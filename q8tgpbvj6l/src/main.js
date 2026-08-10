@@ -3403,13 +3403,21 @@ function hubCard(it){
 
 // ---------------- GitHub backup/restore ----------------
 // Powered by github-data-plugin (`gh = {import:github-data-plugin}` in the Lists panel).
-// Backup pushes this generator's last-saved main.pjs+index.html to a repo the user owns.
+//
+// Deliberately does NOT use root.gh.backupGenerator() — that pushes to a repo's ROOT as
+// literally "main.pjs"/"index.html" with no path option, which is right for backing up a
+// *plugin* (that's what it's named after) but wrong here: this repo (rathjis-generators)
+// holds many generators, one per <slug>/ folder, using lists.txt/html.txt (this repo's own
+// capture convention, not perchance's plugin-export names). Root-level main.pjs/index.html
+// would collide across every generator that ever points this same screen at this repo.
+// So backup/restore call root.gh.push()/raw() directly with slug-prefixed paths instead.
+//
 // "Restore" only fetches + offers a download — it can't write back into perchance's own
 // Lists/HTML editor (that needs the editor page's own session, which a plugin never has),
 // so the user pastes the fetched files in themselves.
 function ghApi(){
   const g = root.gh;
-  return (g && (g.push || g.backupGenerator || g.raw)) ? g : null;
+  return (g && (g.push || g.raw)) ? g : null;
 }
 function ghSetOut(el, text, isErr){
   if(!el) return;
@@ -3424,7 +3432,24 @@ function ghDownload(filename, text){
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+// Mirrors what root.gh.backupGenerator() does internally (same two perchance endpoints), so
+// backup still reflects the generator's last-SAVED state, not whatever is unsaved in the editor.
+async function ghFetchOwnSource(gen){
+  const htmlRes = await fetch('https://perchance.org/api/getGeneratorHtml?generatorName=' + encodeURIComponent(gen));
+  if(!htmlRes.ok) throw new Error("Couldn't fetch this generator's HTML panel (HTTP " + htmlRes.status + '). Is it saved and public?');
+  const html = await htmlRes.text();
+  const codeRes = await fetch('https://perchance.org/api/getGeneratorsAndDependencies?generatorNames=' + encodeURIComponent(gen));
+  if(!codeRes.ok) throw new Error("Couldn't fetch this generator's Lists panel (HTTP " + codeRes.status + ').');
+  const codeJson = await codeRes.json();
+  const code = codeJson.generators && codeJson.generators[gen] && codeJson.generators[gen].code;
+  if(typeof code !== 'string') throw new Error("Couldn't read this generator's Lists panel from the API response.");
+  return { code, html };
+}
 function initGithubBackup(){
+  const gen = window.generatorName || 'q8tgpbvj6l';
+  const listsPath = gen + '/lists.txt';
+  const htmlPath = gen + '/html.txt';
+
   const tokenStatus = $('#ghTokenStatus');
   $('#ghSaveTokenBtn').addEventListener('click', ()=>{
     const api = ghApi();
@@ -3449,9 +3474,10 @@ function initGithubBackup(){
     if(!repo){ ghSetOut(backupOut, 'Enter an owner/repo first.', true); return; }
     if(!api.getToken()){ ghSetOut(backupOut, 'Save your GitHub token first (step 1).', true); return; }
     btn.disabled = true;
-    ghSetOut(backupOut, 'Backing up ' + (window.generatorName||'this generator') + ' → ' + repo + ' …');
+    ghSetOut(backupOut, 'Backing up ' + gen + ' → ' + repo + '/' + gen + '/ …');
     try {
-      const r = await api.backupGenerator(repo);
+      const { code, html } = await ghFetchOwnSource(gen);
+      const r = await api.push(repo, { [listsPath]: code, [htmlPath]: html }, { message: 'Backup of ' + gen + ' via github-data-plugin' });
       backupOut.classList.remove('err');
       backupOut.textContent = '';
       backupOut.append(document.createTextNode('✓ backed up ' + r.files.join(', ') + ' — '));
@@ -3466,7 +3492,7 @@ function initGithubBackup(){
   });
 
   const restoreOut = $('#ghRestoreOut');
-  const fetched = { main:null, html:null };
+  const fetched = { lists:null, html:null };
   $('#ghFetchBtn').addEventListener('click', async ()=>{
     const repo = $('#ghRepoInput').value.trim();
     const api = ghApi();
@@ -3474,14 +3500,14 @@ function initGithubBackup(){
     if(!api){ ghSetOut(restoreOut, "The github-data-plugin isn't loaded yet — try again in a moment.", true); return; }
     if(!repo){ ghSetOut(restoreOut, 'Enter an owner/repo first.', true); return; }
     btn.disabled = true;
-    ghSetOut(restoreOut, 'Fetching from ' + repo + ' …');
+    ghSetOut(restoreOut, 'Fetching ' + repo + '/' + gen + '/ …');
     try {
-      const [main, html] = await Promise.all([api.raw(repo,'main.pjs'), api.raw(repo,'index.html')]);
-      fetched.main = main; fetched.html = html;
+      const [lists, html] = await Promise.all([api.raw(repo, listsPath), api.raw(repo, htmlPath)]);
+      fetched.lists = lists; fetched.html = html;
       $('#ghDlMainBtn').disabled = false;
       $('#ghDlHtmlBtn').disabled = false;
       restoreOut.classList.remove('err');
-      restoreOut.textContent = '✓ fetched main.pjs (' + main.length + ' chars) + index.html (' + html.length + ' chars). ' +
+      restoreOut.textContent = '✓ fetched lists.txt (' + lists.length + ' chars) + html.txt (' + html.length + ' chars). ' +
         'Download to review, then paste into this generator’s editor yourself — this does not write back into perchance automatically.';
     } catch(e) {
       ghSetOut(restoreOut, '✗ ' + ((e && e.message) || e), true);
@@ -3489,8 +3515,8 @@ function initGithubBackup(){
       btn.disabled = false;
     }
   });
-  $('#ghDlMainBtn').addEventListener('click', ()=>{ if(fetched.main!=null) ghDownload('main.pjs', fetched.main); });
-  $('#ghDlHtmlBtn').addEventListener('click', ()=>{ if(fetched.html!=null) ghDownload('index.html', fetched.html); });
+  $('#ghDlMainBtn').addEventListener('click', ()=>{ if(fetched.lists!=null) ghDownload('lists.txt', fetched.lists); });
+  $('#ghDlHtmlBtn').addEventListener('click', ()=>{ if(fetched.html!=null) ghDownload('html.txt', fetched.html); });
 }
 
 // ---------------- Boot ----------------
