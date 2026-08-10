@@ -65,6 +65,25 @@ An empty diff (plus a manual re-check of `src/*` files, since those aren't re-do
 automatically — repeat the `curl` from step 1) confirms the live generator now matches what's
 committed here.
 
+## Update 2026-08-10: a self-service alternative for the *push* direction
+
+`q8tgpbvj6l` now imports `github-data-plugin` (`gh = {import:github-data-plugin}`) and has its
+own **GitHub Backup screen** built into its menu (`#ghScreen` in `html.txt`, wired in
+`src/main.js`'s `initGithubBackup()`). This runs live, in the browser, as the owning user —
+which sidesteps step 3's manual paste for the **capture → GitHub** half specifically:
+
+- **Backup → GitHub**: one click calls `root.gh.backupGenerator(repo)`, which pulls this
+  generator's *own last-saved* `main.pjs`/`index.html` straight from perchance's API and pushes
+  them to a repo you own, as a single commit. No copy-paste, no capture tool.
+- **Restore ← GitHub**: fetches `main.pjs`/`index.html` from the repo via `root.gh.raw(...)` and
+  offers them as downloads to review. It still does **not** write back into perchance's editor —
+  same `/api/save` limitation as ever (see `perchance-generator-reference`'s
+  `reference/open-threads.md` T-13) — so applying a restore is still steps 2-3 above, manually.
+
+This only covers the two panels, matching what `backupGenerator()` actually reaches — it says
+nothing about `src/main.js`, which still needs the manual files-panel re-upload in step 3. Don't
+mistake "I clicked Backup to GitHub" for "everything is synced."
+
 ## Why manual, why now
 
 `q8tgpbvj6l`'s `lists.txt` is 12 lines and `html.txt` is 518, but its actual game logic is a
