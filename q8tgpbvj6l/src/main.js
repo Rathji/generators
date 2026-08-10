@@ -2995,7 +2995,7 @@ function hideChoice(){
 // ---------------- Screens ----------------
 function setScreen(name){
   $('#muteBtn').hidden = name!=='menu';
-  for(const id of ['menuScreen','selectScreen','customScreen','pauseScreen','endScreen','hubScreen','debugScreen']){
+  for(const id of ['menuScreen','selectScreen','customScreen','pauseScreen','endScreen','hubScreen','debugScreen','ghScreen']){
     $('#'+id).hidden = true;
   }
   if(name==='menu'){ $('#menuScreen').hidden = false; updateMenuCredits(); }
@@ -3005,6 +3005,7 @@ function setScreen(name){
   if(name==='end') $('#endScreen').hidden = false;
   if(name==='hub') $('#hubScreen').hidden = false;
   if(name==='debug') $('#debugScreen').hidden = false;
+  if(name==='gh') $('#ghScreen').hidden = false;
 }
 
 function hexColor(n){ return '#'+n.toString(16).padStart(6,'0'); }
@@ -3081,6 +3082,8 @@ function initMenus(){
   });
   $('#debugBackBtn').addEventListener('click', ()=>{ setScreen('menu'); });
   $('#hubBackBtn').addEventListener('click', ()=>{ setScreen('menu'); });
+  $('#ghBtn').addEventListener('click', ()=>{ setScreen('gh'); });
+  $('#ghBackBtn').addEventListener('click', ()=>{ setScreen('menu'); });
   document.querySelectorAll('#hubTabs .segBtn').forEach(b=>{
     b.addEventListener('click', ()=>{
       hubTab = b.dataset.t;
@@ -3398,6 +3401,98 @@ function hubCard(it){
   return el;
 }
 
+// ---------------- GitHub backup/restore ----------------
+// Powered by github-data-plugin (`gh = {import:github-data-plugin}` in the Lists panel).
+// Backup pushes this generator's last-saved main.pjs+index.html to a repo the user owns.
+// "Restore" only fetches + offers a download — it can't write back into perchance's own
+// Lists/HTML editor (that needs the editor page's own session, which a plugin never has),
+// so the user pastes the fetched files in themselves.
+function ghApi(){
+  const g = root.gh;
+  return (g && (g.push || g.backupGenerator || g.raw)) ? g : null;
+}
+function ghSetOut(el, text, isErr){
+  if(!el) return;
+  el.classList.toggle('err', !!isErr);
+  el.textContent = text;
+}
+function ghDownload(filename, text){
+  const blob = new Blob([text], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function initGithubBackup(){
+  const tokenStatus = $('#ghTokenStatus');
+  $('#ghSaveTokenBtn').addEventListener('click', ()=>{
+    const api = ghApi();
+    if(!api){ ghSetOut(tokenStatus, 'Plugin not loaded yet — try again in a moment.', true); return; }
+    const t = $('#ghTokenInput').value.trim();
+    api.setToken(t);
+    ghSetOut(tokenStatus, t ? 'Saved in this browser ✓' : 'Cleared');
+  });
+  $('#ghClearTokenBtn').addEventListener('click', ()=>{
+    const api = ghApi();
+    $('#ghTokenInput').value = '';
+    if(api) api.clearToken();
+    ghSetOut(tokenStatus, 'Cleared');
+  });
+
+  const backupOut = $('#ghBackupOut');
+  $('#ghBackupBtn').addEventListener('click', async ()=>{
+    const repo = $('#ghRepoInput').value.trim();
+    const api = ghApi();
+    const btn = $('#ghBackupBtn');
+    if(!api){ ghSetOut(backupOut, "The github-data-plugin isn't loaded yet — try again in a moment.", true); return; }
+    if(!repo){ ghSetOut(backupOut, 'Enter an owner/repo first.', true); return; }
+    if(!api.getToken()){ ghSetOut(backupOut, 'Save your GitHub token first (step 1).', true); return; }
+    btn.disabled = true;
+    ghSetOut(backupOut, 'Backing up ' + (window.generatorName||'this generator') + ' → ' + repo + ' …');
+    try {
+      const r = await api.backupGenerator(repo);
+      backupOut.classList.remove('err');
+      backupOut.textContent = '';
+      backupOut.append(document.createTextNode('✓ backed up ' + r.files.join(', ') + ' — '));
+      const a = document.createElement('a');
+      a.href = r.url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'see the commit';
+      backupOut.append(a);
+    } catch(e) {
+      ghSetOut(backupOut, '✗ ' + ((e && e.message) || e), true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  const restoreOut = $('#ghRestoreOut');
+  const fetched = { main:null, html:null };
+  $('#ghFetchBtn').addEventListener('click', async ()=>{
+    const repo = $('#ghRepoInput').value.trim();
+    const api = ghApi();
+    const btn = $('#ghFetchBtn');
+    if(!api){ ghSetOut(restoreOut, "The github-data-plugin isn't loaded yet — try again in a moment.", true); return; }
+    if(!repo){ ghSetOut(restoreOut, 'Enter an owner/repo first.', true); return; }
+    btn.disabled = true;
+    ghSetOut(restoreOut, 'Fetching from ' + repo + ' …');
+    try {
+      const [main, html] = await Promise.all([api.raw(repo,'main.pjs'), api.raw(repo,'index.html')]);
+      fetched.main = main; fetched.html = html;
+      $('#ghDlMainBtn').disabled = false;
+      $('#ghDlHtmlBtn').disabled = false;
+      restoreOut.classList.remove('err');
+      restoreOut.textContent = '✓ fetched main.pjs (' + main.length + ' chars) + index.html (' + html.length + ' chars). ' +
+        'Download to review, then paste into this generator’s editor yourself — this does not write back into perchance automatically.';
+    } catch(e) {
+      ghSetOut(restoreOut, '✗ ' + ((e && e.message) || e), true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  $('#ghDlMainBtn').addEventListener('click', ()=>{ if(fetched.main!=null) ghDownload('main.pjs', fetched.main); });
+  $('#ghDlHtmlBtn').addEventListener('click', ()=>{ if(fetched.html!=null) ghDownload('index.html', fetched.html); });
+}
+
 // ---------------- Boot ----------------
 G.sel = { char:'pulse', gun:'rustyp', gem:'green', diff:'Normal', music:'d2' };
 loadSave();
@@ -3407,6 +3502,7 @@ if(!ownsGem(G.sel.gem)) G.sel.gem='green';
 initScene();
 initInput();
 initMenus();
+initGithubBackup();
 setScreen('menu');
 $('#hud').hidden = true;
 window.__BB = G; // debugging hook
