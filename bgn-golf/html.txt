@@ -1,0 +1,2237 @@
+<!-- ════════════════════════════════════════════════════════════════
+     GOLF — Grandpa Beck's Golf, as a card game.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative game server (rooms, hidden layouts, private
+       peeks, turn validation, scoring). It is PUBLIC source — no
+       secrets here. Its rules engine is mirrored in the client
+       script below (keep the two in sync if you change rules).
+     - Durable room state lives in the server-plugin `state` bytes.
+       Face-down layout values are pushed per-connection (private);
+       only face-up cards, the discard top, counts and scores are
+       broadcast. The "peek at two" rule is enforced by the server.
+     - Rules (Grandpa Beck's Golf): 6 cards each in two rows of
+       three. Peek at any two. On your turn draw from the stock or
+       take the discard top — swap it for a face-down card (the old
+       card goes on the discard), or discard the drawn stock card.
+       Once all six of your cards are face up, knock to end the
+       hole — everyone else gets one final turn. Score per column:
+       A=1, 2–10 face value, J/Q=10, K=0, and a matching pair in a
+       column scores 0. Nine holes, lowest total wins.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Golf server ──────────────────────────────────────────────
+   Rooms: 5-letter codes. Host creates; a guest joining with the
+   code starts hole 1. The server keeps BOTH hidden layouts and
+   the draw pile authoritatively. Face-down layout values are
+   pushed per-connection (private) so each player only ever sees
+   their own hidden cards; only face-up cards, the discard top,
+   counts and scores are broadcast. Durable room state lives in
+   the plugin `state` bytes (versioned layout). Rules mirror the
+   client — keep the two in sync if you change rules.           */
+const HOLES=9, LAYOUT=6;
+const DECK1=52;
+const RANK_VAL=[1,2,3,4,5,6,7,8,9,10,10,10,0];
+const SCHEMA=1;
+const SLOT=256;
+const MAX_ROOMS=Math.min(256, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const O_STAT=0,O_CODE=1,O_SCHEMA=9,O_PHASE=10,O_HOLE=11,O_TURN=12,O_FLAGS=13,O_WIN=14,O_REASON=15,O_LAST=16;
+const O_TOTALS=20,O_HSCORE=24,O_PEEKED=28,O_PEEKDONE=29;
+const O_LAYOUT=30,O_FACEUP=42,O_DRAWCNT=44,O_DRAW=45,O_DISCNT=145,O_DISC=146;
+
+/* ── pure rules engine (mirrors client — keep in sync) ── */
+function cRank(id){ return id%13; }
+function cVal(id){ return RANK_VAL[cRank(id)]; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(){ const d=[]; for(let i=0;i<DECK1;i++)d.push(i); return shuffle(d); }
+function colScore(c){ return cRank(c[0])===cRank(c[1])?0:cVal(c[0])+cVal(c[1]); }
+function holeScore(lay){ return colScore([lay[0],lay[3]])+colScore([lay[1],lay[4]])+colScore([lay[2],lay[5]]); }
+function pName(p){ return p===0?"Host":"Guest"; }
+function cardTxt(id){ return String(id%13===0?"A":id%13===10?"J":id%13===11?"Q":id%13===12?"K":id%13+1)+(["♠","♥","♦","♣"][Math.floor(id/13)%4]); }
+
+/* ── room helpers ── */
+function newRoom(){ return {slot:-1,code:"",status:1,hostId:-1,guestId:-1,lastAct:0,
+  phase:0,hole:1,turn:-1,knocked:false,knockP:-1,
+  layouts:[[],[]],faceUp:[[],[]],peeked:[null,null],peekDone:[false,false],
+  draw:[],discard:[],holeScores:null,totals:[0,0],
+  over:false,winner:null,reason:"",seq:0,event:""}; }
+function startHole(g){
+  const deck=buildDeck();
+  g.layouts=[[],[]]; g.faceUp=[[],[]];
+  for(let p=0;p<2;p++){
+    for(let k=0;k<LAYOUT;k++){ g.layouts[p].push(deck.pop()); g.faceUp[p].push(false); }
+  }
+  g.draw=deck.slice(0,deck.length-1);
+  g.discard=[deck[deck.length-1]];
+  g.phase=0; g.turn=-1; g.knocked=false; g.knockP=-1;
+  g.peeked=[null,null]; g.peekDone=[false,false];
+  g.holeScores=null;
+  g.event="Hole "+g.hole+": 6 cards each — peek at two in secret.";
+}
+function allFaceUp(g,p){ for(let k=0;k<LAYOUT;k++){ if(!g.faceUp[p][k])return false; } return true; }
+function ensureDraw(g){
+  if(g.draw.length)return;
+  if(g.discard.length>1){ const top=g.discard.pop(); g.draw=shuffle(g.discard); g.discard=[top]; }
+}
+function finishHole(g){
+  g.phase=2; g.turn=-1;
+  const s=[holeScore(g.layouts[0]),holeScore(g.layouts[1])];
+  g.holeScores=s;
+  g.totals[0]+=s[0]; g.totals[1]+=s[1];
+  g.event="Hole "+g.hole+" scored — Host "+s[0]+", Guest "+s[1]+". Totals "+g.totals[0]+"–"+g.totals[1]+".";
+  if(g.hole>=HOLES){
+    g.status=3; g.over=true;
+    g.winner=g.totals[0]<g.totals[1]?0:g.totals[1]<g.totals[0]?1:"draw";
+    g.reason="gameOver";
+    g.event=(g.winner==="draw"?"A draw — "+g.totals[0]+" to "+g.totals[1]+"!":pName(g.winner)+" wins the tournament "+g.totals[0]+" to "+g.totals[1]+"!");
+  }
+}
+function handleAct(g,idx,source,swap){
+  let card;
+  if(source==="discard"){ card=g.discard.pop(); }
+  else { ensureDraw(g); card=g.draw.pop(); }
+  if(swap>=0){
+    const old=g.layouts[idx][swap];
+    g.layouts[idx][swap]=card; g.faceUp[idx][swap]=true;
+    g.discard.push(old);
+  }else{
+    g.discard.push(card);
+  }
+  const what=source==="discard"?"takes the discard top":(swap>=0?"draws from the stock and swaps a card":"draws from the stock and discards");
+  if(g.knocked){
+    g.event=pName(idx)+" "+what+". The hole is over.";
+    finishHole(g);
+  }else{
+    g.turn=1-idx;
+    g.event=pName(idx)+" "+what+". "+pName(g.turn)+" is up.";
+  }
+}
+
+/* ── durable state helpers ── */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+O_LAST]<<24)|(state[o+O_LAST+1]<<16)|(state[o+O_LAST+2]<<8)|state[o+O_LAST+3]; }
+function slotStatus(i){ return state[off(i)+O_STAT]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function reasonCode(r){ return r==="gameOver"?1:r==="forfeit"?2:r==="resign"?3:0; }
+function reasonName(c){ return c===1?"gameOver":c===2?"forfeit":c===3?"resign":""; }
+function i16write(o,v){ const x=v|0; state[o]=(x>>8)&255; state[o+1]=x&255; }
+function i16read(o){ const v=((state[o]<<8)|state[o+1]); return v>32767?v-65536:v; }
+function saveRoom(g){
+  const o=off(g.slot);
+  state.fill(0,o,o+SLOT);
+  state[o+O_STAT]=g.status;
+  writeCode(o,g.code);
+  state[o+O_SCHEMA]=SCHEMA;
+  state[o+O_PHASE]=g.phase;
+  state[o+O_HOLE]=g.hole;
+  state[o+O_TURN]=g.turn<0?255:g.turn;
+  let fl=(g.knocked?1:0)|(g.peekDone[0]?2:0)|(g.peekDone[1]?4:0);
+  if(g.knockP===0)fl|=8; else if(g.knockP===1)fl|=16;
+  state[o+O_FLAGS]=fl;
+  const w=g.winner==="draw"?2:g.winner===1?1:g.winner===0?0:255;
+  state[o+O_WIN]=w;
+  state[o+O_REASON]=reasonCode(g.reason);
+  const la=Math.max(0,Math.min(0xFFFFFFFF,g.lastAct));
+  state[o+O_LAST]=(la>>>24)&255; state[o+O_LAST+1]=(la>>>16)&255; state[o+O_LAST+2]=(la>>>8)&255; state[o+O_LAST+3]=la&255;
+  i16write(o+O_TOTALS,g.totals[0]); i16write(o+O_TOTALS+2,g.totals[1]);
+  i16write(o+O_HSCORE,g.holeScores?g.holeScores[0]:0); i16write(o+O_HSCORE+2,g.holeScores?g.holeScores[1]:0);
+  state[o+O_PEEKED]=g.peeked[0]?g.peeked[0][0]*6+g.peeked[0][1]+1:255;
+  state[o+O_PEEKED+1]=g.peeked[1]?g.peeked[1][0]*6+g.peeked[1][1]+1:255;
+  for(let p=0;p<2;p++)for(let k=0;k<LAYOUT;k++)state[o+O_LAYOUT+p*LAYOUT+k]=g.layouts[p][k];
+  state[o+O_FACEUP]=0; state[o+O_FACEUP+1]=0;
+  for(let p=0;p<2;p++)for(let k=0;k<LAYOUT;k++){ const b=p*LAYOUT+k; const byt=o+O_FACEUP+Math.floor(b/8); state[byt]|=((g.faceUp[p][k]?1:0)<<(b%8)); }
+  state[o+O_DRAWCNT]=Math.min(100,g.draw.length);
+  for(let i=0;i<g.draw.length&&i<100;i++)state[o+O_DRAW+i]=g.draw[i];
+  state[o+O_DISCNT]=Math.min(100,g.discard.length);
+  for(let i=0;i<g.discard.length&&i<100;i++)state[o+O_DISC+i]=g.discard[i];
+}
+function loadRoom(i){
+  const o=off(i);
+  const g=newRoom();
+  g.slot=i; g.code=codeAt(i); g.status=state[o+O_STAT];
+  g.phase=state[o+O_PHASE]; g.hole=state[o+O_HOLE];
+  g.turn=state[o+O_TURN]===255?-1:state[o+O_TURN];
+  const fl=state[o+O_FLAGS];
+  g.knocked=!!(fl&1); g.peekDone=[!!(fl&2),!!(fl&4)];
+  g.knockP=(fl&8)?0:((fl&16)?1:-1);
+  const w=state[o+O_WIN]; g.winner=w===2?"draw":w===1?1:w===0?0:null;
+  g.reason=reasonName(state[o+O_REASON]);
+  g.lastAct=readLastAct(i);
+  g.totals=[i16read(o+O_TOTALS),i16read(o+O_TOTALS+2)];
+  const h0=i16read(o+O_HSCORE), h1=i16read(o+O_HSCORE+2);
+  g.holeScores=(g.phase===2)?[h0,h1]:null;
+  for(let p=0;p<2;p++){
+    g.layouts[p]=[]; g.faceUp[p]=[];
+    for(let k=0;k<LAYOUT;k++)g.layouts[p].push(state[o+O_LAYOUT+p*LAYOUT+k]);
+  }
+  const fu=state[o+O_FACEUP]|(state[o+O_FACEUP+1]<<8);
+  for(let p=0;p<2;p++)for(let k=0;k<LAYOUT;k++){ const b=p*LAYOUT+k; g.faceUp[p].push(!!(fu&(1<<b))); }
+  const pk0=state[o+O_PEEKED], pk1=state[o+O_PEEKED+1];
+  g.peeked=[pk0===255?null:[Math.floor((pk0-1)/6),(pk0-1)%6], pk1===255?null:[Math.floor((pk1-1)/6),(pk1-1)%6]];
+  const dl=state[o+O_DRAWCNT]; for(let k=0;k<dl&&k<100;k++)g.draw.push(state[o+O_DRAW+k]);
+  const sl=state[o+O_DISCNT]; for(let k=0;k<sl&&k<100;k++)g.discard.push(state[o+O_DISC+k]);
+  g.over=g.status===3; g.seq=0; g.event="";
+  return g;
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+O_SCHEMA]!==SCHEMA){ state.fill(0,o,o+SLOT); continue; }
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }   // abandoned waiting rooms are reclaimed
+    rooms.set(codeAt(i),loadRoom(i));
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── connection / broadcast ── */
+let rooms=new Map();                 // code -> room
+const conns=new Map();               // conn.id -> {code, role, conn}
+function topic(code){ return "ch:"+code; }
+function snap(g){
+  return {
+    code:g.code, status:g.status, phase:g.phase, hole:g.hole, turn:g.turn,
+    knocked:g.knocked?1:0, knockP:g.knockP,
+    peekDone:[g.peekDone[0]?1:0,g.peekDone[1]?1:0],
+    layouts:(g.phase===2)
+      ? [g.layouts[0].slice(), g.layouts[1].slice()]
+      : [g.layouts[0].map(function(id,k){ return g.faceUp[0][k]?id:null; }),
+         g.layouts[1].map(function(id,k){ return g.faceUp[1][k]?id:null; })],
+    discardTop:g.discard.length?g.discard[g.discard.length-1]:null,
+    discardCount:g.discard.length, drawCount:g.draw.length,
+    totals:g.totals.slice(), holeScores:g.holeScores,
+    hostIn:g.hostId!==-1, guestIn:g.guestId!==-1,
+    over:g.status===3, winner:g.winner, reason:g.reason,
+    seq:g.seq, event:g.event||""
+  };
+}
+function broadcast(g){ try{ pubsub.publish(topic(g.code), JSON.stringify({t:"snap",snap:snap(g)})); }catch(e){} }
+function sendPrivate(g){
+  const targets=[[g.hostId,0],[g.guestId,1]];
+  for(const pair of targets){
+    if(pair[0]===-1)continue;
+    const info=conns.get(pair[0]);
+    if(!info)continue;
+    try{ info.conn.send(JSON.stringify({t:"layout",cards:g.layouts[pair[1]].slice()})); }catch(e){}
+    const pe=g.peeked[pair[1]];
+    if(pe)try{ info.conn.send(JSON.stringify({t:"peeked",idx:pe.slice()})); }catch(e){}
+  }
+}
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function saveBroadcast(g){ saveRoom(g); broadcast(g); sendPrivate(g); }
+
+/* ── durable leaderboard (best rounds, lives at the end of `state`) ──
+   Rooms use the first MAX_ROOMS*SLOT bytes; the leaderboard reserves the
+   last LB_BYTES so the two never overlap. Golf ranks by LOWER score. */
+const LB_VERSION=1, LB_CAP=50, LB_NAME_MAX=24, LB_EXTRA_MAX=11, LB_ENTRY=44, LB_HEAD=2;
+const LB_BYTES=LB_HEAD+LB_CAP*LB_ENTRY;
+const LB_BASE=Math.max(state.length-LB_BYTES, 1+MAX_ROOMS*SLOT);
+const lbTimes=new Map(), lbNets=new Map();   // rate-limit trackers
+function cleanField(s,max){ return String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,max); }
+function lbInit(){ if(state[LB_BASE]!==LB_VERSION){ state.fill(0,LB_BASE,state.length); state[LB_BASE]=LB_VERSION; } }
+function lbRead(){
+  const a=[];
+  for(let i=0;i<LB_CAP;i++){
+    const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+    if(state[e]!==1)continue;
+    let name=""; for(let k=1;k<=LB_NAME_MAX;k++){ const c=state[e+k]; if(!c)break; name+=String.fromCharCode(c); }
+    let extra=""; for(let k=0;k<LB_EXTRA_MAX;k++){ const c=state[e+33+k]; if(!c)break; extra+=String.fromCharCode(c); }
+    a.push({i,
+      name,
+      score:((state[e+25]<<24)|(state[e+26]<<16)|(state[e+27]<<8)|state[e+28])>>>0,
+      ts:((state[e+29]<<24)|(state[e+30]<<16)|(state[e+31]<<8)|state[e+32])>>>0,
+      extra});
+  }
+  return a;
+}
+function lbWriteSlot(i,name,score,ts,extra){
+  const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+  state.fill(0,e,e+LB_ENTRY);
+  state[e]=1;
+  const nb=[]; for(let k=0;k<name.length&&k<LB_NAME_MAX;k++)nb.push(name.charCodeAt(k));
+  for(let k=0;k<nb.length;k++)state[e+1+k]=nb[k];
+  const xb=[]; for(let k=0;k<extra.length&&k<LB_EXTRA_MAX;k++)xb.push(extra.charCodeAt(k));
+  for(let k=0;k<xb.length;k++)state[e+33+k]=xb[k];
+  state[e+25]=(score>>>24)&255; state[e+26]=(score>>>16)&255; state[e+27]=(score>>>8)&255; state[e+28]=score&255;
+  state[e+29]=(ts>>>24)&255; state[e+30]=(ts>>>16)&255; state[e+31]=(ts>>>8)&255; state[e+32]=ts&255;
+}
+function lbBetter(asc,a,b){ if(asc)return a.score<b.score||(a.score===b.score&&a.ts<b.ts); return a.score>b.score||(a.score===b.score&&a.ts<b.ts); }
+function lbSubmit(name,score,ts,extra,asc){
+  lbInit();
+  const a=lbRead();
+  if(a.length<LB_CAP){
+    for(let i=0;i<LB_CAP;i++){ if(state[LB_BASE+LB_HEAD+i*LB_ENTRY]!==1){ lbWriteSlot(i,name,score,ts,extra); return; } }
+    return;
+  }
+  let wi=-1; const w={score:0,ts:0};
+  for(const en of a){ if(wi===-1||lbBetter(asc,w,en)){ wi=en.i; w.score=en.score; w.ts=en.ts; } }
+  if(lbBetter(asc,{score,ts},w))lbWriteSlot(wi,name,score,ts,extra);
+}
+
+/* ── table chat (online rooms) ── */
+const chatTimes=new Map();           // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const g=newRoom();
+    g.slot=slot; g.code=code; g.status=1; g.hostId=conn.id; g.guestId=-1; g.lastAct=nowSec();
+    rooms.set(code,g);
+    saveRoom(g);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host",conn});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(g)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const g=rooms.get(code);
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(g.hostId===-1)role="host";
+    else if(g.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(g.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")g.hostId=conn.id; else g.guestId=conn.id;
+    if(g.status===1&&g.hostId!==-1&&g.guestId!==-1){
+      g.status=2; startHole(g); g.seq++;
+    }
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role,conn});
+    g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true,role,snap:snap(g)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const g=rooms.get(code);
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    sendPrivate(g);
+    return JSON.stringify({ok:true,snap:snap(g)});
+  },
+  peek({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn); const idx=role==="host"?0:1;
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.phase!==0)return JSON.stringify({ok:false,err:"not_peeking"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    if(g.peekDone[idx])return JSON.stringify({ok:false,err:"already_peeked"});
+    const c=obj.cards;
+    if(!c||!Array.isArray(c)||c.length!==2)return JSON.stringify({ok:false,err:"bad_peek"});
+    const i=c[0], j=c[1];
+    if(typeof i!=="number"||typeof j!=="number"||i===j||i<0||i>5||j<0||j>5)return JSON.stringify({ok:false,err:"bad_peek"});
+    g.peeked[idx]=[i,j]; g.peekDone[idx]=true;
+    g.seq++; g.lastAct=nowSec();
+    if(g.peekDone[0]&&g.peekDone[1]){
+      g.phase=1; g.turn=g.hole%2;
+      g.event="Both players peeked — "+pName(g.turn)+" takes the first turn.";
+    }else{
+      g.event=pName(idx)+" has peeked — waiting for the other.";
+    }
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  act({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn); const idx=role==="host"?0:1;
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.phase!==1)return JSON.stringify({ok:false,err:"not_playing"});
+    if(g.turn!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    if(allFaceUp(g,idx)){
+      if(!g.knocked)return JSON.stringify({ok:false,err:"must_knock"});
+      g.event=pName(idx)+" has no face-down cards — the hole is over.";
+      finishHole(g);
+      g.seq++; g.lastAct=nowSec();
+      saveBroadcast(g);
+      return JSON.stringify({ok:true});
+    }
+    const src=obj.draw;
+    if(src!=="pile"&&src!=="discard")return JSON.stringify({ok:false,err:"bad_source"});
+    let swap=obj.swap;
+    if(src==="discard"){
+      if(!g.discard.length)return JSON.stringify({ok:false,err:"empty_discard"});
+      if(typeof swap!=="number"||swap<0||swap>5)return JSON.stringify({ok:false,err:"need_swap"});
+    }else{
+      if(!g.draw.length)ensureDraw(g);
+      if(!g.draw.length)return JSON.stringify({ok:false,err:"empty_stock"});
+      if(typeof swap!=="number")swap=-1;
+      if(swap!==-1&&(swap<0||swap>5))return JSON.stringify({ok:false,err:"bad_swap"});
+    }
+    if(swap>=0&&g.faceUp[idx][swap])return JSON.stringify({ok:false,err:"already_face_up"});
+    handleAct(g,idx,src,swap);
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  knock({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn); const idx=role==="host"?0:1;
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.phase!==1)return JSON.stringify({ok:false,err:"not_playing"});
+    if(g.turn!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    if(g.knocked)return JSON.stringify({ok:false,err:"already_knocked"});
+    if(!allFaceUp(g,idx))return JSON.stringify({ok:false,err:"not_all_face_up"});
+    g.knocked=true; g.knockP=idx; g.turn=1-idx;
+    g.event=pName(idx)+" knocks — all cards face up. "+pName(g.turn)+" takes the final turn.";
+    g.seq++; g.lastAct=nowSec();
+    if(allFaceUp(g,g.turn)){ finishHole(g); }
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  nextHole({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    if(g.phase!==2)return JSON.stringify({ok:false,err:"not_scored"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    g.hole++;
+    if(g.hole>HOLES)return JSON.stringify({ok:false,err:"done"});
+    startHole(g);
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      g.status=3; g.over=true; g.winner=1-idx; g.reason="resign"; g.seq++;
+      g.event=pName(1-idx)+" wins — "+pName(idx)+" resigned.";
+      g.lastAct=nowSec(); saveBroadcast(g);
+    }
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?g.guestId!==-1:g.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    g.status=3; g.over=true; g.winner=idx; g.reason="forfeit"; g.seq++;
+    g.event=pName(idx)+" wins — the opponent disconnected.";
+    g.lastAct=nowSec(); saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?g.guestId!==-1:g.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    g.status=2; g.over=false; g.winner=null; g.reason="";
+    g.hole=1; g.totals=[0,0];
+    startHole(g);
+    g.event="Rematch! Hole 1 — peek in secret.";
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const g=roomOf(conn);
+    if(g&&g.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      g.status=3; g.over=true; g.winner=1-idx; g.reason="forfeit"; g.seq++;
+      g.event=pName(1-idx)+" wins — "+pName(idx)+" left.";
+      g.lastAct=nowSec(); saveBroadcast(g);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(g.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  submitScore({conn},data){
+    let p; try{ p=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const now=Date.now();
+    if(now-(lbTimes.get(conn.id)||0)<1200)return JSON.stringify({ok:false,err:"rate"});   // per connection
+    lbTimes.set(conn.id,now);
+    if(now-(lbNets.get(conn.net[3])||0)<6000)return JSON.stringify({ok:false,err:"rate"}); // per network
+    lbNets.set(conn.net[3],now);
+    const name=cleanField(p.name,24)||"Player";
+    const score=Math.max(0,Math.min(0xffffffff,Math.floor(Number(p.score)||0)));
+    const extra=cleanField(p.extra,11);
+    lbSubmit(name,score,Math.floor(now/1000),extra,true);
+    return JSON.stringify({ok:true});
+  },
+  getScores({conn},data){
+    lbInit();
+    const a=lbRead().sort(function(x,y){ return lbBetter(true,x,y)?-1:1; }).slice(0,10);
+    return JSON.stringify({scores:a});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  chatTimes.delete(conn.id);
+  const g=rooms.get(info.code);
+  if(!g)return;
+  if(info.role==="host")g.hostId=-1; else g.guestId=-1;
+  g.lastAct=nowSec();
+  if(g.status===2){ g.event="Opponent disconnected — you may claim the win."; g.seq++; }
+  saveRoom(g);
+  broadcast(g);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+lbInit();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Six cards in two rows of three. Peek at any two, then draw and swap to build the lowest score — pairs cancel a column, Kings are zero, and the low score wins the tournament.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Hotseat</span>
+        <span class="bgn-mode-sub">Two to four players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">vs the Field</span>
+        <span class="bgn-mode-sub">You against up to three bots</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online</span>
+        <span class="bgn-mode-sub">Live duel, hidden layouts</span>
+      </button>
+    </div>
+
+    <div class="panel" id="countPanel" style="margin-top:26px; padding:20px 24px; display:none">
+      <div class="sec-eyebrow" style="text-align:center">Players at the table</div>
+      <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px">
+        <button class="chip" data-count="2">2 players</button>
+        <button class="chip" data-count="3">3 players</button>
+        <button class="chip" data-count="4">4 players</button>
+      </div>
+      <div class="muted small center" id="countHintEl" style="margin-top:12px"></div>
+      <div style="display:flex; justify-content:center; margin-top:16px">
+        <button class="btn btn-gold" id="countGoBtn">Shuffle &amp; deal →</button>
+      </div>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last game</h3>
+      <p class="muted small" id="continueInfoEl">A saved game was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
+    <div class="bgn-diff" id="diffRow">
+      <span class="muted small" style="letter-spacing:.05em; text-transform:uppercase">🤖 Field difficulty</span>
+      <div class="diff-btns">
+        <button class="btn btn-ghost btn-sm" data-diff="easy">Easy</button>
+        <button class="btn btn-ghost btn-sm" data-diff="normal">Normal</button>
+        <button class="btn btn-ghost btn-sm" data-diff="hard">Hard</button>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="lbBtn">🏆 Leaderboard</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this game as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div class="panel" id="onlinePanel" hidden style="margin-top:26px; padding:20px 24px; max-width:520px; margin-left:auto; margin-right:auto">
+      <div class="sec-eyebrow" style="text-align:center">Online duel</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; justify-content:center">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+      </div>
+      <div style="display:flex; gap:10px; margin-top:14px; justify-content:center">
+        <input class="field" id="joinCodeInput" placeholder="ROOM CODE" style="max-width:190px; text-align:center; letter-spacing:4px" autocomplete="off"/>
+        <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+      </div>
+      <div class="muted small center" id="onlineMsg" style="margin-top:12px"></div>
+    </div>
+
+    <div class="panel" style="margin-top:26px; padding:20px 24px;">
+      <div class="sec-eyebrow" style="text-align:center">How to play</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:14px;">
+        <div class="muted small"><b class="goldtext">1 · Deal</b><br>Six cards face-down, two rows of three. Peek at any two, in secret.</div>
+        <div class="muted small"><b class="goldtext">2 · Turn</b><br>Draw from the stock or take the discard top — swap it for a face-down card; the old card goes to the discard.</div>
+        <div class="muted small"><b class="goldtext">3 · Knock</b><br>Once all six of your cards are face up, knock to end the hole — everyone else gets one final turn.</div>
+        <div class="muted small"><b class="goldtext">4 · Score</b><br>A=1 · 2–10 face value · J/Q=10 · K=0. A matching pair in a column cancels it to zero. Lowest total after 9 holes wins.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ GAME ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="gf-table">
+      <div class="gf-boardpanel panel">
+        <div class="gf-hud">
+          <span class="gf-hole" id="holeEl">—</span>
+          <span class="gf-turn" id="turnEl">Loading…</span>
+          <span class="gf-timer" id="tmrEl" hidden>⏱ —</span>
+        </div>
+
+        <div class="gf-rows" id="rowsEl"></div>
+
+        <div class="gf-middle">
+          <div class="gf-pile">
+            <div class="gf-stockcard" id="stockEl"></div>
+            <div class="gf-pilelabel">stock</div>
+          </div>
+          <div class="gf-pile">
+            <div class="gf-pile" id="discardEl"></div>
+            <div class="gf-pilelabel">discard</div>
+          </div>
+        </div>
+
+        <div class="gf-actions" id="actBarEl"></div>
+      </div>
+
+      <div class="bgn-side">
+        <div class="bgn-room" id="roomBox" hidden>
+          <div class="bgn-room-code">Room code <b id="roomCodeEl">—</b></div>
+          <div class="muted small" id="connEl">Connecting…</div>
+          <div class="gf-roombtns">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+          </div>
+        </div>
+
+        <div class="gf-actions" style="margin-top:0">
+          <button class="btn btn-ghost" id="resignBtn" hidden>Resign</button>
+          <button class="btn btn-ghost" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
+          <button class="btn btn-ghost" id="hintBtn" hidden>💡 Hint</button>
+          <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+        </div>
+
+        <div class="gf-chatwrap" id="chatBox" hidden>
+          <div class="sec-eyebrow" style="margin-bottom:8px">Table chat</div>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+
+        <div class="gf-logwrap">
+          <div class="sec-eyebrow" style="margin-bottom:8px">Scorecard</div>
+          <div class="bgn-log" id="logEl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ MODALS ═══ -->
+<div class="peek-overlay" id="peekModal" hidden>
+  <div class="peek-box">
+    <div class="peek-title" id="peekTitleEl">Peek at two cards</div>
+    <div class="peek-sub muted small" id="peekSubEl">Click two face-down cards to see them — in secret.</div>
+    <div class="peek-layout" id="peekLayoutEl"></div>
+    <div class="peek-btns">
+      <button class="btn btn-gold" id="peekDoneBtn" disabled>Lock peek 🔒</button>
+      <button class="btn btn-ghost" id="peekCancelBtn" hidden>Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="peek-overlay" id="passScreen" hidden>
+  <div class="peek-box">
+    <div class="peek-title" id="passTitleEl">Pass the device</div>
+    <div style="font-size:2.6rem; margin:6px 0 2px;">🤫</div>
+    <div class="peek-sub muted small" id="passSubEl"></div>
+    <button class="btn btn-gold" style="margin-top:14px" id="passGoBtn">It's my turn</button>
+  </div>
+</div>
+
+<div class="promo" id="holeModal" hidden>
+  <div class="promo-title" id="holeTitleEl">Hole scored</div>
+  <div class="hole-table" id="holeTableEl"></div>
+  <button class="btn btn-gold" style="margin-top:14px" id="nextHoleBtn">Next hole →</button>
+</div>
+
+<div class="promo" id="overModal" hidden>
+  <div class="promo-title" id="overTitleEl">Tournament over</div>
+  <div class="over-banner" id="overBannerEl"></div>
+  <div class="over-scores" id="overScoresEl"></div>
+  <div class="muted small" id="overReasonEl"></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="playAgainBtn">Play again</button>
+    <button class="btn btn-ghost" id="overMenuBtn">Main menu</button>
+    <button class="btn btn-ghost" id="overLbBtn">🏆 Leaderboard</button>
+  </div>
+</div>
+
+<style>
+/* ═══ leaderboard ═══ */
+.lbname-row{ display:flex; align-items:center; justify-content:center; gap:8px; margin:12px 0; }
+.lbname-row label{ font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; color:var(--bgn-muted,#c9d3e5); }
+.lbname-row input{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:7px 10px; width:170px; text-align:center; }
+.lb-rows{ min-width:280px; display:grid; gap:6px; margin:4px 0 6px; }
+.lb-row{ display:flex; align-items:center; gap:10px; padding:6px 12px; border-radius:8px; background:rgba(255,255,255,.04); font-size:.9rem; }
+.lb-row .rk{ color:var(--bgn-gold2,#d4af37); font-weight:700; width:26px; text-align:right; }
+.lb-row .nm{ flex:1; text-align:left; }
+.lb-row .sc{ font-weight:700; }
+.lb-row.top{ background:rgba(212,175,55,.12); border:1px solid rgba(212,175,55,.35); }
+.lb-empty{ color:var(--bgn-muted,#c9d3e5); font-size:.85rem; padding:8px 0; }
+</style>
+
+<div class="promo" id="lbModal" hidden>
+  <div class="promo-title">🏆 Leaderboard</div>
+  <div class="lbname-row">
+    <label for="lbNameInput">Your name</label>
+    <input id="lbNameInput" maxlength="24" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="lb-rows" id="lbRowsEl"><div class="lb-empty">Loading…</div></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="lbDoneBtn">Done</button>
+  </div>
+</div>
+
+<!-- ═══ FLOATING BACK-TO-HUB BUTTON (rathjiBackBtn) ═══ -->
+<script>
+(function(){
+  if (document.getElementById("rathjiBackBtn")) return;
+  var style = document.createElement("style");
+  style.textContent = "#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:inline-flex;align-items:center;gap:9px;text-decoration:none;background:rgba(13,15,21,.82);border:1px solid rgba(255,255,255,.16);border-radius:999px;padding:8px 16px 8px 8px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);box-shadow:0 6px 18px rgba(0,0,0,.35);transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}#rathjiBackBtn .rb-badge{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#d946ef);display:flex;align-items:center;justify-content:center;color:#fff;font-family:system-ui,sans-serif;font-size:15px;font-weight:700;flex:none;box-shadow:0 2px 6px rgba(139,92,246,.45)}#rathjiBackBtn .rb-label{color:#fff;font-family:system-ui,sans-serif;font-size:14px;font-weight:600;line-height:1}#rathjiBackBtn .rb-arrow{width:12px;height:12px;flex:none;opacity:.85;color:#fff}#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,.65);box-shadow:0 8px 22px rgba(139,92,246,.35)}@media (max-width:480px){#rathjiBackBtn{padding:8px}#rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{display:none}}";
+  document.head.appendChild(style);
+  var a = document.createElement("a");
+  a.id = "rathjiBackBtn";
+  a.href = "https://perchance.org/rathjis-generators";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.setAttribute("aria-label", "Back to my projects");
+  a.title = "Back to my projects";
+  a.innerHTML = '<span class="rb-badge">R</span><span class="rb-label">My projects</span><svg class="rb-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>';
+  document.body.appendChild(a);
+})();
+</script>
+
+<footer class="bgn-footer">
+  <div class="ornament">⛳</div>
+  <p>Golf — peek, swap, knock and score the lowest round of your life.</p>
+  <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ GOLF ═══ */
+.bgn-lobby{ max-width:820px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+.gf-table{ grid-template-columns:minmax(0,1fr) 330px; max-width:1060px; margin:0 auto; }
+@media (max-width:900px){ .gf-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.gf-boardpanel{ text-align:center; padding:18px; }
+
+.gf-hud{ display:flex; align-items:center; justify-content:center; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+.gf-hole{ font-family:var(--bgn-serif); font-size:1.2rem; letter-spacing:.05em; color:#a9e0bc; }
+.gf-turn{ font-size:.85rem; color:var(--bgn-muted); letter-spacing:.02em; }
+.gf-turn.warn{ color:#ffb07a; }
+
+/* player rows */
+.gf-rows{ display:flex; flex-direction:column; gap:14px; margin-bottom:16px; }
+.gf-row{ display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; border:1px solid rgba(255,255,255,.1); border-radius:14px; padding:12px 14px; background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)); transition:border-color .15s, box-shadow .15s; }
+.gf-row.act{ border-color:#7fe0b0; box-shadow:0 0 0 1px rgba(127,224,176,.35), 0 0 18px rgba(63,157,107,.35); }
+.gf-row.me{ background:linear-gradient(180deg, rgba(63,157,107,.14), rgba(255,255,255,.02)); }
+.gf-rowhead{ display:flex; flex-direction:column; align-items:center; gap:3px; min-width:96px; }
+.gf-avatar{ width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:1.05rem; background:radial-gradient(circle at 35% 30%, #2f7a56, #143624); flex:none; }
+.gf-row.me .gf-avatar{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.gf-pname{ font-weight:800; font-size:.85rem; letter-spacing:.03em; }
+.gf-total{ font-size:.7rem; opacity:.85; }
+.gf-total b{ color:#7fe0b0; font-size:.95rem; }
+.gf-knockbadge{ font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:#ffb07a; border:1px solid rgba(255,176,122,.4); border-radius:999px; padding:1px 7px; }
+
+/* layouts */
+.gf-layout{ display:grid; grid-template-columns:repeat(3,auto); grid-template-rows:auto auto; gap:7px; }
+.gf-card{ width:clamp(46px,6.4vw,66px); aspect-ratio:2/3; border-radius:9px; position:relative; display:flex; flex-direction:column; align-items:center; justify-content:center; box-shadow:0 4px 12px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.5); user-select:none; transition:transform .12s, box-shadow .12s, border-color .12s; }
+.gf-card.face{ background:linear-gradient(180deg,#ffffff,#e8e6df); border:1px solid rgba(0,0,0,.25); }
+.gf-card.face .gf-rank{ font-family:var(--bgn-serif); font-size:clamp(1.05rem,2.3vw,1.55rem); font-weight:800; line-height:1; }
+.gf-card.face .gf-suit{ font-size:clamp(1.1rem,2.5vw,1.75rem); line-height:1; margin-top:2px; }
+.gf-card.face.red .gf-rank,.gf-card.face.red .gf-suit{ color:#c0392b; }
+.gf-card.face.black .gf-rank,.gf-card.face.black .gf-suit{ color:#1d1b16; }
+.gf-card.face .gf-corner{ position:absolute; top:4px; left:6px; font-size:clamp(.55rem,1.1vw,.78rem); font-weight:800; text-align:center; line-height:1.05; }
+.gf-card.face .gf-corner .s{ display:block; font-size:.62em; }
+.gf-card.back{ background:repeating-linear-gradient(45deg,#1f5d43,#2f7a56 8px); border:2px solid rgba(255,255,255,.35); }
+.gf-card.back::after{ content:"⛳"; font-size:clamp(1rem,2.2vw,1.4rem); opacity:.9; text-shadow:0 2px 3px rgba(0,0,0,.4); }
+.gf-card.canswap{ cursor:pointer; border-color:#a5e8c2; }
+.gf-card.canswap:hover{ transform:translateY(-6px); box-shadow:0 10px 18px rgba(0,0,0,.55); }
+.gf-card.peekbadge::before{ content:"👁"; position:absolute; top:3px; right:4px; font-size:.85rem; filter:drop-shadow(0 1px 2px rgba(0,0,0,.45)); z-index:2; }
+
+/* stock & discard */
+.gf-middle{ display:flex; align-items:flex-end; justify-content:center; gap:38px; padding:12px 0 4px; }
+.gf-pile{ display:flex; flex-direction:column; align-items:center; gap:5px; }
+.gf-pilelabel{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.6; }
+.gf-stockcard{ width:clamp(56px,7.5vw,78px); aspect-ratio:2/3; border-radius:11px; background:repeating-linear-gradient(45deg,#1f5d43,#2f7a56 8px); border:2px solid rgba(255,255,255,.35); display:flex; align-items:center; justify-content:center; box-shadow:0 6px 16px rgba(0,0,0,.5); position:relative; }
+.gf-stockcard .cnt{ position:absolute; bottom:-8px; right:-8px; background:linear-gradient(180deg,#f6e6a4,#d4af37); color:#221803; font-weight:800; font-size:.72rem; border-radius:999px; padding:2px 8px; box-shadow:0 2px 5px rgba(0,0,0,.5); }
+.gf-stockcard .gf-card.face{ width:100%; height:100%; border-radius:9px; border:none; box-shadow:none; }
+.gf-empty{ width:clamp(56px,7.5vw,78px); aspect-ratio:2/3; border-radius:11px; border:2px dashed rgba(255,255,255,.2); display:flex; align-items:center; justify-content:center; color:rgba(255,255,255,.3); font-size:.7rem; }
+
+/* actions */
+.gf-actions{ display:flex; flex-direction:column; align-items:center; gap:10px; margin-top:8px; min-height:78px; }
+.gf-srccols{ display:flex; gap:12px; justify-content:center; flex-wrap:wrap; }
+.gf-src{ display:flex; flex-direction:column; align-items:center; gap:6px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:12px 18px; cursor:pointer; color:inherit; font:inherit; text-align:center; transition:border-color .12s, transform .12s; }
+.gf-src:hover:not(:disabled){ border-color:#7fe0b0; transform:translateY(-2px); }
+.gf-src:disabled{ opacity:.4; cursor:default; }
+.gf-src .lbl{ font-size:.82rem; font-weight:700; }
+.gf-src .sub{ font-size:.62rem; opacity:.6; margin-top:2px; }
+.gf-src .sub .mini{ display:inline-block; width:20px; height:28px; border-radius:4px; background:linear-gradient(180deg,#fff,#e8e6df); line-height:28px; font-size:.55rem; font-weight:800; margin-right:4px; vertical-align:middle; box-shadow:0 2px 3px rgba(0,0,0,.4); }
+.gf-src .sub .mini.red{ color:#c0392b; } .gf-src .sub .mini.black{ color:#1d1b16; }
+.gf-hint{ font-size:.8rem; color:var(--bgn-muted); }
+
+/* side panel */
+.gf-roombtns{ display:flex; gap:8px; justify-content:center; margin-top:8px; }
+.gf-logwrap{ margin-top:18px; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:6px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.bgn-log{ max-height:300px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item .ev{ color:var(--bgn-accent2); }
+.log-item .st{ color:#ff9d9d; font-weight:700; }
+
+/* peek / pass overlays */
+.peek-overlay{ position:fixed; inset:0; z-index:60; background:rgba(8,6,3,.97); display:flex; align-items:center; justify-content:center; }
+.peek-box{ background:rgba(20,15,8,.98); border:1px solid var(--bgn-gold2,#d4af37); border-radius:14px; padding:22px 24px; text-align:center; max-width:94vw; box-shadow:0 10px 40px rgba(0,0,0,.7); }
+.peek-title{ font-family:var(--bgn-serif); font-size:1.15rem; font-weight:700; color:#f6e6a4; }
+.peek-sub{ margin-top:6px; }
+.peek-layout{ display:grid; grid-template-columns:repeat(3,auto); gap:10px; justify-content:center; margin:18px 0; }
+.peek-layout .gf-card{ width:clamp(62px,13vw,92px); cursor:pointer; }
+.peek-btns{ display:flex; gap:10px; justify-content:center; }
+
+/* hole table */
+.hole-table{ margin:6px auto 4px; width:100%; max-width:560px; font-size:.8rem; }
+.ht-row{ display:grid; grid-template-columns:76px minmax(170px,1fr) 90px 44px 52px; gap:8px; padding:7px 8px; border-bottom:1px solid rgba(255,255,255,.07); align-items:center; }
+.ht-row:last-child{ border-bottom:none; }
+.ht-head{ font-size:.58rem; letter-spacing:.13em; text-transform:uppercase; opacity:.55; }
+.ht-name{ text-align:left; font-weight:700; }
+.ht-cards{ display:flex; justify-content:center; flex-wrap:wrap; gap:3px; }
+.ht-cols{ opacity:.75; }
+.ht-pts{ font-weight:800; color:var(--bgn-accent2,#d4af37); }
+.ht-total{ font-weight:800; color:#7fe0b0; }
+.gf-mini{ display:inline-flex; align-items:center; justify-content:center; width:27px; height:38px; border-radius:5px; background:linear-gradient(180deg,#fff,#e8e6df); font-size:.58rem; font-weight:800; box-shadow:0 2px 4px rgba(0,0,0,.4); }
+.gf-mini.red{ color:#c0392b; } .gf-mini.black{ color:#1d1b16; }
+
+/* modals */
+.promo{ position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:50; background:rgba(12,9,5,.97); border:1px solid var(--bgn-gold2,#d4af37); border-radius:12px; padding:18px 20px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,.65); max-width:92vw; }
+.promo-title{ font-size:.8rem; opacity:.85; margin-bottom:10px; letter-spacing:.5px; }
+.over-banner{ font-family:var(--bgn-serif); font-size:1.35rem; line-height:1.3; margin:2px 0 12px; color:#f6e6a4; }
+.over-scores{ display:flex; gap:30px; justify-content:center; margin:6px 0 10px; font-size:.9rem; align-items:flex-start; }
+.over-scores > div{ display:flex; flex-direction:column; align-items:center; gap:2px; min-width:96px; }
+.over-scores .muted{ white-space:nowrap; }
+.over-scores b{ font-family:var(--bgn-serif); font-size:1.6rem; color:var(--bgn-accent2); display:block; line-height:1.1; }
+.over-scores .pts-tag{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.6; }
+.over-scores .win b{ color:#7fe0b0; }
+.win-tag{ font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:#7fe0b0; border:1px solid rgba(127,224,176,.4); border-radius:999px; padding:1px 8px; margin-top:3px; }
+.over-btns{ display:flex; gap:10px; justify-content:center; margin-top:14px; flex-wrap:wrap; }
+.over-btns .btn{ white-space:nowrap; padding:14px 22px; }
+@media (max-width:380px){
+  .over-scores{ flex-direction:column; gap:10px; }
+  .over-scores > div{ min-width:0; }
+  .over-banner{ font-size:1.15rem; }
+  .promo{ padding:14px 14px; }
+  .ht-row{ grid-template-columns:64px minmax(120px,1fr) 70px 38px 44px; gap:6px; }
+}
+
+/* ═══ new template features ═══ */
+.gf-timer{ font-size:.78rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(212,175,55,.35); border-radius:999px; padding:3px 10px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.gf-timer.low{ color:#ff9b6b; border-color:rgba(255,120,60,.55); }
+.gf-card.hintglow{ border-color:#ffd479; box-shadow:0 0 0 2px rgba(255,212,121,.85), 0 0 18px rgba(255,212,121,.5); }
+.bgn-diff{ display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:20px; }
+.diff-btns{ display:flex; gap:8px; }
+.diff-btns .btn.on{ background:var(--bgn-gold2,#d4af37); color:#12101c; border-color:transparent; }
+.gf-chatwrap{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+</style>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#3f9d6b"));
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+
+/* ══════════ rules engine (mirrors server — keep in sync) ══════════ */
+const HOLES=9, LAYOUT=6;
+const RANK_VAL=[1,2,3,4,5,6,7,8,9,10,10,10,0];
+const RANK_NAMES=["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+const SUIT_GLYPH=["♠","♥","♦","♣"];
+const SUIT_RED=[false,true,true,false];
+const AI_NAMES=["Bogey Bob","Tin Cup","Sand Trap","Short Putt"];
+const AV_EMO=["⛳","🏌️","🧢","🌲"];
+function cRank(id){ return id%13; }
+function cSuit(id){ return Math.floor(id/13)%4; }
+function cVal(id){ return RANK_VAL[cRank(id)]; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(n){ const d=[]; const m=n>2?104:52; for(let i=0;i<m;i++)d.push(i); return shuffle(d); }
+function colScore(c){ return cRank(c[0])===cRank(c[1])?0:cVal(c[0])+cVal(c[1]); }
+function holeScore(lay){ return colScore([lay[0],lay[3]])+colScore([lay[1],lay[4]])+colScore([lay[2],lay[5]]); }
+function cardColor(id){ return SUIT_RED[cSuit(id)]?"red":"black"; }
+function cardName(id){ return RANK_NAMES[cRank(id)]+SUIT_GLYPH[cSuit(id)]; }
+function cardFaceHtml(id){
+  const r=RANK_NAMES[cRank(id)], s=SUIT_GLYPH[cSuit(id)];
+  return '<span class="gf-rank">'+r+'</span><span class="gf-suit">'+s+'</span><span class="gf-corner">'+r+'<span class="s">'+s+'</span></span>';
+}
+
+/* ══════════ game state ══════════ */
+const game={ mode:null, n:2, view:0, g:null, locked:false, aiThinking:false,
+  myPlayer:0, myRole:null, status:"idle", oppPresent:true, hostIn:false, guestIn:false,
+  socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null, openResolvers:[],
+  choosing:null, peekP:0, peekSel:[], privLayout:null, myPeekedIdx:[], hintAt:-1, nextView:null,
+  logLines:[], lastSeq:-1, holeShown:false, _lastAp:-1 };
+
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const countPanel=document.getElementById("countPanel");
+const countHintEl=document.getElementById("countHintEl");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const rowsEl=document.getElementById("rowsEl");
+const stockEl=document.getElementById("stockEl");
+const discardEl=document.getElementById("discardEl");
+const actBarEl=document.getElementById("actBarEl");
+const holeEl=document.getElementById("holeEl");
+const turnEl=document.getElementById("turnEl");
+const logEl=document.getElementById("logEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const resignBtn=document.getElementById("resignBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const peekModal=document.getElementById("peekModal");
+const peekTitleEl=document.getElementById("peekTitleEl");
+const peekSubEl=document.getElementById("peekSubEl");
+const peekLayoutEl=document.getElementById("peekLayoutEl");
+const peekDoneBtn=document.getElementById("peekDoneBtn");
+const peekCancelBtn=document.getElementById("peekCancelBtn");
+const passScreen=document.getElementById("passScreen");
+const passTitleEl=document.getElementById("passTitleEl");
+const passSubEl=document.getElementById("passSubEl");
+const passGoBtn=document.getElementById("passGoBtn");
+const holeModal=document.getElementById("holeModal");
+const holeTitleEl=document.getElementById("holeTitleEl");
+const holeTableEl=document.getElementById("holeTableEl");
+const nextHoleBtn=document.getElementById("nextHoleBtn");
+const overModal=document.getElementById("overModal");
+const overTitleEl=document.getElementById("overTitleEl");
+const overBannerEl=document.getElementById("overBannerEl");
+const overScoresEl=document.getElementById("overScoresEl");
+const overReasonEl=document.getElementById("overReasonEl");
+const playAgainBtn=document.getElementById("playAgainBtn");
+const overMenuBtn=document.getElementById("overMenuBtn");
+const saveBtn=document.getElementById("saveBtn");
+const hintBtn=document.getElementById("hintBtn");
+const tmrEl=document.getElementById("tmrEl");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const lbBtn=document.getElementById("lbBtn");
+const overLbBtn=document.getElementById("overLbBtn");
+const lbModal=document.getElementById("lbModal");
+const lbNameInput=document.getElementById("lbNameInput");
+const lbRowsEl=document.getElementById("lbRowsEl");
+const lbDoneBtn=document.getElementById("lbDoneBtn");
+
+/* ══════════ helpers ══════════ */
+function npName(p){
+  if(game.mode==="online")return p===game.myPlayer?"You":"Opponent";
+  if(game.mode==="ai")return p===0?"You":AI_NAMES[p-1];
+  return "Player "+(p+1);
+}
+function myIdx(){ return game.mode==="online"?game.myPlayer:(game.mode==="ai"?0:game.view); }
+function isMyRow(p){
+  if(game.mode==="online")return p===game.myPlayer;
+  if(game.mode==="ai")return p===0;
+  return p===game.view;
+}
+function isMyPlay(){
+  const g=game.g;
+  if(!g||g.over||g.phase!==1)return false;
+  if(game.locked||game.aiThinking)return false;
+  if(game.mode==="local"&&!passScreen.hidden)return false;
+  if(game.mode==="online")return g.turn===game.myPlayer;
+  if(game.mode==="ai")return g.turn===0;
+  return g.turn===game.view;
+}
+function allFaceUp(g,p){ for(let k=0;k<LAYOUT;k++){ if(!g.faceUp[p][k])return false; } return true; }
+function log(txt,steal){
+  game.logLines.push(steal?'<div class="log-item"><span class="st">'+txt+'</span></div>':'<div class="log-item"><span class="ev">'+txt+'</span></div>');
+  if(game.logLines.length>80)game.logLines.splice(0,game.logLines.length-80);
+  renderLog();
+}
+function renderLog(){ logEl.innerHTML=game.logLines.join(""); logEl.scrollTop=logEl.scrollHeight; }
+function stockCount(){ const g=game.g; return game.mode==="online"?g.drawCount:g.draw.length; }
+function discardTopId(){ const g=game.g; if(game.mode==="online")return g.discardTop; return g.discard.length?g.discard[g.discard.length-1]:null; }
+
+/* ══════════ table chat (online) ══════════ */
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function fmtTime(ts){ const d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(role,text,ts){
+  const p=role==="host"?0:1;
+  const who=p===game.myPlayer?"You":npName(p);
+  const row=document.createElement("div");
+  row.className="chat-item"+(p===game.myPlayer?" mine":"");
+  row.innerHTML="<b>"+esc(who)+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(p!==game.myPlayer)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ save / continue (local & AI only) ══════════ */
+const SAVE_KEY="bgn_save_golf";
+function saveGame(){
+  if(!game.g||game.mode==="online")return;
+  if(game.g.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:1,mode:game.mode,g:game.g,view:game.view,nextView:game.nextView,logLines:game.logLines,savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved game was found.";
+  try{ const o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — "+(o.mode==="ai"?"vs the Field":"hotseat")+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function restoreGame(o){
+  if(!o||!o.g)return false;
+  const mode=(o.mode==="ai")?"ai":"local";
+  if(game.mode==="online"&&game.socket)exitOnline(false);
+  game.mode=mode; game.g=o.g;
+  game.view=(o.view!=null)?o.view:0;
+  game.nextView=(o.nextView!=null)?o.nextView:null;
+  game.myPlayer=0; game.myRole=null;
+  game.over=!!o.g.over;
+  game.choosing=null; game.locked=false; game.aiThinking=false;
+  game.privLayout=null; game.myPeekedIdx=[]; game.hintAt=-1;
+  game.logLines=Array.isArray(o.logLines)?o.logLines.slice():[];
+  roomBox.hidden=true; claimBtn.hidden=true; resignBtn.style.display="none"; chatBox.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false; passScreen.hidden=true; peekModal.hidden=true; holeModal.hidden=true; overModal.hidden=true;
+  sfx("deal");
+  renderAll();
+  if(game.g.phase===2&&game.g.holeScores)showHoleModal();
+  else if(game.g.phase===0){
+    if(game.mode==="local")openPeekModal(game.view);
+    else { openPeekModal(0); aiPeek(); }
+  }
+  if(game.mode==="ai"&&game.g.phase===1&&game.g.turn!==0&&!game.g.over)driveAI();
+  if(game.mode==="local"&&game.g.phase===1&&!game.g.over)showPass(game.g.turn,"Pass the device to "+npName(game.g.turn)+" — take their turn.");
+  return true;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.g){ flashBanner("No saved game found."); return; }
+  restoreGame(o);
+}
+
+/* ══════════ leaderboard (best rounds, server-shared) ══════════ */
+const LB_NAME_KEY="bgn_lb_name";
+function lbName(){ try{ return localStorage.getItem(LB_NAME_KEY)||"Player"; }catch(e){ return "Player"; } }
+function setLbName(n){ try{ localStorage.setItem(LB_NAME_KEY,String(n).trim().slice(0,24)||"Player"); }catch(e){} }
+let lbSock=null, lbReady=false, lbBack=1000, lbQueue=null;
+function lbConnect(){
+  if(lbSock||!window.root||!window.root.createServerSocket)return;
+  try{ lbSock=window.root.createServerSocket(); }catch(e){ return; }
+  lbSock.addEventListener("open",function(){
+    lbReady=true; lbBack=1000;
+    if(lbQueue){ const q=lbQueue; lbQueue=null; lbSubmitNow(q.name,q.score,q.extra); }
+  });
+  lbSock.addEventListener("close",function(e){
+    lbReady=false;
+    if(e.code===4403)return;
+    setTimeout(function(){ lbConnect(); }, Math.min(15000,lbBack)+Math.random()*500);
+    lbBack=Math.min(15000,lbBack*2);
+  });
+}
+function lbSubmitNow(name,score,extra){
+  if(!lbSock||lbSock.readyState!==1)return;
+  lbSock.rpc.submitScore(JSON.stringify({name:name,score:score,extra:extra})).catch(function(){});
+}
+function lbSubmitScore(name,score,extra){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ lbQueue={name:name,score:score,extra:extra}; return; }
+  lbSubmitNow(name,score,extra);
+}
+function lbGetScores(cb){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ setTimeout(function(){ lbGetScores(cb); },600); return; }
+  lbSock.rpc.getScores("").then(function(r){
+    let o; try{ o=JSON.parse(r); }catch(e){ cb([]); return; }
+    cb(o.scores||[]);
+  }).catch(function(){ cb([]); });
+}
+function lbRenderRows(list){
+  if(!list.length){ lbRowsEl.innerHTML='<div class="lb-empty">No rounds yet — finish a tournament to set one.</div>'; return; }
+  lbRowsEl.innerHTML=list.map(function(x,i){
+    return '<div class="lb-row'+(i<3?" top":"")+'"><span class="rk">#'+(i+1)+'</span><span class="nm">'+esc(x.name)+'</span><span class="sc">'+x.score+' pts</span></div>';
+  }).join("");
+}
+function openLb(){
+  lbNameInput.value=lbName();
+  lbModal.hidden=false;
+  lbRowsEl.innerHTML='<div class="lb-empty">Loading…</div>';
+  lbGetScores(lbRenderRows);
+}
+function closeLb(){
+  setLbName(lbNameInput.value);
+  lbNameInput.value=lbName();
+  lbModal.hidden=true;
+}
+
+/* ══════════ AI difficulty (Easy/Normal/Hard) ══════════ */
+let AI_DIFF="normal";
+try{ const s=localStorage.getItem("bgn_ai_diff"); if(s==="easy"||s==="normal"||s==="hard")AI_DIFF=s; }catch(e){}
+function setDiff(d){
+  AI_DIFF=d;
+  try{ localStorage.setItem("bgn_ai_diff",d); }catch(e){}
+  document.querySelectorAll(".diff-btns .btn").forEach(function(b){ b.classList.toggle("on",b.dataset.diff===d); });
+}
+
+/* ══════════ turn timer (0 to disable) ══════════ */
+const TURN_TIMER_SECS=60;
+let tmrRemain=0, tmrInt=null, tmrKey="";
+function tmrFmt(s){ const m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0"); }
+function tmrStop(){ if(tmrInt){ clearInterval(tmrInt); tmrInt=null; } }
+function tmrStart(){ if(TURN_TIMER_SECS<=0)return; tmrStop(); tmrRemain=TURN_TIMER_SECS; tmrInt=setInterval(tmrTick,1000); tmrTick(); }
+function tmrTick(){
+  tmrRemain--;
+  if(tmrEl){ tmrEl.textContent="⏱ "+tmrFmt(Math.max(0,tmrRemain)); tmrEl.classList.toggle("low",tmrRemain<=10); }
+  if(tmrRemain<=0){
+    tmrStop();
+    flashBanner("Time's up — auto-discarding a stock card.");
+    if(game.mode!=="online"&&isMyPlay()&&!passScreen.hidden){
+      if(game.choosing){ game.choosing=null; renderAll(); }
+      else commitAction("pile",-1);
+    }else if(game.mode==="online"&&isMyPlay()&&game.g&&game.g.phase===1&&!allFaceUp(game.g,game.myPlayer)){
+      sendAct("pile",-1);
+    }
+  }
+}
+function syncTurnTimer(){
+  const g=game.g;
+  const should = TURN_TIMER_SECS>0 && game.mode && g && !g.over && !game.locked && !game.aiThinking && passScreen.hidden && g.phase===1;
+  if(!should){ tmrStop(); if(tmrEl)tmrEl.hidden=true; return; }
+  if(tmrEl)tmrEl.hidden=false;
+  const key = game.mode+":"+g.phase+":"+g.turn+":"+g.seq;
+  let mine=false;
+  if(game.mode==="online")mine=(g.turn===game.myPlayer&&game.sockOpen&&game.status===2);
+  else if(game.mode==="local")mine=(g.turn===game.view);
+  else mine=(g.turn===0);
+  if(!mine){ tmrStop(); if(tmrEl)tmrEl.textContent="⏱ —"; return; }
+  if(key!==tmrKey){ tmrKey=key; tmrStart(); }
+  else if(!tmrInt)tmrStart();
+}
+
+/* ══════════ hint (suggest a good move) ══════════ */
+function onHint(){
+  if(!isMyPlay()||!game.g)return;
+  const g=game.g, p=myIdx();
+  if(g.phase===0){ flashBanner("💡 Hint: peek at two cards to plan your swaps."); return; }
+  if(allFaceUp(g,p)){ flashBanner("💡 Hint: all six face up — knock to end the hole!"); return; }
+  const c=aiChoose(g,p,true);
+  if(c.swap>=0){
+    game.hintAt=c.swap;
+    sfx("hint");
+    renderAll();
+    flashBanner("💡 Hint: "+(c.draw==="discard"?"take the discard top":"draw from the stock")+" and swap card "+(c.swap+1)+".");
+    setTimeout(function(){ if(game.hintAt===c.swap){ game.hintAt=-1; renderAll(); } },6000);
+  }else{
+    flashBanner("💡 Hint: draw and discard — nothing improves your score right now.");
+  }
+}
+
+/* ══════════ local / AI game model ══════════ */
+function newLocalGame(n){
+  return { n, status:2, hole:1, phase:0, layouts:[], faceUp:[], peeked:[], peekVals:[],
+    draw:[], discard:[], turn:-1, knocked:false, knockP:-1, turnsLeft:0,
+    holeScores:null, totals:[], over:false, winner:null, reason:"", seq:0,
+    drawCount:0, discardCount:0, discardTop:null };
+}
+function holeLayout(g){
+  const deck=buildDeck(g.n);
+  g.layouts=[]; g.faceUp=[]; g.peeked=[]; g.peekVals=[];
+  for(let p=0;p<g.n;p++){
+    const lay=[]; const fu=[];
+    for(let k=0;k<LAYOUT;k++){ lay.push(deck.pop()); fu.push(false); }
+    g.layouts.push(lay); g.faceUp.push(fu); g.peeked.push(null); g.peekVals.push(null);
+  }
+  g.draw=deck.slice(0,deck.length-1); g.discard=[deck[deck.length-1]];
+  g.phase=0; g.turn=-1; g.knocked=false; g.knockP=-1; g.turnsLeft=0; g.holeScores=null;
+}
+function nextPlayer(g,p){ let q=(p+1)%g.n; while(g.knocked&&q===g.knockP)q=(q+1)%g.n; return q; }
+function doAct(g,p,source,swap){
+  let card;
+  if(source==="discard"){ card=g.discard.pop(); }
+  else{
+    if(!g.draw.length&&g.discard.length>1){ const top=g.discard.pop(); g.draw=shuffle(g.discard); g.discard=[top]; }
+    card=g.draw.pop();
+  }
+  if(swap>=0){
+    const old=g.layouts[p][swap];
+    g.layouts[p][swap]=card; g.faceUp[p][swap]=true;
+    g.discard.push(old);
+  }else{
+    g.discard.push(card);
+  }
+  if(g.knocked){
+    g.turnsLeft--;
+    if(g.turnsLeft<=0){ g.turn=-1; finishLocalHole(g); return; }
+  }
+  g.turn=nextPlayer(g,p);
+}
+function doPass(g,p){
+  g.turnsLeft--;
+  if(g.turnsLeft<=0){ g.turn=-1; finishLocalHole(g); return; }
+  g.turn=nextPlayer(g,p);
+}
+function doKnock(g,p){
+  g.knocked=true; g.knockP=p; g.turnsLeft=g.n-1;
+  let q=nextPlayer(g,p);
+  while(g.turnsLeft>0&&allFaceUp(g,q)){ g.turnsLeft--; q=nextPlayer(g,q); }
+  if(g.turnsLeft<=0){ g.turn=-1; finishLocalHole(g); }
+  else g.turn=q;
+}
+function finishLocalHole(g){
+  g.phase=2; g.turn=-1;
+  const rs=[];
+  for(let p=0;p<g.n;p++){ const s=holeScore(g.layouts[p]); rs.push(s); g.totals[p]+=s; }
+  g.holeScores=rs;
+  log("Hole "+g.hole+" scored — totals: "+g.totals.join(" · ")+".",true);
+  if(g.hole>=HOLES){
+    g.over=true; g.reason="gameOver";
+    const mn=Math.min.apply(null,g.totals);
+    const wins=g.totals.map(function(t,p){return t===mn?p:-1;}).filter(function(p){return p!==-1;});
+    g.winner=wins.length===1?wins[0]:"draw";
+    showOverModal();
+  }else{
+    showHoleModal();
+  }
+}
+
+/* ══════════ rendering ══════════ */
+function visibleCard(g,p,i){
+  if(g.faceUp[p][i])return g.layouts[p][i];
+  if(isMyRow(p)){
+    if(game.mode==="online"){
+      if(game.privLayout&&game.myPeekedIdx&&game.myPeekedIdx.indexOf(i)!==-1)return game.privLayout[i];
+    }else{
+      if(g.peeked[p]&&g.peekVals[p]){ const k=g.peeked[p].indexOf(i); if(k>=0)return g.peekVals[p][k]; }
+    }
+  }
+  return null;
+}
+function isPeekShown(g,p,i){ return visibleCard(g,p,i)!==null && !g.faceUp[p][i]; }
+function slotEl(g,p,i){
+  const d=document.createElement("div");
+  d.className="gf-slot";
+  const id=visibleCard(g,p,i);
+  const canSwap=isMyPlay()&&isMyRow(p)&&game.choosing&&!g.faceUp[p][i];
+  if(id!==null){
+    d.innerHTML='<div class="gf-card face '+cardColor(id)+'">'+cardFaceHtml(id)+'</div>';
+    if(isPeekShown(g,p,i))d.querySelector(".gf-card").classList.add("peekbadge");
+  }else{
+    d.innerHTML='<div class="gf-card back"></div>';
+    const c=d.querySelector(".gf-card");
+    if(game.hintAt===i&&isMyRow(p))c.classList.add("hintglow");
+    if(canSwap){
+      c.classList.add("canswap");
+      c.addEventListener("click",function(){ onSlotClick(i); });
+    }
+  }
+  return d;
+}
+function rowEl(g,p){
+  const d=document.createElement("div");
+  const me=isMyRow(p);
+  const act=g.phase===1&&g.turn===p&&!g.over&&!me;
+  d.className="gf-row"+(me?" me":"")+(act?" act":"");
+  const knocked=g.knocked&&g.knockP===p;
+  d.innerHTML='<div class="gf-rowhead">'
+    +'<div class="gf-avatar">'+AV_EMO[p%4]+'</div>'
+    +'<div class="gf-pname">'+npName(p)+'</div>'
+    +'<div class="gf-total">total <b>'+g.totals[p]+'</b></div>'
+    +(knocked?'<div class="gf-knockbadge">knocked</div>':'')
+    +'</div>';
+  const lay=document.createElement("div");
+  lay.className="gf-layout";
+  for(let i=0;i<LAYOUT;i++)lay.appendChild(slotEl(g,p,i));
+  d.appendChild(lay);
+  return d;
+}
+function renderRows(){
+  rowsEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  if(g.status===1){
+    rowsEl.innerHTML='<div class="gf-hint" style="padding:34px 10px">Waiting for an opponent to join…<br><span class="muted small">Share your room code to start the match.</span></div>';
+    return;
+  }
+  const me=myIdx();
+  const order=[];
+  for(let p=0;p<g.n;p++){ if(p!==me)order.push(p); }
+  order.push(me);
+  for(const p of order)rowsEl.appendChild(rowEl(g,p));
+}
+function renderStock(){
+  const n=stockCount();
+  stockEl.innerHTML='<span class="cnt">'+n+'</span>';
+}
+function renderDiscard(){
+  const top=discardTopId();
+  discardEl.innerHTML=top!=null
+    ?'<div class="gf-card face '+cardColor(top)+'">'+cardFaceHtml(top)+'</div>'
+    :'<div class="gf-empty">empty</div>';
+}
+function renderHud(){
+  const g=game.g; if(!g)return;
+  holeEl.textContent="Hole "+g.hole+" / "+HOLES;
+  let t="";
+  if(g.over) t="Tournament over";
+  else if(g.status===1) t="Waiting for the opponent…";
+  else if(g.phase===0){
+    if(game.mode==="online") t=g.peekDone&&g.peekDone[game.myPlayer]?"Waiting for the opponent to peek…":"Peek at two cards — in secret.";
+    else t="Peek at two cards — in secret.";
+  }
+  else if(g.phase===1){
+    if(g.knocked) t=(isMyPlay()?"Your final turn — take it!":"Waiting for "+npName(g.turn)+" — final turn of the hole.");
+    else if(isMyPlay()) t="Your turn — draw a card.";
+    else t="Waiting for "+npName(g.turn)+"…";
+  }
+  else t="Hole scored.";
+  turnEl.textContent=t;
+}
+function renderActBar(){
+  actBarEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  if(g.status===1)return;
+  const online=game.mode==="online";
+  if(online&&g.phase===0){
+    if(!(g.peekDone&&g.peekDone[game.myPlayer])){
+      const b=document.createElement("button");
+      b.className="btn btn-gold";
+      b.textContent="Peek at two cards 👁";
+      b.addEventListener("click",function(){ openPeekModal(game.myPlayer); });
+      actBarEl.appendChild(b);
+    }else{
+      actBarEl.innerHTML='<div class="gf-hint">Waiting for the opponent to peek…</div>';
+    }
+    return;
+  }
+  if(g.phase!==1)return;
+  if(!isMyPlay()){
+    if(g.turn>=0&&!g.over)actBarEl.innerHTML='<div class="gf-hint">Waiting for '+npName(g.turn)+'…</div>';
+    return;
+  }
+  const p=myIdx();
+  if(allFaceUp(g,p)){
+    if(g.knocked){
+      if(online)actBarEl.innerHTML='<div class="gf-hint">No face-down cards left — the hole is ending…</div>';
+      else{
+        const b=document.createElement("button");
+        b.className="btn btn-ghost"; b.textContent="End your turn (no cards to swap)";
+        b.addEventListener("click",function(){ commitPass(); });
+        actBarEl.appendChild(b);
+      }
+      return;
+    }
+    const b=document.createElement("button");
+    b.className="btn btn-gold"; b.textContent="🏌️ Knock — end the hole";
+    b.addEventListener("click",function(){ commitKnock(); });
+    actBarEl.appendChild(b);
+    const h=document.createElement("div"); h.className="gf-hint"; h.textContent="All six cards are face up — knock to score the hole.";
+    actBarEl.appendChild(h);
+    return;
+  }
+  if(!game.choosing){
+    const wrap=document.createElement("div"); wrap.className="gf-srccols";
+    const s1=document.createElement("button"); s1.className="gf-src";
+    s1.innerHTML='<span class="lbl">🂠 Draw from the stock</span><span class="sub">'+stockCount()+' cards left — swap or discard</span>';
+    s1.addEventListener("click",function(){ game.choosing="pile"; renderAll(); });
+    const s2=document.createElement("button"); s2.className="gf-src";
+    const top=discardTopId();
+    s2.innerHTML='<span class="lbl">Draw from the discard</span><span class="sub">'+(top!=null?'<span class="mini '+cardColor(top)+'">'+cardName(top)+'</span>must swap it in':'empty')+'</span>';
+    s2.disabled=top==null;
+    s2.addEventListener("click",function(){ game.choosing="discard"; renderAll(); });
+    wrap.appendChild(s1); wrap.appendChild(s2);
+    actBarEl.appendChild(wrap);
+  }else{
+    const h=document.createElement("div"); h.className="gf-hint";
+    h.textContent="Click a face-down card in your layout to swap it in.";
+    actBarEl.appendChild(h);
+    const btns=document.createElement("div"); btns.className="gf-srccols";
+    if(game.choosing==="pile"){
+      const b=document.createElement("button"); b.className="btn btn-ghost btn-sm";
+      b.textContent="Discard the drawn card";
+      b.addEventListener("click",function(){ commitAction("pile",-1); });
+      btns.appendChild(b);
+    }
+    const c=document.createElement("button"); c.className="btn btn-ghost btn-sm";
+    c.textContent="Cancel";
+    c.addEventListener("click",function(){ game.choosing=null; renderAll(); });
+    btns.appendChild(c);
+    actBarEl.appendChild(btns);
+  }
+}
+function updateButtons(){
+  const g=game.g; if(!g)return;
+  const online=game.mode==="online";
+  if(online){
+    resignBtn.style.display=g.over?"none":"";
+    claimBtn.hidden=!(game.status===2&&!g.over&&!game.oppPresent);
+  }else{
+    resignBtn.style.display="none";
+    claimBtn.hidden=true;
+  }
+  newGameBtn.textContent=online?(g.over?"Rematch":"Match in progress"):"New game";
+  saveBtn.style.display=(!online&&!g.over)?"":"none";
+  hintBtn.style.display=(!online&&!g.over)?"":"none";
+  hintBtn.disabled=!!(game.locked||game.aiThinking);
+}
+function renderAll(){
+  if(!game.g)return;
+  renderHud();
+  renderRows();
+  renderStock();
+  renderDiscard();
+  renderActBar();
+  updateButtons();
+  syncTurnTimer();
+}
+let bannerTimer=null;
+function flashBanner(msg){ turnEl.textContent=msg; turnEl.classList.add("warn"); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderHud(); },2600); }
+
+/* ══════════ peek modal ══════════ */
+function openPeekModal(p){
+  game.peekP=p; game.peekSel=[];
+  peekTitleEl.textContent=npName(p)+" — peek at two cards";
+  peekSubEl.textContent="Click two face-down cards to see them. Only you know what you saw.";
+  peekCancelBtn.hidden=game.mode!=="online";
+  buildPeekSlots();
+  peekDoneBtn.disabled=true;
+  peekModal.hidden=false;
+}
+function buildPeekSlots(){
+  const g=game.g; const p=game.peekP;
+  peekLayoutEl.innerHTML="";
+  for(let i=0;i<LAYOUT;i++){
+    const s=document.createElement("div");
+    s.className="peek-slot";
+    const c=document.createElement("div");
+    c.className="gf-card back";
+    c.addEventListener("click",function(){ togglePeekSlot(p,i,c); });
+    s.appendChild(c);
+    peekLayoutEl.appendChild(s);
+  }
+}
+function togglePeekSlot(p,i,c){
+  const k=game.peekSel.indexOf(i);
+  if(k>=0){
+    game.peekSel.splice(k,1);
+    c.className="gf-card back";
+  }else{
+    if(game.peekSel.length>=2)return;
+    game.peekSel.push(i);
+    sfx("flip");
+    const id=(game.mode==="online")?game.privLayout[i]:game.g.layouts[p][i];
+    c.className="gf-card face "+cardColor(id);
+    c.innerHTML=cardFaceHtml(id);
+  }
+  peekDoneBtn.disabled=game.peekSel.length!==2;
+}
+function peekDoneHandler(){
+  const g=game.g;
+  if(game.mode==="online"){ sendPeek(game.peekSel.slice()); return; }
+  const p=game.peekP;
+  g.peeked[p]=game.peekSel.slice();
+  g.peekVals[p]=game.peekSel.map(function(i){ return g.layouts[p][i]; });
+  peekModal.hidden=true;
+  sfx("chip");
+  afterPeekDone();
+  saveGame();
+}
+function afterPeekDone(){
+  const g=game.g;
+  if(game.mode==="local"){
+    let next=null;
+    for(let q=game.peekP+1;q<g.n;q++){ if(!g.peeked[q]){ next=q; break; } }
+    if(next!==null){ openPeekModal(next); return; }
+  }else{
+    aiPeek();
+  }
+  startPlayAfterPeek();
+}
+function startPlayAfterPeek(){
+  const g=game.g;
+  g.phase=1; g.turn=(g.hole-1)%g.n;
+  log("Everyone has peeked — "+npName(g.turn)+" takes the first turn.",true);
+  renderAll();
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — take their turn."); }
+  else if(g.turn!==0){ driveAI(); }
+}
+
+/* ══════════ interaction ══════════ */
+function onSlotClick(i){ commitAction(game.choosing,i); }
+function commitAction(source,swap){
+  if(game.mode==="online"){ sendAct(source,swap); return; }
+  const g=game.g, p=myIdx();
+  log((source==="discard"?npName(p)+" takes the discard top":npName(p)+" draws from the stock")+(swap>=0?" and swaps a card.":" and discards."));
+  sfx(swap>=0?"place":(source==="pile"?"draw":"discard"));
+  doAct(g,p,source,swap);
+  game.choosing=null;
+  renderAll();
+  saveGame();
+  if(g.phase===2)return;
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — take their turn."); }
+  else if(g.turn!==0){ driveAI(); }
+}
+function commitKnock(){
+  if(game.mode==="online"){ sendKnock(); return; }
+  const g=game.g, p=myIdx();
+  log(npName(p)+" knocks — all six cards face up!",true);
+  sfx("warn");
+  doKnock(g,p);
+  game.choosing=null;
+  renderAll();
+  saveGame();
+  if(g.phase===2)return;
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — final turn of the hole."); }
+  else if(g.turn!==0){ driveAI(); }
+}
+function commitPass(){
+  const g=game.g, p=myIdx();
+  log(npName(p)+" has no face-down cards — their turn is skipped.");
+  doPass(g,p);
+  renderAll();
+  saveGame();
+  if(g.phase===2)return;
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — take their turn."); }
+  else if(g.turn!==0){ driveAI(); }
+}
+
+/* ══════════ pass screen (hotseat) ══════════ */
+function showPass(next,msg){
+  game.nextView=next;
+  passTitleEl.textContent="Pass the device to "+npName(next);
+  passSubEl.textContent=msg;
+  passScreen.hidden=false;
+}
+passGoBtn.addEventListener("click",function(){
+  passScreen.hidden=true;
+  if(game.nextView!=null){ game.view=game.nextView; game.nextView=null; }
+  sfx("turn");
+  renderAll();
+  saveGame();
+});
+
+/* ══════════ AI ══════════ */
+function aiPeek(){
+  const g=game.g;
+  for(let p=1;p<g.n;p++){
+    if(g.peeked[p])continue;
+    const a=Math.floor(Math.random()*6);
+    let b=a; while(b===a)b=Math.floor(Math.random()*6);
+    g.peeked[p]=[a,b];
+    g.peekVals[p]=[g.layouts[p][a],g.layouts[p][b]];
+  }
+}
+function aiChoose(g,p,force){
+  if(!force&&AI_DIFF==="easy"&&Math.random()<0.3){
+    const fd=[]; for(let i=0;i<LAYOUT;i++)if(!g.faceUp[p][i])fd.push(i);
+    if(fd.length){
+      let src=Math.random()<0.5?"discard":"pile";
+      if(src==="discard"&&!g.discard.length)src="pile";
+      if(src==="pile"&&!g.draw.length)src="discard";
+      if((src==="discard"&&!g.discard.length)||(src==="pile"&&!g.draw.length))return {draw:"pile",swap:-1};
+      return {draw:src,swap:fd[Math.floor(Math.random()*fd.length)]};
+    }
+  }
+  const cur=holeScore(g.layouts[p]);
+  const discTop=g.discard.length?g.discard[g.discard.length-1]:null;
+  const SAMPLES=AI_DIFF==="hard"?12:6;
+  function bestSwap(card){
+    let bi=-1,bs=cur,bv=-1;
+    for(let i=0;i<LAYOUT;i++){
+      if(g.faceUp[p][i])continue;
+      const lay=g.layouts[p].slice(); lay[i]=card;
+      const s=holeScore(lay);
+      const kn=(g.peeked[p]&&g.peekVals[p]&&g.peekVals[p][g.peeked[p].indexOf(i)]!==undefined)?g.peekVals[p][g.peeked[p].indexOf(i)]:0;
+      if(s<bs||(s===bs&&AI_DIFF==="hard"&&kn>bv)){ bs=s; bi=i; bv=kn; }
+    }
+    return {i:bi,s:bi>=0?bs:cur};
+  }
+  const d=discTop!=null?bestSwap(discTop):null;
+  let st=null, stS=cur;
+  const n=g.draw.length;
+  for(let k=0;k<SAMPLES&&n>0;k++){
+    const c=g.draw[Math.floor(Math.random()*n)];
+    const b=bestSwap(c);
+    if(b.i>=0&&b.s<stS){ stS=b.s; st={draw:"pile",swap:b.i}; }
+  }
+  if(force){
+    let fi=-1;
+    for(let i=0;i<LAYOUT;i++){ if(!g.faceUp[p][i]){ fi=i; break; } }
+    if(fi<0)return {draw:"pile",swap:-1};
+    if(d&&d.i>=0)return {draw:"discard",swap:d.i};
+    if(st)return st;
+    if(discTop!=null)return {draw:"discard",swap:fi};
+    if(g.draw.length)return {draw:"pile",swap:fi};
+    return {draw:"pile",swap:-1};
+  }
+  if(d&&st)return d.s<=stS?{draw:"discard",swap:d.i}:st;
+  if(d)return {draw:"discard",swap:d.i};
+  if(st)return st;
+  return {draw:"pile",swap:-1};
+}
+function driveAI(){
+  const g=game.g;
+  if(game.mode!=="ai"||!g||g.over)return;
+  if(g.phase!==1)return;
+  if(g.turn===0){ renderAll(); return; }
+  game.aiThinking=true;
+  renderAll();
+  setTimeout(function(){
+    if(game.mode!=="ai"||!game.g||game.g.over)return;
+    const gg=game.g;
+    game.aiThinking=false;
+    if(gg.phase!==1||gg.turn===0){ renderAll(); return; }
+    const p=gg.turn;
+    if(allFaceUp(gg,p)){
+      if(gg.knocked){ log(npName(p)+" has no face-down cards — their turn is skipped."); doPass(gg,p); }
+      else { log(npName(p)+" knocks — all six cards face up!",true); doKnock(gg,p); }
+    }else{
+      let c=aiChoose(gg,p,false);
+      if(c.swap>=0){ gg.aiStall=(gg.aiStall||{}); gg.aiStall[p]=0; }
+      else{ gg.aiStall=(gg.aiStall||{}); gg.aiStall[p]=(gg.aiStall[p]||0)+1; if(gg.aiStall[p]>=2)c=aiChoose(gg,p,true); }
+      if(c.draw==="discard")log(npName(p)+" takes the discard top and swaps a card.");
+      else log(c.swap>=0?npName(p)+" draws from the stock and swaps a card.":npName(p)+" draws from the stock and discards.");
+      doAct(gg,p,c.draw,c.swap);
+    }
+    renderAll();
+    if(gg.phase===2)return;
+    if(gg.phase===1&&gg.turn===0)sfx("turn");
+    driveAI();
+  },700+Math.random()*500);
+}
+
+/* ══════════ game flow (local / AI) ══════════ */
+function startLocalGame(){
+  const n=game.n;
+  const g=newLocalGame(n);
+  for(let p=0;p<n;p++)g.totals.push(0);
+  game.g=g; game.view=0; game.locked=false; game.aiThinking=false; game.myPlayer=0;
+  game.choosing=null; game.privLayout=null; game.myPeekedIdx=[]; game.hintAt=-1; game.nextView=null;
+  game.logLines=[];
+  holeLayout(g);
+  log("Hole 1 — six cards each, two rows of three. Peek at two in secret.");
+  log("A=1 · 2–10 face · J/Q=10 · K=0 · Pairs cancel a column.");
+  sfx("deal");
+  renderAll();
+  saveGame();
+  if(game.mode==="local"){ openPeekModal(0); }
+  else { openPeekModal(0); aiPeek(); }
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  game.mode=mode;
+  game.myPlayer=0; game.myRole=null;
+  roomBox.hidden=true;
+  claimBtn.hidden=true;
+  resignBtn.style.display="none";
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  passScreen.hidden=true;
+  peekModal.hidden=true;
+  holeModal.hidden=true;
+  overModal.hidden=true;
+  startLocalGame();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
+    exitOnline(true);
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+  }
+  refreshContinuePanel();
+}
+
+/* ══════════ hole / game over ══════════ */
+function showHoleModal(){
+  const g=game.g; if(!g)return;
+  sfx("chip");
+  holeTitleEl.textContent="Hole "+g.hole+" — scored";
+  const np=game.mode==="online"?2:g.n;
+  let h='<div class="ht-row ht-head"><span>Player</span><span>Cards</span><span>Columns</span><span>Pts</span><span>Total</span></div>';
+  for(let p=0;p<np;p++){
+    const lay=g.layouts[p];
+    const c0=colScore([lay[0],lay[3]]), c1=colScore([lay[1],lay[4]]), c2=colScore([lay[2],lay[5]]);
+    const sc=g.holeScores[p];
+    let cards="";
+    for(let i=0;i<6;i++)cards+='<span class="gf-mini '+cardColor(lay[i])+'">'+RANK_NAMES[cRank(lay[i])]+SUIT_GLYPH[cSuit(lay[i])]+'</span>';
+    h+='<div class="ht-row"><span class="ht-name">'+npName(p)+'</span><span class="ht-cards">'+cards+'</span><span class="ht-cols">'+c0+' + '+c1+' + '+c2+'</span><span class="ht-pts">'+sc+'</span><span class="ht-total">'+g.totals[p]+'</span></div>';
+  }
+  holeTableEl.innerHTML=h;
+  nextHoleBtn.textContent=g.hole>=HOLES?"Final results":"Next hole →";
+  holeModal.hidden=false;
+}
+function nextHoleAction(){
+  holeModal.hidden=true;
+  const g=game.g; if(!g)return;
+  if(game.mode==="online"){ sendNextHole(); return; }
+  g.hole++;
+  if(g.hole>HOLES){ showOverModal(); return; }
+  holeLayout(g);
+  log("Hole "+g.hole+" — new deal! Peek at two cards in secret.");
+  sfx("deal");
+  renderAll();
+  saveGame();
+  if(game.mode==="local")openPeekModal(0);
+  else { openPeekModal(0); aiPeek(); }
+}
+function showOverModal(){
+  const g=game.g; if(!g)return;
+  const youWon=game.mode==="online"?g.winner===game.myPlayer:(game.mode==="ai"?g.winner===0:(g.winner===game.view));
+  if(g.winner==="draw")sfx("draw2");
+  else if(youWon)sfx("win");
+  else sfx("lose");
+  overTitleEl.textContent="Tournament over";
+  let banner="";
+  if(g.winner==="draw")banner="⚖️ It's a tie!";
+  else if(game.mode==="online")banner=g.winner===game.myPlayer?"🏌️ You win the tournament!":"🏌️ "+npName(g.winner)+" wins the tournament!";
+  else if(game.mode==="ai")banner=g.winner===0?"🏌️ You win the tournament!":"🏌️ "+npName(g.winner)+" wins the tournament!";
+  else banner="🏌️ "+npName(g.winner)+" wins the tournament!";
+  overBannerEl.textContent=banner;
+  const n=game.mode==="online"?2:g.n;
+  let s="";
+  for(let p=0;p<n;p++){
+    const name=game.mode==="online"?(p===game.myPlayer?"You":"Opponent"):npName(p);
+    const win=g.winner===p;
+    s+='<div class="'+(win?"win":"")+'"><span class="muted small">'+name+'</span><b>'+g.totals[p]+'</b><span class="pts-tag">pts</span>'+(win?'<span class="win-tag">★ winner</span>':"")+'</div>';
+  }
+  overScoresEl.innerHTML=s;
+  if(g.reason==="resign")overReasonEl.textContent="The match ended early.";
+  else if(g.reason==="forfeit")overReasonEl.textContent=game.mode==="online"?"One player left the match.":"The match ended early.";
+  else overReasonEl.textContent="Nine holes played — the lowest total wins.";
+  playAgainBtn.textContent=game.mode==="online"?"Rematch":"Play again";
+  overModal.hidden=false;
+  deleteSave();
+  if(g.winner!==null&&g.winner!=="draw"){
+    const sc=g.totals[g.winner];
+    if(game.mode==="online"){ if(game.myRole==="host")lbSubmitScore(lbName(),sc,""); }
+    else lbSubmitScore(lbName(),sc,"");
+  }
+}
+playAgainBtn.addEventListener("click",function(){
+  overModal.hidden=true;
+  if(game.mode==="online"){ rpc("rematch",game.roomCode).catch(function(){}); return; }
+  startLocalGame();
+});
+overMenuBtn.addEventListener("click",function(){ overModal.hidden=true; exitToLobby(); });
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true;
+    game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    renderHud();
+  });
+  game.socket.addEventListener("message",function(ev){
+    if(game.mode==="online")onServerMsg(ev.data);
+  });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null;
+        connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){ connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — share the code to start the match":"Connecting…"); }
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function resync(){
+  rpc("getRoom",game.roomCode).then(function(s){
+    if(s&&s.snap)applyServerSnap(s.snap);
+  }).catch(function(){});
+}
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="layout"){ game.privLayout=msg.cards.slice(); game.myPeekedIdx=[]; renderAll(); }
+  else if(msg.t==="peeked"){ game.myPeekedIdx=msg.idx.slice(); renderAll(); }
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+}
+function applyServerSnap(s){
+  if(!game.g){ game.g=newLocalGame(2); game.g.totals=[0,0]; }
+  const g=game.g;
+  g.status=s.status;
+  g.phase=s.phase; g.hole=s.hole; g.turn=s.turn;
+  g.knocked=!!s.knocked; g.knockP=s.knockP;
+  g.peekDone=s.peekDone.slice();
+  g.faceUp=s.layouts.map(function(lay){ return lay.map(function(id){ return id!==null; }); });
+  g.layouts=s.layouts.map(function(lay){ return lay.slice(); });
+  g.discardTop=s.discardTop; g.discardCount=s.discardCount; g.drawCount=s.drawCount;
+  g.totals=s.totals.slice();
+  g.holeScores=s.holeScores?s.holeScores.slice():null;
+  g.over=s.over; g.winner=s.winner; g.reason=s.reason;
+  g.seq=s.seq;
+  game.status=s.status;
+  game.hostIn=!!s.hostIn; game.guestIn=!!s.guestIn;
+  game.oppPresent=(game.myPlayer===0)?game.guestIn:game.hostIn;
+  game.locked=false;
+  if(game.lastHole!==s.hole){ game.lastHole=s.hole; game.myPeekedIdx=[]; game.privLayout=null; }
+  if(s.event&&s.seq!==game.lastSeq){
+    log(s.event.replace(/Host/g,npName(0)).replace(/Guest/g,npName(1)), /knocks|scored|wins|tie|final|tournament|disconnect/.test(s.event));
+  }
+  game.lastSeq=s.seq;
+  if(!g.over&&game.mode==="online"&&g.phase===1&&g.turn===game.myPlayer&&game._lastAp!==g.turn)sfx("turn");
+  game._lastAp=g.turn;
+  renderAll();
+  if(g.over&&game.mode==="online"){ showOverModal(); }
+  else if(g.phase===2&&g.holeScores&&game.mode==="online"){ showHoleModal(); }
+  else { holeModal.hidden=true; }
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  roomBox.hidden=false;
+  chatBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  game.locked=false;
+  renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom","");
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=0;
+    game.roomCode=r.code;
+    game.logLines=[];
+    log("Room created — code "+r.code+". Share it with a friend to start.");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    game.roomCode=code;
+    game.logLines=[];
+    log("Joined room "+code+".");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+function sendPeek(cards){
+  game.locked=true;
+  const evt=game.g?game.g.seq:0;
+  game.myPeekedIdx=cards.slice();
+  peekModal.hidden=true;
+  rpc("peek",JSON.stringify({code:game.roomCode,evt:evt,cards:cards})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok){ flashBanner("Peek rejected ("+(r&&r.err?r.err:"error")+")"); resync(); }
+  }).catch(function(){ game.locked=false; resync(); });
+  renderAll();
+}
+function sendAct(source,swap){
+  game.locked=true;
+  game.choosing=null;
+  const evt=game.g?game.g.seq:0;
+  rpc("act",JSON.stringify({code:game.roomCode,evt:evt,draw:source,swap:swap})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Move rejected ("+(r&&r.err?r.err:"error")+")");
+      resync();
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+  renderAll();
+}
+function sendKnock(){
+  game.locked=true;
+  const evt=game.g?game.g.seq:0;
+  rpc("knock",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Knock rejected ("+(r&&r.err?r.err:"error")+")");
+      resync();
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+  renderAll();
+}
+function sendNextHole(){
+  game.locked=true;
+  const evt=game.g?game.g.seq:0;
+  rpc("nextHole",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok)flashBanner("Can't advance yet ("+r.err+").");
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+
+/* ══════════ wire up UI ══════════ */
+let pendingMode=null;
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){
+      pendingMode=null; countPanel.style.display="none";
+      onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus();
+      return;
+    }
+    onlinePanel.hidden=true;
+    countPanel.style.display="";
+    countHintEl.textContent=m==="local"?"Pass the device between players. Peeks stay secret.":"You against "+(game.n-1)+" AI golfer"+(game.n>2?"s":"")+".";
+    pendingMode=m;
+  });
+});
+document.querySelectorAll("#countPanel .chip").forEach(function(chip){
+  chip.addEventListener("click",function(){
+    const n=parseInt(chip.dataset.count,10);
+    game.n=n;
+    document.querySelectorAll("#countPanel .chip").forEach(function(c){ c.classList.remove("on"); });
+    chip.classList.add("on");
+    countHintEl.textContent=pendingMode==="local"?"Pass the device between "+n+" players.":"You against "+(n-1)+" AI golfers.";
+  });
+});
+document.querySelectorAll("#countPanel .chip")[0].classList.add("on");
+document.getElementById("countGoBtn").addEventListener("click",function(){
+  if(!pendingMode)return;
+  startMode(pendingMode);
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true;
+  connectSocket();
+  doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true;
+  connectSocket();
+  doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+resignBtn.addEventListener("click",function(){
+  if(!game.over&&game.mode==="online"){ rpc("resign",game.roomCode).catch(function(){}); }
+});
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.g&&game.g.over)rpc("rematch",game.roomCode).catch(function(){});
+    return;
+  }
+  startLocalGame();
+});
+claimBtn.addEventListener("click",function(){
+  if(game.g&&game.g.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+peekDoneBtn.addEventListener("click",function(){ peekDoneHandler(); });
+peekCancelBtn.addEventListener("click",function(){ peekModal.hidden=true; renderAll(); });
+nextHoleBtn.addEventListener("click",function(){ nextHoleAction(); });
+document.querySelectorAll(".diff-btns .btn").forEach(function(b){
+  b.addEventListener("click",function(){ setDiff(b.dataset.diff); });
+});
+setDiff(AI_DIFF);
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); log("💾 Game saved."); });
+hintBtn.addEventListener("click",onHint);
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+lbBtn.addEventListener("click",openLb);
+overLbBtn.addEventListener("click",openLb);
+lbDoneBtn.addEventListener("click",closeLb);
+lbNameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")closeLb(); });
+
+/* debug/testing handle for browser_eval */
+window.__golf={ game, newLocalGame, holeLayout, doAct, doKnock, doPass, finishLocalHole,
+  holeScore, colScore, cRank, cSuit, cVal, cardName, cardColor, buildDeck, shuffle,
+  aiChoose, aiPeek, startLocalGame, startMode, openPeekModal, RANK_NAMES, SUIT_GLYPH,
+  HOLES, LAYOUT, allFaceUp, nextPlayer, isMyPlay, myIdx, npName, visibleCard,
+  renderAll, saveGame, continueGame, restoreGame, deleteSave, lbSubmitScore, openLb, onHint, syncTurnTimer };
+refreshContinuePanel();
+renderAll();
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"Golf"); }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-golf",
+    gameName:tplName,
+    exportData:function(){
+      if(!game.g||game.mode==="online")return null;
+      return {mode:game.mode, g:game.g, view:game.view, nextView:game.nextView, logLines:game.logLines};
+    },
+    applySave:function(o){ return restoreGame(o); },
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs the Field":"hotseat"; },
+    filenameBase:function(){ return "golf-round"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>

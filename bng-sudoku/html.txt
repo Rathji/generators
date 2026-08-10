@@ -1,0 +1,1212 @@
+<!-- ════════════════════════════════════════════════════════════════
+     SUDOKU — a polished single-player sudoku
+     - Unique puzzles generated on-device (backtracking + uniqueness check)
+     - 4 difficulties · pencil notes · undo · hints (+30s) · 3 strikes
+     - In-progress games auto-save locally and resume on reload
+     - Shared global leaderboard stored in an editable upload file
+     - BGN audio (music + SFX) · "How it works" help · JSON export/import · PNG screenshot
+     ════════════════════════════════════════════════════════════════ -->
+
+<style>
+*{box-sizing:border-box}
+:root{
+  --gold:#d4af37; --gold2:#f6e6a4; --gold3:#8f721d;
+  --bg:#0a0912; --panel:#15121f; --line:rgba(255,255,255,.09);
+  --txt:#eae6d8; --mut:#8b87a0; --err:#ff5c5c;
+}
+html,body{margin:0;padding:0}
+body{
+  background:radial-gradient(1100px 640px at 50% -12%, #1b1730 0%, var(--bg) 62%);
+  color:var(--txt); text-align:left;
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  min-height:100vh;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 18px 60px}
+
+/* ── nav ── */
+.nav{border-bottom:1px solid var(--line);background:rgba(10,9,18,.6);backdrop-filter:blur(6px)}
+.nav-inner{max-width:1180px;margin:0 auto;padding:12px 18px;display:flex;align-items:center;gap:10px}
+.nav-brand{font-weight:800;letter-spacing:1px;color:var(--gold2)}
+.nav-tag{font-size:.72rem;opacity:.6;letter-spacing:2px;text-transform:uppercase}
+
+/* ── hero ── */
+.hero{text-align:center;padding:38px 18px 10px}
+.hero-title{
+  margin:0;font-family:Georgia,"Times New Roman",serif;font-size:clamp(2.2rem,6vw,3.4rem);
+  background:linear-gradient(180deg,#f6e6a4,#d4af37 55%,#8f721d);-webkit-background-clip:text;background-clip:text;color:transparent;
+  letter-spacing:6px;
+}
+.hero-sub{max-width:640px;margin:10px auto 0;color:var(--mut);font-size:.95rem;line-height:1.5}
+.diffs{display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.diff-tab{
+  background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:8px 18px;border-radius:999px;font:inherit;font-weight:700;font-size:.85rem;letter-spacing:.5px;transition:all .12s;
+}
+.diff-tab:hover{border-color:var(--gold3);color:var(--txt)}
+.diff-tab.active{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+
+/* ── layout ── */
+main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items:start;margin-top:26px}
+@media (max-width:880px){ main{grid-template-columns:minmax(0,1fr)} .side{order:2} }
+.game-col{min-width:0;max-width:640px;margin:0 auto;width:100%}
+.side{display:flex;flex-direction:column;gap:16px}
+
+/* ── hud ── */
+.hud{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.hud-chip{
+  background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;
+  padding:6px 14px;font-variant-numeric:tabular-nums;font-weight:700;font-size:.95rem;white-space:nowrap;
+}
+.mist-on{color:var(--err);margin:0 2px}
+.mist-off{color:rgba(255,255,255,.14);margin:0 2px}
+
+/* ── board ── */
+.board{
+  display:grid;grid-template-columns:repeat(9,1fr);aspect-ratio:1;
+  border:2px solid var(--gold);background:#0e0c18;border-radius:8px;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(212,175,55,.2);
+}
+.board.paused{opacity:.45;pointer-events:none}
+.cell{
+  border:1px solid rgba(255,255,255,.07);position:relative;
+  display:flex;align-items:center;justify-content:center;
+  font-size:min(6.6vw,1.75rem);line-height:1;cursor:pointer;user-select:none;-webkit-user-select:none;
+  transition:background .06s;
+}
+.cell.top{border-top:2px solid var(--gold)}
+.cell.left{border-left:2px solid var(--gold)}
+.cell.given{color:#e9e5d9;font-weight:800}
+.cell.user{color:var(--gold2);font-weight:800}
+.cell.error{color:var(--err);background:rgba(255,92,92,.08)}
+.cell.selected{background:rgba(212,175,55,.22)!important;box-shadow:inset 0 0 0 2px var(--gold)}
+.cell.peer{background:rgba(255,255,255,.035)}
+.cell.same{background:rgba(212,175,55,.12)}
+.notes{display:grid;grid-template-columns:repeat(3,1fr);width:100%;height:100%;place-items:center}
+.notes span{font-size:min(2.3vw,.58rem);line-height:1;color:rgba(139,135,160,.0);font-weight:700}
+.notes span.on{color:var(--mut)}
+.cell.selected .notes span.on{color:var(--gold2)}
+
+/* ── number pad ── */
+.pad{display:grid;grid-template-columns:repeat(10,1fr);gap:8px;margin-top:12px}
+@media (max-width:560px){ .pad{grid-template-columns:repeat(5,1fr)} }
+.pad-btn{
+  aspect-ratio:1.45;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:10px;
+  color:var(--gold2);font:inherit;font-weight:800;font-size:1.25rem;cursor:pointer;transition:all .1s;
+}
+.pad-btn:hover{background:rgba(212,175,55,.16);border-color:var(--gold3)}
+.pad-btn:active{transform:scale(.95)}
+.pad-erase{color:var(--mut);font-size:1rem}
+
+/* ── side panels ── */
+.panel{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:14px;padding:16px}
+.panel-head{font-size:.72rem;letter-spacing:2px;text-transform:uppercase;color:var(--gold2);font-weight:800;margin-bottom:12px}
+.btn-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.btn{
+  flex:1;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--txt);cursor:pointer;
+  padding:10px 8px;border-radius:10px;font:inherit;font-weight:700;font-size:.85rem;white-space:nowrap;transition:all .1s;
+}
+.btn:hover{background:rgba(255,255,255,.12)}
+.btn:active{transform:scale(.97)}
+.btn-gold{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+.btn-gold:hover{filter:brightness(1.08);background:linear-gradient(180deg,var(--gold2),var(--gold))}
+.btn.active{background:rgba(212,175,55,.2);border-color:var(--gold);color:var(--gold2)}
+.btn-note{opacity:.6;font-size:.65rem}
+.status{min-height:20px;margin-top:4px;color:var(--gold2);font-size:.85rem;font-weight:600}
+.hintline{color:var(--mut);font-size:.75rem;margin:10px 0 0;line-height:1.5}
+
+/* ── leaderboard ── */
+.lb-tabs{display:flex;gap:6px;margin-bottom:12px}
+.lb-tab{
+  flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:7px 0;border-radius:8px;font:inherit;font-size:.75rem;font-weight:700;transition:all .1s;
+}
+.lb-tab.active{background:rgba(212,175,55,.18);border-color:var(--gold3);color:var(--gold2)}
+.lb-list{display:flex;flex-direction:column;gap:4px}
+.lb-row{display:grid;grid-template-columns:26px 1fr auto auto;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.03);font-size:.85rem}
+.lb-row.first{background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.35)}
+.lb-rank{color:var(--mut);font-weight:800;font-variant-numeric:tabular-nums}
+.lb-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-time{font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.lb-date{color:var(--mut);font-size:.72rem;font-variant-numeric:tabular-nums}
+.lb-msg{color:var(--mut);font-size:.85rem;text-align:center;padding:18px 0;margin:0}
+
+/* ── overlays ── */
+.overlay{
+  position:fixed;inset:0;background:rgba(5,4,10,.82);backdrop-filter:blur(4px);
+  display:flex;align-items:center;justify-content:center;z-index:50;padding:18px;
+}
+.modal{
+  background:linear-gradient(180deg,#1a1730,#0f0d1a);border:1px solid rgba(212,175,55,.45);border-radius:18px;
+  padding:30px;max-width:430px;width:100%;text-align:center;box-shadow:0 40px 90px rgba(0,0,0,.6);
+}
+.modal-kicker{font-size:.72rem;letter-spacing:3px;text-transform:uppercase;color:var(--gold3);font-weight:800}
+.modal h2{margin:8px 0 16px;font-family:Georgia,serif;font-size:1.7rem;color:var(--gold2)}
+.win-stats{display:flex;justify-content:center;gap:10px;margin-bottom:16px}
+.stat{flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:12px;padding:12px 6px}
+.stat span{display:block;font-size:1.5rem;font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.stat small{color:var(--mut);font-size:.68rem;letter-spacing:1px;text-transform:uppercase}
+.modal-line{color:var(--mut);font-size:.9rem;margin:6px 0}
+.modal-line.small{font-size:.78rem}
+.submit-row{display:flex;gap:8px;margin:10px 0 4px}
+.submit-row input{
+  flex:1;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  padding:10px 12px;font:inherit;outline:none;
+}
+.submit-row input:focus{border-color:var(--gold3)}
+.modal-actions{display:flex;gap:10px;margin-top:18px}
+
+/* ── footer ── */
+.footer{text-align:center;color:var(--mut);font-size:.8rem;padding:26px 0 40px}
+.footer b{color:var(--gold3)}
+</style>
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/c59339d9788a635635c75c0a9d397611.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+
+<!-- help modal + share/export styles -->
+<style>
+.help-modal{max-width:520px;text-align:left}
+.help-modal h3{color:var(--gold2);margin:16px 0 6px;font-family:Georgia,serif;font-size:1.05rem}
+.help-modal p,.help-modal li{color:var(--mut);font-size:.85rem;line-height:1.6;margin:4px 0}
+.help-modal ul{margin:6px 0 0;padding-left:20px}
+.nav-help{flex:0 0 auto;padding:7px 12px;font-size:.74rem}
+.help-actions{display:flex;justify-content:center;gap:10px;margin-top:18px}
+.share-row{display:flex;gap:8px;flex-wrap:wrap}
+.share-row .btn{flex:1;min-width:0}
+.share-note{color:var(--mut);font-size:.72rem;margin:8px 0 0;line-height:1.5}
+.import-input{
+  width:100%;min-height:110px;resize:vertical;background:rgba(0,0,0,.4);border:1px solid var(--line);
+  border-radius:10px;color:var(--txt);font:inherit;font-size:.78rem;padding:10px 12px;outline:none;
+}
+.import-input:focus{border-color:var(--gold3)}
+.file-link{background:none;border:none;color:var(--gold2);cursor:pointer;font:inherit;font-size:.75rem;text-decoration:underline;padding:0}
+</style>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand">◆ SUDOKU</span>
+    <span class="nav-tag">gold grid</span>
+    <span style="flex:1"></span>
+    <button class="btn nav-help" id="helpBtn" title="How it works">❓ How it works</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <h1 class="hero-title">SUDOKU</h1>
+  <p class="hero-sub">Fill every row, column and 3×3 box with 1–9. Wrong entries cost you one of three lives — beat the clock for a place on the board.</p>
+  <div class="diffs" id="diffTabs">
+    <button class="diff-tab" data-diff="easy">Easy</button>
+    <button class="diff-tab" data-diff="medium">Medium</button>
+    <button class="diff-tab" data-diff="hard">Hard</button>
+    <button class="diff-tab" data-diff="expert">Expert</button>
+  </div>
+</header>
+
+<main class="wrap" id="gameWrap">
+  <section class="game-col">
+    <div class="hud">
+      <span class="hud-chip" id="timerEl">0:00</span>
+      <span class="hud-chip" id="mistakesEl"></span>
+      <span class="hud-chip" id="hintsEl">✎ 0</span>
+    </div>
+    <div class="board" id="boardEl"></div>
+    <div class="pad" id="padEl"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <div class="panel-head">Controls</div>
+      <div class="btn-row">
+        <button class="btn" id="undoBtn" title="Undo">↶ Undo</button>
+        <button class="btn" id="notesBtn" title="Pencil mode">✎ Notes</button>
+        <button class="btn" id="eraseBtn" title="Erase cell">⌫ Erase</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="hintBtn" title="Reveal a cell (+30s)">💡 Hint <span class="btn-note">+30s</span></button>
+        <button class="btn" id="pauseBtn">⏸ Pause</button>
+        <button class="btn btn-gold" id="newGameBtn">New game</button>
+      </div>
+      <div class="status" id="statusEl">Puzzle ready.</div>
+      <p class="hintline">Arrows to move · 1–9 to enter · <b>N</b> pencil marks · <b>⌫</b> erase · <b>U</b> undo</p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Share / export</div>
+      <div class="share-row">
+        <button class="btn" id="exportJsonBtn" title="Save this game (puzzle + your progress) as a .json file">⬇ JSON</button>
+        <button class="btn" id="importJsonBtn" title="Restore a game from an exported .json file">⬆ JSON</button>
+        <button class="btn" id="screenshotBtn" title="Save a printable picture of the board">📷 PNG</button>
+      </div>
+      <p class="share-note">Screenshot = shareable image of the board. JSON = the exact game, restored anytime.</p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Leaderboard</div>
+      <div class="lb-tabs" id="lbTabs">
+        <button class="lb-tab" data-diff="easy">Easy</button>
+        <button class="lb-tab" data-diff="medium">Medium</button>
+        <button class="lb-tab" data-diff="hard">Hard</button>
+        <button class="lb-tab" data-diff="expert">Expert</button>
+      </div>
+      <div class="lb-list" id="lbListEl"></div>
+      <p class="lb-msg" id="lbMsgEl">Loading…</p>
+    </div>
+  </aside>
+</main>
+
+<div class="overlay" id="winOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker">Puzzle solved</div>
+    <h2>🎉 Finished!</h2>
+    <div class="win-stats">
+      <div class="stat"><span id="winTimeEl">0:00</span><small>time</small></div>
+      <div class="stat"><span id="winMistakesEl">0</span><small>mistakes</small></div>
+      <div class="stat"><span id="winHintsEl">0</span><small>hints</small></div>
+    </div>
+    <div id="winSubmitBox">
+      <p class="modal-line" id="winQualifyEl"></p>
+      <div class="submit-row">
+        <input id="winNameInput" maxlength="20" autocomplete="off" spellcheck="false" placeholder="Your name" />
+        <button class="btn btn-gold" id="winSubmitBtn">Publish</button>
+      </div>
+      <p class="modal-line small" id="winMsgEl"></p>
+    </div>
+    <p class="modal-line small" id="winPersonalEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="winPlayAgainBtn">Play again</button>
+      <button class="btn" id="winCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="loseOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker">Three strikes</div>
+    <h2>😵 Puzzle failed</h2>
+    <p class="modal-line" id="loseLineEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="loseRetryBtn">Try again</button>
+      <button class="btn" id="loseCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="importOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker">Restore a game</div>
+    <h2>⬆ Import</h2>
+    <p class="modal-line" style="margin-bottom:10px">Paste an exported game's JSON below, or load a .json file.</p>
+    <textarea class="import-input" id="importInput" placeholder='\{ "tpl": "sudoku", "game": … \}'></textarea>
+    <p class="modal-line" style="text-align:left;margin:8px 0 0"><button class="file-link" id="importFileBtn">or choose a .json file…</button></p>
+    <input type="file" id="importFileInput" accept=".json,application/json" hidden />
+    <p class="modal-line small" id="importMsgEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="importOkBtn">Import</button>
+      <button class="btn" id="importCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="helpOverlay" hidden>
+  <div class="modal help-modal">
+    <div class="modal-kicker">How it works</div>
+    <h2>Sudoku</h2>
+    <h3>Playing</h3>
+    <ul>
+      <li>Click a cell (or move with <b>arrows</b>) to select it, then press <b>1–9</b> to place a digit.</li>
+      <li><b>✎ Notes</b> (or <b>N</b>) toggles pencil mode — tap a number to jot a candidate.</li>
+      <li><b>⌫</b> erases the selected cell, <b>↶ Undo</b> (or <b>U</b>) undoes your last move.</li>
+    </ul>
+    <h3>Strikes &amp; hints</h3>
+    <ul>
+      <li>Every wrong entry costs a life — <b>three strikes</b> and the puzzle is lost. Undo restores your last entry and refunds a strike.</li>
+      <li><b>💡 Hint</b> reveals the selected empty cell (+30s to your finish time).</li>
+    </ul>
+    <h3>Difficulties &amp; scores</h3>
+    <ul>
+      <li>Easy / Medium / Hard / Expert vary how many numbers start filled in.</li>
+      <li>Finish fast enough to make the <b>shared leaderboard</b>; your personal best is saved on your device.</li>
+      <li>Your game <b>auto-saves</b> after every move and resumes next visit.</li>
+    </ul>
+    <h3>Share / export</h3>
+    <ul>
+      <li><b>⬇ JSON</b> downloads the exact game — restore it anytime with <b>⬆ JSON</b>.</li>
+      <li><b>📷 PNG</b> saves a printable screenshot of the board.</li>
+    </ul>
+    <div class="help-actions"><button class="btn btn-gold" id="helpDoneBtn">Got it</button></div>
+  </div>
+</div>
+
+<footer class="footer wrap">
+  <p>Every puzzle has exactly one solution — generated on your device.</p>
+  <p><b>◆</b> Sudoku on <a href="https://perchance.org" target="_blank" rel="noopener" style="color:var(--gold3)">Perchance</a></p>
+</footer>
+
+<script>
+(function(){
+"use strict";
+
+/* ═══════════ config from main.pjs ═══════════ */
+var rootRef=window.root||{};
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+function cfg(name,dflt){
+  var v=rootRef[name];
+  if(v==null)return dflt;
+  try{ if(typeof v.evaluateItem==="function")v=v.evaluateItem(); }catch(e){}
+  if(v==null||String(v).trim()==="")return dflt;
+  var s=String(v).trim();
+  if(s.length>=2&&s.charAt(0)==='"'&&s.charAt(s.length-1)==='"')s=s.slice(1,-1);
+  var n=Number(s);
+  if(s!==""&&!isNaN(n))return n;
+  return s;
+}
+var LB_FILE=cfg("leaderboardFileName","sudoku-scores-8xh4m9q2z7v1k6w3");
+var LB_KEY=String(cfg("leaderboardEditKey",""));
+var DIFFS={
+  easy:{label:"Easy",givens:cfg("givensEasy",38)},
+  medium:{label:"Medium",givens:cfg("givensMedium",32)},
+  hard:{label:"Hard",givens:cfg("givensHard",27),strict:true},
+  expert:{label:"Expert",givens:cfg("givensExpert",25),strict:true}
+};
+var MAX_MISTAKES=cfg("maxMistakes",3);
+var HINT_PENALTY=cfg("hintPenaltySeconds",30)*1000;
+
+/* ═══════════ sudoku engine ═══════════ */
+function shuffle(a){ for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)),t=a[i];a[i]=a[j];a[j]=t; } return a; }
+function valid(g,r,c,n){
+  for(var k=0;k<9;k++){ if(g[r][k]===n)return false; if(g[k][c]===n)return false; }
+  var br=(r/3|0)*3,bc=(c/3|0)*3;
+  for(var i=0;i<3;i++)for(var j=0;j<3;j++)if(g[br+i][bc+j]===n)return false;
+  return true;
+}
+function fillSolved(grid){
+  var best=null,bestN=null;
+  for(var r=0;r<9;r++)for(var c=0;c<9;c++){
+    if(grid[r][c]!==0)continue;
+    var cands=[];
+    for(var n=1;n<=9;n++)if(valid(grid,r,c,n))cands.push(n);
+    if(!best||cands.length<bestN.length){ best=[r,c];bestN=cands; if(cands.length===1)break; }
+  }
+  if(!best)return true;
+  shuffle(bestN);
+  for(var i=0;i<bestN.length;i++){
+    grid[best[0]][best[1]]=bestN[i];
+    if(fillSolved(grid))return true;
+    grid[best[0]][best[1]]=0;
+  }
+  return false;
+}
+function countSolutions(grid,limit){
+  var count=0;
+  (function rec(){
+    var best=null,bestN=null;
+    for(var r=0;r<9;r++)for(var c=0;c<9;c++){
+      if(grid[r][c]!==0)continue;
+      var cands=[];
+      for(var n=1;n<=9;n++)if(valid(grid,r,c,n))cands.push(n);
+      if(cands.length===0)return false;
+      if(!best||cands.length<bestN.length){ best=[r,c];bestN=cands; if(cands.length===1)break; }
+    }
+    if(!best){ count++; return count>=limit; }
+    for(var i=0;i<bestN.length;i++){
+      grid[best[0]][best[1]]=bestN[i];
+      if(rec()){ grid[best[0]][best[1]]=0; return true; }
+      grid[best[0]][best[1]]=0;
+    }
+    return false;
+  })();
+  return count;
+}
+function solvedBySingles(grid){
+  var g=grid.map(function(r){return r.slice();});
+  var changed=true;
+  while(changed){
+    changed=false; var empty=false;
+    for(var r=0;r<9;r++)for(var c=0;c<9;c++){
+      if(g[r][c]!==0)continue;
+      empty=true;
+      var cands=[];
+      for(var n=1;n<=9;n++)if(valid(g,r,c,n))cands.push(n);
+      if(cands.length===1){ g[r][c]=cands[0]; changed=true; }
+    }
+    if(!empty)return true;
+    if(!changed)return false;
+  }
+  return false;
+}
+function generatePuzzle(diff){
+  var cfgd=DIFFS[diff], attempts=cfgd.strict?30:2, last=null;
+  for(var a=0;a<attempts;a++){
+    var solved=Array.from({length:9},function(){return Array(9).fill(0);});
+    for(var b=0;b<3;b++){
+      var nums=shuffle([1,2,3,4,5,6,7,8,9]);
+      for(var i=0;i<3;i++)for(var j=0;j<3;j++)solved[b*3+i][b*3+j]=nums[i*3+j];
+    }
+    fillSolved(solved);
+    var puzzle=solved.map(function(r){return r.slice();});
+    var cells=shuffle(Array.from({length:81},function(_,i){return i;}));
+    var givens=81;
+    for(var k=0;k<cells.length;k++){
+      if(givens<=cfgd.givens)break;
+      var idx=cells[k],r=idx/9|0,c=idx%9;
+      var saved=puzzle[r][c];
+      puzzle[r][c]=0;
+      if(countSolutions(puzzle.map(function(r){return r.slice();}),2)!==1)puzzle[r][c]=saved;
+      else givens--;
+    }
+    last={puzzle:puzzle,solution:solved,givens:givens};
+    if(!cfgd.strict||!solvedBySingles(puzzle))return last;
+  }
+  return last;
+}
+
+/* ═══════════ game state ═══════════ */
+var game={
+  puzzle:null,solution:null,user:null,notes:null,
+  selected:null,noteMode:false,diff:"easy",
+  mistakes:0,hints:0,hintPenaltyMs:0,
+  startTs:0,elapsed:0,timer:null,status:"idle",history:[],winTimeMs:0
+};
+function emptyGrid(){ return Array.from({length:9},function(){return Array(9).fill(0);}); }
+function emptyNotes(){ return Array.from({length:9},function(){return Array.from({length:9},function(){return new Set();});}); }
+function playing(){ return game.status==="playing"; }
+function valAt(r,c){ return game.user[r][c]||game.puzzle[r][c]; }
+function displayMs(){ return game.elapsed*1000+game.hintPenaltyMs; }
+function fmtTime(ms){
+  var t=Math.max(0,Math.round(ms/1000));
+  var m=Math.floor(t/60),s=t%60;
+  return m+":"+String(s).padStart(2,"0");
+}
+function peerKeys(r,c){
+  var s=new Set();
+  for(var k=0;k<9;k++){ s.add(r+","+k); s.add(k+","+c); }
+  var br=(r/3|0)*3,bc=(c/3|0)*3;
+  for(var i=0;i<3;i++)for(var j=0;j<3;j++)s.add((br+i)+","+(bc+j));
+  return s;
+}
+
+/* ═══════════ DOM refs ═══════════ */
+var boardEl=document.getElementById("boardEl"),padEl=document.getElementById("padEl");
+var timerEl=document.getElementById("timerEl"),mistakesEl=document.getElementById("mistakesEl"),hintsEl=document.getElementById("hintsEl");
+var statusEl=document.getElementById("statusEl");
+var undoBtn=document.getElementById("undoBtn"),notesBtn=document.getElementById("notesBtn"),eraseBtn=document.getElementById("eraseBtn");
+var hintBtn=document.getElementById("hintBtn"),pauseBtn=document.getElementById("pauseBtn"),newGameBtn=document.getElementById("newGameBtn");
+var diffBtns=document.querySelectorAll("#diffTabs .diff-tab");
+var winOverlay=document.getElementById("winOverlay"),loseOverlay=document.getElementById("loseOverlay");
+var winTimeEl=document.getElementById("winTimeEl"),winMistakesEl=document.getElementById("winMistakesEl"),winHintsEl=document.getElementById("winHintsEl");
+var winSubmitBox=document.getElementById("winSubmitBox"),winQualifyEl=document.getElementById("winQualifyEl");
+var winNameInput=document.getElementById("winNameInput"),winMsgEl=document.getElementById("winMsgEl"),winPersonalEl=document.getElementById("winPersonalEl");
+var loseLineEl=document.getElementById("loseLineEl");
+var lbListEl=document.getElementById("lbListEl"),lbMsgEl=document.getElementById("lbMsgEl");
+var lbTabs=document.querySelectorAll("#lbTabs .lb-tab");
+var helpBtn=document.getElementById("helpBtn"),helpOverlay=document.getElementById("helpOverlay");
+var exportJsonBtn=document.getElementById("exportJsonBtn"),importJsonBtn=document.getElementById("importJsonBtn"),screenshotBtn=document.getElementById("screenshotBtn");
+var importOverlay=document.getElementById("importOverlay"),importInput=document.getElementById("importInput");
+var importFileBtn=document.getElementById("importFileBtn"),importFileInput=document.getElementById("importFileInput");
+var importMsgEl=document.getElementById("importMsgEl");
+var SAVE_KEY="sudokuGame",NAME_KEY="sudokuName",BEST_KEY="sudokuBest:";
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+/* ═══════════ board UI ═══════════ */
+var cells=[];
+for(var r=0;r<9;r++)for(var c=0;c<9;c++){
+  (function(r,c){
+    var d=document.createElement("div");
+    d.className="cell"+(r%3===0?" top":"")+(c%3===0?" left":"");
+    d.addEventListener("click",function(){ select(r,c); });
+    boardEl.appendChild(d);
+    cells.push({el:d,r:r,c:c});
+  })(r,c);
+}
+function select(r,c){ game.selected={r:r,c:c}; renderBoard(); }
+
+function renderBoard(){
+  var sel=game.selected,peers=sel?peerKeys(sel.r,sel.c):null;
+  var selVal=sel?valAt(sel.r,sel.c):0;
+  for(var i=0;i<cells.length;i++){
+    var cell=cells[i],el=cell.el,r=cell.r,c=cell.c;
+    var cls="cell"+(r%3===0?" top":"")+(c%3===0?" left":"");
+    var g=game.puzzle[r][c],v=game.user[r][c];
+    if(g!==0)cls+=" given";
+    else if(v!==0){ cls+=" user"; if(v!==game.solution[r][c])cls+=" error"; }
+    if(sel&&r===sel.r&&c===sel.c)cls+=" selected";
+    else if(peers&&peers.has(r+","+c))cls+=" peer";
+    if(sel&&v!==0&&v===selVal&&!(sel.r===r&&sel.c===c))cls+=" same";
+    el.className=cls;
+    if(g!==0||v!==0){ el.innerHTML=""; el.textContent=String(v||g); }
+    else{
+      var notes=game.notes[r][c];
+      if(notes&&notes.size>0){
+        el.innerHTML="";
+        var grid=document.createElement("div"); grid.className="notes";
+        for(var n=1;n<=9;n++){
+          var nd=document.createElement("span");
+          nd.className=notes.has(n)?"on":"";
+          nd.textContent=n;
+          grid.appendChild(nd);
+        }
+        el.appendChild(grid);
+      }
+      else el.innerHTML="";
+    }
+  }
+}
+
+/* ═══════════ hud + controls ═══════════ */
+function renderHud(){
+  timerEl.textContent=fmtTime(displayMs());
+  hintsEl.textContent="✎ "+game.hints;
+  mistakesEl.innerHTML="";
+  for(var i=0;i<MAX_MISTAKES;i++){
+    var s=document.createElement("span");
+    s.className=i<game.mistakes?"mist-on":"mist-off";
+    s.textContent="✖";
+    mistakesEl.appendChild(s);
+  }
+}
+function renderControls(){
+  for(var i=0;i<diffBtns.length;i++)diffBtns[i].classList.toggle("active",diffBtns[i].dataset.diff===game.diff);
+  notesBtn.classList.toggle("active",game.noteMode);
+  pauseBtn.textContent=game.status==="paused"?"▶ Resume":"⏸ Pause";
+}
+function renderAll(){ renderBoard(); renderHud(); renderControls(); }
+function setStatus(t){ statusEl.textContent=t||""; }
+
+/* ═══════════ timer ═══════════ */
+function tick(){ if(game.status!=="playing")return; game.elapsed=Math.floor((Date.now()-game.startTs)/1000); renderHud(); }
+function startTimer(){ if(game.timer)clearInterval(game.timer); game.timer=setInterval(tick,250); tick(); }
+function stopTimer(){ if(game.timer)clearInterval(game.timer); game.timer=null; }
+
+/* ═══════════ moves ═══════════ */
+function pushHist(r,c){
+  game.history.push({r:r,c:c,prev:game.user[r][c],prevNotes:new Set(game.notes[r][c]),wasMistake:false,wasHint:false});
+  if(game.history.length>200)game.history.shift();
+}
+function placeDigit(n){
+  if(!playing())return;
+  var s=game.selected;
+  if(!s)return;
+  var r=s.r,c=s.c;
+  if(game.puzzle[r][c]!==0)return;
+  if(game.noteMode){
+    var had=game.notes[r][c].has(n);
+    pushHist(r,c);
+    if(had)game.notes[r][c].delete(n); else game.notes[r][c].add(n);
+    saveGame(); renderBoard();
+    return;
+  }
+  if(game.user[r][c]===n)return;
+  pushHist(r,c);
+  if(n===game.solution[r][c]){
+    game.user[r][c]=n;
+    game.notes[r][c].clear();
+    saveGame(); renderBoard();
+    sfx("place");
+    setStatus("Nice!");
+    if(isSolved())win();
+  }else{
+    game.user[r][c]=n;
+    game.mistakes++;
+    game.history[game.history.length-1].wasMistake=true;
+    saveGame(); renderBoard();
+    sfx("error");
+    setStatus("Mistake — "+(MAX_MISTAKES-game.mistakes)+" "+(MAX_MISTAKES-game.mistakes===1?"life left":"lives left"));
+    if(game.mistakes>=MAX_MISTAKES)lose();
+  }
+}
+function eraseCell(){
+  if(!playing())return;
+  var s=game.selected;
+  if(!s)return;
+  if(game.puzzle[s.r][s.c]!==0)return;
+  if(game.user[s.r][s.c]===0&&game.notes[s.r][s.c].size===0)return;
+  pushHist(s.r,s.c);
+  game.user[s.r][s.c]=0;
+  game.notes[s.r][s.c].clear();
+  sfx("discard");
+  saveGame(); renderBoard();
+}
+function undo(){
+  if(!game.history.length||game.status==="paused")return;
+  var h=game.history.pop();
+  game.user[h.r][h.c]=h.prev;
+  game.notes[h.r][h.c]=h.prevNotes;
+  if(h.wasMistake&&game.mistakes>0)game.mistakes--;
+  if(h.wasHint){ if(game.hints>0)game.hints--; game.hintPenaltyMs=Math.max(0,game.hintPenaltyMs-HINT_PENALTY); }
+  sfx("step");
+  saveGame(); renderBoard();
+}
+function hint(){
+  if(!playing())return;
+  var cands=[];
+  for(var r=0;r<9;r++)for(var c=0;c<9;c++){
+    if(game.puzzle[r][c]!==0||game.user[r][c]!==0)continue;
+    cands.push([r,c]);
+  }
+  if(!cands.length)return;
+  var pick;
+  if(game.selected&&game.puzzle[game.selected.r][game.selected.c]===0&&game.user[game.selected.r][game.selected.c]===0){
+    pick=[game.selected.r,game.selected.c];
+  }else{
+    pick=cands[Math.floor(Math.random()*cands.length)];
+  }
+  pushHist(pick[0],pick[1]);
+  game.history[game.history.length-1].wasHint=true;
+  game.user[pick[0]][pick[1]]=game.solution[pick[0]][pick[1]];
+  game.notes[pick[0]][pick[1]].clear();
+  game.hints++;
+  game.hintPenaltyMs+=HINT_PENALTY;
+  sfx("hint");
+  saveGame(); renderBoard();
+  setStatus("Hint revealed (+"+Math.round(HINT_PENALTY/1000)+"s).");
+  if(isSolved())win();
+}
+function toggleNotes(){
+  if(!playing())return;
+  game.noteMode=!game.noteMode;
+  sfx("flip");
+  notesBtn.classList.toggle("active",game.noteMode);
+  setStatus(game.noteMode?"Pencil mode — tap a number to toggle a note.":"");
+}
+function togglePause(){
+  if(game.status==="playing"){
+    stopTimer();
+    game.elapsed=Math.floor((Date.now()-game.startTs)/1000);
+    game.status="paused";
+    boardEl.classList.add("paused");
+    setStatus("Paused.");
+  }else if(game.status==="paused"){
+    game.status="playing";
+    game.startTs=Date.now()-game.elapsed*1000;
+    startTimer();
+    boardEl.classList.remove("paused");
+    setStatus("");
+  }
+  renderHud(); renderControls();
+}
+
+/* ═══════════ win / lose ═══════════ */
+function isSolved(){
+  for(var r=0;r<9;r++)for(var c=0;c<9;c++)if((game.user[r][c]||game.puzzle[r][c])!==game.solution[r][c])return false;
+  return true;
+}
+function qualifies(diff,t){
+  var list=boards[diff]||[];
+  if(list.length<10)return true;
+  return t<list[list.length-1].t;
+}
+function win(){
+  sfx("win");
+  stopTimer();
+  game.elapsed=Math.floor((Date.now()-game.startTs)/1000);
+  game.status="won";
+  game.winTimeMs=displayMs();
+  localStorage.removeItem(SAVE_KEY);
+  var bestKey=BEST_KEY+game.diff;
+  var prev=Number(localStorage.getItem(bestKey)||0);
+  if(!prev||game.winTimeMs<prev)localStorage.setItem(bestKey,String(game.winTimeMs));
+  winTimeEl.textContent=fmtTime(game.winTimeMs);
+  winMistakesEl.textContent=game.mistakes;
+  winHintsEl.textContent=game.hints;
+  var pb=Math.min(prev||Infinity,game.winTimeMs);
+  winPersonalEl.textContent=pb<Infinity?"Personal best ("+DIFFS[game.diff].label+"): "+fmtTime(pb):"First finish on this difficulty!";
+  var q=qualifies(game.diff,game.winTimeMs);
+  winSubmitBox.hidden=!q;
+  if(q)winQualifyEl.textContent="You made the board — publish your time:";
+  else{
+    var list=boards[game.diff]||[];
+    winQualifyEl.textContent=list.length>=10?"No entry this time — #10 is "+fmtTime(list[9].t)+".":"No entry this time — try again!";
+  }
+  winNameInput.value=localStorage.getItem(NAME_KEY)||"";
+  winMsgEl.textContent="";
+  winOverlay.hidden=false;
+  renderHud(); renderBoard();
+}
+function lose(){
+  sfx("lose");
+  stopTimer();
+  game.status="lost";
+  localStorage.removeItem(SAVE_KEY);
+  loseLineEl.textContent="You made "+MAX_MISTAKES+" mistakes before solving the puzzle. The solution is never revealed — try again!";
+  loseOverlay.hidden=false;
+  renderHud();
+}
+function hideOverlays(){ winOverlay.hidden=true; loseOverlay.hidden=true; importOverlay.hidden=true; helpOverlay.hidden=true; }
+
+/* ═══════════ persistence ═══════════ */
+function serializeGame(){
+  return {
+    p:game.puzzle,s:game.solution,u:game.user,d:game.diff,
+    m:game.mistakes,h:game.hints,hp:game.hintPenaltyMs,
+    e:game.status==="playing"?Math.floor((Date.now()-game.startTs)/1000):game.elapsed,
+    n:game.notes.map(function(row){ return row.map(function(set){ return Array.from(set); }); })
+  };
+}
+function deserializeGame(d){
+  if(!d||!d.p||!d.s)return false;
+  game.puzzle=d.p; game.solution=d.s;
+  game.user=d.u||emptyGrid();
+  game.notes=d.n?d.n.map(function(row){ return row.map(function(arr){ return new Set(arr||[]); }); }):emptyNotes();
+  game.diff=DIFFS[d.d]?d.d:"easy";
+  game.mistakes=d.m||0; game.hints=d.h||0; game.hintPenaltyMs=d.hp||0;
+  game.elapsed=d.e||0; game.history=[];
+  game.startTs=Date.now()-game.elapsed*1000;
+  game.status="playing";
+  game.noteMode=false;
+  return true;
+}
+function saveGame(){
+  try{ localStorage.setItem(SAVE_KEY,JSON.stringify(serializeGame())); }catch(e){}
+}
+function restoreGame(){
+  try{
+    var raw=localStorage.getItem(SAVE_KEY);
+    if(!raw)return false;
+    return deserializeGame(JSON.parse(raw));
+  }catch(e){ return false; }
+}
+
+/* ═══════════ export / import JSON ═══════════ */
+function exportData(){
+  return {
+    tpl:"sudoku", ver:1, gameName:"Sudoku",
+    date:new Date().toISOString(),
+    diff:game.diff, diffLabel:DIFFS[game.diff].label,
+    hints:game.hints, hp:game.hintPenaltyMs,
+    e:game.status==="playing"?Math.floor((Date.now()-game.startTs)/1000):game.elapsed,
+    game:serializeGame()
+  };
+}
+function downloadBlob(name,mime,blob){
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download=name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },100);
+}
+function exportJSON(){
+  var base="sudoku-"+game.diff+"-"+new Date().toISOString().slice(0,10);
+  downloadBlob(base+".json","application/json",new Blob([JSON.stringify(exportData(),null,2)],{type:"application/json"}));
+  setStatus("Exported a "+DIFFS[game.diff].label+" game to JSON.");
+}
+function importJSON(str){
+  var d;
+  try{ d=JSON.parse(str); }catch(e){ return "That doesn't look like valid JSON."; }
+  if(!d||typeof d!=="object"||Array.isArray(d))return "That doesn't look like a game export.";
+  if(d.tpl&&d.tpl!=="sudoku")return "That export was made by a different template ("+d.tpl+").";
+  if(d.gameName&&d.gameName!=="Sudoku")return "That save is from "+d.gameName+", not Sudoku. Games can't be swapped between copies.";
+  if(!deserializeGame(d.game))return "That JSON isn't a valid Sudoku game.";
+  hideOverlays();
+  startTimer();
+  renderAll();
+  setStatus("Imported a "+(d.diffLabel||DIFFS[game.diff].label)+" game.");
+  saveGame();
+  return null;
+}
+
+/* ═══════════ screenshot ═══════════ */
+function cloneWithStyles(src){
+  var clone=src.cloneNode(true);
+  clone.setAttribute("xmlns","http://www.w3.org/1999/xhtml");
+  var PROPS=["display","position","top","left","width","height","min-width","min-height","aspect-ratio","box-sizing",
+    "padding-top","padding-right","padding-bottom","padding-left","margin-top","margin-right","margin-bottom","margin-left",
+    "grid-template-columns","grid-template-rows","gap","grid-gap","align-items","justify-content","justify-items","align-content","flex-direction","flex-wrap",
+    "background-color","background-image","background-size","background-position","background-repeat",
+    "border-radius",
+    "border-top-width","border-top-style","border-top-color","border-right-width","border-right-style","border-right-color",
+    "border-bottom-width","border-bottom-style","border-bottom-color","border-left-width","border-left-style","border-left-color",
+    "color","font-family","font-size","font-weight","font-style","line-height","letter-spacing","text-transform","text-align",
+    "box-shadow","opacity","overflow","cursor","user-select","text-shadow","outline"];
+  function walk(el,c){
+    if(!el||!c)return;
+    var cs=window.getComputedStyle(el),style="";
+    for(var i=0;i<PROPS.length;i++){
+      var v=cs.getPropertyValue(PROPS[i]);
+      if(v)style+=PROPS[i]+":"+v+";";
+    }
+    c.setAttribute("style",style);
+    for(var k=0;k<el.children.length;k++)walk(el.children[k],c.children[k]);
+  }
+  walk(src,clone);
+  return clone;
+}
+function renderBoardImage(){
+  var el=boardEl;
+  var w=el.offsetWidth,h=el.offsetHeight;
+  if(!w||!h)return Promise.resolve(null);
+  var scale=3;
+  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'+
+    '<foreignObject width="100%" height="100%">'+new XMLSerializer().serializeToString(cloneWithStyles(el))+'</foreignObject></svg>';
+  return new Promise(function(resolve){
+    var img=new Image();
+    img.onload=function(){
+      var c=document.createElement("canvas");
+      c.width=Math.round(w*scale); c.height=Math.round(h*scale);
+      var ctx=c.getContext("2d");
+      ctx.scale(scale,scale);
+      ctx.drawImage(img,0,0);
+      resolve(c);
+    };
+    img.onerror=function(){ resolve(null); };
+    img.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+  });
+}
+function renderFramedImage(){
+  return renderBoardImage().then(function(boardCanvas){
+    if(!boardCanvas)return null;
+    var s=3;
+    var bw=boardCanvas.width/s, bh=boardCanvas.height/s;
+    var side=48, top=84, bottom=64;
+    var W=bw+side*2, H=bh+top+bottom;
+    var c=document.createElement("canvas");
+    c.width=Math.round(W*s); c.height=Math.round(H*s);
+    var ctx=c.getContext("2d");
+    function rr(x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+    }
+    var g=ctx.createRadialGradient(W/2*s,0,0,W/2*s,0,Math.max(W,H)*s);
+    g.addColorStop(0,"#1b1730"); g.addColorStop(1,"#0a0912");
+    ctx.fillStyle=g; ctx.fillRect(0,0,W*s,H*s);
+    ctx.drawImage(boardCanvas,side*s,top*s);
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=3*s;
+    rr((side-14)*s,(top-14)*s,(bw+28)*s,(bh+28)*s,10*s); ctx.stroke();
+    ctx.strokeStyle="rgba(212,175,55,.3)"; ctx.lineWidth=1*s;
+    rr((side-22)*s,(top-22)*s,(bw+44)*s,(bh+44)*s,14*s); ctx.stroke();
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="600 "+Math.round(30*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("SUDOKU",W/2*s,(top/2-10)*s);
+    ctx.fillStyle="#8f721d";
+    ctx.font="700 "+Math.round(12*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText((DIFFS[game.diff].label+" · "+new Date().toISOString().slice(0,10)).toUpperCase(),W/2*s,(top/2+11)*s);
+    ctx.strokeStyle="rgba(212,175,55,.35)"; ctx.lineWidth=1*s;
+    ctx.beginPath(); ctx.moveTo(side*s,(H-bottom)*s); ctx.lineTo((W-side)*s,(H-bottom)*s); ctx.stroke();
+    ctx.fillStyle="#8b87a0";
+    ctx.font="600 "+Math.round(14*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign="left"; ctx.textBaseline="middle";
+    var url="https://perchance.org/"+(window.generatorName||"");
+    var fy=((H-bottom)+(bottom/2))*s;
+    var badgeW=96,badgeGap=24;
+    var avail=(W-side-8)-(side+8)-badgeW-badgeGap;
+    var urlW=ctx.measureText(url).width;
+    if(urlW>avail){
+      var f=Math.max(9,Math.floor(14*avail/urlW));
+      ctx.font="600 "+Math.round(f*s)+"px ui-sans-serif, system-ui, sans-serif";
+    }
+    ctx.fillText(url,(side+8)*s,fy);
+    var bh2=36,bx=W-side-badgeW-10,by=H-bottom+((bottom-bh2)/2);
+    ctx.fillStyle="rgba(212,175,55,.12)";
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.fill();
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=1.5*s;
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.stroke();
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="800 "+Math.round(19*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("BGN",(bx+badgeW/2)*s,(by+bh2/2+1)*s);
+    return c;
+  });
+}
+function screenshot(){
+  setStatus("Rendering screenshot…");
+  renderFramedImage().then(function(c){
+    if(!c){ setStatus("Couldn't render a screenshot."); return; }
+    var base="sudoku-"+game.diff+"-"+new Date().toISOString().slice(0,10);
+    c.toBlob(function(blob){
+      if(blob)downloadBlob(base+".png","image/png",blob);
+      setStatus("Screenshot saved ("+base+".png).");
+    },"image/png");
+  });
+}
+
+/* ═══════════ new game ═══════════ */
+function newGame(diff){
+  sfx("deal");
+  if(diff)game.diff=diff;
+  var gen=generatePuzzle(game.diff);
+  game.puzzle=gen.puzzle; game.solution=gen.solution;
+  game.user=emptyGrid(); game.notes=emptyNotes();
+  game.selected=null; game.noteMode=false;
+  game.mistakes=0; game.hints=0; game.hintPenaltyMs=0; game.history=[];
+  game.status="playing";
+  game.startTs=Date.now(); game.elapsed=0;
+  startTimer();
+  hideOverlays();
+  renderAll();
+  setStatus("Good luck — "+(DIFFS[game.diff].label)+" puzzle ready.");
+  saveGame();
+}
+
+/* ═══════════ leaderboard ═══════════ */
+var boards={easy:null,medium:null,hard:null,expert:null};
+var lbTab="easy",lbLoaded=false;
+function loadLeaderboard(){
+  if(!rootRef.uploadPlugin){ lbMsgEl.textContent="Leaderboard unavailable on this page."; lbLoaded=true; renderLeaderboard(); return; }
+  lbMsgEl.textContent="Loading…";
+  rootRef.uploadPlugin.editable.get(LB_FILE).then(function(t){
+    if(t){
+      try{ var b=JSON.parse(t); for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10); }catch(e){}
+    }
+    lbLoaded=true;
+    renderLeaderboard();
+  }).catch(function(){
+    lbLoaded=true;
+    lbMsgEl.textContent="Couldn't reach the leaderboard right now.";
+    renderLeaderboard();
+  });
+}
+function renderLeaderboard(){
+  for(var i=0;i<lbTabs.length;i++)lbTabs[i].classList.toggle("active",lbTabs[i].dataset.diff===lbTab);
+  lbListEl.innerHTML="";
+  if(!lbLoaded){ lbMsgEl.hidden=false; lbMsgEl.textContent="Loading…"; return; }
+  var list=boards[lbTab]||[];
+  if(!list.length){ lbMsgEl.hidden=false; lbMsgEl.textContent="No scores yet — be the first!"; return; }
+  lbMsgEl.hidden=true;
+  var medals=["🥇","🥈","🥉"];
+  for(var i=0;i<list.length;i++){
+    var e=list[i];
+    var row=document.createElement("div"); row.className="lb-row"+(i===0?" first":"");
+    var rank=document.createElement("span"); rank.className="lb-rank"; rank.textContent=i+1;
+    var nm=document.createElement("span"); nm.className="lb-name"; nm.textContent=(medals[i]?medals[i]+" ":"")+esc(e.n||"Anonymous");
+    var tt=document.createElement("span"); tt.className="lb-time"; tt.textContent=fmtTime(e.t)+(e.h>0?" ✎"+e.h:"");
+    var dt=document.createElement("span"); dt.className="lb-date"; dt.textContent=(e.d||"").slice(5);
+    row.appendChild(rank); row.appendChild(nm); row.appendChild(tt); row.appendChild(dt);
+    lbListEl.appendChild(row);
+  }
+}
+function submitScore(){
+  if(game.winTimeMs<3000){ winMsgEl.textContent="That was too fast to count — solve it for real!"; return; }
+  var name=(winNameInput.value||"").trim().slice(0,20)||"Anonymous";
+  localStorage.setItem(NAME_KEY,name);
+  var entry={n:name,t:game.winTimeMs,d:new Date().toISOString().slice(0,10),h:game.hints};
+  winMsgEl.textContent="Publishing…";
+  var merged=false;
+  Promise.resolve().then(function(){
+    if(rootRef.uploadPlugin)return rootRef.uploadPlugin.editable.get(LB_FILE);
+    return null;
+  }).then(function(fresh){
+    if(fresh){
+      try{
+        var b=JSON.parse(fresh);
+        for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10);
+      }catch(e){}
+    }
+    var list=(boards[game.diff]||[]).concat(entry).sort(function(a,b){return a.t-b.t;}).slice(0,10);
+    boards[game.diff]=list;
+    renderLeaderboard();
+    if(!rootRef.uploadPlugin){ winMsgEl.textContent="Score saved locally."; return; }
+    var knownKey=localStorage.getItem("sudokuLbKey")||LB_KEY;
+    var data=JSON.stringify(boards);
+    function createFresh(){
+      return rootRef.uploadPlugin.editable.set(LB_FILE,data).then(function(created){
+        if(created&&created.editKey){
+          localStorage.setItem("sudokuLbKey",created.editKey);
+          winMsgEl.textContent="Published! For a board every player can update, paste this editKey into main.pjs: "+created.editKey;
+        }else if(created&&created.error){
+          winMsgEl.textContent="Couldn't publish to the shared board ("+created.error+") — score kept locally.";
+        }else{
+          winMsgEl.textContent="Couldn't publish to the shared board — score kept locally.";
+        }
+      });
+    }
+    var p=knownKey?rootRef.uploadPlugin.editable.set(LB_FILE,data,{editKey:knownKey}):createFresh();
+    p.then(function(res){
+      if(!res)return;
+      if(res&&res.editKey){
+        localStorage.setItem("sudokuLbKey",res.editKey);
+        winMsgEl.textContent="Published to the leaderboard!";
+        return;
+      }
+      if(res&&res.error==="invalid_edit_key")return createFresh();
+      if(res&&res.error)winMsgEl.textContent="Couldn't publish to the shared board ("+res.error+") — score kept locally.";
+      else winMsgEl.textContent="Published to the leaderboard!";
+    }).catch(function(){
+      winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+    });
+  }).catch(function(){
+    winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+  });
+}
+
+/* ═══════════ number pad ═══════════ */
+function firstEmptyCell(){
+  for(var r=0;r<9;r++)for(var c=0;c<9;c++)if(game.puzzle[r][c]===0)return [r,c];
+  return null;
+}
+for(var n=1;n<=9;n++){
+  (function(n){
+    var b=document.createElement("button");
+    b.className="pad-btn"; b.textContent=n;
+    b.addEventListener("click",function(){
+      if(!playing())return;
+      if(!game.selected){ var e=firstEmptyCell(); if(e)select(e[0],e[1]); else return; }
+      placeDigit(n);
+    });
+    padEl.appendChild(b);
+  })(n);
+}
+var eb=document.createElement("button");
+eb.className="pad-btn pad-erase"; eb.textContent="⌫";
+eb.addEventListener("click",eraseCell);
+padEl.appendChild(eb);
+
+/* ═══════════ wire up ═══════════ */
+for(var i=0;i<diffBtns.length;i++)(function(b){
+  b.addEventListener("click",function(){
+    var d=b.dataset.diff;
+    if(d===game.diff&&playing()){ newGame(d); return; }
+    newGame(d);
+  });
+})(diffBtns[i]);
+for(var i=0;i<lbTabs.length;i++)(function(b){
+  b.addEventListener("click",function(){ lbTab=b.dataset.diff; renderLeaderboard(); });
+})(lbTabs[i]);
+undoBtn.addEventListener("click",undo);
+notesBtn.addEventListener("click",toggleNotes);
+eraseBtn.addEventListener("click",eraseCell);
+hintBtn.addEventListener("click",hint);
+pauseBtn.addEventListener("click",togglePause);
+newGameBtn.addEventListener("click",function(){ newGame(game.diff); });
+document.getElementById("winPlayAgainBtn").addEventListener("click",function(){ newGame(game.diff); });
+document.getElementById("winCloseBtn").addEventListener("click",function(){ winOverlay.hidden=true; });
+document.getElementById("loseRetryBtn").addEventListener("click",function(){ newGame(game.diff); });
+document.getElementById("loseCloseBtn").addEventListener("click",function(){ loseOverlay.hidden=true; });
+document.getElementById("winSubmitBtn").addEventListener("click",submitScore);
+helpBtn.addEventListener("click",function(){ helpOverlay.hidden=false; });
+document.getElementById("helpDoneBtn").addEventListener("click",function(){ helpOverlay.hidden=true; });
+exportJsonBtn.addEventListener("click",exportJSON);
+importJsonBtn.addEventListener("click",function(){
+  importInput.value=""; importMsgEl.textContent="";
+  importOverlay.hidden=false;
+  importInput.focus();
+});
+document.getElementById("importOkBtn").addEventListener("click",function(){
+  importMsgEl.textContent=importJSON(importInput.value)||"";
+});
+document.getElementById("importCancelBtn").addEventListener("click",function(){ importOverlay.hidden=true; });
+importFileBtn.addEventListener("click",function(){ importFileInput.click(); });
+importFileInput.addEventListener("change",function(){
+  var f=importFileInput.files&&importFileInput.files[0];
+  if(!f)return;
+  var rd=new FileReader();
+  rd.onload=function(){
+    importInput.value=rd.result;
+    importMsgEl.textContent=importJSON(rd.result)||"";
+  };
+  rd.readAsText(f);
+  importFileInput.value="";
+});
+screenshotBtn.addEventListener("click",screenshot);
+
+document.addEventListener("keydown",function(e){
+  if(game.status==="won"||game.status==="lost"){
+    if(e.key==="Enter"){ hideOverlays(); }
+    return;
+  }
+  if(!importOverlay.hidden||!helpOverlay.hidden){
+    if(e.key==="Escape")hideOverlays();
+    return;
+  }
+  if(e.key.startsWith("Arrow")){
+    e.preventDefault();
+    var sel=game.selected;
+    if(!sel){ select(0,0); return; }
+    var r=sel.r,c=sel.c;
+    if(e.key==="ArrowUp")r=(r+8)%9;
+    else if(e.key==="ArrowDown")r=(r+1)%9;
+    else if(e.key==="ArrowLeft")c=(c+8)%9;
+    else c=(c+1)%9;
+    select(r,c);
+    return;
+  }
+  if(/^[1-9]$/.test(e.key)){ if(!game.selected){ var em=firstEmptyCell(); if(em)select(em[0],em[1]); } placeDigit(Number(e.key)); return; }
+  if(e.key==="Backspace"||e.key==="Delete"){ e.preventDefault(); eraseCell(); return; }
+  if(e.key==="n"||e.key==="N"){ toggleNotes(); return; }
+  if(e.key==="u"||e.key==="U"){ undo(); return; }
+  if(e.key==="Escape"){ game.selected=null; renderBoard(); }
+});
+
+/* ═══════════ boot ═══════════ */
+loadLeaderboard();
+if(restoreGame()){
+  startTimer();
+  hideOverlays();
+  renderAll();
+  setStatus("Resumed your game — "+(MAX_MISTAKES-game.mistakes)+" "+(MAX_MISTAKES-game.mistakes===1?"life left":"lives left")+".");
+}else{
+  newGame("easy");
+}
+
+window.__s={game:game,newGame:newGame,placeDigit:placeDigit,select:select,eraseCell:eraseCell,undo:undo,hint:hint,toggleNotes:toggleNotes,togglePause:togglePause,renderAll:renderAll,win:win,lose:lose,boards:boards,submitScore:submitScore,generatePuzzle:generatePuzzle,fmtTime:fmtTime,DIFFS:DIFFS,saveGame:saveGame,restoreGame:restoreGame,exportJSON:exportJSON,importJSON:importJSON,screenshot:screenshot,serializeGame:serializeGame,renderFramedImage:renderFramedImage};
+})();
+</script>
+
+<!-- Back-to-hub floating button -->
+<style>
+#rathjiBackBtn{
+  position:fixed;left:90%;bottom:18px;transform:translateX(-50%);
+  z-index:2147483000;display:flex;align-items:center;gap:8px;
+  padding:8px 16px 8px 8px;border-radius:999px;text-decoration:none;
+  background:rgba(13,15,21,0.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  border:1px solid rgba(255,255,255,0.16);box-shadow:0 8px 24px rgba(0,0,0,0.4);
+  transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease;
+}
+#rathjiBackBtn:hover{
+  transform:translateX(-50%) translateY(-2px);
+  border-color:rgba(167,139,250,0.65);
+  box-shadow:0 12px 30px rgba(0,0,0,0.45),0 0 18px rgba(139,92,246,0.35);
+}
+#rathjiBackBtn:active{ transform:translateX(-50%) translateY(0); }
+#rathjiBackBtn .rb-badge{
+  width:28px;height:28px;border-radius:50%;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#8b5cf6,#d946ef);
+  color:#fff;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-weight:700;font-size:15px;line-height:1;
+}
+#rathjiBackBtn .rb-label{
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  font-size:14px;font-weight:600;color:#fff;white-space:nowrap;letter-spacing:.2px;
+}
+#rathjiBackBtn .rb-arrow{ width:14px;height:14px;flex:0 0 auto;opacity:.9 }
+@media (max-width:480px){
+  #rathjiBackBtn{ padding:8px }
+  #rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{ display:none }
+}
+</style>
+<script>
+(function(){
+  "use strict";
+  if(document.getElementById("rathjiBackBtn"))return;
+  var a=document.createElement("a");
+  a.id="rathjiBackBtn";
+  a.href="https://perchance.org/rathjis-generators";
+  a.target="_blank";
+  a.rel="noopener";
+  a.setAttribute("aria-label","Back to my projects");
+  a.title="Back to my projects";
+  var badge=document.createElement("span");
+  badge.className="rb-badge";
+  badge.textContent="R";
+  var label=document.createElement("span");
+  label.className="rb-label";
+  label.textContent="My projects";
+  var arrow=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  arrow.setAttribute("class","rb-arrow");
+  arrow.setAttribute("viewBox","0 0 24 24");
+  arrow.setAttribute("fill","none");
+  arrow.setAttribute("stroke","rgba(255,255,255,0.85)");
+  arrow.setAttribute("stroke-width","2.5");
+  arrow.setAttribute("stroke-linecap","round");
+  arrow.setAttribute("stroke-linejoin","round");
+  arrow.innerHTML='<path d="M7 17L17 7M9 7h8v8"/>';
+  a.appendChild(badge);
+  a.appendChild(label);
+  a.appendChild(arrow);
+  document.body.appendChild(a);
+})();
+</script>

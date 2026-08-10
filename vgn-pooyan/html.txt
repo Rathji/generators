@@ -1,0 +1,1787 @@
+<!-- ════════════════════════════════════════════════════════════
+     POOYAN — for The Video Game Network
+     ────────────────────────────────────────────────────────────
+     A fork of the VGN Shooter Template, rebuilt around the
+     classic Konami forest. Ride the elevator. Pop the balloons.
+     Catch the piglets before the wolves drag them into the cave.
+
+     main.pjs needs exactly one line:
+         createServerSocket = {import:server-plugin}
+
+     GAMEPLAY
+       · You are Mama Pig on a rope elevator. Wolves descend on
+         balloons, snatching piglets from the trees. Pop a balloon
+         → the wolf crashes and the piglet tumbles — catch it on
+         the elevator for big points, or let it land safely.
+       · Wolves that reach the ground climb the ladder beside the
+         elevator and try to EAT you — shoot them before they get
+         level with you. Airborne wolves hurl rocks at you too.
+       · Grab the MEAT that floats at the top of the elevator —
+         throw it to drop every wolf on the screen at once!
+       · Each round has N piglets; save at least the required
+         count to clear it. Fail → lose a life and retry. Clear →
+         BONUS STAGE (shoot the balloon column) → next round.
+       · Round 1: save 6 of 8 piglets. Wolves get faster, rock
+         harder and sway further as rounds climb. Extra life 5,000.
+
+     CONTROLS
+       UP/DOWN (or W/S)  move the elevator
+       A/Z/SPACE/LEFT    shoot arrow up-left
+       X/D/RIGHT         shoot arrow up-right
+       ENTER start · P pause · M mute · (gamepad: A=left, B=right)
+       1P or 2P (alternating) on the title screen.
+
+     NETWORK
+       Online top-10 leaderboard + live players-online counter,
+       identical wiring to the VGN Shooter Template.
+     ════════════════════════════════════════════════════════════ -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bezel: clamp(18px, 3.5vw, 44px);
+    --bezel-sides: clamp(30px, 5vw, 58px);
+    --aspect: 4 / 3;
+    --screen-h: calc(100svh - var(--bezel) * 2.45);
+    --screen-w: min(calc(var(--screen-h) * 4 / 3), calc(100vw - var(--bezel-sides) * 2));
+    --neon:#25d7fd; --pink:#ff2bd6; --gold:#ffd319; --green:#3ddc84; --red:#ff5a3c;
+    --pix:'Press Start 2P',monospace;
+    --term:'VT323',monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#07090f;color:#dce6f0;font-family:var(--term);font-size:1.2rem;
+    text-align:left;overflow:hidden;display:flex;align-items:center;justify-content:center;
+    background-image:
+      radial-gradient(1000px 600px at 82% -10%, rgba(37,215,253,.07), transparent 60%),
+      radial-gradient(900px 620px at 8% 110%, rgba(255,122,217,.07), transparent 60%);
+    -webkit-tap-highlight-color:transparent;
+  }
+  button{font-family:inherit}
+
+  .monitor{
+    position:relative;height:100svh;width:calc(var(--screen-w) + var(--bezel-sides) * 2);max-width:100vw;
+    display:flex;align-items:center;justify-content:center;
+    padding:var(--bezel) var(--bezel-sides) calc(var(--bezel) * 1.45);
+    border-radius:30px;
+    background:linear-gradient(168deg,#202a38 0%,#0d1219 40%,#0a0e14 62%,#1a222e 100%);
+    box-shadow:0 46px 100px rgba(0,0,0,.78), inset 0 1px 0 rgba(255,255,255,.07), inset 0 -2px 0 rgba(0,0,0,.75);
+  }
+  .monitor::before{content:"";position:absolute;inset:0;border-radius:30px;pointer-events:none;z-index:6;
+    background:linear-gradient(115deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,.02) 26%, transparent 38%);}
+  .screen-wrap{
+    position:relative;width:var(--screen-w);flex:0 0 auto;aspect-ratio:var(--aspect);border-radius:16px;overflow:hidden;
+    background:#020307;
+    box-shadow:inset 0 0 0 2px rgba(255,255,255,.05), inset 0 0 70px rgba(0,0,0,.9), 0 2px 0 rgba(0,0,0,.8);
+  }
+  #screen{position:absolute;inset:0}
+  #screen canvas{position:absolute;inset:0;width:100%;height:100%}
+  .screen-glow{position:absolute;inset:0;z-index:2;pointer-events:none;
+    background:radial-gradient(125% 105% at 50% 45%, transparent 58%, rgba(0,0,0,.62) 100%);}
+  .screen-sheen{position:absolute;inset:0;z-index:2;pointer-events:none;overflow:hidden;
+    background:linear-gradient(115deg, transparent 42%, rgba(160,210,255,.07) 47%, transparent 53%);
+    animation:sheen 8s ease-in-out infinite;}
+  @keyframes sheen{0%,58%,100%{transform:translateX(-45%)}74%{transform:translateX(45%)}}
+  .scanlines{position:absolute;inset:0;z-index:3;pointer-events:none;mix-blend-mode:multiply;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.24) 0 1px, transparent 1px 3px);}
+  .crt-flicker{position:absolute;inset:0;z-index:4;pointer-events:none;opacity:.5;mix-blend-mode:overlay;
+    background:rgba(255,255,255,.02);animation:flicker 4s infinite;}
+  @keyframes flicker{0%,100%{opacity:.45}49%{opacity:.5}50%{opacity:.32}51%{opacity:.5}}
+
+  .ctrl-row{position:absolute;top:10px;right:10px;z-index:7;display:flex;gap:8px}
+  .tbtn{
+    font-family:var(--pix);font-size:.46rem;letter-spacing:.08em;padding:7px 10px;cursor:pointer;
+    background:rgba(7,9,15,.72);border:1px solid rgba(120,140,180,.28);color:#8a93a5;
+    transition:all .2s;user-select:none;
+  }
+  .tbtn:hover{border-color:var(--neon);color:var(--neon)}
+  .tbtn.on{color:#07090f;background:linear-gradient(180deg,#ffe25e,#ffd319);border-color:transparent}
+
+  .hints{
+    position:absolute;top:12px;left:12px;z-index:7;display:none;
+    font-family:var(--term);font-size:1.02rem;line-height:1.5;color:#b6c2d6;
+    background:rgba(7,9,15,.62);border:1px solid rgba(120,140,180,.22);border-radius:8px;padding:6px 10px;
+    pointer-events:none;white-space:nowrap;max-width:calc(100% - 24px);overflow:hidden;text-overflow:ellipsis;
+  }
+  .hints.on{display:block}
+
+  .gamepad{
+    position:absolute;left:0;right:0;bottom:12px;z-index:8;
+    display:flex;justify-content:space-between;align-items:flex-end;gap:10px;padding:0 14px;
+    opacity:0;pointer-events:none;transition:opacity .3s;
+  }
+  .gamepad.on{opacity:1;pointer-events:auto}
+  .pad-group{
+    display:flex;gap:14px;align-items:center;padding:10px 12px;border-radius:14px;
+    background:rgba(7,9,15,.62);border:1px solid rgba(120,140,180,.22);backdrop-filter:blur(3px);
+  }
+  .dpad{display:grid;grid-template-columns:repeat(3,42px);grid-template-rows:repeat(3,42px);gap:4px}
+  .d{
+    grid-area:2/2;display:flex;align-items:center;justify-content:center;cursor:pointer;user-select:none;touch-action:none;
+    background:linear-gradient(180deg,#1b2534,#0f1622);border:1px solid rgba(120,140,180,.25);
+    color:#8a93a5;font-size:1.05rem;border-radius:6px;transition:all .12s;
+  }
+  .d.up{grid-area:1/2}.d.down{grid-area:3/2}.d.left{grid-area:2/1}.d.right{grid-area:2/3}
+  .d.on{background:linear-gradient(180deg,#ffe25e,#ffd319);color:#07090f;border-color:transparent;box-shadow:0 0 16px rgba(255,211,25,.5)}
+  .pad-mid{display:flex;flex-direction:column;gap:8px;align-items:center}
+  .pmin{
+    font-family:var(--pix);font-size:.38rem;letter-spacing:.06em;color:#8a93a5;padding:7px 9px;cursor:pointer;
+    background:#0f1622;border:1px solid rgba(120,140,180,.25);border-radius:6px;user-select:none;touch-action:none;transition:all .12s;
+  }
+  .pmin.on{background:#25d7fd;color:#07090f;border-color:transparent;box-shadow:0 0 14px rgba(37,215,253,.5)}
+  .btns{display:grid;grid-template-columns:repeat(2,44px);gap:7px}
+  .pbtn{
+    width:44px;height:44px;border-radius:50%;cursor:pointer;user-select:none;touch-action:none;
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--pix);font-size:.6rem;color:#fff;border:1px solid rgba(255,255,255,.22);
+    box-shadow:0 3px 0 rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.25);transition:all .12s;
+  }
+  .pbtn.a{background:linear-gradient(180deg,#3ddc84,#1e8a52)}
+  .pbtn.b{background:linear-gradient(180deg,#ff6b4a,#c0392b)}
+  .pbtn.x{background:linear-gradient(180deg,#37b6ff,#1d6fb8)}
+  .pbtn.y{background:linear-gradient(180deg,#ffd319,#d49a00)}
+  .pbtn.on{transform:translateY(2px);box-shadow:0 1px 0 rgba(0,0,0,.6), 0 0 18px rgba(255,255,255,.35);filter:brightness(1.25)}
+  @media(max-width:560px){
+    .dpad{grid-template-columns:repeat(3,34px);grid-template-rows:repeat(3,34px)}
+    .pbtn{width:38px;height:38px}
+    .pad-group{gap:9px;padding:8px 9px}
+  }
+
+  .panel{
+    position:absolute;left:var(--bezel-sides);right:var(--bezel-sides);bottom:calc(var(--bezel)*.45);z-index:6;
+    display:flex;align-items:center;justify-content:space-between;gap:12px;pointer-events:none;
+  }
+  .brand{font-family:var(--pix);font-size:.5rem;letter-spacing:.18em;color:var(--neon);text-shadow:0 0 10px rgba(37,215,253,.6)}
+  .led{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(61,220,132,.9);animation:ledpulse 3.2s ease-in-out infinite}
+  @keyframes ledpulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .panel-note{font-family:var(--pix);font-size:.42rem;letter-spacing:.12em;color:#5a6476}
+
+  body.bare{overflow:hidden}
+  body.bare .monitor{width:100vw;height:100vh;max-width:none;padding:0;border-radius:0;box-shadow:none}
+  body.bare .panel,body.bare .monitor::before{display:none}
+  body.bare .screen-wrap{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0}
+  body.bare .screen-wrap{box-shadow:none}
+</style>
+
+<!-- ═══════════ ONLINE LEADERBOARD (server-plugin) ═══════════
+     PUBLIC SOURCE (authoritative, but anyone can read it — no
+     secrets here). Durable `state` layout:
+       0        version guard (42)
+       1..      N=60 entries × ENTRY=32 bytes:
+                  name   (24 utf8 bytes, zero-padded)
+                  score  (u32 BE)
+                  ts     (u32 LE, unix seconds)
+     Sorted best-first; the top 10 are shown. Also tracks players
+     online via the "lobby" topic (subscriber count).
+     RPC:  get() → {ok, board(top-10), n(online)}
+           submit({name, score}) → {ok, rank(1-based | -1)}
+     Rate limits: 1 per 5s per connection, 5 per 10min per net[2].
+     ═══════════════════════════════════════════════════════════ -->
+<script type="text/x-server-plugin">
+"use strict";
+var N = 60, NAME = 24, ENTRY = 32, BASE = 1;
+if (state[0] !== 42) { state.fill(0, 0, state.length); state[0] = 42; }
+
+function r32(o){ return (state[o]|state[o+1]<<8|state[o+2]<<16|state[o+3]<<24)>>>0; }
+function u32(o,v){ state[o]=v&255; state[o+1]=(v>>>8)&255; state[o+2]=(v>>>16)&255; state[o+3]=(v>>>24)&255; }
+function putName(dst,s){
+  s=String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,NAME);
+  state.fill(0,dst,dst+NAME);
+  for(var i=0;i<s.length;i++) state[dst+i]=s.charCodeAt(i);
+}
+function getName(o){ var s="",i=o,e=o+NAME,c; while(i<e){ c=state[i++]; if(!c)break; s+=String.fromCharCode(c); } return s; }
+function getEntry(i){ var o=BASE+i*ENTRY; return { name:getName(o), score:r32(o+NAME), ts:r32(o+NAME+4) }; }
+function saveEntry(i,name,score,ts){ var o=BASE+i*ENTRY; putName(o,name); u32(o+NAME,score); u32(o+NAME+4,ts); }
+function top10(){ var a=[]; for(var i=0;i<N;i++){ var e=getEntry(i); if(e.score>0) a.push(e); if(a.length>=10) break; } return a; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+
+var submitTimes=new Map(), netLog=new Map();
+function canSubmit(conn){
+  var n=nowSec(), k="n"+conn.net[2], arr=netLog.get(k)||[];
+  arr=arr.filter(function(t){ return t>n-600; });
+  if(arr.length>=5){ netLog.set(k,arr); return false; }
+  arr.push(n); netLog.set(k,arr);
+  return true;
+}
+function onlineCount(){ try{ return pubsub.numSubscribers("lobby"); }catch(e){ return 0; } }
+function publishCount(){ try{ pubsub.publish("lobby", "{\"t\":\"n\",\"n\":"+onlineCount()+"}"); }catch(e){} }
+
+self.onopen = function({conn}){
+  try{ conn.subscribe("lb:pub"); }catch(e){}
+  try{ conn.subscribe("lobby"); }catch(e){}
+  publishCount();
+};
+self.onclose = function(){ publishCount(); };
+
+self.rpc = {
+  get: function(){
+    return JSON.stringify({ok:true, board:top10(), n:onlineCount()});
+  },
+  submit: function({conn}, data){
+    var obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    var name=String(obj.name||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,NAME);
+    var score=Math.floor(Number(obj.score));
+    if(!name) return JSON.stringify({ok:false,err:"name"});
+    if(!isFinite(score)||score<=0||score>4294967295) return JSON.stringify({ok:false,err:"score"});
+    var now=Date.now();
+    if(now-(submitTimes.get(conn.id)||0)<5000) return JSON.stringify({ok:false,err:"rate_limited"});
+    submitTimes.set(conn.id,now);
+    if(!canSubmit(conn)) return JSON.stringify({ok:false,err:"rate_limited"});
+    var idx=-1;
+    for(var i=0;i<N;i++){ var e=getEntry(i); if(e.score===0){ idx=i; break; } if(score>e.score){ idx=i; break; } }
+    if(idx===-1) return JSON.stringify({ok:true,rank:-1});
+    for(var j=N-1;j>idx;j--){ var s=getEntry(j-1); saveEntry(j,s.name,s.score,s.ts); }
+    saveEntry(idx,name,score,nowSec());
+    try{ pubsub.publish("lb:pub", JSON.stringify({t:"lb",board:top10(),newEntry:{rank:idx+1,name:name,score:score}})); }catch(e){}
+    return JSON.stringify({ok:true,rank:idx+1});
+  }
+};
+</script>
+
+<!-- ═══════════ MONITOR ═══════════ -->
+<div class="monitor">
+  <div class="screen-wrap">
+    <div id="screen">
+      <canvas id="game"></canvas>
+    </div>
+
+    <div class="screen-glow" aria-hidden="true"></div>
+    <div class="screen-sheen" aria-hidden="true"></div>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="crt-flicker" aria-hidden="true"></div>
+
+    <div class="hints" id="hintsEl"></div>
+
+    <div class="ctrl-row">
+      <button class="tbtn" id="controlsBtn" aria-pressed="false">🎮 Controls</button>
+      <button class="tbtn" id="bezelBtn" aria-pressed="false">⛶ Bezel</button>
+      <button class="tbtn" id="fullBtn" aria-pressed="false">▣ Full</button>
+    </div>
+
+    <div class="gamepad" id="gamepad" aria-hidden="true">
+      <div class="pad-group">
+        <div class="dpad" id="dpad">
+          <button class="d up" data-key="up" aria-label="Up">▲</button>
+          <button class="d left" data-key="left" aria-label="Left">◀</button>
+          <button class="d right" data-key="right" aria-label="Right">▶</button>
+          <button class="d down" data-key="down" aria-label="Down">▼</button>
+        </div>
+        <div class="pad-mid">
+          <button class="pmin" data-key="select" aria-label="Select">SEL</button>
+          <button class="pmin" data-key="start" aria-label="Start">STA</button>
+        </div>
+        <div class="btns">
+          <button class="pbtn y" data-key="y" aria-label="Y">Y</button>
+          <button class="pbtn x" data-key="x" aria-label="X">X</button>
+          <button class="pbtn b" data-key="b" aria-label="B">B</button>
+          <button class="pbtn a" data-key="a" aria-label="A">A</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" aria-hidden="true">
+    <span class="brand">◤ VGN ◥</span>
+    <span class="led"></span>
+    <span class="panel-note">POOYAN · THE WOLF FOREST</span>
+  </div>
+</div>
+
+<!-- ═══════════ CRT / GAMEPAD ENGINE + GAME ═══════════ -->
+<script>
+(function(){
+  "use strict";
+
+  /* ── VGN helper API (games can use this) ── */
+  var VGN = {
+    keymap:{ up:"ArrowUp", down:"ArrowDown", left:"ArrowLeft", right:"ArrowRight",
+             a:" ", b:"x", x:"y", y:"c", start:"Enter", select:"Shift" },
+    setKeymap:function(map){ for(var k in map) this.keymap[k]=map[k]; },
+    press:function(action){ dispatchKey(this.keymap[action], true);  },
+    release:function(action){ dispatchKey(this.keymap[action], false); },
+    hints:function(text){ hintsEl.textContent = text || ""; }
+  };
+  window.VGN = VGN;
+
+  function keyCode(k){
+    if(k===" ") return "Space";
+    if(k.length===1) return "Key"+k.toUpperCase();
+    return k;
+  }
+  function dispatchKey(key, down){
+    if(!key) return;
+    window.dispatchEvent(new KeyboardEvent(down?"keydown":"keyup", {key:key, code:keyCode(key), bubbles:true}));
+    reflectPad(key, down);
+  }
+
+  var hintsEl = document.getElementById("hintsEl");
+  var gamepad = document.getElementById("gamepad");
+  var controlsBtn = document.getElementById("controlsBtn");
+  var bezelBtn = document.getElementById("bezelBtn");
+  var fullBtn = document.getElementById("fullBtn");
+  var controlsOn = false;
+
+  controlsBtn.addEventListener("click", function(){
+    controlsOn = !controlsOn;
+    controlsBtn.classList.toggle("on", controlsOn);
+    controlsBtn.setAttribute("aria-pressed", String(controlsOn));
+    gamepad.classList.toggle("on", controlsOn);
+    hintsEl.classList.toggle("on", controlsOn);
+  });
+  bezelBtn.addEventListener("click", function(){
+    var bare = document.body.classList.toggle("bare");
+    bezelBtn.classList.toggle("on", bare);
+    bezelBtn.setAttribute("aria-pressed", String(bare));
+    window.dispatchEvent(new Event("resize"));
+  });
+
+  var prevBare = false;
+  function isFS(){ return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+  function syncFullBtn(){
+    var fs = isFS();
+    fullBtn.classList.toggle("on", fs);
+    fullBtn.setAttribute("aria-pressed", String(fs));
+    if(!fs) document.body.classList.toggle("bare", prevBare);
+  }
+  document.addEventListener("fullscreenchange", syncFullBtn);
+  document.addEventListener("webkitfullscreenchange", syncFullBtn);
+  fullBtn.addEventListener("click", function(){
+    if(!isFS()){
+      prevBare = document.body.classList.contains("bare");
+      document.body.classList.add("bare");
+      var el = document.documentElement;
+      var p = null;
+      if(el.requestFullscreen) p = el.requestFullscreen();
+      else if(el.webkitRequestFullscreen) p = el.webkitRequestFullscreen();
+      if(p && p.catch) p.catch(function(){
+        document.body.classList.toggle("bare", prevBare);
+        syncFullBtn();
+      });
+      window.dispatchEvent(new Event("resize"));
+    } else {
+      if(document.exitFullscreen) document.exitFullscreen();
+      else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  });
+
+  function wire(btn){
+    var action = btn.getAttribute("data-key");
+    btn.addEventListener("pointerdown", function(e){
+      e.preventDefault(); e.stopPropagation();
+      btn.classList.add("on");
+      VGN.press(action);
+      try{ btn.setPointerCapture(e.pointerId); }catch(_){}
+    });
+    function off(e){
+      if(!btn.classList.contains("on")) return;
+      btn.classList.remove("on");
+      VGN.release(action);
+    }
+    btn.addEventListener("pointerup", off);
+    btn.addEventListener("pointercancel", off);
+    btn.addEventListener("pointerleave", off);
+  }
+  document.querySelectorAll(".d,.pbtn,.pmin").forEach(wire);
+
+  function reflectPad(key, down){
+    var action = null;
+    for(var k in VGN.keymap){ if(VGN.keymap[k]===key) action=k; }
+    if(!action) return;
+    var el = document.querySelector('[data-key="'+action+'"]');
+    if(el) el.classList.toggle("on", down);
+  }
+  window.addEventListener("keyup", function(e){ reflectPad(e.key, false); });
+
+  VGN.hints("UP/DOWN MOVE · A/Z SHOOT LEFT · X/D SHOOT RIGHT · ENTER START · P PAUSE · M MUTE");
+
+  /* ══════════════════════════════════════════════════════════
+     THE GAME — POOYAN. Fork me!
+     ══════════════════════════════════════════════════════════ */
+  var canvas = document.getElementById("game");
+  if (canvas) (function(){
+    "use strict";
+
+    var W = 800, H = 600;
+    canvas.width = W; canvas.height = H;
+    var ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+
+    /* ── CONFIG — fork me ── */
+    var CONFIG = {
+      title: "POOYAN",
+      tagline: "SAVE THE PIGLETS",
+      lives: 3,
+      playerSpeed: 270,               // elevator px/sec
+      fireCooldown: 0.26,             // sec between shots (per direction)
+      arrowSpeedX: 460, arrowSpeedY: 300, arrowGravity: 300,
+      maxArrowsPerSide: 5,
+      balloonR: 15,
+      fallSpeed: 90,                  // wolf fall speed on balloon pop
+      rockTimerBase: 4.5, rockTimerMin: 2.2, rockSpeed: 240, rockGravity: 300,
+      climbSpeed: 72,                 // wolf ladder-climb speed
+      meatEvery: 26,                  // sec between meat slabs
+      extraLifeAt: 5000,
+      spawnBase: 1.5, spawnMin: 0.55, spawnPerRound: 0.12,
+      wolfBaseSpeed: 64, wolfSpeedPerRound: 8,
+      swayAmpBase: 16, swayAmpPerRound: 3, swayAmpMax: 38,
+      roundPiglets: 8, roundPigletsPerRound: 1, roundPigletsMax: 12,
+      requiredFrac: 0.65,             // share of piglets you must save
+      bonusTime: 15, bonusCount: 9
+    };
+
+    /* ── sprite pixel maps ('X' = lit pixel) ── */
+    var SPRITES = {
+      pigA: [
+        ".XXXXXXXX.",
+        ".XXXXXXXX.",
+        ".XX.XX.XX.",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        ".XXX.XXXX.",
+        ".XXXXXXXX.",
+        "..XXXXXX.."
+      ],
+      pigB: [
+        ".XXXXXXXX.",
+        ".XXXXXXXX.",
+        ".XX.XX.XX.",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        ".XXX.XXXX.",
+        "...XXXX...",
+        ".XX....XX."
+      ],
+      wolfA: [
+        "XX.....XX.",
+        "XX.....XX.",
+        "XX......XX",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        ".XXXXXXXX.",
+        "..XX..XX..",
+        "...X..X..."
+      ],
+      wolfB: [
+        "XX.....XX.",
+        "XX.....XX.",
+        "XX......XX",
+        "XXXXXXXXXX",
+        "XXXXXXXXXX",
+        ".XXXXXXXX.",
+        "...XXXX...",
+        "..X....X.."
+      ],
+      piglet: [
+        ".XXXXXX.",
+        "XXXXXXXX",
+        "XX.XX.XX",
+        "XXXXXXXX",
+        ".XXXXXX.",
+        "..XXXX.."
+      ]
+    };
+    var PINK = "#ff7ad9";
+    var PIGLET_COL = "#ff9ad0";
+    var WOLF_COL = "#b6becb";
+    var BALLOONS = ["#ff5a3c", "#ffd319", "#37e0ff", "#3ddc84", "#ff2bd6"];
+    var PX = 3;
+
+    var TRACK_X = 96;
+    var LADDER_X = 138;
+    var ELEV_TOP = 76, ELEV_BOT = H - 58;
+    var GROUND_Y = H - 46;
+    var BOTTOM_Y = GROUND_Y - 4;
+    var CAVE_X = W / 2;
+
+    /* ── audio ── */
+    var actx = null, sfxOn = true;
+    function ac(){
+      if(!actx){ var AC = window.AudioContext || window.webkitAudioContext; if(AC) actx = new AC(); }
+      return actx;
+    }
+    function tone(f0, f1, dur, type, vol, delay){
+      if(!sfxOn) return; var a = ac(); if(!a) return;
+      var t0 = a.currentTime + (delay||0);
+      var o = a.createOscillator(), g = a.createGain();
+      o.type = type || "square";
+      o.frequency.setValueAtTime(f0, t0);
+      if(f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(f1, t0+dur);
+      g.gain.setValueAtTime(vol||0.04, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+      o.connect(g); g.connect(a.destination);
+      o.start(t0); o.stop(t0+dur+0.02);
+    }
+    function noise(dur, vol, delay){
+      if(!sfxOn) return; var a = ac(); if(!a) return;
+      var t0 = a.currentTime + (delay||0);
+      var n = Math.max(1, Math.floor(a.sampleRate*dur));
+      var buf = a.createBuffer(1, n, a.sampleRate);
+      var d = buf.getChannelData(0);
+      for(var i=0;i<n;i++) d[i] = (Math.random()*2-1)*(1-i/n);
+      var src = a.createBufferSource(); src.buffer = buf;
+      var f = a.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 900;
+      var g = a.createGain(); g.gain.value = vol||0.06;
+      src.connect(f); f.connect(g); g.connect(a.destination);
+      src.start(t0);
+    }
+    var SFX = {
+      shoot:  function(){ tone(880, 320, 0.08, "square", 0.025); },
+      pop:    function(){ noise(0.05, 0.05); tone(280, 70, 0.06, "square", 0.03); },
+      squeal: function(){ tone(640, 140, 0.5, "sawtooth", 0.05); },
+      oink:   function(){ tone(280, 520, 0.09, "square", 0.045); tone(520, 760, 0.07, "square", 0.04, 0.07); },
+      rescue: function(){ tone(523,523,0.08,"square",0.05); tone(659,659,0.08,"square",0.05,0.08); tone(784,784,0.14,"square",0.05,0.16); },
+      lost:   function(){ tone(340, 160, 0.4, "square", 0.05); },
+      pigDie: function(){ tone(600, 70, 0.9, "sawtooth", 0.06); },
+      clear:  function(){ tone(523,523,0.09,"square",0.05); tone(659,659,0.09,"square",0.05,0.1); tone(784,784,0.14,"square",0.05,0.2); },
+      over:   function(){ var fs=[392,330,262,196]; for(var i=0;i<fs.length;i++) tone(fs[i], fs[i]*0.9, 0.3, "square", 0.05, i*0.22); },
+      extra:  function(){ tone(523,523,0.1,"square",0.05); tone(659,659,0.1,"square",0.05,0.12); tone(784,784,0.18,"square",0.05,0.24); }
+    };
+
+    /* ── game state ── */
+    var state = "title";          /* title | intro | playing | dying | roundclear | roundfail | bonusIntro | bonus | entry | over */
+    var score = 0, hiScore = 0, lives = CONFIG.lives, round = 1, required = 5;
+    var nextLifeAt = CONFIG.extraLifeAt;
+    var paused = false, time = 0;
+    var twoPlayer = false, curPlayer = 0;
+    try{ hiScore = parseInt(localStorage.getItem("vgn-poy-hi")||"0", 10)||0; }catch(e){}
+
+    var pig = { y: H - 110, fireL: 0, fireR: 0, invuln: 0 };
+    var piglets = [], wolves = [], arrows = [], falling = [], bonusWolves = [];
+    var particles = [], popups = [];
+    var rocks = [], rockTimer = 3.5;
+    var meat = { active:false, timer:12 };
+    var hasMeat = false, meatThrow = null;
+    var spawnTimer = 1.0;
+    var shake = 0, dieTimer = 0, clearTimer = 0, introTimer = 1.8, bonusIntroTimer = 1.5, bonusTimer = CONFIG.bonusTime;
+    var keys = {};
+    var touch = { active:false, x:0, y:0 };
+    var stars = [];
+    for(var si=0;si<80;si++) stars.push({x:Math.random()*W, y:Math.random()*H, s:Math.random()<0.3?2:1, ph:Math.random()*6.283});
+
+    /* ── online leaderboard client ── */
+    var Net = {
+      socket:null, connected:false, ready:false, board:[], online:0, retries:0, timer:null,
+      connect:function(){
+        try{
+          var s = root.createServerSocket();
+          Net.socket = s;
+          s.addEventListener("open", Net.onOpen);
+          s.addEventListener("message", Net.onMessage);
+          s.addEventListener("close", Net.onClose);
+        }catch(e){}
+      },
+      onOpen:function(){
+        Net.connected = true; Net.retries = 0;
+        Net.refresh();
+      },
+      onClose:function(e){
+        Net.connected = false; Net.socket = null;
+        if(e && e.code === 4403) return;
+        var d = Math.min(30, Math.pow(2, Net.retries++))*1000 + Math.random()*1000;
+        Net.timer = setTimeout(Net.connect, d);
+      },
+      onMessage:function(e){
+        var d; try{ d = JSON.parse(e.data); }catch(err){ return; }
+        if(d.t === "lb" && d.board) Net.board = d.board;
+        if(d.t === "n" && typeof d.n === "number") Net.online = d.n;
+      },
+      refresh:function(){
+        var s = Net.socket;
+        if(!s || !Net.connected) return;
+        s.rpc.get("").then(function(reply){
+          var d = JSON.parse(reply);
+          if(d && d.ok){ Net.board = d.board || []; Net.online = d.n || 0; Net.ready = true; }
+        }).catch(function(){});
+      },
+      qualifies:function(score){
+        if(!Net.ready) return score > 0;
+        if(Net.board.length < 10) return true;
+        return score > Net.board[Net.board.length-1].score;
+      },
+      submit:function(name, score){
+        var s = Net.socket;
+        if(!s || !Net.connected) return Promise.resolve({ok:false, rank:-1, offline:true});
+        return s.rpc.submit(JSON.stringify({name:name, score:score})).then(function(reply){
+          var d = JSON.parse(reply);
+          if(!d.ok) return {ok:false, rank:-1, offline:false, err:d.err};
+          Net.refresh();
+          return {ok:true, rank:d.rank};
+        }).catch(function(){ return {ok:false, rank:-1, offline:true}; });
+      }
+    };
+    Net.connect();
+    setInterval(function(){ if(Net.connected) Net.refresh(); }, 15000);
+
+    /* ── small helpers ── */
+    function rnd(a, b){ return a + Math.random()*(b-a); }
+    function randBalloon(){ return BALLOONS[Math.floor(Math.random()*BALLOONS.length)]; }
+    function pad(n){ n = String(n); while(n.length < 6) n = "0"+n; return n; }
+    function treeCount(){ var c=0; for(var i=0;i<piglets.length;i++) if(piglets[i].state==="tree") c++; return c; }
+    function resolvedCount(){ var c=0; for(var i=0;i<piglets.length;i++){ var s=piglets[i].state; if(s==="caught"||s==="ground"||s==="lost") c++; } return c; }
+    function rescuedCount(){ var c=0; for(var i=0;i<piglets.length;i++){ var s=piglets[i].state; if(s==="caught"||s==="ground") c++; } return c; }
+    function wolfSpeed(){ return CONFIG.wolfBaseSpeed + (round-1)*CONFIG.wolfSpeedPerRound + Math.random()*26; }
+    function spawnInterval(){ return Math.max(CONFIG.spawnMin, CONFIG.spawnBase - (round-1)*CONFIG.spawnPerRound); }
+    function bonusWolfSpeed(){ return 70 + Math.random()*50 + (round-1)*6; }
+
+    /* ── builders ── */
+    function buildRound(){
+      var total = Math.min(CONFIG.roundPiglets + (round-1)*CONFIG.roundPigletsPerRound, CONFIG.roundPigletsMax);
+      required = Math.max(4, Math.ceil(total*CONFIG.requiredFrac));
+      piglets = [];
+      var x0 = 140, x1 = W - 140;
+      for(var i=0;i<total;i++){
+        var px = total===1 ? W/2 : x0 + i*(x1-x0)/(total-1);
+        piglets.push({x:px, y:66, state:"tree"});
+      }
+      wolves = []; arrows = []; falling = []; rocks = [];
+      rockTimer = 3.5;
+      meat.active = false; meatThrow = null; hasMeat = false;
+      meat.timer = 12;
+      spawnTimer = 1.1;
+      pig.y = H - 110; pig.invuln = 0; pig.fireL = 0; pig.fireR = 0;
+    }
+    function buildBonus(){
+      bonusWolves = [];
+      for(var i=0;i<CONFIG.bonusCount;i++){
+        bonusWolves.push({x:rnd(50, W-50), y:-24-Math.random()*120, vy:bonusWolfSpeed(),
+          ph:Math.random()*6.283, freq:1.3+Math.random(), amp:rnd(24,52), color:randBalloon(),
+          fallen:false, respawn:0, rot:0});
+      }
+      bonusTimer = CONFIG.bonusTime;
+    }
+    function spawnWolf(){
+      var tree = piglets.filter(function(p){ return p.state === "tree"; });
+      var w = { x:rnd(60, W-120), y:-24, vy:wolfSpeed(),
+        amp:Math.min(CONFIG.swayAmpBase + (round-1)*CONFIG.swayAmpPerRound, CONFIG.swayAmpMax),
+        freq:1.1+Math.random()*0.9, ph:Math.random()*6.283, color:randBalloon(),
+        pop:false, fallen:false, exit:false, carry:null, rot:0 };
+      if(tree.length){
+        var p = tree[Math.floor(Math.random()*tree.length)];
+        p.state = "carried";
+        w.carry = p;
+        w.x = p.x;
+      }
+      wolves.push(w);
+    }
+
+    /* ── flow ── */
+    function startRun(){
+      curPlayer = 0;
+      score = 0; lives = CONFIG.lives; round = 1; nextLifeAt = CONFIG.extraLifeAt;
+      buildRound();
+      state = "intro"; introTimer = 1.8;
+    }
+    function startNextPlayer(){
+      score = 0; lives = CONFIG.lives; round = 1; nextLifeAt = CONFIG.extraLifeAt;
+      buildRound();
+      state = "intro"; introTimer = 2.0;
+    }
+    function loseLife(){
+      lives--;
+      if(lives < 0){ gameOver(); return; }
+      buildRound();
+      state = "intro"; introTimer = 1.8;
+    }
+    function gameOver(){
+      state = qualifies() ? "entry" : "over";
+      SFX.over();
+      if(score > hiScore){ hiScore = score; try{ localStorage.setItem("vgn-poy-hi", String(hiScore)); }catch(e){} }
+      if(qualifies()){ entry.letters=["A","A","A"]; entry.pos=0; entry.done=false; entry.result=null; }
+    }
+    function qualifies(){ return Net.connected && Net.qualifies(score); }
+    function advanceFromOver(){
+      if(twoPlayer && curPlayer === 0){ curPlayer = 1; startNextPlayer(); }
+      else state = "title";
+    }
+    function skipIntro(){
+      if(state === "intro") state = "playing";
+      else if(state === "bonusIntro") state = "bonus";
+    }
+    function killPlayer(){
+      if(state !== "playing" || pig.invuln > 0) return;
+      explode(TRACK_X, pig.y - 10, PINK, 26);
+      shake = 9; SFX.pigDie();
+      state = "dying"; dieTimer = 1.1;
+    }
+    function resolveRound(){
+      var r = rescuedCount();
+      if(r >= required){
+        var b = r * 100;
+        addScore(b);
+        popup(W/2, H/2 - 96, "RESCUE BONUS +"+b, "#ffd319");
+        state = "roundclear"; clearTimer = 1.7; SFX.clear();
+      } else {
+        popup(W/2, H/2 - 40, "NOT ENOUGH RESCUED!", "#ff5a3c");
+        SFX.over();
+        state = "roundfail"; clearTimer = 1.9;
+      }
+    }
+    function addScore(n){
+      score += n;
+      if(score >= nextLifeAt){ lives++; nextLifeAt += CONFIG.extraLifeAt; popup(W/2, H/2 - 70, "1UP!", "#3ddc84"); SFX.extra(); }
+    }
+
+    /* ── initials entry ── */
+    var entry = { letters:["A","A","A"], pos:0, done:false, result:null, timer:0 };
+    function entryCycle(d){
+      var c = entry.letters[entry.pos].charCodeAt(0) + d;
+      if(c < 65) c = 90; if(c > 90) c = 65;
+      entry.letters[entry.pos] = String.fromCharCode(c);
+    }
+    function entrySubmit(){
+      if(entry.done) return;
+      entry.done = true;
+      entry.timer = 0;
+      Net.submit(entry.letters.join(""), score).then(function(res){
+        entry.result = res;
+        entry.timer = 2.6;
+        if(res.offline){ SFX.kill(); } else if(res.rank > 0){ SFX.extra(); } else { SFX.hit(); }
+        Net.refresh();
+      });
+    }
+
+    /* ── particles / popups ── */
+    function explode(x, y, color, n){
+      for(var i=0;i<n;i++){
+        var a = Math.random()*6.283, sp = 60 + Math.random()*220;
+        particles.push({x:x, y:y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp, life:0.35+Math.random()*0.3, t:0, color:color, size:2+Math.random()*3});
+      }
+    }
+    function popup(x, y, text, color){
+      popups.push({x:x, y:y, text:text, life:0.9, t:0, color:color||"#ffd319"});
+    }
+    function updateFx(dt){
+      for(var i=particles.length-1;i>=0;i--){
+        var p = particles[i];
+        p.t += dt; p.x += p.vx*dt; p.y += p.vy*dt; p.vx *= 0.92; p.vy *= 0.92;
+        if(p.t >= p.life) particles.splice(i,1);
+      }
+      for(i=popups.length-1;i>=0;i--){
+        var pu = popups[i];
+        pu.t += dt; pu.y -= 26*dt;
+        if(pu.t >= pu.life) popups.splice(i,1);
+      }
+      shake = Math.max(0, shake - 26*dt);
+    }
+
+    /* ── shooting ── */
+    function fireArrow(dir){
+      var count = 0;
+      for(var i=0;i<arrows.length;i++) if(arrows[i].dir === dir) count++;
+      if(count >= CONFIG.maxArrowsPerSide) return;
+      if(hasMeat){
+        var any = false;
+        for(var j=0;j<wolves.length;j++){ var wj=wolves[j]; if(!wj.fallen && !wj.exit && !wj.climb) any = true; }
+        if(any){
+          hasMeat = false;
+          meatThrow = { x:TRACK_X + dir*14, y:pig.y - 16, vx:dir*CONFIG.arrowSpeedX*0.75, vy:-CONFIG.arrowSpeedY*0.5, dir:dir };
+          for(j=wolves.length-1;j>=0;j--){
+            var w = wolves[j];
+            if(w.fallen || w.exit || w.climb) continue;
+            popWolf(w);
+          }
+          SFX.extra();
+          return;
+        }
+      }
+      arrows.push({x:TRACK_X + dir*14, y:pig.y - 16, vx:dir*CONFIG.arrowSpeedX, vy:-CONFIG.arrowSpeedY, dir:dir});
+      SFX.shoot();
+    }
+    function popWolf(w){
+      w.pop = true; w.fallen = true;
+      w.vy = CONFIG.fallSpeed; w.vx = rnd(-50, 50); w.rot = (w.x < TRACK_X ? -1 : 1) * rnd(2, 5);
+      if(w.carry){
+        var p = w.carry;
+        p.state = "falling"; p.t = 0;
+        p.x = w.x; p.y = w.y + 22; p.vy = 10; p.vx = rnd(-40, 40); p.swayPh = Math.random()*6.283;
+        falling.push(p);
+        w.carry = null;
+        addScore(150 + Math.min(30*(round-1), 270));
+        popup(w.x, w.y - 34, "+"+(150 + Math.min(30*(round-1), 270)), "#ffd319");
+      } else {
+        addScore(100 + Math.min(20*(round-1), 180));
+        popup(w.x, w.y - 34, "+"+(100 + Math.min(20*(round-1), 180)), "#ffd319");
+      }
+      explode(w.x, w.y - 27, w.color, 14);
+      shake = Math.max(shake, 3);
+      SFX.pop(); SFX.squeal();
+    }
+    function popBonusWolf(bw){
+      bw.fallen = true; bw.vy = CONFIG.fallSpeed; bw.vx = rnd(-60, 60); bw.rot = (bw.x < TRACK_X ? -1 : 1) * rnd(2, 5);
+      var pts = 200 + 100*(round-1);
+      addScore(pts);
+      popup(bw.x, bw.y - 34, "+"+pts, "#ffd319");
+      explode(bw.x, bw.y - 27, bw.color, 12);
+      SFX.pop();
+    }
+
+    /* ── input ── */
+    window.addEventListener("keydown", function(e){
+      var k = e.key;
+      if([" ","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].indexOf(k) !== -1) e.preventDefault();
+      keys[k] = true;
+      if(k === "m" || k === "M"){ sfxOn = !sfxOn; return; }
+      if(state === "entry"){
+        if(!entry.done){
+          if(k === "ArrowUp" || k === "w" || k === "W") entryCycle(1);
+          else if(k === "ArrowDown" || k === "s" || k === "S") entryCycle(-1);
+          else if(k === " " || k === "a" || k === "A" || k === "z" || k === "Z" || k === "x" || k === "X" || k === "d" || k === "D"){ if(entry.pos < 2) entry.pos++; else entrySubmit(); }
+          else if(k === "ArrowLeft" || k === "Backspace") entry.pos = Math.max(0, entry.pos-1);
+          else if(k === "Enter") entrySubmit();
+        } else if(k === "Enter" || k === " "){ state = "over"; }
+        return;
+      }
+      if(state === "title"){
+        if(k === "ArrowUp" || k === "w" || k === "W" || k === "ArrowDown" || k === "s" || k === "S" || k === "Shift"){ twoPlayer = !twoPlayer; }
+        else if(k === "Enter" || k === " ") startRun();
+        return;
+      }
+      if(k === "Enter" || k === " "){
+        if(state === "over"){ advanceFromOver(); return; }
+        if(state === "intro" || state === "bonusIntro"){ skipIntro(); return; }
+      }
+      if(k === "p" || k === "P"){ if(state === "playing" || state === "bonus") paused = !paused; }
+    });
+    window.addEventListener("keyup", function(e){ keys[e.key] = false; });
+
+    canvas.addEventListener("pointerdown", function(e){
+      var r = canvas.getBoundingClientRect();
+      var px = (e.clientX - r.left) / r.width * W;
+      var py = (e.clientY - r.top) / r.height * H;
+      if(state === "title"){ startRun(); return; }
+      if(state === "over"){ advanceFromOver(); return; }
+      if(state === "intro" || state === "bonusIntro"){ skipIntro(); return; }
+      touch.active = true; touch.x = px; touch.y = py;
+    });
+    canvas.addEventListener("pointermove", function(e){
+      if(!touch.active) return;
+      var r = canvas.getBoundingClientRect();
+      touch.x = (e.clientX - r.left) / r.width * W;
+      touch.y = (e.clientY - r.top) / r.height * H;
+    });
+    window.addEventListener("pointerup", function(){ touch.active = false; });
+
+    document.addEventListener("visibilitychange", function(){
+      if(document.hidden && (state === "playing" || state === "bonus")) paused = true;
+    });
+
+    /* ── update ── */
+    function update(dt){
+      time += dt;
+      var i;
+
+      if(paused) return;
+
+      if(state === "intro"){
+        introTimer -= dt;
+        if(introTimer <= 0) state = "playing";
+        updateFx(dt);
+        return;
+      }
+      if(state === "bonusIntro"){
+        bonusIntroTimer -= dt;
+        if(bonusIntroTimer <= 0){ buildBonus(); state = "bonus"; bonusTimer = CONFIG.bonusTime; }
+        updateFx(dt);
+        return;
+      }
+      if(state === "roundclear"){
+        clearTimer -= dt;
+        if(clearTimer <= 0){ state = "bonusIntro"; bonusIntroTimer = 1.5; }
+        updateFx(dt);
+        return;
+      }
+      if(state === "roundfail"){
+        clearTimer -= dt;
+        if(clearTimer <= 0) loseLife();
+        updateFx(dt);
+        return;
+      }
+      if(state === "dying"){
+        dieTimer -= dt;
+        if(dieTimer <= 0) loseLife();
+        updateFx(dt);
+        return;
+      }
+      if(state !== "playing" && state !== "bonus") return;
+
+      /* stars drift */
+      for(i=0;i<stars.length;i++){
+        var st = stars[i];
+        st.y += (22 + st.s*14)*dt;
+        if(st.y > H+4){ st.y = -4; st.x = Math.random()*W; }
+      }
+
+      /* elevator move */
+      var mv = 0;
+      if(keys["ArrowUp"]||keys["w"]||keys["W"]) mv -= 1;
+      if(keys["ArrowDown"]||keys["s"]||keys["S"]) mv += 1;
+      if(touch.active){
+        var d = touch.y - pig.y;
+        if(Math.abs(d) > 4) mv = d > 0 ? 1 : -1;
+        if(Math.abs(d) < 6) mv = 0;
+      }
+      pig.y += mv * CONFIG.playerSpeed * dt;
+      pig.y = Math.max(ELEV_TOP, Math.min(ELEV_BOT, pig.y));
+      pig.invuln = Math.max(0, pig.invuln - dt);
+      pig.fireL -= dt; pig.fireR -= dt;
+
+      /* fire */
+      var fireL = !!(keys[" "] || keys["a"] || keys["A"] || keys["z"] || keys["Z"] || keys["ArrowLeft"] || keys["c"] || keys["C"]);
+      var fireR = !!(keys["x"] || keys["X"] || keys["d"] || keys["D"] || keys["ArrowRight"] || keys["y"] || keys["Y"]);
+      if(touch.active){ if(touch.x < W/2) fireL = true; else fireR = true; }
+      if(fireL && pig.fireL <= 0){ fireArrow(-1); pig.fireL = CONFIG.fireCooldown; }
+      if(fireR && pig.fireR <= 0){ fireArrow(1); pig.fireR = CONFIG.fireCooldown; }
+
+      /* arrows */
+      for(i=arrows.length-1;i>=0;i--){
+        var a = arrows[i];
+        a.vy += CONFIG.arrowGravity*dt;
+        a.x += a.vx*dt; a.y += a.vy*dt;
+        if(a.x < -20 || a.x > W+20 || a.y < -30 || a.y > H+20){ arrows.splice(i,1); continue; }
+        var hit = false;
+        if(state === "playing"){
+          for(var wi=0;wi<wolves.length;wi++){
+            var w = wolves[wi];
+            if(w.fallen) continue;
+            if(w.climb){
+              if(a.x > w.x-15 && a.x < w.x+15 && a.y > w.y-14 && a.y < w.y+14){ shootClimber(w); hit = true; break; }
+              continue;
+            }
+            if(w.exit) continue;
+            var dxx = a.x - w.x, dyy = a.y - (w.y-30);
+            if(dxx*dxx + dyy*dyy < (CONFIG.balloonR+5)*(CONFIG.balloonR+5) ||
+               (a.x > w.x-15 && a.x < w.x+15 && a.y > w.y-14 && a.y < w.y+14)){
+              popWolf(w); hit = true; break;
+            }
+          }
+        } else if(state === "bonus"){
+          for(var bi=0;bi<bonusWolves.length;bi++){
+            var bw = bonusWolves[bi];
+            if(bw.fallen || bw.respawn > 0) continue;
+            var dxx = a.x - bw.x, dyy = a.y - (bw.y-30);
+            if(dxx*dxx + dyy*dyy < (CONFIG.balloonR+5)*(CONFIG.balloonR+5) ||
+               (a.x > bw.x-15 && a.x < bw.x+15 && a.y > bw.y-14 && a.y < bw.y+14)){
+              popBonusWolf(bw); hit = true; break;
+            }
+          }
+        }
+        if(hit) arrows.splice(i,1);
+      }
+
+      if(state === "playing"){
+        updateWolves(dt);
+        updateFalling(dt);
+        updateRocks(dt);
+        updateMeat(dt);
+        if(piglets.length && resolvedCount() >= piglets.length) resolveRound();
+      }
+      if(state === "bonus") updateBonus(dt);
+
+      updateFx(dt);
+    }
+
+    function updateWolves(dt){
+      if(piglets.length && resolvedCount() < piglets.length){
+        spawnTimer -= dt;
+        if(spawnTimer <= 0){ spawnTimer = spawnInterval(); spawnWolf(); }
+      }
+      for(var i=wolves.length-1;i>=0;i--){
+        var w = wolves[i];
+        if(w.fallen){
+          w.vy += 300*dt; w.y += w.vy*dt; w.x += w.vx*dt; w.rot += 3*dt;
+          if(w.y > H+40){ wolves.splice(i,1); continue; }
+          continue;
+        }
+        if(w.climb){
+          if(w.pause > 0){ w.pause -= dt; continue; }
+          w.y -= w.vy*dt;
+          if(w.y <= ELEV_TOP - 6){ wolves.splice(i,1); continue; }
+          if(pig.invuln <= 0 && Math.abs(w.y - pig.y) < 12){ killPlayer(); return; }
+          continue;
+        }
+        if(w.exit) continue;
+        w.x += Math.sin(time*w.freq + w.ph)*w.amp*dt;
+        w.y += w.vy*dt;
+        if(w.y >= BOTTOM_Y){
+          if(w.carry){ w.carry.state = "lost"; w.carry = null; popup(CAVE_X, H-78, "-1 PIGLET", "#ff8a7a"); SFX.lost(); shake = Math.max(shake, 3); }
+          w.climb = true; w.pause = 1.0;
+          w.x = LADDER_X; w.vy = CONFIG.climbSpeed;
+          continue;
+        }
+      }
+    }
+
+    function shootClimber(w){
+      w.fallen = true; w.climb = false;
+      w.vy = CONFIG.fallSpeed; w.vx = rnd(-30, 30); w.rot = rnd(2, 5);
+      addScore(50);
+      popup(w.x, w.y - 20, "+50", "#ffd319");
+      explode(w.x, w.y - 10, WOLF_COL, 12);
+      SFX.pop(); SFX.squeal();
+    }
+
+    function updateRocks(dt){
+      var list = [];
+      for(var i=0;i<wolves.length;i++){ var w=wolves[i]; if(!w.fallen && !w.exit && !w.climb) list.push(w); }
+      if(list.length){
+        rockTimer -= dt;
+        if(rockTimer <= 0){
+          rockTimer = Math.max(CONFIG.rockTimerMin, CONFIG.rockTimerBase - (round-1)*0.4) + Math.random()*2;
+          var w = list[Math.floor(Math.random()*list.length)];
+          var tx = TRACK_X, ty = pig.y - 10;
+          var dx = tx - w.x, dy = ty - (w.y - 30);
+          var T = Math.max(0.25, Math.sqrt(dx*dx + dy*dy) / CONFIG.rockSpeed);
+          var g = CONFIG.rockGravity;
+          var jx = (Math.random()*2-1)*40, jy = (Math.random()*2-1)*40;
+          rocks.push({ x:w.x, y:w.y-30, vx:dx/T + jx, vy:dy/T - 0.5*g*T + jy, r:6 });
+        }
+      }
+      for(i=rocks.length-1;i>=0;i--){
+        var r = rocks[i];
+        r.vy += CONFIG.rockGravity*dt;
+        r.x += r.vx*dt; r.y += r.vy*dt;
+        if(r.x < -20 || r.x > W+20 || r.y < -40 || r.y > H+20){ rocks.splice(i,1); continue; }
+        if(pig.invuln <= 0 && Math.abs(r.x - TRACK_X) < 18 && r.y > pig.y - 16 && r.y < pig.y + 16){
+          rocks.splice(i,1);
+          killPlayer();
+          return;
+        }
+      }
+    }
+
+    function updateMeat(dt){
+      if(meat.timer > 0){
+        meat.timer -= dt;
+        if(meat.timer <= 0){ meat.active = true; meat.x = TRACK_X; meat.y = ELEV_TOP + 16; }
+      }
+      if(meat.active && Math.abs(pig.y - (meat.y - 8)) < 26){
+        meat.active = false;
+        hasMeat = true;
+        meat.timer = CONFIG.meatEvery;
+        popup(TRACK_X + 40, meat.y - 20, "MEAT!", "#ffd319");
+        SFX.extra();
+      }
+      if(meatThrow){
+        meatThrow.x += meatThrow.vx*dt;
+        meatThrow.y += meatThrow.vy*dt;
+        if(meatThrow.x < -20 || meatThrow.x > W+20 || meatThrow.y < -30 || meatThrow.y > H+20) meatThrow = null;
+      }
+    }
+
+    function updateBonus(dt){
+      bonusTimer -= dt;
+      if(bonusTimer <= 0){
+        popup(W/2, H/2 - 60, "BONUS COMPLETE", "#ffd319");
+        round++;
+        buildRound();
+        state = "intro"; introTimer = 1.8;
+        SFX.clear();
+        return;
+      }
+      for(var i=bonusWolves.length-1;i>=0;i--){
+        var bw = bonusWolves[i];
+        if(bw.respawn > 0){ bw.respawn -= dt; continue; }
+        if(bw.fallen){
+          bw.vy += 300*dt; bw.y += bw.vy*dt; bw.x += bw.vx*dt; bw.rot += 3*dt;
+          if(bw.y > H+30){ bw.fallen = false; bw.respawn = 0.7; bw.y = -24; bw.x = rnd(50, W-50); bw.vy = bonusWolfSpeed(); }
+          continue;
+        }
+        bw.x += Math.sin(time*bw.freq + bw.ph)*bw.amp*dt;
+        bw.y += bw.vy*dt;
+        if(bw.y > H+8){ bw.y = -24; bw.x = rnd(50, W-50); bw.vy = bonusWolfSpeed(); }
+      }
+    }
+
+    function updateFalling(dt){
+      for(var i=falling.length-1;i>=0;i--){
+        var p = falling[i];
+        p.t += dt;
+        if(p.state === "caught"){
+          p.x = TRACK_X + 24;
+          p.y = pig.y - 16 - Math.abs(Math.sin(p.t*9))*9;
+          if(p.t > 1.0){ falling.splice(i,1); continue; }
+          continue;
+        }
+        if(p.state === "ground"){
+          p.y = GROUND_Y - 12 - Math.abs(Math.sin(p.t*9))*7;
+          if(p.t > 0.7){ falling.splice(i,1); continue; }
+          continue;
+        }
+        p.vy += 90*dt;
+        p.y += p.vy*dt;
+        p.x += p.vx*dt + Math.sin(time*2.5 + p.swayPh)*16*dt;
+        if(Math.abs(p.x - TRACK_X) < 36 && p.y > pig.y - 20 && p.y < pig.y + 2 && pig.invuln <= 0){
+          p.state = "caught"; p.t = 0;
+          addScore(300 + Math.min(60*(round-1), 300));
+          popup(TRACK_X + 30, pig.y - 40, "SAVED! +"+(300 + Math.min(60*(round-1), 300)), "#3ddc84");
+          SFX.rescue();
+        } else if(p.y >= GROUND_Y - 10){
+          p.state = "ground"; p.t = 0;
+          addScore(100);
+          popup(p.x, GROUND_Y - 46, "SAFE +100", "#3ddc84");
+          SFX.oink();
+        }
+      }
+    }
+
+    /* ── drawing ── */
+    function drawSprite(rows, x, y, px, color){
+      ctx.fillStyle = color;
+      for(var r=0;r<rows.length;r++){
+        var line = rows[r];
+        for(var c=0;c<line.length;c++) if(line[c] === "X") ctx.fillRect(x + c*px, y + r*px, px, px);
+      }
+    }
+    function drawShake(){ if(shake > 0){ ctx.translate((Math.random()*2-1)*shake, (Math.random()*2-1)*shake); } }
+
+    function drawWorld(){
+      var g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, "#0e2438");
+      g.addColorStop(0.5, "#0d2c31");
+      g.addColorStop(1, "#081a1e");
+      ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+      /* stars (twilight) */
+      for(var i=0;i<stars.length;i++){
+        var s = stars[i];
+        if(s.y > 340) continue;
+        ctx.globalAlpha = 0.3 + 0.3*Math.sin(time*2 + s.ph);
+        ctx.fillStyle = "#bcd4e8";
+        ctx.fillRect(Math.round(s.x), Math.round(s.y), s.s, s.s);
+      }
+      ctx.globalAlpha = 1;
+
+      /* moon */
+      ctx.fillStyle = "rgba(232,242,255,.10)";
+      ctx.beginPath(); ctx.arc(W-88, 62, 34, 0, 6.283); ctx.fill();
+      ctx.fillStyle = "#e8f2ff";
+      ctx.beginPath(); ctx.arc(W-88, 62, 20, 0, 6.283); ctx.fill();
+      ctx.fillStyle = "#d3e0ee";
+      ctx.beginPath(); ctx.arc(W-94, 55, 5, 0, 6.283); ctx.fill();
+      ctx.beginPath(); ctx.arc(W-84, 68, 4, 0, 6.283); ctx.fill();
+
+      /* canopy */
+      ctx.fillStyle = "#0c2320";
+      ctx.fillRect(0, 0, W, 34);
+      for(var x=-30; x<=W+30; x+=46){
+        ctx.beginPath(); ctx.arc(x, 30, 34, 0, 6.283); ctx.fill();
+      }
+      ctx.fillStyle = "#09201c";
+      for(x=-30; x<=W+30; x+=70){
+        ctx.beginPath(); ctx.arc(x+23, 40, 26, 0, 6.283); ctx.fill();
+      }
+      /* branch */
+      ctx.fillStyle = "#14533a"; ctx.fillRect(0, 56, W, 6);
+      ctx.fillStyle = "#0e3a28"; ctx.fillRect(0, 60, W, 2);
+      /* leaves */
+      ctx.fillStyle = "#15613d";
+      for(var lx=40; lx<W; lx+=80){
+        ctx.beginPath(); ctx.arc(lx + ((lx/80)%2)*34, 80, 8, 0, 6.283); ctx.fill();
+      }
+
+      /* ground */
+      ctx.fillStyle = "#0d2b1a"; ctx.fillRect(0, GROUND_Y, W, H-GROUND_Y);
+      ctx.fillStyle = "#17763f"; ctx.fillRect(0, GROUND_Y, W, 4);
+      ctx.fillStyle = "#0e3b22"; ctx.fillRect(0, GROUND_Y+4, W, 2);
+      ctx.strokeStyle = "#1d8a4c"; ctx.lineWidth = 2;
+      for(var gx=14; gx<W; gx+=26){
+        ctx.beginPath(); ctx.moveTo(gx, GROUND_Y+2); ctx.lineTo(gx+3, GROUND_Y-5); ctx.stroke();
+      }
+      /* cave */
+      ctx.fillStyle = "#0a1a14";
+      ctx.beginPath(); ctx.ellipse(CAVE_X, GROUND_Y+14, 60, 30, 0, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = "#081712";
+      ctx.beginPath(); ctx.ellipse(CAVE_X, GROUND_Y+12, 44, 22, 0, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = "#030a06";
+      ctx.beginPath(); ctx.ellipse(CAVE_X, GROUND_Y+12, 30, 18, 0, Math.PI, 0); ctx.fill();
+    }
+
+    function drawTrees(){
+      for(var i=0;i<piglets.length;i++){
+        var p = piglets[i];
+        if(p.state !== "tree") continue;
+        ctx.strokeStyle = "#1d8a4c"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(p.x, 58); ctx.lineTo(p.x, 62); ctx.stroke();
+        drawSprite(SPRITES.piglet, Math.round(p.x-12), Math.round(p.y-8), 3, PIGLET_COL);
+      }
+    }
+
+    function drawElevator(){
+      ctx.strokeStyle = "#22303a"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(TRACK_X, 58); ctx.lineTo(TRACK_X, ELEV_BOT+18); ctx.stroke();
+      ctx.fillStyle = "#3a4a55";
+      ctx.beginPath(); ctx.arc(TRACK_X, 56, 7, 0, 6.283); ctx.fill();
+      ctx.fillStyle = "#22303a";
+      ctx.beginPath(); ctx.arc(TRACK_X, 56, 3, 0, 6.283); ctx.fill();
+      ctx.strokeStyle = "#c9a35e"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(TRACK_X, 60); ctx.lineTo(TRACK_X, pig.y - 10); ctx.stroke();
+      ctx.fillStyle = "#9a6a3a"; ctx.fillRect(TRACK_X-28, pig.y-10, 56, 3);
+      ctx.fillStyle = "#7a4a2b"; ctx.fillRect(TRACK_X-28, pig.y-7, 56, 9);
+      ctx.fillStyle = "#5d3218"; ctx.fillRect(TRACK_X-28, pig.y-1, 56, 3);
+    }
+
+    function drawPig(){
+      if(pig.invuln > 0 && Math.floor(time*10)%2 === 0) return;
+      var spr = Math.floor(time*2.5)%2 ? SPRITES.pigA : SPRITES.pigB;
+      drawSprite(spr, Math.round(TRACK_X-15), Math.round(pig.y-33), 3, PINK);
+    }
+
+    function drawLadder(){
+      ctx.strokeStyle = "#5d3218"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(LADDER_X-8, GROUND_Y); ctx.lineTo(LADDER_X-8, ELEV_TOP-10); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(LADDER_X+8, GROUND_Y); ctx.lineTo(LADDER_X+8, ELEV_TOP-10); ctx.stroke();
+      ctx.lineWidth = 2; ctx.strokeStyle = "#8a5a34";
+      for(var y = GROUND_Y - 8; y > ELEV_TOP; y -= 16){
+        ctx.beginPath(); ctx.moveTo(LADDER_X-8, y); ctx.lineTo(LADDER_X+8, y); ctx.stroke();
+      }
+    }
+
+    function drawWolves(){
+      for(var i=0;i<wolves.length;i++){
+        var w = wolves[i];
+        if(w.fallen){
+          ctx.save();
+          ctx.translate(Math.round(w.x), Math.round(w.y)); ctx.rotate(w.rot);
+          drawSprite(SPRITES.wolfB, -15, -13, 3, WOLF_COL);
+          ctx.restore();
+          continue;
+        }
+        if(w.climb){
+          var spr = Math.floor(time*6)%2 ? SPRITES.wolfA : SPRITES.wolfB;
+          drawSprite(spr, Math.round(w.x-15), Math.round(w.y-13), 3, WOLF_COL);
+          continue;
+        }
+        var bx = Math.round(w.x), by = Math.round(w.y);
+        ctx.strokeStyle = "#8a93a5"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(bx, by-14); ctx.lineTo(bx, by-24); ctx.stroke();
+        ctx.fillStyle = w.color;
+        ctx.beginPath(); ctx.arc(bx, by-30, CONFIG.balloonR, 0, 6.283); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,.4)";
+        ctx.beginPath(); ctx.arc(bx-5, by-35, 4, 0, 6.283); ctx.fill();
+        drawSprite(SPRITES.wolfA, bx-15, by-13, 3, WOLF_COL);
+        if(w.carry){
+          ctx.strokeStyle = "#8a93a5"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(bx, by+14); ctx.lineTo(bx, by+22); ctx.stroke();
+          drawSprite(SPRITES.piglet, bx-12, by+20, 3, PIGLET_COL);
+        }
+      }
+    }
+
+    function drawRocks(){
+      ctx.fillStyle = "#9aa5b1";
+      for(var i=0;i<rocks.length;i++){
+        var r = rocks[i];
+        ctx.beginPath(); ctx.arc(Math.round(r.x), Math.round(r.y), r.r, 0, 6.283); ctx.fill();
+      }
+    }
+
+    function drawSteak(x, y, s){
+      ctx.fillStyle = "rgba(255,170,90,.30)";
+      ctx.beginPath(); ctx.arc(x, y, 15*s, 0, 6.283); ctx.fill();
+      ctx.fillStyle = "#ff8a4d";
+      ctx.fillRect(x - 11*s, y - 6*s, 22*s, 12*s);
+      ctx.fillStyle = "#c2401f";
+      ctx.fillRect(x - 11*s, y - 1*s, 22*s, 5*s);
+      ctx.fillStyle = "#fff0dd";
+      ctx.fillRect(x - 7*s, y - 6*s, 4*s, 4*s);
+      ctx.fillRect(x + 4*s, y + 1*s, 4*s, 4*s);
+      ctx.fillStyle = "#ffd9b8";
+      ctx.fillRect(x - 1*s, y - 6*s, 2*s, 12*s);
+    }
+    function drawMeat(){
+      if(meat.active) drawSteak(meat.x, meat.y + Math.sin(time*2.5)*6, 1.6);
+      if(meatThrow) drawSteak(meatThrow.x, meatThrow.y, 1);
+      if(hasMeat) drawSteak(TRACK_X, pig.y - 48, 2);
+    }
+
+    function drawBonusWolves(){
+      for(var i=0;i<bonusWolves.length;i++){
+        var w = bonusWolves[i];
+        if(w.respawn > 0) continue;
+        var bx = Math.round(w.x), by = Math.round(w.y);
+        if(!w.fallen){
+          ctx.strokeStyle = "#8a93a5"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(bx, by-14); ctx.lineTo(bx, by-24); ctx.stroke();
+          ctx.fillStyle = w.color;
+          ctx.beginPath(); ctx.arc(bx, by-30, CONFIG.balloonR, 0, 6.283); ctx.fill();
+          ctx.fillStyle = "rgba(255,255,255,.4)";
+          ctx.beginPath(); ctx.arc(bx-5, by-35, 4, 0, 6.283); ctx.fill();
+          drawSprite(SPRITES.wolfA, bx-15, by-13, 3, WOLF_COL);
+        } else {
+          ctx.save();
+          ctx.translate(bx, by); ctx.rotate(w.rot);
+          drawSprite(SPRITES.wolfB, -15, -13, 3, WOLF_COL);
+          ctx.restore();
+        }
+      }
+    }
+
+    function drawFallingPiglets(){
+      for(var i=0;i<falling.length;i++){
+        var p = falling[i];
+        drawSprite(SPRITES.piglet, Math.round(p.x-12), Math.round(p.y-9), 3, PIGLET_COL);
+      }
+    }
+
+    function drawArrows(){
+      for(var i=0;i<arrows.length;i++){
+        var a = arrows[i];
+        ctx.save();
+        ctx.translate(a.x, a.y);
+        ctx.rotate(Math.atan2(a.vy, a.vx));
+        ctx.fillStyle = "#c9a35e"; ctx.fillRect(-2, -1.5, 16, 3);
+        ctx.fillStyle = "#ffd319";
+        ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(10, -3.5); ctx.lineTo(10, 3.5); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = "#8a93a5"; ctx.fillRect(-2, -2, 5, 1.5); ctx.fillRect(-2, 0.5, 5, 1.5);
+        ctx.restore();
+      }
+    }
+
+    function drawParticles(){
+      for(var i=0;i<particles.length;i++){
+        var p = particles[i];
+        ctx.globalAlpha = 1 - p.t/p.life;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(Math.round(p.x), Math.round(p.y), p.size, p.size);
+      }
+      ctx.globalAlpha = 1;
+    }
+    function drawPopups(){
+      ctx.font = "13px 'Press Start 2P', monospace";
+      ctx.textAlign = "center";
+      for(var i=0;i<popups.length;i++){
+        var p = popups[i];
+        ctx.globalAlpha = Math.max(0, 1 - p.t/p.life);
+        ctx.fillStyle = p.color;
+        ctx.fillText(p.text, p.x, p.y);
+      }
+      ctx.globalAlpha = 1;
+    }
+    function drawCenteredBanner(title, color, sub){
+      ctx.textAlign = "center";
+      ctx.font = "34px 'Press Start 2P', monospace";
+      ctx.fillStyle = color;
+      ctx.fillText(title, W/2, H/2-90);
+      if(sub){
+        ctx.font = "12px 'Press Start 2P', monospace";
+        ctx.fillStyle = "#8a93a5";
+        ctx.fillText(sub, W/2, H/2-48);
+      }
+    }
+    function drawLeaderboard(x, y, max, title){
+      if(!Net.board || Net.board.length === 0) return;
+      ctx.textAlign = "right";
+      ctx.font = "11px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#37e0ff";
+      ctx.fillText(title || "TOP SCORES", x, y);
+      ctx.font = "9px 'Press Start 2P', monospace";
+      for(var i=0;i<Math.min(Net.board.length, max||8);i++){
+        var e = Net.board[i];
+        ctx.fillStyle = (i === 0) ? "#ffd319" : (i < 3 ? "#dce6f0" : "#8a93a5");
+        ctx.fillText(String(i+1) + " " + e.name + " " + pad(e.score), x, y + (i+1)*18);
+      }
+    }
+
+    function drawHUD(){
+      ctx.textAlign = "left";
+      ctx.font = "13px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#dce6f0";
+      ctx.fillText("SCORE " + pad(score), 14, 30);
+      ctx.fillStyle = "#8a93a5";
+      ctx.fillText("HI " + pad(hiScore), 14, 52);
+      ctx.textAlign = "center";
+      ctx.font = "11px 'Press Start 2P', monospace";
+      if(state === "bonus"){
+        ctx.fillStyle = bonusTimer < 4 ? "#ff5a3c" : "#dce6f0";
+        ctx.fillText("TIME " + Math.ceil(bonusTimer), W/2, 30);
+      } else {
+        ctx.fillStyle = "#dce6f0";
+        ctx.fillText("ROUND " + round, W/2, 30);
+        ctx.font = "9px 'Press Start 2P', monospace";
+        ctx.fillStyle = rescuedCount() >= required ? "#3ddc84" : "#ffd319";
+        ctx.fillText("SAVE " + rescuedCount() + "/" + required, W/2, 48);
+        if(hasMeat && Math.floor(time*4)%2 === 0){
+          ctx.textAlign = "left";
+          ctx.font = "8px 'Press Start 2P', monospace";
+          ctx.fillStyle = "#ffd319";
+          ctx.fillText("MEAT READY!", 14, 74);
+        }
+      }
+      ctx.textAlign = "right";
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = twoPlayer ? (curPlayer === 0 ? "#37e0ff" : "#ff2bd6") : "#5a6476";
+      ctx.fillText(twoPlayer ? ("PLAYER " + (curPlayer+1)) : "1P", W-14, 30);
+      ctx.fillStyle = Net.connected ? "#3ddc84" : "#5a6476";
+      ctx.fillText(Net.connected ? ("● " + Net.online + " ONLINE") : "OFFLINE", W-14, H-22);
+      ctx.textAlign = "left";
+      for(var i=0;i<Math.max(0,lives);i++){
+        drawSprite(SPRITES.piglet, 14 + i*26, H-34, 2, PINK);
+      }
+    }
+
+    function drawTitle(){
+      drawWorld();
+      for(var i=0;i<8;i++){
+        var px = 140 + i*(W-280)/7;
+        ctx.strokeStyle = "#1d8a4c"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(px, 58); ctx.lineTo(px, 62); ctx.stroke();
+        drawSprite(SPRITES.piglet, Math.round(px-12), 58, 3, PIGLET_COL);
+      }
+      drawElevator();
+      drawPig();
+
+      ctx.textAlign = "center";
+      ctx.font = "52px 'Press Start 2P', monospace";
+      ctx.fillStyle = "rgba(0,0,0,.65)"; ctx.fillText("POOYAN", W/2+4, H/2-184+4);
+      ctx.fillStyle = "#ff7ad9"; ctx.fillText("POOYAN", W/2, H/2-184);
+      ctx.font = "11px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#3ddc84"; ctx.fillText("SAVE THE PIGLETS", W/2, H/2-140);
+
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#8a93a5"; ctx.fillText("PLAYERS · UP/DOWN", W/2, H/2-106);
+      var bw = 116, gap = 18, total = bw*2 + gap, x0 = (W-total)/2, y0 = H/2-88;
+      var opts = [["1 PLAYER", false], ["2 PLAYERS", true]];
+      for(var oi=0; oi<2; oi++){
+        var sel = twoPlayer === opts[oi][1];
+        var bx = x0 + oi*(bw+gap);
+        ctx.strokeStyle = sel ? "#ff7ad9" : "#3a4356";
+        ctx.lineWidth = sel ? 3 : 1;
+        ctx.strokeRect(bx, y0, bw, 34);
+        ctx.fillStyle = sel ? "#ff7ad9" : "#8a93a5";
+        ctx.font = "10px 'Press Start 2P', monospace";
+        ctx.fillText(opts[oi][0], bx + bw/2, y0 + 23);
+      }
+      if(Math.floor(time*1000/500)%2 === 0){
+        ctx.fillStyle = "#ffd319";
+        ctx.font = "15px 'Press Start 2P', monospace";
+        ctx.fillText("PRESS ENTER OR TAP TO START", W/2, H/2+2);
+      }
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#8a93a5";
+      ctx.fillText("UP/DOWN MOVE · A/Z SHOOT LEFT · X/D SHOOT RIGHT", W/2, H-116);
+      ctx.fillText("P PAUSE · M MUTE", W/2, H-94);
+      ctx.fillStyle = "#dce6f0";
+      ctx.fillText("HI-SCORE " + pad(hiScore), W/2, H-62);
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = Net.connected ? "#3ddc84" : "#5a6476";
+      ctx.fillText(Net.connected ? ("● " + Net.online + " ONLINE") : "OFFLINE", W-14, 20);
+      drawLeaderboard(W-16, 60, 7, "TOP SCORES");
+    }
+
+    function drawIntroOverlay(title, color, sub){
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.font = "34px 'Press Start 2P', monospace";
+      ctx.fillStyle = color;
+      ctx.fillText(title, W/2, H/2-90);
+      if(sub){
+        ctx.font = "12px 'Press Start 2P', monospace";
+        ctx.fillStyle = "#8a93a5";
+        ctx.fillText(sub, W/2, H/2-44);
+      }
+    }
+
+    function drawRoundIntro(){
+      drawIntroOverlay("ROUND " + round, "#ff7ad9", "SAVE " + required + " OF " + piglets.length + " PIGLETS");
+      ctx.fillStyle = "#3ddc84";
+      ctx.font = "13px 'Press Start 2P', monospace";
+      if(twoPlayer) ctx.fillText("PLAYER " + (curPlayer+1), W/2, H/2-126);
+      if(Math.floor(time*1000/500)%2 === 0) ctx.fillText("GET READY!", W/2, H/2-4);
+      ctx.fillStyle = "#8a93a5";
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillText("ENTER / TAP TO SKIP", W/2, H-36);
+    }
+
+    function drawBonusIntro(){
+      drawIntroOverlay("BONUS STAGE!", "#ffd319", "POP THE BALLOONS!");
+      if(Math.floor(time*1000/500)%2 === 0){
+        ctx.fillStyle = "#ff9ad0";
+        ctx.font = "13px 'Press Start 2P', monospace";
+        ctx.fillText("SHOOT FOR BIG POINTS!", W/2, H/2+6);
+      }
+      ctx.fillStyle = "#8a93a5";
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillText("ENTER / TAP TO SKIP", W/2, H-36);
+    }
+
+    function drawPaused(){
+      ctx.fillStyle = "rgba(0,0,0,.55)";
+      ctx.fillRect(0, 0, W, H);
+      drawCenteredBanner("PAUSED", "#8a93a5", "P TO RESUME");
+    }
+
+    function drawEntry(){
+      drawWorld();
+      ctx.fillStyle = "rgba(0,0,0,.6)";
+      ctx.fillRect(0, 0, W, H);
+      drawCenteredBanner("HIGH SCORE!", "#ffd319", "ENTER YOUR INITIALS");
+      var size = 44, gap = 18, total = size*3 + gap*2;
+      var x0 = (W - total)/2, y0 = H/2 + 30;
+      ctx.font = "30px 'Press Start 2P', monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      for(var i=0;i<3;i++){
+        var x = x0 + i*(size+gap);
+        var active = !entry.done && i === entry.pos;
+        ctx.fillStyle = active ? "#ffd319" : "#dce6f0";
+        ctx.fillText(entry.letters[i], x, y0);
+        if(active && Math.floor(time*1000/300)%2 === 0){
+          ctx.fillStyle = "#ffd319";
+          ctx.fillRect(x-size/2, y0+size+6, size, 5);
+        } else if(!entry.done){
+          ctx.fillStyle = "#5a6476";
+          ctx.fillRect(x-size/2, y0+size+6, size, 2);
+        }
+      }
+      ctx.textBaseline = "alphabetic";
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = twoPlayer ? (curPlayer === 0 ? "#37e0ff" : "#ff2bd6") : "#5a6476";
+      ctx.fillText(twoPlayer ? ("PLAYER " + (curPlayer+1)) : "1P", W-14, 30);
+      if(!entry.done){
+        ctx.fillStyle = "#8a93a5";
+        ctx.fillText("UP/DOWN LETTER · FIRE NEXT · ENTER DONE", W/2, y0+size+40);
+      } else if(entry.result){
+        ctx.fillStyle = entry.result.offline ? "#ff5a3c" : "#3ddc84";
+        var msg = entry.result.offline ? "NOT CONNECTED - CAN'T SAVE" :
+                  (entry.result.rank > 0 ? "RANK #" + entry.result.rank + "!" : "NOT ON THE BOARD");
+        ctx.fillText(msg, W/2, y0+size+40);
+      }
+    }
+
+    function drawOver(){
+      drawWorld();
+      ctx.fillStyle = "rgba(0,0,0,.6)";
+      ctx.fillRect(0, 0, W, H);
+      drawCenteredBanner("GAME OVER", "#ff5a3c", "SCORE " + pad(score));
+      ctx.textAlign = "center";
+      ctx.font = "11px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#dce6f0";
+      ctx.fillText("HI-SCORE " + pad(hiScore), W/2, H/2-12);
+      if(qualifies()){
+        ctx.fillStyle = "#ffd319";
+        ctx.fillText("NEW HIGH SCORE! ENTER INITIALS", W/2, H/2+26);
+        ctx.fillStyle = "#dce6f0";
+        ctx.fillText("PRESS ENTER", W/2, H/2+52);
+      } else {
+        ctx.fillStyle = "#5a6476";
+        ctx.fillText("NOT ON THE BOARD THIS TIME", W/2, H/2+26);
+      }
+      ctx.font = "9px 'Press Start 2P', monospace";
+      ctx.fillStyle = "#8a93a5";
+      if(twoPlayer && curPlayer === 0){
+        ctx.fillText("PLAYER 2 · PRESS ENTER / TAP TO PLAY", W/2, H-30);
+      } else {
+        ctx.fillText("ENTER / TAP FOR TITLE", W/2, H-30);
+      }
+      drawLeaderboard(W/2, H/2+78, 5, "TOP SCORES");
+    }
+
+    function draw(t){
+      ctx.save();
+      ctx.fillStyle = "#081a1e";
+      ctx.fillRect(0, 0, W, H);
+      drawShake();
+      if(state === "title"){ drawTitle(); }
+      else if(state === "entry"){ drawEntry(); }
+      else if(state === "over"){ drawOver(); }
+      else {
+        drawWorld();
+        drawLadder();
+        drawTrees();
+        drawWolves();
+        drawBonusWolves();
+        drawFallingPiglets();
+        drawArrows();
+        drawRocks();
+        drawMeat();
+        drawElevator();
+        drawPig();
+        drawParticles();
+        drawPopups();
+        if(state === "playing" || state === "bonus") drawHUD();
+        if(state === "intro") drawRoundIntro();
+        if(state === "bonusIntro") drawBonusIntro();
+        if(state === "roundclear") drawIntroOverlay("ROUND CLEAR!", "#3ddc84", "");
+        if(state === "roundfail") drawIntroOverlay("ROUND FAILED", "#ff5a3c", "SAVE MORE PIGLETS!");
+        if(paused) drawPaused();
+      }
+      ctx.restore();
+    }
+
+    /* ── main loop (fixed timestep + watchdog) ── */
+    var FIXED = 1000/60;
+    var acc = 0, lastT = 0, __steps = 0, __ticks = 0;
+    function tick(t){
+      var now = (typeof t === "number") ? t : performance.now();
+      if(lastT === 0) lastT = now;
+      var elapsed = now - lastT;
+      lastT = now;
+      if(elapsed > 250) elapsed = 250;
+      acc += elapsed;
+      var steps = 0;
+      while(acc >= FIXED && steps < 6){
+        update(FIXED/1000);
+        acc -= FIXED;
+        steps++;
+      }
+      if(steps === 6) acc = 0;
+      __steps += steps; __ticks++;
+      draw(now);
+      requestAnimationFrame(tick);
+    }
+    setInterval(function(){ tick(); }, 100);
+
+    requestAnimationFrame(tick);
+
+    /* public hooks for builders + testing */
+    window.SHT = {
+      info: function(){
+        return { state:state, score:score, hiScore:hiScore, lives:lives, round:round, required:required,
+                 paused:paused, twoPlayer:twoPlayer, curPlayer:curPlayer,
+                 total:piglets.length, rescued:rescuedCount(), lost:(function(){ var c=0; for(var i=0;i<piglets.length;i++) if(piglets[i].state==="lost") c++; return c; })(),
+                 wolves:wolves.length, arrows:arrows.length, falling:falling.length,
+                 rocks:rocks.length, rockTimer:Math.round(rockTimer*10)/10,
+                 hasMeat:hasMeat, meatActive:meat.active,
+                 bonusWolves:bonusWolves.length, bonusTimer:Math.round(bonusTimer*10)/10,
+                 pigY:Math.round(pig.y), spawnTimer:Math.round(spawnTimer*10)/10,
+                 ticks:__ticks, steps:__steps, acc:Math.round(acc*10)/10,
+                 net:{ connected:Net.connected, online:Net.online, ready:Net.ready,
+                       top:Net.board ? Net.board.slice(0,3) : null } };
+      },
+      netRefresh: function(){ Net.refresh(); },
+      netSubmit: function(name, score){ return Net.submit(name, score); },
+      qualifies: function(s){ return Net.qualifies(s); },
+      startRun: startRun,
+      setTwoPlayer: function(b){ twoPlayer = !!b; },
+      setPigY: function(y){ pig.y = Math.max(ELEV_TOP, Math.min(ELEV_BOT, y)); },
+      holdKey: function(k, ms){
+        keys[k] = true;
+        setTimeout(function(){ keys[k] = false; }, ms||120);
+      },
+      spawnWolf: spawnWolf,
+      spawnClimber: function(y){
+        wolves.push({ x:LADDER_X, y:y, vy:CONFIG.climbSpeed, climb:true, pause:0, fallen:false, exit:false, carry:null, rot:0, amp:0, freq:0, ph:0 });
+      },
+      throwRock: function(){
+        rocks.push({ x:400, y:300, vx:-160, vy:100, r:6 });
+      },
+      giveMeat: function(){ hasMeat = true; },
+      spawnAt: function(x, y, vy, carry){
+        var tree = piglets.filter(function(p){ return p.state === "tree"; });
+        var p = (carry && tree.length) ? tree[Math.floor(Math.random()*tree.length)] : null;
+        if(p){ p.state = "carried"; }
+        var w = { x:x, y:y, vy:vy||60, amp:16, freq:1.5, ph:Math.random()*6.283, color:randBalloon(),
+          pop:false, fallen:false, exit:false, carry:p, rot:0 };
+        wolves.push(w);
+        return p ? 1 : 0;
+      },
+      wolvesInfo: function(){
+        return wolves.map(function(w){ return { x:Math.round(w.x), y:Math.round(w.y), carry:!!w.carry, fallen:w.fallen, exit:w.exit, pop:w.pop }; });
+      },
+      popAll: function(){
+        for(var i=0;i<wolves.length;i++){ var w=wolves[i]; if(!w.fallen && !w.climb && !w.exit) popWolf(w); }
+      },
+      skipIntro: skipIntro,
+      skipEntry: function(){ state = "over"; },
+      forceGameOver: function(){
+        if(state === "playing"){ score = 5000; lives = -1; resolveRound(); }
+      }
+    };
+  })();
+
+})();
+</script>
+
+<!-- ═══════════ BACK TO HUB (rathjis-generators) ═══════════ -->
+<style id="rathjiBackBtnStyle">
+  #rathjiBackBtn{
+    position:fixed;
+    left:25%;
+    bottom:18px;
+    transform:translateX(-50%);
+    z-index:2147483000;
+    display:inline-flex;
+    align-items:center;
+    gap:10px;
+    padding:8px 16px 8px 8px;
+    border-radius:999px;
+    background:rgba(13,15,21,0.82);
+    -webkit-backdrop-filter:blur(10px);
+    backdrop-filter:blur(10px);
+    border:1px solid rgba(255,255,255,0.14);
+    box-shadow:0 6px 20px rgba(0,0,0,0.45);
+    text-decoration:none;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:14px;
+    font-weight:600;
+    line-height:1;
+    color:#fff;
+    cursor:pointer;
+    user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    transition:transform .18s ease, border-color .18s ease, box-shadow .18s ease;
+  }
+  #rathjiBackBtn:hover,
+  #rathjiBackBtn:focus-visible{
+    transform:translateX(-50%) translateY(-2px);
+    border-color:rgba(167,139,250,0.65);
+    box-shadow:0 10px 26px rgba(0,0,0,0.5), 0 0 18px rgba(139,92,246,0.35);
+    outline:none;
+  }
+  #rathjiBackBtn .rathji-badge{
+    width:28px;
+    height:28px;
+    flex:0 0 28px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    background:linear-gradient(135deg,#8b5cf6,#d946ef);
+    color:#fff;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:15px;
+    font-weight:700;
+    line-height:1;
+  }
+  #rathjiBackBtn .rathji-label{
+    color:#fff;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    font-size:14px;
+    font-weight:600;
+    line-height:1;
+  }
+  #rathjiBackBtn .rathji-arrow{
+    color:#fff;
+    opacity:0.85;
+  }
+  @media(max-width:480px){
+    #rathjiBackBtn .rathji-label{ display:none; }
+    #rathjiBackBtn{ padding:8px; gap:0; }
+    #rathjiBackBtn .rathji-arrow{ display:none; }
+  }
+</style>
+<script>
+(function(){
+  "use strict";
+  if(document.getElementById("rathjiBackBtn")) return;
+  var a = document.createElement("a");
+  a.id = "rathjiBackBtn";
+  a.href = "https://perchance.org/rathjis-generators";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.setAttribute("aria-label", "Back to my projects");
+  a.title = "Back to my projects";
+  a.innerHTML =
+    '<span class="rathji-badge" aria-hidden="true">R</span>' +
+    '<span class="rathji-label">My projects</span>' +
+    '<svg class="rathji-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>';
+  (document.body || document.documentElement).appendChild(a);
+})();
+</script>

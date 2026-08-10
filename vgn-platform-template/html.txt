@@ -1,0 +1,250 @@
+<!--
+  VGN Platform Game Template — a ready-to-fork platformer template for the
+  Video Game Network (slug: vgn-platform-template).
+
+  Code lives in src/: 00-core.js (loop, input, physics, camera, HUD),
+  10-level.js (the example level's tile map + spawn data), 20-tiles.js
+  (rendering, tile art, backdrop parallax, animations), 30-player.js (the
+  player character), 40-actors.js (enemies, items, block strikes),
+  50-audio.js (WebAudio SFX and the level-clear sequence). They are plain
+  classic scripts loaded in filename order — the order is load-bearing, so
+  keep the numeric prefixes. Edit the src/ files directly; there is no
+  build step.
+
+  Everything renders with procedurally generated pixel art and synthesized
+  sound: no images, no sprite sheets, no audio files, no fonts, no CDN.
+
+  To make it your own game: tune the movement constants at the top of
+  30-player.js, redraw the tile map in 10-level.js (one char per tile), and
+  edit the sprite grids in 30-player.js / 40-actors.js. The example level
+  shows off every mechanic the engine supports.
+-->
+
+<style>
+  :root {
+    --clr-accent: #e40000;
+    --clr-blue: #0058f8;
+    --clr-gold: #fcbc3c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', Courier, monospace;
+    color: #fcfcfc;
+  }
+  #stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas#game {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    background: #5c94fc;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: rgba(0, 0, 0, 0.82);
+    padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: clamp(20px, 5vw, 34px);
+    margin: 0 0 4px;
+    color: var(--clr-accent);
+    text-shadow: 2px 2px 0 #000;
+    letter-spacing: 1px;
+  }
+  .overlay h2 {
+    font-size: clamp(14px, 3vw, 20px);
+    margin: 0 0 18px;
+    color: var(--clr-gold);
+    letter-spacing: 3px;
+  }
+  .overlay p {
+    max-width: 420px;
+    line-height: 1.7;
+    font-size: 12px;
+    color: #d8d8d8;
+  }
+  .overlay .stat-line {
+    font-size: 14px;
+    color: var(--clr-gold);
+    margin: 10px 0 4px;
+  }
+  button.big {
+    margin-top: 18px;
+    background: var(--clr-accent);
+    border: 3px solid #fff;
+    padding: 12px 30px;
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 4px 4px 0 #000;
+  }
+  button.big:active {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 #000;
+  }
+  #muteBtn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    background: rgba(0,0,0,0.6);
+    border: 2px solid #fff;
+    color: #fff;
+    font-size: 14px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  #touchControls {
+    position: absolute;
+    inset: 0;
+    display: none;
+    pointer-events: none;
+    z-index: 4;
+  }
+  @media (pointer: coarse) {
+    #touchControls { display: block; }
+  }
+  .touch-zone {
+    position: absolute;
+    bottom: 18px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.18);
+    border: 2px solid rgba(255,255,255,0.5);
+    color: #fff;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    user-select: none;
+    touch-action: none;
+  }
+  #touchLeft { left: 16px; font-size: 20px; }
+  #touchRight { left: 82px; font-size: 20px; }
+  #touchRun { right: 82px; }
+  #touchJump { right: 16px; }
+  footer.credit {
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    font-size: 9px;
+    color: rgba(255,255,255,0.3);
+    pointer-events: none;
+  }
+</style>
+
+<div id="stage">
+  <canvas id="game"></canvas>
+
+  <button id="muteBtn" title="Toggle sound">🔊</button>
+
+  <div id="touchControls">
+    <div class="touch-zone" id="touchLeft">◀</div>
+    <div class="touch-zone" id="touchRight">▶</div>
+    <div class="touch-zone" id="touchRun">RUN</div>
+    <div class="touch-zone" id="touchJump">JUMP</div>
+  </div>
+
+  <div id="titleOverlay" class="overlay">
+    <h1>PLATFORM GAME TEMPLATE</h1>
+    <h2>VGN · EXAMPLE LEVEL</h2>
+    <p>
+      ARROWS / WASD — move &nbsp;&middot;&nbsp; SPACE / UP / W / Z — jump
+      &nbsp;&middot;&nbsp; SHIFT / X — run<br>
+      Touch: on-screen ◀ ▶ RUN JUMP zones on mobile.
+    </p>
+    <p class="stat-line">This is the template's example level — fork it and build your own world.</p>
+    <button class="big" id="startBtn">START</button>
+  </div>
+
+  <div id="gameOverOverlay" class="overlay hidden">
+    <h1>GAME OVER</h1>
+    <p>Out of lives. Try again!</p>
+    <button class="big" id="restartBtn">RETRY</button>
+  </div>
+
+  <footer class="credit">vgn-platform-template · platformer template</footer>
+</div>
+
+<script src="src/00-core.js"></script>
+<script src="src/10-level.js"></script>
+<script src="src/20-tiles.js"></script>
+<script src="src/30-player.js"></script>
+<script src="src/40-actors.js"></script>
+<script src="src/50-audio.js"></script>
+
+<script>
+  (function () {
+    if (document.getElementById('rathjiBackBtn')) return;
+    var style = document.createElement('style');
+    style.textContent =
+      '#rathjiBackBtn{position:fixed;left:90%;bottom:18px;transform:translateX(-50%);z-index:2147483000;' +
+      'display:inline-flex;align-items:center;gap:8px;padding:8px 16px 8px 8px;border-radius:999px;' +
+      'background:rgba(13,15,21,0.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);' +
+      'border:1px solid rgba(255,255,255,0.25);box-shadow:0 4px 14px rgba(0,0,0,0.35);' +
+      'text-decoration:none;font-family:system-ui,-apple-system,sans-serif;' +
+      'transition:transform 0.15s ease,border-color 0.15s ease,box-shadow 0.15s ease;} ' +
+      '#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);' +
+      'border-color:rgba(167,139,250,0.65);box-shadow:0 6px 18px rgba(139,92,246,0.35);} ' +
+      '#rathjiBackBtn .rb-badge{width:28px;height:28px;border-radius:50%;flex:none;' +
+      'background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;font-weight:700;font-size:15px;' +
+      'display:inline-flex;align-items:center;justify-content:center;} ' +
+      '#rathjiBackBtn .rb-label{font-size:14px;font-weight:600;color:#fff;line-height:1;} ' +
+      '#rathjiBackBtn .rb-arrow{width:14px;height:14px;flex:none;color:rgba(255,255,255,0.75);} ' +
+      '@media (max-width:480px){#rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{display:none;}' +
+      '#rathjiBackBtn{padding:8px;}}';
+    document.head.appendChild(style);
+
+    var a = document.createElement('a');
+    a.id = 'rathjiBackBtn';
+    a.href = 'https://perchance.org/rathjis-generators';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.setAttribute('aria-label', 'Back to my projects');
+    a.title = 'Back to my projects';
+
+    var badge = document.createElement('span');
+    badge.className = 'rb-badge';
+    badge.textContent = 'R';
+
+    var label = document.createElement('span');
+    label.className = 'rb-label';
+    label.textContent = 'My projects';
+
+    var arrow = document.createElement('span');
+    arrow.className = 'rb-arrow';
+    arrow.innerHTML =
+      '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" ' +
+      'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M5 11L11 5M11 5H6M11 5v5"/></svg>';
+
+    a.appendChild(badge);
+    a.appendChild(label);
+    a.appendChild(arrow);
+    document.body.appendChild(a);
+  })();
+</script>

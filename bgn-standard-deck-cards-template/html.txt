@@ -1,0 +1,927 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN STANDARD DECK CARDS — template
+     ─────────────────────────────────────────────────────────────
+     A ready-made standard playing-card deck for the Boardgame
+     Network. Everything below is a working demo AND the reusable
+     API for your own card game:
+
+       window.standardDeck     → 54 cards ({suit, rank} + 2 jokers)
+       window.renderCard(card) → a card element (crisp SVG face)
+       window.renderCardBack() → the ornate SVG back
+       cardEl.classList.toggle("flipped")  → flip face/back
+       .bgn-card:hover         → the card enlarges (built-in CSS)
+
+     To build a game: clone this generator, delete the demo
+     sections, and use standardDeck + renderCard() wherever you
+     render cards. Hover-zoom ships with every card for free.
+     ─────────────────────────────────────────────────────────────
+     CONFIGURE FROM main.pjs (all optional — defaults shown):
+       deckConfig
+         suits = [["spades","hearts","clubs","diamonds"]]
+         ranks = [["A","2","3","4","5","6","7","8","9","10","J","Q","K"]]
+         jokers = 2
+       rulesConfig
+         handSize = 7          // demo hand size
+         duelRounds = 5        // rounds to win the online duel
+     Note the DOUBLE brackets — the outer [ ] is Perchance's JS
+     block, so the value is a real array. The pack (deck grid,
+     deal, online duel) and the demo rules all rebuild from those
+     lists automatically. Omit them for defaults.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/a97b3db01d556b98aee4c8f62b3fef43.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap" style="display:flex; align-items:center; gap:14px">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+    <button class="bgn-nav-help" id="helpBtn" type="button">❓ Help</button>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ DECK AT A GLANCE ═══ -->
+  <section class="sec-head" style="margin-bottom:34px">
+    <div class="sec-eyebrow">The template</div>
+    <h2 class="sec-title goldtext">One deck, any card game</h2>
+    <p class="sec-sub">A full playing deck rendered as crisp inline SVG — configure the suits, ranks and jokers from main.pjs. Every card has a high-quality face and an ornate back — and enlarges when you hover over it.</p>
+  </section>
+
+  <div class="stat-row" style="margin-bottom:52px">
+    <div class="stat"><b id="statCardsEl">52</b><small>Playing cards</small></div>
+    <div class="stat"><b id="statSuitsEl">4</b><small>Suits · ♠ ♥ ♦ ♣</small></div>
+    <div class="stat"><b id="statRanksEl">13</b><small>Ranks · A to K</small></div>
+    <div class="stat"><b id="statJokersEl">2</b><small>Jokers</small></div>
+  </div>
+
+  <!-- ═══ BACK + DEALT HAND ═══ -->
+  <section style="margin-bottom:52px" id="showcaseCtn">
+    <div class="sec-head" style="margin-bottom:28px">
+      <div class="sec-eyebrow">Showcase</div>
+      <h2 class="sec-title goldtext">The card back &amp; a dealt hand</h2>
+      <p class="sec-sub">Hover any card to enlarge it. Click to flip it over.</p>
+    </div>
+
+    <div class="bgn-showgrid">
+      <div class="bgn-stage center">
+        <div class="muted small" style="letter-spacing:.2em; text-transform:uppercase; margin-bottom:14px">Card back</div>
+        <div id="backSpot" class="bgn-backspot"></div>
+      </div>
+
+      <div class="bgn-stage">
+        <div class="bgn-handbar">
+          <button class="btn btn-gold btn-sm" id="dealBtn">Shuffle &amp; deal</button>
+          <button class="btn btn-ghost btn-sm" id="flipBtn">Flip all</button>
+          <button class="btn btn-ghost btn-sm" id="resetBtn">Reset</button>
+          <button class="btn btn-ghost btn-sm" id="clearSaveBtn">Clear save</button>
+          <button class="btn btn-ghost btn-sm" id="shareBtn" title="Download this deck as JSON or a PNG">📤 Share</button>
+          <span class="muted small" id="statusEl" style="margin-left:auto">Seven cards from a shuffled pack.</span>
+        </div>
+        <div class="bgn-fan" id="handFan"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ FULL DECK ═══ -->
+  <section style="margin-bottom:52px">
+    <div class="sec-head" style="margin-bottom:28px">
+      <div class="sec-eyebrow">Browse the deck</div>
+      <h2 class="sec-title goldtext">All 54 cards</h2>
+      <p class="sec-sub">Hover to enlarge · click to flip · scroll to see the whole deck.</p>
+    </div>
+    <div class="bgn-grid" id="deckGrid"></div>
+  </section>
+
+  <!-- ═══ BUILD YOUR GAME ═══ -->
+  <section style="margin-bottom:40px">
+    <div class="sec-head" style="margin-bottom:28px">
+      <div class="sec-eyebrow">For game builders</div>
+      <h2 class="sec-title goldtext">Build with this deck</h2>
+    </div>
+
+    <div class="grid-2" style="align-items:start">
+      <div class="panel">
+        <h3>Three lines to a card game</h3>
+        <pre class="bgn-code">// 1 · The deck — 52 cards + 2 jokers
+window.standardDeck
+
+// 2 · Render a card (returns an element)
+const el = window.renderCard(standardDeck[0])
+myHandEl.append(el)
+
+// 3 · Flip it over
+el.classList.toggle("flipped")
+
+// hover-to-enlarge is built into .bgn-card</pre>
+        <p class="muted small" style="margin-top:14px">That's the whole API. <b>renderCardBack()</b> gives you the back; the demo above shows both in use.</p>
+      </div>
+
+      <div class="panel">
+        <h3>Template notes</h3>
+        <ul class="bgn-list">
+          <li>Faces and backs are <b>inline SVG</b> — zero image downloads, razor sharp at any size.</li>
+          <li>Cards scale to your layout with the <code>--w</code> CSS variable on <code>.bgn-card</code>.</li>
+          <li>Hover-zoom is pure CSS (<code>.bgn-card:hover</code>) — works in any grid, fan or hand.</li>
+          <li>Jokers, court cards, pips and indices are all generated from one small suit-drawing engine.</li>
+          <li>This template ships single-device. For online rooms, add <code>\{import:server-plugin\}</code> to main.pjs (see the server-plugin docs).</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+  <!-- ═══ ONLINE DUEL ═══ -->
+  <section style="margin-bottom:52px">
+    <div class="sec-head" style="margin-bottom:28px">
+      <div class="sec-eyebrow">Play online</div>
+      <h2 class="sec-title goldtext">Beat the Card — a 2-player duel</h2>
+      <p class="sec-sub">A complete little online game built on the deck API: the configured pack dealt into two private face-down stacks, first to <span id="duelRoundsEl">5</span> round wins takes the duel. Requires the server-plugin import in main.pjs.</p>
+    </div>
+
+    <div class="panel duel-room" id="duelRoomEl">
+      <input class="duel-input" id="duelNameInput" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Your name" />
+      <button class="btn btn-gold" id="duelCreateBtn">Create a duel</button>
+      <div class="duel-or">or join with a code</div>
+      <div style="display:flex;gap:8px">
+        <input class="duel-input" id="duelJoinInput" maxlength="5" autocomplete="off" spellcheck="false" placeholder="CODE" />
+        <button class="btn" id="duelJoinBtn">Join</button>
+      </div>
+      <div class="duel-msg" id="duelMsgEl"></div>
+      <div class="duel-hostrow" id="duelHostRowEl" hidden>
+        <span>Room code: <b class="duel-code" id="duelCodeEl">—</b></span>
+        <button class="btn" id="duelCopyBtn">Copy</button>
+        <button class="btn btn-gold" id="duelStartBtn">🚦 Start duel</button>
+      </div>
+      <button class="btn" id="duelLeaveBtn" hidden>✕ Leave</button>
+    </div>
+
+    <div class="panel duel-table" id="duelTableEl" hidden>
+      <div class="duel-scorebar">
+        <div class="duel-side"><b id="duelYouNameEl">You</b><span class="duel-score" id="duelYouScoreEl">0</span></div>
+        <div class="duel-mid"><span class="duel-status" id="duelStatusEl">—</span><span class="duel-round" id="duelRoundEl">Round 1</span></div>
+        <div class="duel-side right"><span class="duel-score" id="duelOppScoreEl">0</span><b id="duelOppNameEl">Rival</b></div>
+      </div>
+      <div class="duel-cards">
+        <div class="duel-player-col">
+          <div class="duel-stack" id="duelYouStackEl" title="Your face-down stack"></div>
+          <div class="duel-reveal" id="duelYouRevealEl"><span class="muted small">your card</span></div>
+        </div>
+        <div class="duel-result" id="duelResultEl">—</div>
+        <div class="duel-player-col">
+          <div class="duel-stack" id="duelOppStackEl" title="Their face-down stack"></div>
+          <div class="duel-reveal" id="duelOppRevealEl"><span class="muted small">their card</span></div>
+        </div>
+      </div>
+      <div class="duel-actions">
+        <button class="btn btn-gold" id="duelStrikeBtn" disabled>⚔ Strike</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ DUEL RESULT ═══ -->
+<div id="duelOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help" style="text-align:center">
+    <h2 class="goldtext" id="duelResultTitleEl">⚔ Duel over!</h2>
+    <p class="muted" id="duelResultLineEl"></p>
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:16px">
+      <button class="btn btn-gold" id="duelAgainBtn">Duel again</button>
+      <button class="btn" id="duelCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="ornament">◆</div>
+  <p>Standard Deck Cards — a drop-in playing-card template.</p>
+  <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ BGN STANDARD DECK CARDS ═══ */
+
+/* showcase layout */
+.bgn-showgrid{ display:grid; grid-template-columns:minmax(0,280px) minmax(0,1fr); gap:20px; align-items:stretch; }
+@media (max-width:820px){ .bgn-showgrid{ grid-template-columns:1fr; } }
+.bgn-stage{ background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+  border:1px solid var(--bgn-line); border-radius:14px; padding:22px 18px 26px;
+  display:flex; flex-direction:column; justify-content:center; overflow:visible; position:relative; }
+.bgn-stage::before{ content:""; position:absolute; top:0; left:15%; right:15%; height:1px; background:linear-gradient(90deg,transparent,var(--bgn-accent),transparent); }
+
+
+/* code + list panels */
+.bgn-code{ background:rgba(10,9,18,.75); border:1px solid var(--bgn-line); border-radius:10px;
+  padding:16px 18px; overflow:auto; font-size:.82rem; line-height:1.65; color:var(--bgn-cream);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.bgn-list{ margin:0; padding-left:20px; color:var(--bgn-muted); font-weight:300; font-size:.9rem; display:grid; gap:10px; }
+.bgn-list b{ color:var(--bgn-cream); font-weight:600; }
+.bgn-list code{ color:var(--bgn-accent2); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.8rem; }
+
+/* nav help button + help modal */
+.bgn-nav-help{ margin-left:auto; background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.18); color:var(--bgn-cream,#f6e6a4); border-radius:999px; padding:7px 14px; cursor:pointer; font:600 .82rem/1 system-ui; white-space:nowrap; }
+.bgn-nav-help:hover{ background:rgba(212,175,55,.18); border-color:var(--bgn-gold2,#d4af37); }
+@media (max-width:520px){ .bgn-nav-help{ font-size:0; } .bgn-nav-help::after{ content:"?"; font-size:.95rem; } }
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help code{ background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.1); border-radius:5px; padding:1px 6px; font-size:.8rem; color:#f2dc8b; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+/* ═══ online duel ═══ */
+.duel-room{ max-width:460px; margin:0 auto; }
+.duel-input{ width:100%; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); border-radius:10px; color:inherit; padding:10px 12px; font:inherit; outline:none; box-sizing:border-box; margin-bottom:8px; }
+.duel-input:focus{ border-color:var(--bgn-gold2,#f6e6a4); }
+.duel-room .btn{ width:100%; margin-bottom:8px; }
+.duel-or{ text-align:center; color:var(--bgn-muted,#c8c3c9); font-size:.72rem; letter-spacing:1px; text-transform:uppercase; margin:10px 0 8px; }
+.duel-msg{ color:var(--bgn-gold2,#f6e6a4); font-size:.8rem; min-height:16px; text-align:center; margin:4px 0 6px; }
+.duel-hostrow{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:center; margin-top:8px; }
+.duel-hostrow .btn{ width:auto; flex:none; padding:8px 14px; margin:0; }
+.duel-code{ color:var(--bgn-gold2,#f6e6a4); letter-spacing:2px; }
+.duel-table{ max-width:760px; margin:0 auto; }
+.duel-scorebar{ display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:10px; margin-bottom:16px; }
+.duel-side{ display:flex; align-items:center; gap:8px; }
+.duel-side.right{ justify-content:flex-end; }
+.duel-side b{ font-size:.95rem; }
+.duel-score{ font-size:1.4rem; font-weight:800; color:var(--bgn-gold2,#f6e6a4); font-variant-numeric:tabular-nums; }
+.duel-mid{ text-align:center; }
+.duel-status{ display:block; font-size:.85rem; color:var(--bgn-accent2,#f2dc8b); min-height:18px; }
+.duel-round{ font-size:.72rem; color:var(--bgn-muted,#c8c3c9); letter-spacing:1px; text-transform:uppercase; }
+.duel-cards{ display:grid; grid-template-columns:1fr auto 1fr; gap:18px; align-items:center; }
+@media (max-width:600px){ .duel-cards{ grid-template-columns:1fr; } .duel-result{ order:0; } }
+.duel-player-col{ display:flex; flex-direction:column; align-items:center; gap:10px; }
+.duel-stack .bgn-card{ --w:86px; }
+.duel-reveal{ min-height:150px; display:flex; align-items:center; justify-content:center; width:100%; }
+.duel-reveal .bgn-card{ --w:120px; }
+.duel-result{ font-weight:800; color:var(--bgn-gold2,#f6e6a4); min-width:120px; text-align:center; font-size:1.05rem; }
+.duel-actions{ text-align:center; margin-top:18px; }
+.duel-actions .btn{ max-width:220px; }
+</style>
+
+<!-- ═══ DUEL SERVER (server-plugin) ═══
+     Requires `createServerSocket = {import:server-plugin}` in main.pjs.
+     Public source — no secrets here. Rooms are in-memory only. -->
+<script type="text/x-server-plugin">
+/* ── BGN Beat-the-Card duel server ──────────────────────────────
+   2-player rooms. The host shuffles its configured pack in the
+   browser and uploads both private stacks + a rank table; the
+   server is authoritative for the stacks and turn order. Host
+   strikes first each round, then guest; higher rank wins. First
+   to `rounds` (from the host, default 5) wins. Rooms live in
+   memory only.                                                    */
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_ROOMS=400, NAME_MAX=16, WIN_ROUNDS=5, DECK_MAX=160;
+let rooms=new Map();
+const byConn=new Map();
+const createTimes=new Map();
+const connRate=new Map();
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function clean(s,max){ return String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").trim().slice(0,max); }
+function makeCode(){ let c=""; for(let i=0;i<5;i++)c+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return c; }
+function rateOk(conn){ const n=nowSec(), last=connRate.get(conn.id); if(last===n)return false; connRate.set(conn.id,n); return true; }
+function canCreate(conn){ const k=conn.net[2], n=nowSec(), e=createTimes.get(k); if(!e||e[1]<n-600){ createTimes.set(k,[1,n]); return true; } if(e[0]>=6)return false; e[0]++; return true; }
+function idArr(a){ if(!Array.isArray(a))return []; const out=[]; for(let i=0;i<a.length&&i<DECK_MAX;i++){ const v=Number(a[i]); if(Number.isInteger(v)&&v>=0&&v<1000)out.push(v); } return out; }
+function send(conn,obj){ try{ if(conn&&conn.readyState===1)conn.send(JSON.stringify(obj)); }catch(e){} }
+self.rpc={
+  create({conn},data){
+    if(!rateOk(conn)||!canCreate(conn))return JSON.stringify({ok:false,err:"slow_down"});
+    let d; try{ d=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad"}); }
+    const name=clean(d.name,NAME_MAX)||"Player";
+    const cur=byConn.get(conn.id);
+    if(cur&&cur.role==="host"){ const r=rooms.get(cur.code); if(r){ r.hostConn=conn; r.hostName=name; return JSON.stringify({ok:true,code:r.code}); } }
+    if(rooms.size>=MAX_ROOMS)return JSON.stringify({ok:false,err:"full"});
+    let code=makeCode(), tries=0;
+    while(rooms.has(code)&&tries++<25)code=makeCode();
+    rooms.set(code,{code,hostConn:conn,hostName:name,guestConn:null,guestName:"",status:0,
+      hostStack:[],guestStack:[],vals:{},hostWins:0,guestWins:0,turn:"host",round:0,rounds:WIN_ROUNDS,pending:null,winner:null});
+    byConn.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code});
+  },
+  join({conn},data){
+    if(!rateOk(conn))return JSON.stringify({ok:false,err:"slow_down"});
+    let d; try{ d=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad"}); }
+    const code=String(d.code||"").toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+    const name=clean(d.name,NAME_MAX)||"Player";
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_room"});
+    if(room.status===1)return JSON.stringify({ok:false,err:"started"});
+    if(room.guestConn)return JSON.stringify({ok:false,err:"full"});
+    room.guestConn=conn; room.guestName=name;
+    byConn.set(conn.id,{code,role:"guest"});
+    send(room.hostConn,{t:"peer",name});
+    return JSON.stringify({ok:true,code});
+  },
+  start({conn},data){
+    if(!rateOk(conn))return JSON.stringify({ok:false,err:"slow_down"});
+    let d; try{ d=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad"}); }
+    const loc=byConn.get(conn.id);
+    if(!loc||loc.role!=="host")return JSON.stringify({ok:false,err:"not_host"});
+    const room=rooms.get(loc.code);
+    if(!room)return JSON.stringify({ok:false,err:"no_room"});
+    if(!room.guestConn)return JSON.stringify({ok:false,err:"no_opp"});
+    const hostStack=idArr(d.hostStack), guestStack=idArr(d.guestStack);
+    if(!hostStack.length||!guestStack.length)return JSON.stringify({ok:false,err:"bad_deck"});
+    const vals={};
+    if(d.vals&&typeof d.vals==="object"){ for(const k in d.vals){ const v=Number(d.vals[k]); if(Number.isFinite(v))vals[k]=v; } }
+    room.hostStack=hostStack; room.guestStack=guestStack; room.vals=vals;
+    room.hostWins=0; room.guestWins=0; room.turn="host"; room.round=0; room.pending=null; room.winner=null;
+    room.rounds=Math.max(1,Math.min(20,Number(d.rounds)||WIN_ROUNDS));
+    room.status=1;
+    send(room.hostConn,{t:"start",you:"host",count:room.hostStack.length,oppName:room.guestName,rounds:room.rounds});
+    send(room.guestConn,{t:"start",you:"guest",count:room.guestStack.length,oppName:room.hostName,rounds:room.rounds});
+    return JSON.stringify({ok:true});
+  },
+  strike({conn},data){
+    if(!rateOk(conn))return JSON.stringify({ok:false,err:"slow_down"});
+    const loc=byConn.get(conn.id);
+    if(!loc)return JSON.stringify({ok:false,err:"no_room"});
+    const room=rooms.get(loc.code);
+    if(!room||room.status!==1)return JSON.stringify({ok:false,err:"no_room"});
+    const role=loc.role;
+    if(room.turn!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    const stack=role==="host"?room.hostStack:room.guestStack;
+    if(!stack.length)return JSON.stringify({ok:false,err:"no_cards"});
+    const id=stack.shift();
+    const rank=Number(room.vals[id]||0)||0;
+    room.pending=room.pending||{};
+    room.pending[role]=id; room.pending[role+"Rank"]=rank;
+    send(room.hostConn,{t:"struck",by:role,id,rank});
+    send(room.guestConn,{t:"struck",by:role,id,rank});
+    if(room.pending.host!==undefined&&room.pending.guest!==undefined){
+      const hr=room.pending.hostRank, gr=room.pending.guestRank;
+      const tie=hr===gr, winner=tie?null:(hr>gr?"host":"guest");
+      if(winner)room[winner==="host"?"hostWins":"guestWins"]++;
+      room.round++;
+      const done=room.hostWins>=room.rounds||room.guestWins>=room.rounds||!room.hostStack.length||!room.guestStack.length;
+      const result={t:"round",aId:room.pending.host,bId:room.pending.guest,tie,winner,hostWins:room.hostWins,guestWins:room.guestWins,round:room.round,done};
+      send(room.hostConn,result); send(room.guestConn,result);
+      room.pending=null;
+      if(done){
+        room.winner=room.hostWins>room.guestWins?"host":(room.hostWins<room.guestWins?"guest":"draw");
+        room.status=2;
+        const msg={t:"done",winner:room.winner,hostWins:room.hostWins,guestWins:room.guestWins};
+        send(room.hostConn,msg); send(room.guestConn,msg);
+      }else{
+        room.turn="host";
+      }
+    }else{
+      room.turn=role==="host"?"guest":"host";
+    }
+    return JSON.stringify({ok:true});
+  },
+  leave({conn}){
+    const loc=byConn.get(conn.id);
+    if(!loc)return JSON.stringify({ok:true});
+    byConn.delete(conn.id);
+    const room=rooms.get(loc.code);
+    if(!room)return JSON.stringify({ok:true});
+    if(loc.role==="host"){ rooms.delete(loc.code); send(room.guestConn,{t:"peerleft"}); }
+    else{ room.guestConn=null; room.guestName=""; send(room.hostConn,{t:"peerleft"}); }
+    return JSON.stringify({ok:true});
+  }
+};
+self.onclose=function({conn}){
+  connRate.delete(conn.id);
+  const loc=byConn.get(conn.id);
+  if(!loc)return;
+  const room=rooms.get(loc.code);
+  byConn.delete(conn.id);
+  if(!room)return;
+  if(loc.role==="host"&&room.hostConn===conn){ rooms.delete(loc.code); send(room.guestConn,{t:"peerleft"}); }
+  else if(loc.role==="guest"&&room.guestConn===conn){ room.guestConn=null; room.guestName=""; send(room.hostConn,{t:"peerleft"}); }
+};
+</script>
+
+<script>
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+</script>
+<script src="https://user.uploads.dev/file/4166609fa079bc2b77e409ff97770415.js"></script> <!-- BGN shared SVG card engine (bgn-deck.js) — source: src/bgn-deck.js (re-upload via upload_file to ship engine updates, then update this URL) -->
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+<script>
+"use strict";
+
+/* ══════════ deck + rules config (from main.pjs — all optional) ══════════
+   deckConfig   → suits / ranks / jokers: which cards the pack contains
+   rulesConfig  → handSize (demo hand) / duelRounds (online duel)
+   Every list below uses its default when missing from main.pjs.   */
+function cfgArr(n, dflt){
+  var v=n;
+  if(v==null)return dflt.slice();
+  try{ if(typeof v.evaluateItem==="function")v=v.evaluateItem(); }catch(e){}
+  if(Array.isArray(v))return v.slice();
+  if(typeof v==="string"){ var a=v.split(/[,\s]+/).map(function(s){return s.trim();}).filter(Boolean); return a.length?a:dflt.slice(); }
+  return dflt.slice();
+}
+function cfgNum(n,d){
+  var v=n;
+  if(v==null)return d;
+  try{ if(typeof v.evaluateItem==="function")v=v.evaluateItem(); }catch(e){}
+  var x=Number(v);
+  return (v!==""&&Number.isFinite(x))?x:d;
+}
+var packCfg = {
+  suits:  cfgArr(rootRef.deckConfig && rootRef.deckConfig.suits, window.bgnDeck.PACK_DEFAULTS.suits),
+  ranks:  cfgArr(rootRef.deckConfig && rootRef.deckConfig.ranks, window.bgnDeck.PACK_DEFAULTS.ranks),
+  jokers: cfgNum(rootRef.deckConfig && rootRef.deckConfig.jokers, window.bgnDeck.PACK_DEFAULTS.jokers)
+};
+var DECK = window.bgnDeck.buildDeck(packCfg);       // the configured pack
+var HAND_SIZE = Math.max(1, Math.min(20, cfgNum(rootRef.rulesConfig && rootRef.rulesConfig.handSize, 7)));
+var DUEL_ROUNDS = Math.max(1, Math.min(20, cfgNum(rootRef.rulesConfig && rootRef.rulesConfig.duelRounds, 5)));
+
+function fillStats(){
+  var cards=document.getElementById("statCardsEl"), suits=document.getElementById("statSuitsEl"),
+      ranks=document.getElementById("statRanksEl"), jokers=document.getElementById("statJokersEl"),
+      rounds=document.getElementById("duelRoundsEl");
+  if(cards)cards.textContent=DECK.filter(function(c){return !c.joker;}).length;
+  if(suits)suits.textContent=new Set(DECK.filter(function(c){return !c.joker;}).map(function(c){return c.suit;})).size;
+  if(ranks)ranks.textContent=packCfg.ranks.length;
+  if(jokers)jokers.textContent=DECK.filter(function(c){return c.joker;}).length;
+  if(rounds)rounds.textContent=DUEL_ROUNDS;
+}
+
+/* ══════════ help modal ══════════ */
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const HELP_HTML='<h2 class="goldtext">The Standard Deck, explained</h2>'
+  +'<p class="muted">54 crisp SVG cards — 52 playing cards plus red and black jokers — ready for any card game you want to build.</p>'
+  +'<h3>Every card is an object</h3>'
+  +'<p><code>{"id":0,"suit":"spades","rank":"A"}</code> — or <code>{"id":52,"joker":true,"color":"red"}</code>. The whole pack is <code>window.standardDeck</code>.</p>'
+  +'<h3>The API</h3>'
+  +'<p><code>renderCard(card)</code> — build a card element (face + back, click to flip, hover to zoom).</p>'
+  +'<p><code>renderCardBack()</code> — just the ornate back.</p>'
+  +'<p><code>cardName(card)</code> — "Ace of Spades", "Red Joker", …</p>'
+  +'<p><code>cardBackSVG()</code> — the raw back as inline SVG, if you want to embed it.</p>'
+  +'<h3>Knobs</h3>'
+  +'<p>Size cards with the <code>--w</code> CSS variable on <code>.bgn-card</code>; flip with <code>el.classList.toggle("flipped")</code>; hover-zoom is built into <code>.bgn-card</code> CSS (disable per card with <code>.nohover</code>).</p>'
+  +'<h3>Configure it (no JS)</h3>'
+  +'<p>Add <code>deckConfig</code> (suits / ranks / jokers) and <code>rulesConfig</code> (handSize / duelRounds) lists to main.pjs — the pack, the dealt hand and the online duel rebuild automatically. Omit them for the default 52+2 deck.</p>'
+  +'<h3>The demo</h3>'
+  +'<p><b>Shuffle &amp; deal</b> deals a fanned hand from a shuffled pack; <b>Flip all</b> turns the hand over; <b>Clear save</b> forgets your arrangement. Your pack order is remembered between visits via localStorage.</p>'
+  +'<h3>Building a game</h3>'
+  +'<p>Clone this generator, delete the demo sections, and call <code>renderCard()</code> wherever you show cards. This template is single-device; for online rooms, import the server-plugin in main.pjs (see the plugin docs).</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+window.openHelp=openHelp;
+window.closeHelp=closeHelp;
+
+/* ══════════ demo ══════════ */
+const dealBtn = document.getElementById("dealBtn");
+const flipBtn = document.getElementById("flipBtn");
+const resetBtn = document.getElementById("resetBtn");
+const clearSaveBtn = document.getElementById("clearSaveBtn");
+const handFan = document.getElementById("handFan");
+const deckGrid = document.getElementById("deckGrid");
+const statusEl = document.getElementById("statusEl");
+const backSpot = document.getElementById("backSpot");
+
+function shuffled(a){
+  const b = a.slice();
+  for(let i=b.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=b[i]; b[i]=b[j]; b[j]=t; }
+  return b;
+}
+let pack = DECK.slice();
+fillStats();
+
+/* ══════════ save / continue (demo deck) ══════════ */
+const SAVE_KEY="bgn_save_stddeck";
+function savePack(){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:2,ids:pack.map(c=>c.id),savedAt:Date.now()})); }catch(e){} }
+function restorePack(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ return false; }
+  if(!o||!Array.isArray(o.ids))return false;
+  const byId=new Map(DECK.map(c=>[c.id,c]));
+  const restored=o.ids.map(id=>byId.get(id)).filter(Boolean);
+  if(restored.length!==DECK.length)return false;
+  pack=restored;
+  return true;
+}
+function clearSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+
+function render(){
+  handFan.innerHTML = "";
+  const tilt = 5;
+  pack.slice(0,HAND_SIZE).forEach((c,i)=>{
+    const el = renderCard(c);
+    el.style.rotate = ((i-3)*tilt)+"deg";
+    el.style.marginBottom = ((3-Math.abs(i-3))*9)+"px";
+    handFan.appendChild(el);
+  });
+  deckGrid.innerHTML = "";
+  for(const c of pack) deckGrid.appendChild(renderCard(c));
+}
+function deal(){
+  pack = shuffled(DECK);
+  savePack();
+  sfx("deal");
+  render();
+  statusEl.textContent = "Fresh shuffle — "+HAND_SIZE+" cards dealt. Hover to zoom.";
+}
+function resetDeck(){
+  pack = DECK.slice();
+  savePack();
+  sfx("place");
+  render();
+  statusEl.textContent = "Reset to a new deck, in order.";
+}
+function flipAll(){
+  sfx("flip");
+  for(const el of handFan.children) el.classList.toggle("flipped");
+}
+
+backSpot.appendChild(renderCardBack());
+dealBtn.addEventListener("click", deal);
+flipBtn.addEventListener("click", flipAll);
+resetBtn.addEventListener("click", resetDeck);
+clearSaveBtn.addEventListener("click", function(){
+  clearSave();
+  pack = DECK.slice();
+  render();
+  sfx("place");
+  statusEl.textContent = "Save cleared — fresh deck.";
+});
+if(restorePack()){
+  render();
+  statusEl.textContent = "Continue — restored your previous deck arrangement.";
+}else{
+  deal();
+}
+
+/* wire up help */
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!helpOverlay.hidden)closeHelp(); });
+
+/* ══════════ ONLINE DUEL (Beat the Card) ══════════
+   A complete tiny 2-player card game built on the deck API —
+   the pattern to copy for your own online game: the host deals a
+   shared shuffle, the server holds both private stacks + turn
+   order, and every revealed card is drawn with renderCard(). */
+var duel={ mode:null, room:null, role:null, sock:null, open:false, started:false,
+  count:0, oppName:"", round:0, rounds:5, youScore:0, oppScore:0, myTurn:false };
+var duelRoomEl=document.getElementById("duelRoomEl"), duelTableEl=document.getElementById("duelTableEl");
+var duelNameInput=document.getElementById("duelNameInput"), duelCreateBtn=document.getElementById("duelCreateBtn");
+var duelJoinInput=document.getElementById("duelJoinInput"), duelJoinBtn=document.getElementById("duelJoinBtn");
+var duelMsgEl=document.getElementById("duelMsgEl");
+var duelHostRowEl=document.getElementById("duelHostRowEl"), duelCodeEl=document.getElementById("duelCodeEl");
+var duelCopyBtn=document.getElementById("duelCopyBtn"), duelStartBtn=document.getElementById("duelStartBtn");
+var duelLeaveBtn=document.getElementById("duelLeaveBtn");
+var duelYouNameEl=document.getElementById("duelYouNameEl"), duelOppNameEl=document.getElementById("duelOppNameEl");
+var duelYouScoreEl=document.getElementById("duelYouScoreEl"), duelOppScoreEl=document.getElementById("duelOppScoreEl");
+var duelStatusEl=document.getElementById("duelStatusEl"), duelRoundEl=document.getElementById("duelRoundEl");
+var duelYouStackEl=document.getElementById("duelYouStackEl"), duelOppStackEl=document.getElementById("duelOppStackEl");
+var duelYouRevealEl=document.getElementById("duelYouRevealEl"), duelOppRevealEl=document.getElementById("duelOppRevealEl");
+var duelResultEl=document.getElementById("duelResultEl"), duelStrikeBtn=document.getElementById("duelStrikeBtn");
+var duelOverlay=document.getElementById("duelOverlay"), duelResultTitleEl=document.getElementById("duelResultTitleEl");
+var duelResultLineEl=document.getElementById("duelResultLineEl"), duelAgainBtn=document.getElementById("duelAgainBtn");
+var duelCloseBtn=document.getElementById("duelCloseBtn");
+
+function duelName(){
+  var n=(duelNameInput&&duelNameInput.value||"").trim();
+  if(!n)n="Player";
+  if(duelNameInput)duelNameInput.value=n;
+  try{ localStorage.setItem("bgn_duel_name",n); }catch(e){}
+  return n.slice(0,16);
+}
+function duelSetMsg(m){ if(duelMsgEl)duelMsgEl.textContent=m||""; }
+function duelCardRank(card){ if(!card||card.joker)return 0; var m={"J":11,"Q":12,"K":13,"A":14}; if(m[card.rank])return m[card.rank]; var v=Number(card.rank); return Number.isFinite(v)?v:0; }
+function duelDeal(){
+  var ids=[]; for(var i=0;i<DECK.length;i++)ids.push(i);
+  for(var j=ids.length-1;j>0;j--){ var k=Math.floor(Math.random()*(j+1)); var tmp=ids[j]; ids[j]=ids[k]; ids[k]=tmp; }
+  var vals={};
+  for(var q=0;q<DECK.length;q++)vals[ids[q]]=duelCardRank(DECK[ids[q]]);
+  var half=Math.floor(DECK.length/2);
+  return {hostStack:ids.slice(0,half), guestStack:ids.slice(half), vals:vals, rounds:DUEL_ROUNDS};
+}
+function duelConnect(cb){
+  if(!rootRef.createServerSocket){ duelSetMsg("Online duels need the server-plugin import in main.pjs."); return; }
+  try{ duel.sock=rootRef.createServerSocket(); }
+  catch(e){ duelSetMsg("Online duels are unavailable right now."); return; }
+  duel.sock.addEventListener("open",function(){ duel.open=true; duelSetMsg("Connected."); if(cb)cb(); });
+  duel.sock.addEventListener("message",function(ev){ duelOnMsg(ev.data); });
+  duel.sock.addEventListener("close",function(){ duelOnClose(); });
+}
+function duelRpc(m,data){
+  if(!duel.sock||!duel.open)return Promise.resolve(null);
+  return duel.sock.rpc[m](data||"").then(function(r){
+    try{ return (typeof r==="string")?JSON.parse(r):r; }catch(e){ return r; }
+  }).catch(function(){ return null; });
+}
+function duelOnClose(){
+  duel.open=false;
+  if(duel.started)duelShowModal("Duel interrupted","Connection to the duel server was lost.","",false);
+  else duelSetMsg("Connection lost.");
+}
+function duelOnMsg(raw){
+  var m; try{ m=JSON.parse(raw); }catch(e){ return; }
+  if(m.t==="peer"){
+    duel.oppName=m.name||"Rival";
+    if(duel.role==="host"){ duelHostRowEl.hidden=false; duelSetMsg(m.name+" joined — hit 🚦 Start duel."); }
+    else duelSetMsg("Joined! Waiting for the host to start…");
+  }
+  else if(m.t==="start"){ duelBegin(m); }
+  else if(m.t==="struck"){ duelOnStruck(m); }
+  else if(m.t==="round"){ duelOnRound(m); }
+  else if(m.t==="done"){ duelOnDone(m); }
+  else if(m.t==="peerleft"){ duelOnPeerLeft(); }
+}
+function duelBegin(m){
+  duel.role=m.you; duel.oppName=m.oppName||"Rival";
+  duel.count=Number(m.count)||0; duel.rounds=Number(m.rounds)||DUEL_ROUNDS;
+  duel.round=0; duel.youScore=0; duel.oppScore=0; duel.started=true;
+  duel.myTurn=duel.role==="host";
+  duelRoomEl.hidden=true; duelTableEl.hidden=false;
+  duelYouNameEl.textContent="You ("+duelName()+")";
+  duelOppNameEl.textContent=duel.oppName;
+  duelYouStackEl.innerHTML=""; duelOppStackEl.innerHTML="";
+  duelYouStackEl.appendChild(renderCardBack());
+  duelOppStackEl.appendChild(renderCardBack());
+  duelResetRound();
+  duelRender();
+  sfx("deal");
+  duelSetMsg("");
+}
+function duelResetRound(){
+  duelYouRevealEl.innerHTML='<span class="muted small">your card</span>';
+  duelOppRevealEl.innerHTML='<span class="muted small">their card</span>';
+  duelResultEl.textContent="—";
+}
+function duelShowStatus(t){ if(duelStatusEl)duelStatusEl.textContent=t; }
+function duelRender(){
+  duelYouScoreEl.textContent=duel.youScore;
+  duelOppScoreEl.textContent=duel.oppScore;
+  duelRoundEl.textContent="Round "+(duel.round||1);
+  duelStrikeBtn.disabled=!duel.started||!duel.myTurn;
+  if(duel.started&&duel.myTurn)duelShowStatus("Your turn — strike!");
+  else if(duel.started)duelShowStatus("Waiting for "+duel.oppName+"…");
+}
+function duelOnStruck(m){
+  var card=DECK[Number(m.id)];
+  var slot=(m.by===duel.role)?duelYouRevealEl:duelOppRevealEl;
+  slot.innerHTML="";
+  if(card)slot.appendChild(renderCard(card));
+  else slot.textContent="?";
+  duel.myTurn=(m.by!==duel.role);
+  if(duel.myTurn)duelShowStatus("Your turn — strike!");
+  else duelShowStatus("Waiting for "+duel.oppName+"…");
+  duelStrikeBtn.disabled=!duel.myTurn;
+}
+function duelOnRound(m){
+  var hostCard=DECK[Number(m.aId)], guestCard=DECK[Number(m.bId)];
+  var youCard=duel.role==="host"?hostCard:guestCard;
+  var oppCard=duel.role==="host"?guestCard:hostCard;
+  duelYouRevealEl.innerHTML=""; duelOppRevealEl.innerHTML="";
+  if(youCard)duelYouRevealEl.appendChild(renderCard(youCard));
+  if(oppCard)duelOppRevealEl.appendChild(renderCard(oppCard));
+  var hw=Number(m.hostWins)||0, gw=Number(m.guestWins)||0;
+  duel.youScore=duel.role==="host"?hw:gw;
+  duel.oppScore=duel.role==="host"?gw:hw;
+  duel.round=Number(m.round)||0;
+  if(m.tie)duelResultEl.textContent="Tie round";
+  else if(m.winner===duel.role)duelResultEl.textContent="You win the round!";
+  else duelResultEl.textContent=duel.oppName+" takes the round.";
+  duel.myTurn=duel.role==="host";
+  duelRender();
+}
+function duelOnDone(m){
+  duel.started=false;
+  duelStrikeBtn.disabled=true;
+  var youWon=m.winner===duel.role;
+  sfx(youWon?"win":"error");
+  duelShowStatus(m.winner==="draw"?"The duel is a draw!":(youWon?"You won the duel!":duel.oppName+" won the duel."));
+  var title=m.winner==="draw"?"🤝 It's a draw!":(youWon?"🏆 You win the duel!":"⚔ "+duel.oppName+" won!");
+  var line=(duel.role==="host"?m.hostWins:m.guestWins)+"–"+(duel.role==="host"?m.guestWins:m.hostWins)+" after "+duel.round+" rounds.";
+  duelShowModal(title,line,m.winner==="draw",duel.role==="host");
+}
+function duelShowModal(title,line,draw,again){
+  duelResultTitleEl.textContent=title;
+  duelResultLineEl.textContent=line+(draw?" No card left unplayed.":"");
+  duelAgainBtn.hidden=!again;
+  duelOverlay.hidden=false;
+}
+function duelOnPeerLeft(){
+  if(duel.started){
+    duel.started=false;
+    duelStrikeBtn.disabled=true;
+    duelShowModal("Duel interrupted",duel.oppName+" left the duel.","",false);
+  }else{
+    duelSetMsg(duel.role==="host"?"Waiting for an opponent…":"Waiting for the host to start…");
+    duelHostRowEl.hidden=true;
+  }
+}
+function duelStartGame(){
+  var deal=duelDeal();
+  duelSetMsg("Starting the duel…");
+  duelRpc("start",JSON.stringify({hostStack:deal.hostStack,guestStack:deal.guestStack,vals:deal.vals,rounds:deal.rounds})).then(function(r){
+    if(!r||!r.ok)duelSetMsg("Couldn't start ("+(r&&r.err?r.err:"error")+").");
+  });
+}
+function duelStrike(){
+  if(!duel.started||!duel.myTurn)return;
+  duelStrikeBtn.disabled=true;
+  duelRpc("strike","").then(function(r){
+    if(!r||!r.ok)duelSetMsg(r&&r.err==="not_your_turn"?"Not your turn.":"Couldn't strike — retry.");
+  });
+}
+function duelLeave(){ if(duel.sock)duelRpc("leave",""); duelTeardown(); }
+function duelTeardown(){
+  duel.started=false;
+  if(duel.sock){ try{ duel.sock.close(1000,"bye"); }catch(e){} }
+  duel.sock=null; duel.open=false; duel.mode=null; duel.room=null; duel.role=null;
+  duel.oppName=""; duel.count=0;
+  duelTableEl.hidden=true; duelRoomEl.hidden=false; duelHostRowEl.hidden=true;
+}
+duelCreateBtn.addEventListener("click",function(){ if(!duel.open)duelConnect(function(){ duelDoCreate(); }); else duelDoCreate(); });
+function duelDoCreate(){
+  duel.mode="host";
+  duelRpc("create",JSON.stringify({name:duelName()})).then(function(r){
+    if(!r||!r.ok){ duelSetMsg(r&&r.err==="slow_down"?"Too many rooms — try again in a minute.":"Couldn't create a duel."); return; }
+    duel.room=r.code; duel.role="host";
+    duelCodeEl.textContent=r.code;
+    duelHostRowEl.hidden=true;
+    duelLeaveBtn.hidden=false;
+    duelSetMsg("Room created — share the code. Waiting for an opponent…");
+  });
+}
+duelJoinBtn.addEventListener("click",function(){
+  var c=(duelJoinInput.value||"").toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+  if(c.length<5){ duelSetMsg("Enter the 5-letter room code."); return; }
+  if(!duel.open)duelConnect(function(){ duelDoJoin(c); });
+  else duelDoJoin(c);
+});
+function duelDoJoin(c){
+  duel.mode="guest";
+  duelRpc("join",JSON.stringify({code:c,name:duelName()})).then(function(r){
+    if(!r||!r.ok){ duelSetMsg(r&&r.err==="no_room"?"No duel with that code — check and retry.":(r&&r.err==="full"?"That room is full.":(r&&r.err==="started"?"That duel already started.":"Couldn't join."))); return; }
+    duel.room=c; duel.role="guest";
+    duelLeaveBtn.hidden=false;
+    duelSetMsg("Joined! Waiting for the host to start…");
+  });
+}
+duelStartBtn.addEventListener("click",function(){ duelStartGame(); });
+duelCopyBtn.addEventListener("click",function(){ try{ navigator.clipboard.writeText(duel.room||""); duelSetMsg("Code copied!"); }catch(e){ duelSetMsg(duel.room||""); } });
+duelLeaveBtn.addEventListener("click",function(){ duelLeave(); });
+duelStrikeBtn.addEventListener("click",duelStrike);
+duelJoinInput.addEventListener("input",function(){ this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5); });
+duelAgainBtn.addEventListener("click",function(){ duelOverlay.hidden=true; if(duel.role==="host")duelStartGame(); else duelSetMsg("Waiting for "+duel.oppName+" to start a rematch…"); });
+duelCloseBtn.addEventListener("click",function(){ duelOverlay.hidden=true; duelLeave(); });
+try{ duelNameInput.value=localStorage.getItem("bgn_duel_name")||""; }catch(e){}
+window.__duel={duel:duel,duelOnMsg:duelOnMsg,duelDeal:duelDeal,duelBegin:duelBegin,duelStrike:duelStrike,duelCardRank:duelCardRank};
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){
+    var g=rootRef.gameTitle&&typeof rootRef.gameTitle.evaluateItem==="function"?rootRef.gameTitle.evaluateItem():rootRef.gameTitle;
+    return (g&&String(g).trim())?String(g).trim():"Standard Deck Cards";
+  }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-standard-deck-cards-template",
+    gameName:tplName,
+    exportData:function(){ return {deckCfg:packCfg, pack:pack.map(function(c){return c.id;})}; },
+    applySave:function(o){
+      if(!o||!Array.isArray(o.pack))return false;
+      if(!o.deckCfg)return false;
+      if(o.deckCfg.suits.join(",")!==packCfg.suits.join(",")||o.deckCfg.ranks.join(",")!==packCfg.ranks.join(",")||o.deckCfg.jokers!==packCfg.jokers)return false;
+      var byId={}; DECK.forEach(function(c){byId[c.id]=c;});
+      var restored=o.pack.map(function(id){return byId[id];}).filter(Boolean);
+      if(restored.length!==DECK.length)return false;
+      pack=restored; savePack(); render(); sfx("place");
+      statusEl.textContent="Restored a shared deck arrangement.";
+      return true;
+    },
+    source:function(){ return document.getElementById("showcaseCtn"); },
+    title:tplName,
+    subtitle:function(){ return "pack · "+DECK.length+" cards · "+packCfg.suits.length+" suits"; },
+    filenameBase:function(){ return tplName().toLowerCase().replace(/[^a-z0-9]+/g,"-")||"standard-deck"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<!-- ── Back-to-hub button (my projects) ─────────────────────────────
+     Vanilla JS + injected <style> only. Links to the projects hub.
+     Guarded: skips if #rathjiBackBtn already exists (no double-add).
+     All CSS is scoped under the #rathjiBackBtn id, so the page's own
+     styles are never touched. -->
+<script>
+(function(){
+  "use strict";
+  if(document.getElementById("rathjiBackBtn")) return;
+  var style=document.createElement("style");
+  style.textContent=""
+    +"#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);z-index:2147483000;"
+    +"display:inline-flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;"
+    +"background:rgba(13,15,21,.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);"
+    +"border:1px solid rgba(255,255,255,.22);box-shadow:0 6px 20px rgba(0,0,0,.35);"
+    +"text-decoration:none;box-sizing:border-box;"
+    +"transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;}"
+    +"#rathjiBackBtn .rb-badge{width:28px;height:28px;flex:none;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;"
+    +"background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;font:600 15px/1 system-ui;}"
+    +"#rathjiBackBtn .rb-label{color:#fff;font:600 14px/1 system-ui;white-space:nowrap;}"
+    +"#rathjiBackBtn .rb-arrow{width:11px;height:11px;flex:none;opacity:.92;}"
+    +"#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,.65);"
+    +"box-shadow:0 10px 26px rgba(0,0,0,.4),0 6px 20px rgba(139,92,246,.45);}"
+    +"@media (max-width:480px){#rathjiBackBtn{padding:8px;gap:0;}"
+    +"#rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{display:none;}}";
+  document.head.appendChild(style);
+  var btn=document.createElement("a");
+  btn.id="rathjiBackBtn";
+  btn.href="https://perchance.org/rathjis-generators";
+  btn.target="_blank";
+  btn.rel="noopener";
+  btn.setAttribute("aria-label","Back to my projects");
+  btn.title="Back to my projects";
+  btn.innerHTML='<span class="rb-badge">R</span><span class="rb-label">My projects</span>'
+    +'<svg class="rb-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+    +'<path d="M5 11L11 5M5 5h6v6" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  document.body.appendChild(btn);
+})();
+</script>

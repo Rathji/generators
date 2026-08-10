@@ -1,0 +1,3021 @@
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/9d516fcdb94e4414444cd6fae716ff50.js"></script> <!-- BGN shared SVG card engine (bgn-deck.js) -->
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+<!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Dominion server ──────────────────────────────────────
+   Rooms: 5-letter codes. Host creates and moves first; a guest
+   joining with the code starts the match. The server owns the
+   complete game state authoritatively (both hands stay private —
+   pushed per-connection, never broadcast) and re-runs the full
+   rules engine to validate every play, buy and response. Public
+   info — supply piles, deck/discard counts, in-play cards, turn,
+   VP — is broadcast via pubsub. Durable room state (the whole
+   game object) lives in the plugin `state` bytes as JSON.
+
+   KINGDOM MIRROR: this script runs in its own sandbox and cannot
+   read main.pjs, so the kingdom card pool is mirrored here. KEEP
+   IT IN SYNC with `dominionKingdom` in main.pjs. The client
+   verifies the pool signature on every update and warns if they
+   drift.                                                    */
+
+/* ═══ KINGDOM CARD POOL — mirror of main.pjs `dominionKingdom` ═══
+   Each game picks 10 of these piles. Engine support for a card's
+   name is required (see the shared DOMINION ENGINE below). */
+const KINGDOM_CFG=[
+  {name:"Cellar",cost:2,emoji:"🍷",kinds:"action"},
+  {name:"Chapel",cost:2,emoji:"⛪",kinds:"action"},
+  {name:"Moat",cost:2,emoji:"🛡️",kinds:"action,reaction"},
+  {name:"Moneylender",cost:4,emoji:"💰",kinds:"action"},
+  {name:"Smithy",cost:4,emoji:"🔨",kinds:"action"},
+  {name:"Village",cost:3,emoji:"🏘️",kinds:"action"},
+  {name:"Market",cost:5,emoji:"🧺",kinds:"action"},
+  {name:"Workshop",cost:3,emoji:"🪚",kinds:"action"},
+  {name:"Feast",cost:4,emoji:"🍗",kinds:"action"},
+  {name:"Mine",cost:5,emoji:"⛏️",kinds:"action"},
+  {name:"Remodel",cost:4,emoji:"🏗️",kinds:"action"},
+  {name:"Throne Room",cost:4,emoji:"🎭",kinds:"action"},
+  {name:"Militia",cost:4,emoji:"⚔️",kinds:"action,attack"},
+  {name:"Witch",cost:5,emoji:"🧙",kinds:"action,attack"},
+  {name:"Council Room",cost:5,emoji:"🏛️",kinds:"action"},
+  {name:"Bureaucrat",cost:4,emoji:"📜",kinds:"action,attack"}
+];
+function kingdomSig(){
+  var s="";
+  for(var i=0;i<KINGDOM_CFG.length;i++){ var c=KINGDOM_CFG[i]; s+=String(c.name)+"|"+c.cost+"|"+String(c.emoji)+"|"+String(c.kinds||"")+";"; }
+  var h=5381; for(var j=0;j<s.length;j++)h=((h*33)^s.charCodeAt(j))>>>0; return h.toString(36);
+}
+
+/* ── durable state helpers ── */
+const SLOT=4096;
+const SCHEMA=1;
+const MAX_ROOMS=Math.min(160, Math.max(4, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/* ── durable leaderboard (top scores, lives at the end of `state`) ── */
+const LB_VERSION=1, LB_CAP=50, LB_NAME_MAX=24, LB_EXTRA_MAX=11, LB_ENTRY=44, LB_HEAD=2;
+const LB_BYTES=LB_HEAD+LB_CAP*LB_ENTRY;
+const LB_BASE=Math.max(state.length-LB_BYTES, 1+MAX_ROOMS*SLOT);
+const lbTimes=new Map(), lbNets=new Map();
+function cleanField(s,max){ return String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,max); }
+function lbInit(){ if(state[LB_BASE]!==LB_VERSION){ state.fill(0,LB_BASE,state.length); state[LB_BASE]=LB_VERSION; } }
+function lbRead(){
+  const a=[];
+  for(let i=0;i<LB_CAP;i++){
+    const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+    if(state[e]!==1)continue;
+    let name=""; for(let k=1;k<=LB_NAME_MAX;k++){ const c=state[e+k]; if(!c)break; name+=String.fromCharCode(c); }
+    let extra=""; for(let k=0;k<LB_EXTRA_MAX;k++){ const c=state[e+33+k]; if(!c)break; extra+=String.fromCharCode(c); }
+    a.push({i,name,score:((state[e+25]<<24)|(state[e+26]<<16)|(state[e+27]<<8)|state[e+28])>>>0,ts:((state[e+29]<<24)|(state[e+30]<<16)|(state[e+31]<<8)|state[e+32])>>>0,extra});
+  }
+  return a;
+}
+function lbWriteSlot(i,name,score,ts,extra){
+  const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+  state.fill(0,e,e+LB_ENTRY);
+  state[e]=1;
+  const nb=[]; for(let k=0;k<name.length&&k<LB_NAME_MAX;k++)nb.push(name.charCodeAt(k));
+  for(let k=0;k<nb.length;k++)state[e+1+k]=nb[k];
+  const xb=[]; for(let k=0;k<extra.length&&k<LB_EXTRA_MAX;k++)xb.push(extra.charCodeAt(k));
+  for(let k=0;k<xb.length;k++)state[e+33+k]=xb[k];
+  state[e+25]=(score>>>24)&255; state[e+26]=(score>>>16)&255; state[e+27]=(score>>>8)&255; state[e+28]=score&255;
+  state[e+29]=(ts>>>24)&255; state[e+30]=(ts>>>16)&255; state[e+31]=(ts>>>8)&255; state[e+32]=ts&255;
+}
+function lbBetter(asc,a,b){ if(asc)return a.score<b.score||(a.score===b.score&&a.ts<b.ts); return a.score>b.score||(a.score===b.score&&a.ts<b.ts); }
+function lbSubmit(name,score,ts,extra,asc){
+  lbInit();
+  const a=lbRead();
+  if(a.length<LB_CAP){
+    for(let i=0;i<LB_CAP;i++){ if(state[LB_BASE+LB_HEAD+i*LB_ENTRY]!==1){ lbWriteSlot(i,name,score,ts,extra); return; } }
+    return;
+  }
+  let wi=-1; const w={score:0,ts:0};
+  for(const en of a){ if(wi===-1||lbBetter(asc,w,en)){ wi=en.i; w.score=en.score; w.ts=en.ts; } }
+  if(lbBetter(asc,{score,ts},w))lbWriteSlot(wi,name,score,ts,extra);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   DOMINION ENGINE — the pure rules engine, shared VERBATIM by the
+   online server (authoritative) and the client (hotseat / vs-AI).
+   It operates only on plain JSON state and card metadata; no DOM,
+   no sockets. It reads the variables POOL (kingdom pool), set via
+   setPool(), and AUTO_RESOLVE (whether unanswered attack prompts
+   should be force-resolved when a player's turn starts).
+   ══════════════════════════════════════════════════════════════════ */
+
+var BASE_CARDS={
+  "Copper":{name:"Copper",cost:0,emoji:"🪙",kinds:["treasure"],coin:1,vp:0},
+  "Silver":{name:"Silver",cost:3,emoji:"🥈",kinds:["treasure"],coin:2,vp:0},
+  "Gold":{name:"Gold",cost:6,emoji:"🥇",kinds:["treasure"],coin:3,vp:0},
+  "Estate":{name:"Estate",cost:2,emoji:"🏛️",kinds:["victory"],coin:0,vp:1},
+  "Duchy":{name:"Duchy",cost:5,emoji:"🏰",kinds:["victory"],coin:0,vp:3},
+  "Province":{name:"Province",cost:8,emoji:"👑",kinds:["victory"],coin:0,vp:6},
+  "Curse":{name:"Curse",cost:0,emoji:"😈",kinds:["curse"],coin:0,vp:-1}
+};
+var KINGDOM_COUNT=10, HAND_SIZE=5, START_COPPERS=7, START_ESTATES=3;
+var POOL, POOL_BY_NAME;
+
+function setPool(arr){
+  POOL=[]; POOL_BY_NAME={};
+  for(var i=0;i<arr.length;i++){
+    var t=arr[i], o={};
+    o.name=String(t.name||"");
+    o.cost=Math.max(0,Math.floor(t.cost)||0);
+    o.emoji=String(t.emoji||"");
+    o.coin=Math.floor(t.coin)||0;
+    o.vp=Math.floor(t.vp)||0;
+    var ks=(typeof t.kinds==="string")?t.kinds.split(","):(Array.isArray(t.kinds)?t.kinds:[]);
+    o.kinds=[];
+    for(var k=0;k<ks.length;k++){ var s=String(ks[k]).trim(); if(s)o.kinds.push(s); }
+    POOL.push(o); POOL_BY_NAME[o.name]=o;
+  }
+}
+function cardInfo(n){ return BASE_CARDS[n]||POOL_BY_NAME[n]||null; }
+function isAction(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("action")>=0); }
+function isTreasure(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("treasure")>=0); }
+function isVictory(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("victory")>=0); }
+function isCurse(n){ return n==="Curse"; }
+function keepVal(c){ var ci=cardInfo(c); if(!ci)return 0; return (ci.vp||0)+(isTreasure(c)?(ci.coin||0)*0.5:0); }
+function shuffle(a){ for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=a[i];a[i]=a[j];a[j]=t; } return a; }
+function pickKingdom(rng){
+  var names=[]; for(var i=0;i<POOL.length;i++)names.push(POOL[i].name);
+  var r=rng||Math.random;
+  for(var j=names.length-1;j>0;j--){ var k=Math.floor(r()*(j+1)); var t=names[j];names[j]=names[k];names[k]=t; }
+  return names.slice(0,KINGDOM_COUNT);
+}
+function basePileCount(n){
+  if(n==="Copper")return 46; if(n==="Silver")return 40; if(n==="Gold")return 30;
+  if(n==="Curse")return 10; return 8;
+}
+function makeSupply(kingdom){
+  var s={};
+  var bases=["Copper","Silver","Gold","Estate","Duchy","Province","Curse"];
+  for(var i=0;i<bases.length;i++)s[bases[i]]=basePileCount(bases[i]);
+  for(var k=0;k<kingdom.length;k++)s[kingdom[k]]=KINGDOM_COUNT;
+  return s;
+}
+function pileOrder(){ return ["Copper","Silver","Gold","Estate","Duchy","Province","Curse"].concat(POOL.map(function(c){return c.name;})); }
+function current(g){ return g.turnIndex%2; }
+function draw(g,p,n){
+  var got=0;
+  while(n>0){
+    var pl=g.players[p];
+    if(!pl.deck.length){
+      if(!pl.discard.length)break;
+      shuffle(pl.discard);
+      pl.deck=pl.discard; pl.discard=[];
+    }
+    pl.hand.push(pl.deck.pop());
+    n--; got++;
+  }
+  return got;
+}
+function gain(g,p,name){
+  if(g.supply[name]>0){ g.supply[name]--; g.players[p].discard.push(name); return true; }
+  return false;
+}
+function gainable(g,name,maxCost){
+  if(g.supply[name]==null||g.supply[name]<=0)return false;
+  var c=cardInfo(name); return !!(c&&c.cost<=maxCost);
+}
+function idxList(cards,len){
+  if(!cards||!cards.length)return [];
+  if(!Array.isArray(cards))return null;
+  var seen={},out=[];
+  for(var i=0;i<cards.length;i++){
+    var v=cards[i];
+    if(typeof v!=="number"||v<0||v>=len||seen[v])return null;
+    seen[v]=1; out.push(v);
+  }
+  return out.sort(function(a,b){return a-b;});
+}
+function removeIdx(arr,idxs){
+  var out=arr.slice();
+  for(var i=idxs.length-1;i>=0;i--)out.splice(idxs[i],1);
+  return out;
+}
+function actionIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isAction(pl.hand[i]))out.push(i); return out; }
+function treasureIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isTreasure(pl.hand[i]))out.push(i); return out; }
+function victoryIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isVictory(pl.hand[i]))out.push(i); return out; }
+function score(g,p){ var pl=g.players[p],v=0; var zones=[pl.hand,pl.deck,pl.discard,pl.inPlay]; for(var z=0;z<zones.length;z++){ for(var i=0;i<zones[z].length;i++){ var c=cardInfo(zones[z][i]); if(c)v+=(c.vp||0); } } return v; }
+function emptyPiles(g){ var c=0; for(var k in g.supply){ if(g.supply[k]<=0)c++; } return c; }
+function ev(g,p,txt){ return {p:p,txt:txt}; }
+function checkOver(g){
+  if(g.over)return true;
+  if(g.supply["Province"]<=0||emptyPiles(g)>=3){
+    g.over=true; g.reason="supply";
+    var s0=score(g,0),s1=score(g,1);
+    g.scores=[s0,s1];
+    g.winner=s0>s1?0:(s1>s0?1:"draw");
+    g.events.push(ev(g,g.winner==="draw"?-1:g.winner,"Game over — "+(g.winner==="draw"?("tie "+s0+"–"+s1):(s0+"–"+s1))+"."));
+    return true;
+  }
+  return false;
+}
+function pendingFor(g,p){ for(var i=0;i<g.pending.length;i++){ if(g.pending[i].player===p)return g.pending[i]; } return null; }
+function pushPrompt(g,p,pd){
+  g.pid=(g.pid||0)+1;
+  var pr={player:p,type:pd.type,data:pd.data||{},id:g.pid};
+  g.pending.push(pr);
+  return pr;
+}
+function resolveAutoPrompts(g,p){
+  if(!AUTO_RESOLVE)return;
+  for(;;){
+    var pr=pendingFor(g,p);
+    if(!pr)break;
+    if(pr.type==="militia"){
+      var pl=g.players[p], h=pl.hand;
+      if(h.length>3){
+        var idxs=h.map(function(c,i){return i;}).sort(function(a,b){return keepVal(h[b])-keepVal(h[a]);});
+        var cards=idxs.slice(3);
+        for(var i=0;i<cards.length;i++)pl.discard.push(h[cards[i]]);
+        pl.hand=removeIdx(pl.hand,cards);
+        g.events.push(ev(g,p,"Discarded down to 3 (auto)."));
+      }
+    } else if(pr.type==="bureaucrat"){
+      var vi=victoryIndices(g,p);
+      if(vi.length){
+        g.players[p].deck.push(g.players[p].hand[vi[0]]);
+        g.players[p].hand=removeIdx(g.players[p].hand,[vi[0]]);
+        g.events.push(ev(g,p,"Revealed a Victory card (auto)."));
+      }
+    }
+    g.pending=g.pending.filter(function(x){return x.id!==pr.id;});
+  }
+}
+function cleanupPlayer(g,p){
+  var pl=g.players[p];
+  for(var i=0;i<pl.hand.length;i++)pl.discard.push(pl.hand[i]);
+  pl.hand=[];
+  for(var j=0;j<pl.inPlay.length;j++)pl.discard.push(pl.inPlay[j]);
+  pl.inPlay=[];
+  draw(g,p,HAND_SIZE);
+}
+function startTurn(g,p){
+  g.phase="action";
+  g.t={actions:1,buys:1,coins:0};
+  resolveAutoPrompts(g,p);
+  g.events.push(ev(g,p,"Turn "+(Math.floor(g.turnIndex/2)+1)+" — drew 5."));
+}
+function newGame(kingdom, firstMover){
+  var g={
+    kingdom:kingdom.slice(),
+    supply:makeSupply(kingdom),
+    players:[{hand:[],deck:[],discard:[],inPlay:[]},{hand:[],deck:[],discard:[],inPlay:[]}],
+    trash:[], turnIndex:0, phase:"action",
+    t:{actions:1,buys:1,coins:0},
+    pending:[], pid:0, over:false, winner:null, reason:"", scores:null,
+    seq:0, events:[], lastAct:0
+  };
+  for(var p=0;p<2;p++){
+    var d=[];
+    for(var i=0;i<START_COPPERS;i++)d.push("Copper");
+    for(var j=0;j<START_ESTATES;j++)d.push("Estate");
+    shuffle(d);
+    g.players[p].deck=d;
+  }
+  draw(g,0,HAND_SIZE);
+  draw(g,1,HAND_SIZE);
+  g.turnIndex=firstMover||0;
+  startTurn(g,current(g));
+  return g;
+}
+function resolveAction(g,p,name){
+  var t=g.t;
+  if(name==="Smithy"){ var got=draw(g,p,3); g.events.push(ev(g,p,"Smithy: drew "+got+".")); }
+  else if(name==="Village"){ draw(g,p,1); t.actions+=2; g.events.push(ev(g,p,"Village: +1 card, +2 Actions.")); }
+  else if(name==="Market"){ draw(g,p,1); t.actions+=1; t.buys+=1; t.coins+=1; g.events.push(ev(g,p,"Market: +1 card, +1 Action, +1 Buy, +$1.")); }
+  else if(name==="Moat"){ var g2=draw(g,p,2); g.events.push(ev(g,p,"Moat: drew "+g2+".")); }
+  else if(name==="Council Room"){ draw(g,p,4); t.buys+=1; var og=draw(g,1-p,1); g.events.push(ev(g,p,"Council Room: +4 cards, +1 Buy; opponent drew "+og+".")); }
+  else if(name==="Militia"){ t.coins+=2; g.events.push(ev(g,p,"Militia: +$2; each other player discards to 3.")); if(g.players[1-p].hand.length>3)return pushPrompt(g,1-p,{type:"militia"}); }
+  else if(name==="Witch"){ draw(g,p,2); var gd=gain(g,1-p,"Curse"); g.events.push(ev(g,p,"Witch: drew 2; opponent gained a Curse"+(gd?"":" (pile empty)")+".")); }
+  else if(name==="Bureaucrat"){ var gs=gain(g,p,"Silver"); if(gs)g.players[p].deck.push("Silver"); g.events.push(ev(g,p,"Bureaucrat: Silver on top of your deck; opponent reveals a Victory card.")); return pushPrompt(g,1-p,{type:"bureaucrat"}); }
+  else if(name==="Cellar"){ t.actions+=1; return pushPrompt(g,p,{type:"cellar"}); }
+  else if(name==="Chapel"){ return pushPrompt(g,p,{type:"trashN",data:{max:4}}); }
+  else if(name==="Moneylender"){ return pushPrompt(g,p,{type:"moneylender"}); }
+  else if(name==="Workshop"){ return pushPrompt(g,p,{type:"gain",data:{maxCost:5}}); }
+  else if(name==="Feast"){ var ip=g.players[p].inPlay; var fi=ip.lastIndexOf("Feast"); if(fi>=0)ip.splice(fi,1); g.trash.push("Feast"); return pushPrompt(g,p,{type:"gain",data:{maxCost:5}}); }
+  else if(name==="Mine"){ if(!treasureIndices(g,p).length){ g.events.push(ev(g,p,"Mine: no Treasure in hand.")); } else return pushPrompt(g,p,{type:"mineStep1"}); }
+  else if(name==="Remodel"){ if(!g.players[p].hand.length){ g.events.push(ev(g,p,"Remodel: no cards in hand.")); } else return pushPrompt(g,p,{type:"remodelStep1"}); }
+  else if(name==="Throne Room"){ if(!actionIndices(g,p).length){ g.events.push(ev(g,p,"Throne Room: no Action in hand to double.")); } else return pushPrompt(g,p,{type:"throne"}); }
+  return null;
+}
+function playCard(g,p,idx){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="action")return {ok:false,err:"not_action_phase"};
+  if(g.t.actions<=0)return {ok:false,err:"no_actions"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  var pl=g.players[p];
+  if(idx==null||idx<0||idx>=pl.hand.length)return {ok:false,err:"bad_card"};
+  var name=pl.hand[idx];
+  if(!isAction(name))return {ok:false,err:"not_action"};
+  pl.hand.splice(idx,1);
+  pl.inPlay.push(name);
+  g.t.actions--;
+  g.seq++;
+  g.events.push(ev(g,p,"Played "+name+"."));
+  var pr=resolveAction(g,p,name);
+  checkOver(g);
+  return {ok:true,prompt:pr,over:g.over};
+}
+function respondPrompt(g,p,req){
+  if(g.over)return {ok:false,err:"over"};
+  var pr=pendingFor(g,p);
+  if(!pr)return {ok:false,err:"no_prompt"};
+  if(req.id!==pr.id)return {ok:false,err:"bad_prompt"};
+  var resp=req.resp||{};
+  var pl=g.players[p];
+  var newPrompt=null;
+  if(pr.type==="cellar"){
+    var cd=idxList(resp.cards,pl.hand.length);
+    if(cd==null)return {ok:false,err:"bad_resp"};
+    for(var a=0;a<cd.length;a++)pl.discard.push(pl.hand[cd[a]]);
+    pl.hand=removeIdx(pl.hand,cd);
+    var cg=draw(g,p,cd.length);
+    g.events.push(ev(g,p,"Cellar: discarded "+cd.length+", drew "+cg+"."));
+  } else if(pr.type==="trashN"){
+    var tr=idxList(resp.cards,pl.hand.length);
+    if(tr==null||tr.length>(pr.data.max||4))return {ok:false,err:"bad_resp"};
+    for(var b=0;b<tr.length;b++)g.trash.push(pl.hand[tr[b]]);
+    pl.hand=removeIdx(pl.hand,tr);
+    g.events.push(ev(g,p,"Chapel: trashed "+(tr.length?tr.length:"no")+" card"+(tr.length===1?"":"s")+"."));
+  } else if(pr.type==="moneylender"){
+    if(resp.skip){ g.events.push(ev(g,p,"Moneylender: kept your Coppers.")); }
+    else{
+      var ml=idxList(resp.cards,pl.hand.length);
+      if(ml==null||ml.length!==1||pl.hand[ml[0]]!=="Copper")return {ok:false,err:"bad_resp"};
+      g.trash.push("Copper"); pl.hand=removeIdx(pl.hand,ml); g.t.coins+=3;
+      g.events.push(ev(g,p,"Moneylender: trashed a Copper, +$3."));
+    }
+  } else if(pr.type==="gain"){
+    var gp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!gainable(g,gp,pr.data.maxCost||5))return {ok:false,err:"bad_pile"};
+      gain(g,p,gp);
+      g.events.push(ev(g,p,"Gained "+gp+"."));
+    }
+  } else if(pr.type==="remodelStep1"){
+    var rs=idxList(resp.cards,pl.hand.length);
+    if(rs==null||rs.length!==1)return {ok:false,err:"bad_resp"};
+    var rm=pl.hand[rs[0]];
+    g.trash.push(rm); pl.hand=removeIdx(pl.hand,rs);
+    g.events.push(ev(g,p,"Remodel: trashed "+rm+"."));
+    newPrompt=pushPrompt(g,p,{type:"remodelStep2",data:{maxCost:(cardInfo(rm).cost||0)+2}});
+  } else if(pr.type==="remodelStep2"){
+    var rp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!gainable(g,rp,pr.data.maxCost||2))return {ok:false,err:"bad_pile"};
+      gain(g,p,rp);
+      g.events.push(ev(g,p,"Gained "+rp+"."));
+    }
+  } else if(pr.type==="mineStep1"){
+    var ms=idxList(resp.cards,pl.hand.length);
+    if(ms==null||ms.length!==1||!isTreasure(pl.hand[ms[0]]))return {ok:false,err:"bad_resp"};
+    var mt=pl.hand[ms[0]];
+    g.trash.push(mt); pl.hand=removeIdx(pl.hand,ms);
+    g.events.push(ev(g,p,"Mine: trashed "+mt+"."));
+    newPrompt=pushPrompt(g,p,{type:"mineStep2",data:{maxCost:(cardInfo(mt).cost||0)+3}});
+  } else if(pr.type==="mineStep2"){
+    var mp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!isTreasure(mp)||!gainable(g,mp,pr.data.maxCost||3))return {ok:false,err:"bad_pile"};
+      gain(g,p,mp);
+      g.events.push(ev(g,p,"Gained "+mp+"."));
+    }
+  } else if(pr.type==="throne"){
+    var th=idxList(resp.cards,pl.hand.length);
+    if(th==null||th.length!==1||!isAction(pl.hand[th[0]]))return {ok:false,err:"bad_resp"};
+    var tn=pl.hand[th[0]];
+    pl.hand=removeIdx(pl.hand,th);
+    pl.inPlay.push(tn);
+    var r1=resolveAction(g,p,tn);
+    if(r1){ newPrompt=r1; newPrompt.data.doubleNext=tn; }
+    else{
+      var r2=resolveAction(g,p,tn);
+      if(r2){ newPrompt=r2; newPrompt.data.doubleNext=tn; }
+    }
+    g.events.push(ev(g,p,"Throne Room: played "+tn+" twice."));
+  } else if(pr.type==="militia"){
+    var h=pl.hand;
+    if(resp.moat){
+      if(h.indexOf("Moat")<0)return {ok:false,err:"bad_resp"};
+      g.events.push(ev(g,p,"Revealed Moat — immune to Militia."));
+    }else{
+      var md=idxList(resp.cards,h.length);
+      if(md==null||h.length-md.length>3)return {ok:false,err:"bad_resp"};
+      for(var e=0;e<md.length;e++)pl.discard.push(h[md[e]]);
+      pl.hand=removeIdx(pl.hand,md);
+      g.events.push(ev(g,p,"Militia: discarded to "+pl.hand.length+" cards."));
+    }
+  } else if(pr.type==="bureaucrat"){
+    var hh=pl.hand;
+    if(resp.none){
+      if(victoryIndices(g,p).length)return {ok:false,err:"bad_resp"};
+      g.events.push(ev(g,p,"No Victory card to reveal."));
+    }else{
+      var br=idxList(resp.cards,hh.length);
+      if(br==null||br.length!==1||!isVictory(hh[br[0]]))return {ok:false,err:"bad_resp"};
+      var bv=hh[br[0]];
+      pl.hand=removeIdx(pl.hand,br);
+      pl.deck.push(bv);
+      g.events.push(ev(g,p,"Bureaucrat: revealed "+bv+", put on top of deck."));
+    }
+  } else return {ok:false,err:"bad_prompt"};
+  g.pending=g.pending.filter(function(x){return x.id!==pr.id;});
+  g.seq++;
+  var dn=pr.data&&pr.data.doubleNext;
+  if(dn&&!newPrompt){
+    var r3=resolveAction(g,p,dn);
+    if(r3){ newPrompt=r3; newPrompt.data.doubleNext=dn; }
+  }
+  checkOver(g);
+  return {ok:true,prompt:newPrompt,over:g.over};
+}
+function endActions(g,p){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="action")return {ok:false,err:"bad_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  var pl=g.players[p], treas=[], keep=[];
+  for(var i=0;i<pl.hand.length;i++){ if(isTreasure(pl.hand[i])){ treas.push(pl.hand[i]); pl.inPlay.push(pl.hand[i]); } else keep.push(pl.hand[i]); }
+  pl.hand=keep;
+  for(var j=0;j<treas.length;j++)g.t.coins+=cardInfo(treas[j]).coin;
+  g.phase="buy";
+  g.seq++;
+  g.events.push(ev(g,p,"Buy phase — auto-played "+treas.length+" Treasure"+(treas.length===1?"":"s")+"."));
+  return {ok:true,over:g.over};
+}
+function buyCard(g,p,pile){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="buy")return {ok:false,err:"not_buy_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  if(g.t.buys<=0)return {ok:false,err:"no_buys"};
+  if(g.supply[pile]==null||g.supply[pile]<=0)return {ok:false,err:"pile_empty"};
+  var c=cardInfo(pile); if(!c)return {ok:false,err:"bad_pile"};
+  if(g.t.coins<c.cost)return {ok:false,err:"too_expensive"};
+  g.t.buys--; g.t.coins-=c.cost;
+  gain(g,p,pile);
+  g.seq++;
+  g.events.push(ev(g,p,"Bought "+pile+"."));
+  checkOver(g);
+  return {ok:true,over:g.over};
+}
+function endTurn(g,p){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="buy")return {ok:false,err:"not_buy_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  cleanupPlayer(g,p);
+  g.events.push(ev(g,p,"Turn ended."));
+  g.turnIndex++;
+  g.seq++;
+  startTurn(g,current(g));
+  checkOver(g);
+  return {ok:true,over:g.over};
+}
+function canPlay(g,p,idx){
+  return !g.over&&current(g)===p&&g.phase==="action"&&g.t.actions>0&&!pendingFor(g,p)&&idx!=null&&idx>=0&&idx<g.players[p].hand.length&&isAction(g.players[p].hand[idx]);
+}
+function canBuyCard(g,p,pile){
+  if(g.over||current(g)!==p||g.phase!=="buy"||pendingFor(g,p)||g.t.buys<=0)return false;
+  if(g.supply[pile]==null||g.supply[pile]<=0)return false;
+  var c=cardInfo(pile); return !!(c&&g.t.coins>=c.cost);
+}
+function drainEvents(g){
+  var out=g.events.slice();
+  g.events.length=0;
+  return out;
+}
+
+var AUTO_RESOLVE=true;
+setPool(KINGDOM_CFG);
+
+/* ── connection / broadcast ── */
+let rooms=new Map();                 // code -> room
+const conns=new Map();               // conn.id -> {code, role, conn}
+const chatTimes=new Map();           // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+function topic(code){ return "ch:"+code; }
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  const blob=JSON.stringify({v:1,hostFirst:room.hostFirst,lastAct:room.lastAct,g:room.g});
+  const len=Math.min(blob.length,SLOT-20);
+  state[o+15]=SCHEMA;
+  state[o+16]=(len>>>24)&255; state[o+17]=(len>>>16)&255; state[o+18]=(len>>>8)&255; state[o+19]=len&255;
+  for(let i=0;i<len;i++)state[o+20+i]=blob.charCodeAt(i)&255;
+}
+function loadRoom(i){
+  const o=off(i), st=state[o];
+  const code=codeAt(i);
+  const len=((state[o+16]<<24)|(state[o+17]<<16)|(state[o+18]<<8)|state[o+19])>>>0;
+  let blob=""; for(let k=0;k<len;k++)blob+=String.fromCharCode(state[o+20+k]);
+  let obj; try{ obj=JSON.parse(blob); }catch(e){ obj=null; }
+  if(!obj||!obj.g){ state.fill(0,o,o+SLOT); return null; }
+  const room={slot:i,code,status:st,hostFirst:obj.hostFirst||0,lastAct:obj.lastAct||nowSec(),g:obj.g,hostId:-1,guestId:-1};
+  room.g.events=[];
+  return room;
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+15]!==SCHEMA){ state.fill(0,o,o+SLOT); continue; }
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }   // abandoned waiting rooms are reclaimed
+    const r=loadRoom(i);
+    if(r)rooms.set(r.code,r);
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function readLastAct(i){ const o=off(i); const len=((state[o+16]<<24)|(state[o+17]<<16)|(state[o+18]<<8)|state[o+19])>>>0; let blob=""; for(let k=0;k<len;k++)blob+=String.fromCharCode(state[o+20+k]); try{ const obj=JSON.parse(blob); return obj.lastAct||0; }catch(e){ return 0; } }
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+function pubPl(room,pi){ const pl=room.g.players[pi]; return {deckLen:pl.deck.length, discardLen:pl.discard.length, discardTop:pl.discard.length?pl.discard[pl.discard.length-1]:null, inPlay:pl.inPlay.slice()}; }
+function snap(room){
+  const g=room.g;
+  return {
+    code:room.code, status:room.status, turnIndex:g.turnIndex, phase:g.phase,
+    t:{actions:g.t.actions,buys:g.t.buys,coins:g.t.coins},
+    hostFirst:room.hostFirst, kingdom:g.kingdom.slice(),
+    supply:Object.assign({},g.supply),
+    players:[pubPl(room,0),pubPl(room,1)],
+    trashTop:g.trash.length?g.trash[g.trash.length-1]:null, trashLen:g.trash.length,
+    handLen:[g.players[0].hand.length,g.players[1].hand.length],
+    pending:g.pending.map(function(pr){return {player:pr.player,type:pr.type,id:pr.id};}),
+    over:g.over, winner:g.winner, reason:g.reason, scores:g.scores,
+    scores:[score(g,0),score(g,1)],
+    seq:g.seq, events:g.events.slice(),
+    hostIn:room.hostId!==-1, guestIn:room.guestId!==-1,
+    deck:KINGDOM_CFG, deckSig:kingdomSig()
+  };
+}
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function sendHands(room){
+  const targets=[[room.hostId,0],[room.guestId,1]];
+  for(const pair of targets){
+    if(pair[0]===-1)continue;
+    const info=conns.get(pair[0]);
+    if(!info)continue;
+    try{ info.conn.send(JSON.stringify({t:"hand",p:pair[1],hand:room.g.players[pair[1]].hand.slice()})); }catch(e){}
+  }
+}
+function sendPrompts(room){
+  const targets=[[room.hostId,0],[room.guestId,1]];
+  for(const pair of targets){
+    if(pair[0]===-1)continue;
+    const info=conns.get(pair[0]);
+    if(!info)continue;
+    const mine=room.g.pending.filter(function(pr){return pr.player===pair[1];});
+    try{ info.conn.send(JSON.stringify({t:"promptlist",p:pair[1],prompts:mine})); }catch(e){}
+  }
+}
+function saveBroadcast(room){ saveRoom(room); broadcast(room); sendHands(room); sendPrompts(room); room.g.events.length=0; }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function pName(p){ return p===0?"Host":"Guest"; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,hostFirst:0,lastAct:nowSec(),g:newGame(pickKingdom(),0),hostId:conn.id,guestId:-1};
+    rooms.set(code,room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host",conn});
+    saveBroadcast(room);
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1){
+      room.status=2;
+      room.g.events.push(ev(room.g,0,"The match begins — "+pName(current(room.g))+" to move first."));
+    }
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role,conn});
+    room.lastAct=nowSec();
+    saveBroadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    sendHands(room); sendPrompts(room);
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  play({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(room.g.turnIndex!==obj.evt)return JSON.stringify({ok:false,err:"stale"});
+    const r=playCard(room.g,idx,obj.card);
+    if(!r.ok)return JSON.stringify({ok:false,err:r.err});
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  respond({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    const r=respondPrompt(room.g,idx,{id:obj.id,resp:obj.resp});
+    if(!r.ok)return JSON.stringify({ok:false,err:r.err});
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endActions({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(room.g.turnIndex!==obj.evt)return JSON.stringify({ok:false,err:"stale"});
+    const r=endActions(room.g,idx);
+    if(!r.ok)return JSON.stringify({ok:false,err:r.err});
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  buy({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(room.g.turnIndex!==obj.evt)return JSON.stringify({ok:false,err:"stale"});
+    const r=buyCard(room.g,idx,String(obj.pile||""));
+    if(!r.ok)return JSON.stringify({ok:false,err:r.err});
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endTurn({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(room.g.turnIndex!==obj.evt)return JSON.stringify({ok:false,err:"stale"});
+    const r=endTurn(room.g,idx);
+    if(!r.ok)return JSON.stringify({ok:false,err:r.err});
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      room.status=3; room.g.over=true; room.g.winner=1-idx; room.g.reason="resign"; room.g.seq++;
+      room.g.events.push(ev(room.g,1-idx,"Wins — "+pName(idx)+" resigned."));
+      room.lastAct=nowSec(); saveBroadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.g.over=true; room.g.winner=idx; room.g.reason="forfeit"; room.g.seq++;
+    room.g.events.push(ev(room.g,idx,"Wins — the opponent disconnected."));
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.hostFirst=1-room.hostFirst;
+    room.status=2;
+    room.g=newGame(pickKingdom(),room.hostFirst?1:0);
+    room.g.events.push(ev(room.g,current(room.g),"Rematch — new kingdom dealt! "+(current(room.g)===0?"Host":"Guest")+" to move first."));
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      room.status=3; room.g.over=true; room.g.winner=1-idx; room.g.reason="forfeit"; room.g.seq++;
+      room.g.events.push(ev(room.g,1-idx,"Wins — "+pName(idx)+" left."));
+      room.lastAct=nowSec(); saveBroadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  submitScore({conn},data){
+    let p; try{ p=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const now=Date.now();
+    if(now-(lbTimes.get(conn.id)||0)<1200)return JSON.stringify({ok:false,err:"rate"});
+    lbTimes.set(conn.id,now);
+    if(now-(lbNets.get(conn.net[3])||0)<6000)return JSON.stringify({ok:false,err:"rate"});
+    lbNets.set(conn.net[3],now);
+    const name=cleanField(p.name,24)||"Player";
+    const score=Math.max(0,Math.min(0xffffffff,Math.floor(Number(p.score)||0)));
+    const extra=cleanField(p.extra,11);
+    lbSubmit(name,score,Math.floor(now/1000),extra,false);
+    return JSON.stringify({ok:true});
+  },
+  getScores({conn},data){
+    lbInit();
+    const a=lbRead().sort(function(x,y){ return lbBetter(false,x,y)?-1:1; }).slice(0,10);
+    return JSON.stringify({scores:a});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  chatTimes.delete(conn.id);
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Every game deals 10 Kingdom piles into the supply beside the base piles (Copper, Silver, Gold, Estate, Duchy, Province, Curse). Draw five, play Actions, buy — then trash, attack, and build your engine until the Provinces run out.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Hotseat</span>
+        <span class="bgn-mode-sub">Two players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">vs the Machine</span>
+        <span class="bgn-mode-sub">You against a scheming AI</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online</span>
+        <span class="bgn-mode-sub">Live match, hidden hands</span>
+      </button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last game</h3>
+      <p class="muted small" id="continueInfoEl">A saved game was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
+    <div class="bgn-diff" id="diffRow">
+      <span class="muted small" style="letter-spacing:.05em; text-transform:uppercase">🤖 Machine difficulty</span>
+      <div class="diff-btns">
+        <button class="btn btn-ghost btn-sm" data-diff="easy">Easy</button>
+        <button class="btn btn-ghost btn-sm" data-diff="normal">Normal</button>
+        <button class="btn btn-ghost btn-sm" data-diff="hard">Hard</button>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="lbBtn">🏆 Leaderboard</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this game as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div class="panel" style="margin-top:26px; padding:20px 24px;">
+      <div class="sec-eyebrow" style="text-align:center">How to play</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:14px;">
+        <div class="muted small"><b class="goldtext">1 · Draw 5</b><br>Start each turn with five cards. Play Action cards for +cards, +actions, +coins and +buys.</div>
+        <div class="muted small"><b class="goldtext">2 · Buy</b><br>Enter the Buy phase — your Treasures play automatically. Spend coins on supply piles.</div>
+        <div class="muted small"><b class="goldtext">3 · Build</b><br>Trash junk with Chapel/Remodel, attack with Militia &amp; Witch, or chain cards with Throne Room.</div>
+        <div class="muted small"><b class="goldtext">4 · Win</b><br>Game ends when Provinces run out or 3 piles are empty. Most Victory Points wins. Curses cost −1.</div>
+      </div>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs. Hands stay private — only the supply, table, and counts are shared.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table dom-table">
+
+      <div class="panel dom-boardpanel">
+
+        <!-- opponent -->
+        <div class="dom-playerrow opp">
+          <span class="bgn-avatar opp" id="oppAvatar"></span>
+          <span class="dom-pname" id="oppNameEl">Opponent</span>
+          <span class="dom-pcounts muted small" id="oppCountsEl"></span>
+          <span class="dom-score" id="oppScoreEl">0 VP</span>
+        </div>
+        <div class="dom-inplay" id="oppInplayEl"></div>
+
+        <!-- supply + status -->
+        <div class="dom-center">
+          <div class="dom-supply" id="supplyEl"></div>
+          <div class="dom-status">
+            <div class="dom-turn" id="turnEl">Loading…</div>
+            <div class="dom-stats" id="statsEl"></div>
+            <div class="dom-banner" id="bannerEl"></div>
+            <div class="dom-piles">
+              <div class="dom-pilebox"><div class="dom-pile" id="deckPileEl">🂠</div><div class="muted small" id="deckCountEl">deck</div></div>
+              <div class="dom-pilebox"><div class="dom-pile" id="trashEl">—</div><div class="muted small" id="trashCountEl">trash</div></div>
+              <div class="dom-pilebox"><div class="dom-pile" id="discardEl">—</div><div class="muted small" id="discardCountEl">discard</div></div>
+            </div>
+            <div class="dom-timer" id="tmrEl" hidden>⏱ —</div>
+          </div>
+        </div>
+
+        <!-- me -->
+        <div class="dom-inplay" id="myInplayEl"></div>
+        <div class="dom-playerrow me">
+          <span class="bgn-avatar me" id="myAvatar"></span>
+          <span class="dom-pname" id="myNameEl">You</span>
+          <span class="dom-pcounts muted small" id="myCountsEl"></span>
+          <span class="dom-score" id="myScoreEl">0 VP</span>
+        </div>
+
+        <!-- hand -->
+        <div class="dom-handstrip">
+          <div class="dom-hand" id="handEl"></div>
+        </div>
+      </div>
+
+      <div class="bgn-side">
+        <div class="bgn-room" id="roomBox" hidden>
+          <div class="bgn-room-code">Room code <b id="roomCodeEl">—</b></div>
+          <div class="muted small" id="connEl">Connecting…</div>
+          <div class="dom-roombtns">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+          </div>
+        </div>
+
+        <div class="dom-actions">
+          <button class="btn btn-gold" id="endPhaseBtn">Buy phase ▸</button>
+          <button class="btn btn-gold" id="endTurnBtn" hidden>End turn</button>
+          <button class="btn btn-ghost" id="resignBtn" hidden>Resign</button>
+          <button class="btn btn-ghost" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
+          <button class="btn btn-ghost" id="hintBtn" hidden>💡 Hint</button>
+        </div>
+
+        <div class="dom-chatwrap" id="chatBox" hidden>
+          <div class="sec-eyebrow" style="margin-bottom:8px">Table chat</div>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+
+        <div class="dom-logwrap">
+          <div class="sec-eyebrow" style="margin-bottom:8px">Game log</div>
+          <div class="bgn-log" id="logEl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ MODALS ═══ -->
+<div class="promo" id="promptModal" hidden>
+  <div class="promo-title" id="promptTitleEl"></div>
+  <div class="dom-prompt-body" id="promptBodyEl"></div>
+  <div class="over-btns" id="promptBtnsEl"></div>
+</div>
+
+<div class="promo" id="passScreen" hidden>
+  <div class="promo-title" id="passTitleEl">Pass the device</div>
+  <div style="font-size:2.6rem; margin:6px 0 2px;">🤫</div>
+  <div class="promo-sub muted small" id="passSubEl"></div>
+  <button class="btn btn-gold" style="margin-top:14px" id="passGoBtn">It's my turn</button>
+</div>
+
+<div class="promo" id="overModal" hidden>
+  <div class="promo-title" id="overTitleEl">Game over</div>
+  <div class="over-banner" id="overBannerEl"></div>
+  <div class="over-scores" id="overScoresEl"></div>
+  <div class="muted small" id="overReasonEl"></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="playAgainBtn">Play again</button>
+    <button class="btn btn-ghost" id="overMenuBtn">Main menu</button>
+    <button class="btn btn-ghost" id="overLbBtn">🏆 Leaderboard</button>
+  </div>
+</div>
+
+<style>
+/* ═══ leaderboard ═══ */
+.lbname-row{ display:flex; align-items:center; justify-content:center; gap:8px; margin:12px 0; }
+.lbname-row label{ font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; color:var(--bgn-muted,#c9d3e5); }
+.lbname-row input{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:7px 10px; width:170px; text-align:center; }
+.lb-rows{ min-width:280px; display:grid; gap:6px; margin:4px 0 6px; }
+.lb-row{ display:flex; align-items:center; gap:10px; padding:6px 12px; border-radius:8px; background:rgba(255,255,255,.04); font-size:.9rem; }
+.lb-row .rk{ color:var(--bgn-gold2,#d4af37); font-weight:700; width:26px; text-align:right; }
+.lb-row .nm{ flex:1; text-align:left; }
+.lb-row .sc{ font-weight:700; }
+.lb-row.top{ background:rgba(212,175,55,.12); border:1px solid rgba(212,175,55,.35); }
+.lb-empty{ color:var(--bgn-muted,#c9d3e5); font-size:.85rem; padding:8px 0; }
+</style>
+
+<div class="promo" id="lbModal" hidden>
+  <div class="promo-title">🏆 Leaderboard</div>
+  <div class="lbname-row">
+    <label for="lbNameInput">Your name</label>
+    <input id="lbNameInput" maxlength="24" autocomplete="off" spellcheck="false">
+  </div>
+  <div class="lb-rows" id="lbRowsEl"><div class="lb-empty">Loading…</div></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="lbDoneBtn">Done</button>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="ornament">◆</div>
+  <p>[gameTitle] — a deck-building card game built from the BGN Non-Standard Deck Template.</p>
+  <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ DOMINION ═══ */
+.bgn-lobby{ max-width:820px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+.bgn-diff{ display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:20px; }
+.diff-btns{ display:flex; gap:8px; }
+.diff-btns .btn.on{ background:var(--bgn-gold2,#d4af37); color:#12101c; border-color:transparent; }
+
+/* table layout */
+.dom-table{ grid-template-columns:minmax(0,1fr) 330px; max-width:1120px; margin:0 auto; }
+@media (max-width:900px){ .dom-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.dom-boardpanel{ text-align:center; padding:18px 14px 22px; }
+.dom-playerrow{ display:flex; align-items:center; gap:10px; justify-content:center; margin:6px 0 8px; }
+.dom-playerrow .bgn-avatar.opp{ background:radial-gradient(circle at 35% 30%, #7a5cff, #241840); }
+.dom-playerrow .bgn-avatar.me{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.dom-pname{ font-weight:800; font-size:.95rem; letter-spacing:.04em; }
+.dom-pcounts{ font-size:.68rem; opacity:.65; letter-spacing:.05em; white-space:nowrap; }
+.dom-score{ font-family:var(--bgn-serif); color:var(--bgn-accent2); font-weight:700; background:rgba(212,175,55,.1); border:1px solid rgba(212,175,55,.3); border-radius:999px; padding:2px 10px; font-size:.8rem; }
+
+/* in-play rows */
+.dom-inplay{ display:flex; justify-content:center; gap:6px; flex-wrap:wrap; min-height:64px; padding:6px 0; }
+.dom-inplay:empty::before{ content:"in play"; color:rgba(255,255,255,.18); font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; align-self:center; }
+.dom-inplay .dom-card{ width:56px; cursor:default; }
+
+/* supply */
+.dom-center{ margin:10px 0 6px; }
+.dom-supply{ display:grid; grid-template-columns:repeat(auto-fill,minmax(74px,1fr)); gap:8px; max-width:860px; margin:0 auto 14px; }
+.dom-pile{ position:relative; border:1px solid rgba(255,255,255,.16); border-radius:10px; background:linear-gradient(170deg, rgba(255,255,255,.06), rgba(255,255,255,.015)); padding:9px 4px 7px; display:flex; flex-direction:column; align-items:center; gap:2px; min-height:86px; justify-content:center; transition:border-color .12s, box-shadow .12s, transform .12s; }
+.dom-pile .em{ font-size:1.5rem; line-height:1.15; filter:drop-shadow(0 2px 4px rgba(0,0,0,.45)); }
+.dom-pile .nm{ font-size:.56rem; letter-spacing:.05em; text-transform:uppercase; opacity:.85; font-weight:700; }
+.dom-pile .cs{ font-size:.6rem; color:var(--bgn-accent2,#f2dc8b); }
+.dom-pile .ct{ position:absolute; top:4px; right:5px; font-size:.6rem; font-weight:800; background:rgba(0,0,0,.5); border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:0 5px; line-height:1.5; }
+.dom-pile.buyable{ border-color:rgba(212,175,55,.75); box-shadow:inset 0 0 0 1px rgba(212,175,55,.25), 0 0 16px rgba(212,175,55,.18); cursor:pointer; }
+.dom-pile.buyable:hover{ transform:translateY(-3px); border-color:#f6e6a4; }
+.dom-pile.empty-pile{ opacity:.32; }
+
+/* status */
+.dom-status{ max-width:560px; margin:0 auto 8px; display:flex; flex-direction:column; align-items:center; gap:5px; }
+.dom-turn{ font-family:var(--bgn-serif); font-size:1.12rem; letter-spacing:.05em; color:var(--bgn-cream); }
+.dom-turn.warn{ color:#ffb07a; }
+.dom-stats{ display:flex; gap:8px; align-items:center; font-size:.82rem; flex-wrap:wrap; justify-content:center; }
+.dom-stats .st{ background:rgba(0,0,0,.3); border:1px solid rgba(255,255,255,.16); border-radius:999px; padding:3px 11px; }
+.dom-stats .st.on{ border-color:rgba(212,175,55,.5); color:var(--bgn-accent2,#f2dc8b); }
+.dom-banner{ min-height:18px; font-size:.8rem; font-weight:600; color:#f6e6a4; }
+.dom-piles{ display:flex; gap:14px; margin:4px auto; justify-content:center; }
+.dom-pilebox{ flex:none; display:flex; flex-direction:column; align-items:center; gap:4px; }
+.dom-pilebox .dom-pile{ width:62px; min-height:74px; padding:8px 4px; }
+.dom-pilebox .dom-pile .em{ font-size:1.3rem; }
+.dom-timer{ font-size:.78rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(212,175,55,.35); border-radius:999px; padding:3px 10px; white-space:nowrap; font-variant-numeric:tabular-nums; margin:4px auto; width:fit-content; }
+.dom-timer.low{ color:#ff9b6b; border-color:rgba(255,120,60,.55); }
+
+/* cards */
+.dom-handstrip{ margin-top:14px; }
+.dom-hand{ display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:148px; padding:10px 4px; align-items:flex-end; }
+@media (min-width:640px){ .dom-hand{ flex-wrap:nowrap; overflow-x:auto; justify-content:flex-start; padding-bottom:6px; } }
+.dom-card{ width:clamp(66px,9vw,88px); aspect-ratio:2/3; border-radius:11px; position:relative; flex:none; cursor:pointer; border:2px solid rgba(255,255,255,.22); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.3); display:flex; flex-direction:column; align-items:center; justify-content:space-between; padding:10px 4px 8px; transition:transform .12s, box-shadow .12s, border-color .12s; user-select:none; background:linear-gradient(165deg,#2c2433,#1d1724); }
+.dom-card .em{ font-size:clamp(1.8rem,4.5vw,2.4rem); line-height:1; filter:drop-shadow(0 3px 5px rgba(0,0,0,.45)); }
+.dom-card .nm{ font-size:.56rem; letter-spacing:.05em; text-transform:uppercase; opacity:.92; font-weight:700; text-align:center; line-height:1.2; }
+.dom-card .cs{ position:absolute; top:5px; right:6px; font-size:.66rem; font-weight:800; color:#221803; background:linear-gradient(180deg,#f6e6a4,#d4af37); border-radius:999px; padding:0 5px; line-height:1.5; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+.dom-card .cv{ position:absolute; top:5px; left:6px; font-size:.6rem; font-weight:800; color:#7fe0b0; background:rgba(0,0,0,.55); border:1px solid rgba(127,224,176,.35); border-radius:999px; padding:0 4px; line-height:1.5; }
+.dom-card .dc{ position:absolute; bottom:3px; left:3px; width:18px; height:18px; border-radius:50%; background:rgba(0,0,0,.55); color:#ff9d9d; font-size:.72rem; line-height:18px; text-align:center; opacity:0; transition:opacity .12s; }
+.dom-card:hover .dc{ opacity:1; }
+.dom-card:hover{ transform:translateY(-8px); border-color:#f6e6a4; }
+.dom-card.selected{ transform:translateY(-12px); border-color:var(--bgn-accent2); box-shadow:0 0 0 2px rgba(212,175,55,.55), 0 14px 26px rgba(0,0,0,.55); }
+.dom-card.hint{ transform:translateY(-12px); border-color:#ffd479; box-shadow:0 0 0 2px rgba(255,212,121,.85), 0 14px 26px rgba(0,0,0,.55); }
+.dom-card.face-down{ background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 6px); border-color:rgba(212,175,55,.45); cursor:default; }
+.dom-card.face-down::after{ content:"🔒"; font-size:1.4rem; }
+.dom-card.face-down:hover{ transform:none; }
+.dom-card.playable{ border-color:rgba(212,175,55,.55); }
+.dom-card.treasure{ background:linear-gradient(165deg,#4a3a18,#2a2010); }
+.dom-card.victory{ background:linear-gradient(165deg,#17354a,#0f2433); }
+.dom-card.curse{ background:linear-gradient(165deg,#3d1520,#250d14); }
+.dom-card.attack{ box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 0 0 1px rgba(255,110,110,.22); }
+
+/* side */
+.dom-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.dom-actions .btn{ padding:12px 18px; font-size:.72rem; }
+.dom-roombtns{ display:flex; gap:8px; justify-content:center; margin-top:8px; }
+.dom-logwrap{ margin-top:18px; }
+.dom-chatwrap{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:6px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.bgn-log{ max-height:300px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item .ev{ color:var(--bgn-accent2); }
+.log-item .st{ color:#ff9d9d; font-weight:700; }
+
+/* prompt modal */
+.dom-prompt-body{ max-width:440px; margin:0 auto; }
+.dom-prompt-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(72px,1fr)); gap:8px; max-height:44vh; overflow-y:auto; padding:4px; }
+.dom-prompt-grid .dom-card{ width:auto; aspect-ratio:2/3; cursor:pointer; }
+.dom-prompt-grid .dom-card.picked{ border-color:var(--bgn-accent2); box-shadow:0 0 0 2px rgba(212,175,55,.55); }
+.dom-prompt-grid .dom-card.grey{ opacity:.4; }
+.dom-prompt-hint{ font-size:.72rem; color:var(--bgn-muted,#c9d3e5); margin:6px 0; min-height:14px; }
+
+/* modals */
+.promo{ position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:50; background:rgba(12,9,5,.97); border:1px solid var(--bgn-gold2,#d4af37); border-radius:12px; padding:18px 20px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,.65); max-width:92vw; }
+.promo-title{ font-size:.8rem; opacity:.85; margin-bottom:10px; letter-spacing:.5px; }
+.promo-sub{ margin-top:8px; }
+.over-banner{ font-family:var(--bgn-serif); font-size:1.35rem; line-height:1.3; margin:2px 0 12px; color:#f6e6a4; }
+.over-scores{ display:flex; gap:30px; justify-content:center; margin:6px 0 10px; font-size:.9rem; align-items:flex-start; }
+.over-scores > div{ display:flex; flex-direction:column; align-items:center; gap:2px; min-width:96px; }
+.over-scores .muted{ white-space:nowrap; }
+.over-scores b{ font-family:var(--bgn-serif); font-size:1.6rem; color:var(--bgn-accent2); display:block; line-height:1.1; }
+.over-scores .pts-tag{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.6; }
+.over-scores .win b{ color:#7fe0b0; }
+.win-tag{ font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:#7fe0b0; border:1px solid rgba(127,224,176,.4); border-radius:999px; padding:1px 8px; margin-top:3px; }
+.over-btns{ display:flex; gap:10px; justify-content:center; margin-top:14px; flex-wrap:wrap; }
+.over-btns .btn{ white-space:nowrap; padding:14px 22px; }
+@media (max-width:560px){
+  .dom-supply{ grid-template-columns:repeat(auto-fill,minmax(62px,1fr)); gap:6px; }
+  .dom-card{ width:clamp(58px,13vw,74px); }
+  .dom-turn{ font-size:.98rem; }
+  .dom-boardpanel{ padding:12px 6px 16px; }
+}
+@media (max-width:380px){
+  .over-scores{ flex-direction:column; gap:10px; }
+  .over-scores > div{ min-width:0; }
+  .over-banner{ font-size:1.15rem; }
+  .promo{ padding:14px 14px; }
+}
+</style>
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n; return v==null?d:String(v); }
+var rootRef = window.root||{};
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ kingdom config (from main.pjs `dominionKingdom`) ══════════
+   The online server mirrors this pool in the KINGDOM_CFG block of the
+   server script — if the two drift, applyServerSnap adopts the room's
+   pool and warns. */
+var DEFAULT_POOL=[
+  {name:"Cellar",cost:2,emoji:"🍷",kinds:"action"},
+  {name:"Chapel",cost:2,emoji:"⛪",kinds:"action"},
+  {name:"Moat",cost:2,emoji:"🛡️",kinds:"action,reaction"},
+  {name:"Moneylender",cost:4,emoji:"💰",kinds:"action"},
+  {name:"Smithy",cost:4,emoji:"🔨",kinds:"action"},
+  {name:"Village",cost:3,emoji:"🏘️",kinds:"action"},
+  {name:"Market",cost:5,emoji:"🧺",kinds:"action"},
+  {name:"Workshop",cost:3,emoji:"🪚",kinds:"action"},
+  {name:"Feast",cost:4,emoji:"🍗",kinds:"action"},
+  {name:"Mine",cost:5,emoji:"⛏️",kinds:"action"},
+  {name:"Remodel",cost:4,emoji:"🏗️",kinds:"action"},
+  {name:"Throne Room",cost:4,emoji:"🎭",kinds:"action"},
+  {name:"Militia",cost:4,emoji:"⚔️",kinds:"action,attack"},
+  {name:"Witch",cost:5,emoji:"🧙",kinds:"action,attack"},
+  {name:"Council Room",cost:5,emoji:"🏛️",kinds:"action"},
+  {name:"Bureaucrat",cost:4,emoji:"📜",kinds:"action,attack"}
+];
+function readSetting(name,fb){ var v=rootRef[name]; if(v==null)return fb; if(v&&typeof v.evaluateItem==="function"){ try{ v=v.evaluateItem(); }catch(e){} } return v; }
+function toCardObj(t){
+  return {name:String(t[0]||t.name||""),cost:Math.max(0,Math.floor(t[1]!==undefined?t[1]:t.cost)||0),emoji:String(t[2]||t.emoji||""),kinds:String(t[3]||t.kinds||""),coin:Math.floor(t[4]!==undefined?t[4]:t.coin)||0,vp:Math.floor(t[5]!==undefined?t[5]:t.vp)||0};
+}
+var CFG={pool:[],sig:""};
+function kingdomSig(){
+  var s="";
+  for(var i=0;i<CFG.pool.length;i++){ var c=CFG.pool[i]; s+=String(c.name)+"|"+c.cost+"|"+String(c.emoji)+"|"+String(c.kinds||"")+";"; }
+  var h=5381; for(var j=0;j<s.length;j++)h=((h*33)^s.charCodeAt(j))>>>0; return h.toString(36);
+}
+function initConfig(){
+  var d=readSetting("dominionKingdom",null);
+  CFG.pool=[];
+  if(Array.isArray(d)){ for(var i=0;i<d.length;i++){ var o=toCardObj(d[i]); if(o.name)CFG.pool.push(o); } }
+  if(!CFG.pool.length){ CFG.pool=DEFAULT_POOL.slice(); }
+  setPool(CFG.pool);
+  CFG.sig=kingdomSig();
+}
+initConfig();
+
+/* ══════════════════════════════════════════════════════════════════
+   DOMINION ENGINE — the pure rules engine, shared VERBATIM by the
+   online server (authoritative) and the client (hotseat / vs-AI).
+   It operates only on plain JSON state and card metadata; no DOM,
+   no sockets. It reads the variables POOL (kingdom pool), set via
+   setPool(), and AUTO_RESOLVE (whether unanswered attack prompts
+   should be force-resolved when a player's turn starts).
+   ══════════════════════════════════════════════════════════════════ */
+
+var BASE_CARDS={
+  "Copper":{name:"Copper",cost:0,emoji:"🪙",kinds:["treasure"],coin:1,vp:0},
+  "Silver":{name:"Silver",cost:3,emoji:"🥈",kinds:["treasure"],coin:2,vp:0},
+  "Gold":{name:"Gold",cost:6,emoji:"🥇",kinds:["treasure"],coin:3,vp:0},
+  "Estate":{name:"Estate",cost:2,emoji:"🏛️",kinds:["victory"],coin:0,vp:1},
+  "Duchy":{name:"Duchy",cost:5,emoji:"🏰",kinds:["victory"],coin:0,vp:3},
+  "Province":{name:"Province",cost:8,emoji:"👑",kinds:["victory"],coin:0,vp:6},
+  "Curse":{name:"Curse",cost:0,emoji:"😈",kinds:["curse"],coin:0,vp:-1}
+};
+var KINGDOM_COUNT=10, HAND_SIZE=5, START_COPPERS=7, START_ESTATES=3;
+var POOL, POOL_BY_NAME;
+
+function setPool(arr){
+  POOL=[]; POOL_BY_NAME={};
+  for(var i=0;i<arr.length;i++){
+    var t=arr[i], o={};
+    o.name=String(t.name||"");
+    o.cost=Math.max(0,Math.floor(t.cost)||0);
+    o.emoji=String(t.emoji||"");
+    o.coin=Math.floor(t.coin)||0;
+    o.vp=Math.floor(t.vp)||0;
+    var ks=(typeof t.kinds==="string")?t.kinds.split(","):(Array.isArray(t.kinds)?t.kinds:[]);
+    o.kinds=[];
+    for(var k=0;k<ks.length;k++){ var s=String(ks[k]).trim(); if(s)o.kinds.push(s); }
+    POOL.push(o); POOL_BY_NAME[o.name]=o;
+  }
+}
+function cardInfo(n){ return BASE_CARDS[n]||POOL_BY_NAME[n]||null; }
+function isAction(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("action")>=0); }
+function isTreasure(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("treasure")>=0); }
+function isVictory(n){ var c=cardInfo(n); return !!(c&&c.kinds&&c.kinds.indexOf("victory")>=0); }
+function isCurse(n){ return n==="Curse"; }
+function keepVal(c){ var ci=cardInfo(c); if(!ci)return 0; return (ci.vp||0)+(isTreasure(c)?(ci.coin||0)*0.5:0); }
+function shuffle(a){ for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=a[i];a[i]=a[j];a[j]=t; } return a; }
+function pickKingdom(rng){
+  var names=[]; for(var i=0;i<POOL.length;i++)names.push(POOL[i].name);
+  var r=rng||Math.random;
+  for(var j=names.length-1;j>0;j--){ var k=Math.floor(r()*(j+1)); var t=names[j];names[j]=names[k];names[k]=t; }
+  return names.slice(0,KINGDOM_COUNT);
+}
+function basePileCount(n){
+  if(n==="Copper")return 46; if(n==="Silver")return 40; if(n==="Gold")return 30;
+  if(n==="Curse")return 10; return 8;
+}
+function makeSupply(kingdom){
+  var s={};
+  var bases=["Copper","Silver","Gold","Estate","Duchy","Province","Curse"];
+  for(var i=0;i<bases.length;i++)s[bases[i]]=basePileCount(bases[i]);
+  for(var k=0;k<kingdom.length;k++)s[kingdom[k]]=KINGDOM_COUNT;
+  return s;
+}
+function pileOrder(){ return ["Copper","Silver","Gold","Estate","Duchy","Province","Curse"].concat(POOL.map(function(c){return c.name;})); }
+function current(g){ return g.turnIndex%2; }
+function draw(g,p,n){
+  var got=0;
+  while(n>0){
+    var pl=g.players[p];
+    if(!pl.deck.length){
+      if(!pl.discard.length)break;
+      shuffle(pl.discard);
+      pl.deck=pl.discard; pl.discard=[];
+    }
+    pl.hand.push(pl.deck.pop());
+    n--; got++;
+  }
+  return got;
+}
+function gain(g,p,name){
+  if(g.supply[name]>0){ g.supply[name]--; g.players[p].discard.push(name); return true; }
+  return false;
+}
+function gainable(g,name,maxCost){
+  if(g.supply[name]==null||g.supply[name]<=0)return false;
+  var c=cardInfo(name); return !!(c&&c.cost<=maxCost);
+}
+function idxList(cards,len){
+  if(!cards||!cards.length)return [];
+  if(!Array.isArray(cards))return null;
+  var seen={},out=[];
+  for(var i=0;i<cards.length;i++){
+    var v=cards[i];
+    if(typeof v!=="number"||v<0||v>=len||seen[v])return null;
+    seen[v]=1; out.push(v);
+  }
+  return out.sort(function(a,b){return a-b;});
+}
+function removeIdx(arr,idxs){
+  var out=arr.slice();
+  for(var i=idxs.length-1;i>=0;i--)out.splice(idxs[i],1);
+  return out;
+}
+function actionIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isAction(pl.hand[i]))out.push(i); return out; }
+function treasureIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isTreasure(pl.hand[i]))out.push(i); return out; }
+function victoryIndices(g,p){ var pl=g.players[p],out=[]; for(var i=0;i<pl.hand.length;i++)if(isVictory(pl.hand[i]))out.push(i); return out; }
+function score(g,p){ var pl=g.players[p],v=0; var zones=[pl.hand,pl.deck,pl.discard,pl.inPlay]; for(var z=0;z<zones.length;z++){ for(var i=0;i<zones[z].length;i++){ var c=cardInfo(zones[z][i]); if(c)v+=(c.vp||0); } } return v; }
+function emptyPiles(g){ var c=0; for(var k in g.supply){ if(g.supply[k]<=0)c++; } return c; }
+function ev(g,p,txt){ return {p:p,txt:txt}; }
+function checkOver(g){
+  if(g.over)return true;
+  if(g.supply["Province"]<=0||emptyPiles(g)>=3){
+    g.over=true; g.reason="supply";
+    var s0=score(g,0),s1=score(g,1);
+    g.scores=[s0,s1];
+    g.winner=s0>s1?0:(s1>s0?1:"draw");
+    g.events.push(ev(g,g.winner==="draw"?-1:g.winner,"Game over — "+(g.winner==="draw"?("tie "+s0+"–"+s1):(s0+"–"+s1))+"."));
+    return true;
+  }
+  return false;
+}
+function pendingFor(g,p){ for(var i=0;i<g.pending.length;i++){ if(g.pending[i].player===p)return g.pending[i]; } return null; }
+function pushPrompt(g,p,pd){
+  g.pid=(g.pid||0)+1;
+  var pr={player:p,type:pd.type,data:pd.data||{},id:g.pid};
+  g.pending.push(pr);
+  return pr;
+}
+function resolveAutoPrompts(g,p){
+  if(!AUTO_RESOLVE)return;
+  for(;;){
+    var pr=pendingFor(g,p);
+    if(!pr)break;
+    if(pr.type==="militia"){
+      var pl=g.players[p], h=pl.hand;
+      if(h.length>3){
+        var idxs=h.map(function(c,i){return i;}).sort(function(a,b){return keepVal(h[b])-keepVal(h[a]);});
+        var cards=idxs.slice(3);
+        for(var i=0;i<cards.length;i++)pl.discard.push(h[cards[i]]);
+        pl.hand=removeIdx(pl.hand,cards);
+        g.events.push(ev(g,p,"Discarded down to 3 (auto)."));
+      }
+    } else if(pr.type==="bureaucrat"){
+      var vi=victoryIndices(g,p);
+      if(vi.length){
+        g.players[p].deck.push(g.players[p].hand[vi[0]]);
+        g.players[p].hand=removeIdx(g.players[p].hand,[vi[0]]);
+        g.events.push(ev(g,p,"Revealed a Victory card (auto)."));
+      }
+    }
+    g.pending=g.pending.filter(function(x){return x.id!==pr.id;});
+  }
+}
+function cleanupPlayer(g,p){
+  var pl=g.players[p];
+  for(var i=0;i<pl.hand.length;i++)pl.discard.push(pl.hand[i]);
+  pl.hand=[];
+  for(var j=0;j<pl.inPlay.length;j++)pl.discard.push(pl.inPlay[j]);
+  pl.inPlay=[];
+  draw(g,p,HAND_SIZE);
+}
+function startTurn(g,p){
+  g.phase="action";
+  g.t={actions:1,buys:1,coins:0};
+  resolveAutoPrompts(g,p);
+  g.events.push(ev(g,p,"Turn "+(Math.floor(g.turnIndex/2)+1)+" — drew 5."));
+}
+function newGame(kingdom, firstMover){
+  var g={
+    kingdom:kingdom.slice(),
+    supply:makeSupply(kingdom),
+    players:[{hand:[],deck:[],discard:[],inPlay:[]},{hand:[],deck:[],discard:[],inPlay:[]}],
+    trash:[], turnIndex:0, phase:"action",
+    t:{actions:1,buys:1,coins:0},
+    pending:[], pid:0, over:false, winner:null, reason:"", scores:null,
+    seq:0, events:[], lastAct:0
+  };
+  for(var p=0;p<2;p++){
+    var d=[];
+    for(var i=0;i<START_COPPERS;i++)d.push("Copper");
+    for(var j=0;j<START_ESTATES;j++)d.push("Estate");
+    shuffle(d);
+    g.players[p].deck=d;
+  }
+  draw(g,0,HAND_SIZE);
+  draw(g,1,HAND_SIZE);
+  g.turnIndex=firstMover||0;
+  startTurn(g,current(g));
+  return g;
+}
+function resolveAction(g,p,name){
+  var t=g.t;
+  if(name==="Smithy"){ var got=draw(g,p,3); g.events.push(ev(g,p,"Smithy: drew "+got+".")); }
+  else if(name==="Village"){ draw(g,p,1); t.actions+=2; g.events.push(ev(g,p,"Village: +1 card, +2 Actions.")); }
+  else if(name==="Market"){ draw(g,p,1); t.actions+=1; t.buys+=1; t.coins+=1; g.events.push(ev(g,p,"Market: +1 card, +1 Action, +1 Buy, +$1.")); }
+  else if(name==="Moat"){ var g2=draw(g,p,2); g.events.push(ev(g,p,"Moat: drew "+g2+".")); }
+  else if(name==="Council Room"){ draw(g,p,4); t.buys+=1; var og=draw(g,1-p,1); g.events.push(ev(g,p,"Council Room: +4 cards, +1 Buy; opponent drew "+og+".")); }
+  else if(name==="Militia"){ t.coins+=2; g.events.push(ev(g,p,"Militia: +$2; each other player discards to 3.")); if(g.players[1-p].hand.length>3)return pushPrompt(g,1-p,{type:"militia"}); }
+  else if(name==="Witch"){ draw(g,p,2); var gd=gain(g,1-p,"Curse"); g.events.push(ev(g,p,"Witch: drew 2; opponent gained a Curse"+(gd?"":" (pile empty)")+".")); }
+  else if(name==="Bureaucrat"){ var gs=gain(g,p,"Silver"); if(gs)g.players[p].deck.push("Silver"); g.events.push(ev(g,p,"Bureaucrat: Silver on top of your deck; opponent reveals a Victory card.")); return pushPrompt(g,1-p,{type:"bureaucrat"}); }
+  else if(name==="Cellar"){ t.actions+=1; return pushPrompt(g,p,{type:"cellar"}); }
+  else if(name==="Chapel"){ return pushPrompt(g,p,{type:"trashN",data:{max:4}}); }
+  else if(name==="Moneylender"){ return pushPrompt(g,p,{type:"moneylender"}); }
+  else if(name==="Workshop"){ return pushPrompt(g,p,{type:"gain",data:{maxCost:5}}); }
+  else if(name==="Feast"){ var ip=g.players[p].inPlay; var fi=ip.lastIndexOf("Feast"); if(fi>=0)ip.splice(fi,1); g.trash.push("Feast"); return pushPrompt(g,p,{type:"gain",data:{maxCost:5}}); }
+  else if(name==="Mine"){ if(!treasureIndices(g,p).length){ g.events.push(ev(g,p,"Mine: no Treasure in hand.")); } else return pushPrompt(g,p,{type:"mineStep1"}); }
+  else if(name==="Remodel"){ if(!g.players[p].hand.length){ g.events.push(ev(g,p,"Remodel: no cards in hand.")); } else return pushPrompt(g,p,{type:"remodelStep1"}); }
+  else if(name==="Throne Room"){ if(!actionIndices(g,p).length){ g.events.push(ev(g,p,"Throne Room: no Action in hand to double.")); } else return pushPrompt(g,p,{type:"throne"}); }
+  return null;
+}
+function playCard(g,p,idx){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="action")return {ok:false,err:"not_action_phase"};
+  if(g.t.actions<=0)return {ok:false,err:"no_actions"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  var pl=g.players[p];
+  if(idx==null||idx<0||idx>=pl.hand.length)return {ok:false,err:"bad_card"};
+  var name=pl.hand[idx];
+  if(!isAction(name))return {ok:false,err:"not_action"};
+  pl.hand.splice(idx,1);
+  pl.inPlay.push(name);
+  g.t.actions--;
+  g.seq++;
+  g.events.push(ev(g,p,"Played "+name+"."));
+  var pr=resolveAction(g,p,name);
+  checkOver(g);
+  return {ok:true,prompt:pr,over:g.over};
+}
+function respondPrompt(g,p,req){
+  if(g.over)return {ok:false,err:"over"};
+  var pr=pendingFor(g,p);
+  if(!pr)return {ok:false,err:"no_prompt"};
+  if(req.id!==pr.id)return {ok:false,err:"bad_prompt"};
+  var resp=req.resp||{};
+  var pl=g.players[p];
+  var newPrompt=null;
+  if(pr.type==="cellar"){
+    var cd=idxList(resp.cards,pl.hand.length);
+    if(cd==null)return {ok:false,err:"bad_resp"};
+    for(var a=0;a<cd.length;a++)pl.discard.push(pl.hand[cd[a]]);
+    pl.hand=removeIdx(pl.hand,cd);
+    var cg=draw(g,p,cd.length);
+    g.events.push(ev(g,p,"Cellar: discarded "+cd.length+", drew "+cg+"."));
+  } else if(pr.type==="trashN"){
+    var tr=idxList(resp.cards,pl.hand.length);
+    if(tr==null||tr.length>(pr.data.max||4))return {ok:false,err:"bad_resp"};
+    for(var b=0;b<tr.length;b++)g.trash.push(pl.hand[tr[b]]);
+    pl.hand=removeIdx(pl.hand,tr);
+    g.events.push(ev(g,p,"Chapel: trashed "+(tr.length?tr.length:"no")+" card"+(tr.length===1?"":"s")+"."));
+  } else if(pr.type==="moneylender"){
+    if(resp.skip){ g.events.push(ev(g,p,"Moneylender: kept your Coppers.")); }
+    else{
+      var ml=idxList(resp.cards,pl.hand.length);
+      if(ml==null||ml.length!==1||pl.hand[ml[0]]!=="Copper")return {ok:false,err:"bad_resp"};
+      g.trash.push("Copper"); pl.hand=removeIdx(pl.hand,ml); g.t.coins+=3;
+      g.events.push(ev(g,p,"Moneylender: trashed a Copper, +$3."));
+    }
+  } else if(pr.type==="gain"){
+    var gp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!gainable(g,gp,pr.data.maxCost||5))return {ok:false,err:"bad_pile"};
+      gain(g,p,gp);
+      g.events.push(ev(g,p,"Gained "+gp+"."));
+    }
+  } else if(pr.type==="remodelStep1"){
+    var rs=idxList(resp.cards,pl.hand.length);
+    if(rs==null||rs.length!==1)return {ok:false,err:"bad_resp"};
+    var rm=pl.hand[rs[0]];
+    g.trash.push(rm); pl.hand=removeIdx(pl.hand,rs);
+    g.events.push(ev(g,p,"Remodel: trashed "+rm+"."));
+    newPrompt=pushPrompt(g,p,{type:"remodelStep2",data:{maxCost:(cardInfo(rm).cost||0)+2}});
+  } else if(pr.type==="remodelStep2"){
+    var rp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!gainable(g,rp,pr.data.maxCost||2))return {ok:false,err:"bad_pile"};
+      gain(g,p,rp);
+      g.events.push(ev(g,p,"Gained "+rp+"."));
+    }
+  } else if(pr.type==="mineStep1"){
+    var ms=idxList(resp.cards,pl.hand.length);
+    if(ms==null||ms.length!==1||!isTreasure(pl.hand[ms[0]]))return {ok:false,err:"bad_resp"};
+    var mt=pl.hand[ms[0]];
+    g.trash.push(mt); pl.hand=removeIdx(pl.hand,ms);
+    g.events.push(ev(g,p,"Mine: trashed "+mt+"."));
+    newPrompt=pushPrompt(g,p,{type:"mineStep2",data:{maxCost:(cardInfo(mt).cost||0)+3}});
+  } else if(pr.type==="mineStep2"){
+    var mp=String(resp.pile||"");
+    if(resp.skip){ g.events.push(ev(g,p,"Gained nothing.")); }
+    else{
+      if(!isTreasure(mp)||!gainable(g,mp,pr.data.maxCost||3))return {ok:false,err:"bad_pile"};
+      gain(g,p,mp);
+      g.events.push(ev(g,p,"Gained "+mp+"."));
+    }
+  } else if(pr.type==="throne"){
+    var th=idxList(resp.cards,pl.hand.length);
+    if(th==null||th.length!==1||!isAction(pl.hand[th[0]]))return {ok:false,err:"bad_resp"};
+    var tn=pl.hand[th[0]];
+    pl.hand=removeIdx(pl.hand,th);
+    pl.inPlay.push(tn);
+    var r1=resolveAction(g,p,tn);
+    if(r1){ newPrompt=r1; newPrompt.data.doubleNext=tn; }
+    else{
+      var r2=resolveAction(g,p,tn);
+      if(r2){ newPrompt=r2; newPrompt.data.doubleNext=tn; }
+    }
+    g.events.push(ev(g,p,"Throne Room: played "+tn+" twice."));
+  } else if(pr.type==="militia"){
+    var h=pl.hand;
+    if(resp.moat){
+      if(h.indexOf("Moat")<0)return {ok:false,err:"bad_resp"};
+      g.events.push(ev(g,p,"Revealed Moat — immune to Militia."));
+    }else{
+      var md=idxList(resp.cards,h.length);
+      if(md==null||h.length-md.length>3)return {ok:false,err:"bad_resp"};
+      for(var e=0;e<md.length;e++)pl.discard.push(h[md[e]]);
+      pl.hand=removeIdx(pl.hand,md);
+      g.events.push(ev(g,p,"Militia: discarded to "+pl.hand.length+" cards."));
+    }
+  } else if(pr.type==="bureaucrat"){
+    var hh=pl.hand;
+    if(resp.none){
+      if(victoryIndices(g,p).length)return {ok:false,err:"bad_resp"};
+      g.events.push(ev(g,p,"No Victory card to reveal."));
+    }else{
+      var br=idxList(resp.cards,hh.length);
+      if(br==null||br.length!==1||!isVictory(hh[br[0]]))return {ok:false,err:"bad_resp"};
+      var bv=hh[br[0]];
+      pl.hand=removeIdx(pl.hand,br);
+      pl.deck.push(bv);
+      g.events.push(ev(g,p,"Bureaucrat: revealed "+bv+", put on top of deck."));
+    }
+  } else return {ok:false,err:"bad_prompt"};
+  g.pending=g.pending.filter(function(x){return x.id!==pr.id;});
+  g.seq++;
+  var dn=pr.data&&pr.data.doubleNext;
+  if(dn&&!newPrompt){
+    var r3=resolveAction(g,p,dn);
+    if(r3){ newPrompt=r3; newPrompt.data.doubleNext=dn; }
+  }
+  checkOver(g);
+  return {ok:true,prompt:newPrompt,over:g.over};
+}
+function endActions(g,p){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="action")return {ok:false,err:"bad_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  var pl=g.players[p], treas=[], keep=[];
+  for(var i=0;i<pl.hand.length;i++){ if(isTreasure(pl.hand[i])){ treas.push(pl.hand[i]); pl.inPlay.push(pl.hand[i]); } else keep.push(pl.hand[i]); }
+  pl.hand=keep;
+  for(var j=0;j<treas.length;j++)g.t.coins+=cardInfo(treas[j]).coin;
+  g.phase="buy";
+  g.seq++;
+  g.events.push(ev(g,p,"Buy phase — auto-played "+treas.length+" Treasure"+(treas.length===1?"":"s")+"."));
+  return {ok:true,over:g.over};
+}
+function buyCard(g,p,pile){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="buy")return {ok:false,err:"not_buy_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  if(g.t.buys<=0)return {ok:false,err:"no_buys"};
+  if(g.supply[pile]==null||g.supply[pile]<=0)return {ok:false,err:"pile_empty"};
+  var c=cardInfo(pile); if(!c)return {ok:false,err:"bad_pile"};
+  if(g.t.coins<c.cost)return {ok:false,err:"too_expensive"};
+  g.t.buys--; g.t.coins-=c.cost;
+  gain(g,p,pile);
+  g.seq++;
+  g.events.push(ev(g,p,"Bought "+pile+"."));
+  checkOver(g);
+  return {ok:true,over:g.over};
+}
+function endTurn(g,p){
+  if(g.over)return {ok:false,err:"over"};
+  if(current(g)!==p)return {ok:false,err:"not_your_turn"};
+  if(g.phase!=="buy")return {ok:false,err:"not_buy_phase"};
+  if(pendingFor(g,p))return {ok:false,err:"resolve_prompt"};
+  cleanupPlayer(g,p);
+  g.events.push(ev(g,p,"Turn ended."));
+  g.turnIndex++;
+  g.seq++;
+  startTurn(g,current(g));
+  checkOver(g);
+  return {ok:true,over:g.over};
+}
+function canPlay(g,p,idx){
+  return !g.over&&current(g)===p&&g.phase==="action"&&g.t.actions>0&&!pendingFor(g,p)&&idx!=null&&idx>=0&&idx<g.players[p].hand.length&&isAction(g.players[p].hand[idx]);
+}
+function canBuyCard(g,p,pile){
+  if(g.over||current(g)!==p||g.phase!=="buy"||pendingFor(g,p)||g.t.buys<=0)return false;
+  if(g.supply[pile]==null||g.supply[pile]<=0)return false;
+  var c=cardInfo(pile); return !!(c&&g.t.coins>=c.cost);
+}
+function drainEvents(g){
+  var out=g.events.slice();
+  g.events.length=0;
+  return out;
+}
+
+var AUTO_RESOLVE=false;
+
+/* ══════════ DOM refs ══════════ */
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const handEl=document.getElementById("handEl");
+const supplyEl=document.getElementById("supplyEl");
+const myInplayEl=document.getElementById("myInplayEl");
+const oppInplayEl=document.getElementById("oppInplayEl");
+const turnEl=document.getElementById("turnEl");
+const statsEl=document.getElementById("statsEl");
+const bannerEl=document.getElementById("bannerEl");
+const logEl=document.getElementById("logEl");
+const deckCountEl=document.getElementById("deckCountEl");
+const discardCountEl=document.getElementById("discardCountEl");
+const trashCountEl=document.getElementById("trashCountEl");
+const trashEl=document.getElementById("trashEl");
+const discardEl=document.getElementById("discardEl");
+const myNameEl=document.getElementById("myNameEl");
+const oppNameEl=document.getElementById("oppNameEl");
+const myScoreEl=document.getElementById("myScoreEl");
+const oppScoreEl=document.getElementById("oppScoreEl");
+const myCountsEl=document.getElementById("myCountsEl");
+const oppCountsEl=document.getElementById("oppCountsEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const resignBtn=document.getElementById("resignBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const endPhaseBtn=document.getElementById("endPhaseBtn");
+const endTurnBtn=document.getElementById("endTurnBtn");
+const saveBtn=document.getElementById("saveBtn");
+const hintBtn=document.getElementById("hintBtn");
+const promptModal=document.getElementById("promptModal");
+const promptTitleEl=document.getElementById("promptTitleEl");
+const promptBodyEl=document.getElementById("promptBodyEl");
+const promptBtnsEl=document.getElementById("promptBtnsEl");
+const passScreen=document.getElementById("passScreen");
+const passTitleEl=document.getElementById("passTitleEl");
+const passSubEl=document.getElementById("passSubEl");
+const passGoBtn=document.getElementById("passGoBtn");
+const overModal=document.getElementById("overModal");
+const overTitleEl=document.getElementById("overTitleEl");
+const overBannerEl=document.getElementById("overBannerEl");
+const overScoresEl=document.getElementById("overScoresEl");
+const overReasonEl=document.getElementById("overReasonEl");
+const playAgainBtn=document.getElementById("playAgainBtn");
+const overMenuBtn=document.getElementById("overMenuBtn");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const tmrEl=document.getElementById("tmrEl");
+const lbBtn=document.getElementById("lbBtn");
+const overLbBtn=document.getElementById("overLbBtn");
+const lbModal=document.getElementById("lbModal");
+const lbNameInput=document.getElementById("lbNameInput");
+const lbRowsEl=document.getElementById("lbRowsEl");
+const lbDoneBtn=document.getElementById("lbDoneBtn");
+
+/* ══════════ state ══════════ */
+const game={ mode:null, g:null, view:0, hand:[], prompts:[], selected:null,
+  aiThinking:false, locked:false, passShow:false,
+  myPlayer:0, myRole:null, status:"idle", oppPresent:true, hostIn:false, guestIn:false,
+  lastSeq:-1, logLines:[], deckWarned:false,
+  socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null, openResolvers:[] };
+
+/* ══════════ helpers ══════════ */
+function npName(p){
+  if(game.mode==="online")return p===game.myPlayer?"You":"Opponent";
+  if(game.mode==="ai")return p===0?"You":"The Machine";
+  return "Player "+(p+1);
+}
+function activeP(){ return game.g&&game.g.turnIndex>=0?current(game.g):-1; }
+function viewPlayer(){ return game.mode==="online"?game.myPlayer:(game.mode==="ai"?0:game.view); }
+function myHand(){ return game.mode==="online"?game.hand:game.g.players[viewPlayer()].hand; }
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function fmtTime(ts){ const d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function log(txt,steal){
+  game.logLines.push(steal?'<div class="log-item"><span class="st">'+esc(txt)+'</span></div>':'<div class="log-item"><span class="ev">'+esc(txt)+'</span></div>');
+  if(game.logLines.length>120)game.logLines.splice(0,game.logLines.length-120);
+  renderLog();
+}
+function renderLog(){ logEl.innerHTML=game.logLines.join(""); logEl.scrollTop=logEl.scrollHeight; }
+function flushLog(){
+  if(!game.g)return;
+  const evs=drainEvents(game.g);
+  for(let i=0;i<evs.length;i++){
+    const e=evs[i];
+    log((e.p===-1?"⚑ Table: ":npName(e.p)+": ")+e.txt);
+  }
+}
+function addChat(role,text,ts){
+  const p=role==="host"?0:1;
+  const who=p===game.myPlayer?"You":npName(p);
+  const row=document.createElement("div");
+  row.className="chat-item"+(p===game.myPlayer?" mine":"");
+  row.innerHTML="<b>"+esc(who)+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(p!==game.myPlayer)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ interaction gating ══════════ */
+function curPrompt(){
+  const g=game.g; if(!g)return null;
+  if(game.mode==="online"){
+    for(let i=0;i<game.prompts.length;i++){ if(game.prompts[i].player===game.myPlayer)return game.prompts[i]; }
+    return null;
+  }
+  return pendingFor(g,activeP());
+}
+function canActUI(){
+  const g=game.g; if(!g||g.over||game.locked)return false;
+  if(game.mode==="online"){ if(!game.sockOpen||game.status!==2)return false; if(activeP()!==game.myPlayer)return false; }
+  else if(game.mode==="ai"){ if(activeP()!==0||game.aiThinking)return false; }
+  else { if(activeP()!==game.view)return false; }
+  if(curPrompt())return false;
+  return true;
+}
+
+/* ══════════ rendering ══════════ */
+function cardEl(name,opts){
+  opts=opts||{};
+  const c=cardInfo(name);
+  const d=document.createElement("div");
+  d.className="dom-card";
+  if(c.kinds.indexOf("treasure")>=0)d.classList.add("treasure");
+  if(c.kinds.indexOf("victory")>=0||isCurse(name))d.classList.add("victory");
+  if(isCurse(name))d.classList.add("curse");
+  if(c.kinds.indexOf("attack")>=0)d.classList.add("attack");
+  if(opts.faceDown){ d.classList.add("face-down"); return d; }
+  let tag="";
+  if(c.coin)tag='<div class="cv">+'+c.coin+'</div>';
+  else if(c.vp)tag='<div class="cv">'+(c.vp>0?"+":"")+c.vp+'</div>';
+  d.innerHTML='<div class="em">'+c.emoji+'</div><div class="nm">'+esc(c.name)+'</div><div class="cs">$'+c.cost+'</div>'+tag;
+  if(opts.selected)d.classList.add("selected");
+  if(opts.hint)d.classList.add("hint");
+  if(opts.tiny){ d.style.width="58px"; d.style.fontSize=".9em"; }
+  return d;
+}
+function pileEl(n,cnt){
+  const c=cardInfo(n);
+  const el=document.createElement("div");
+  el.className="dom-pile"+(cnt<=0?" empty-pile":"");
+  const coinSym="$";
+  el.innerHTML='<div class="em">'+c.emoji+'</div><div class="nm">'+esc(c.name)+'</div><div class="cs">'+coinSym+c.cost+'</div><div class="ct">'+cnt+'</div>';
+  return el;
+}
+function renderSupply(){
+  supplyEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  const canBuy=canActUI()&&g.phase==="buy";
+  const names=["Copper","Silver","Gold","Estate","Duchy","Province","Curse"].concat(g.kingdom||[]);
+  for(let i=0;i<names.length;i++){
+    const n=names[i];
+    const cnt=g.supply[n]==null?0:g.supply[n];
+    const el=pileEl(n,cnt);
+    if(cnt>0&&canBuy&&canBuyCard(g,viewPlayer(),n)){
+      el.classList.add("buyable");
+      el.addEventListener("click",function(){ onSupplyClick(n); });
+    }
+    supplyEl.appendChild(el);
+  }
+}
+function renderInplay(){
+  const g=game.g; if(!g)return;
+  const me=viewPlayer();
+  myInplayEl.innerHTML="";
+  oppInplayEl.innerHTML="";
+  const mine=g.players[me].inPlay;
+  const opp=g.players[1-me].inPlay;
+  for(let i=0;i<mine.length;i++)myInplayEl.appendChild(cardEl(mine[i]));
+  for(let j=0;j<opp.length;j++)oppInplayEl.appendChild(cardEl(opp[j]));
+}
+function renderHand(){
+  handEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  const can=canActUI()&&g.phase==="action";
+  const mine=myHand();
+  for(let i=0;i<mine.length;i++){
+    const el=cardEl(mine[i],{selected:game.selected===i,hint:hintAt===i});
+    if(can&&canPlay(g,viewPlayer(),i)){ el.classList.add("playable"); el.addEventListener("click",function(){ onHandClick(i); }); }
+    handEl.appendChild(el);
+  }
+  if(!mine.length&&g.turnIndex>=0){
+    const em=document.createElement("div"); em.className="muted small"; em.style.padding="20px 0"; em.textContent="No cards in hand.";
+    handEl.appendChild(em);
+  }
+}
+function renderStatus(){
+  const g=game.g; if(!g)return;
+  const over=g.over;
+  if(over){ turnEl.textContent="Game over"; turnEl.classList.remove("warn"); }
+  else if(activeP()<0){ turnEl.textContent=game.mode==="online"?"Waiting for a rival…":"Loading…"; }
+  else{
+    const p=activeP();
+    const you = game.mode==="online"?p===game.myPlayer:(game.mode==="ai"?p===0:(p===game.view));
+    turnEl.textContent=(you?"Your turn":npName(p)+"'s turn")+(g.phase==="action"?" · Action phase":" · Buy phase");
+    turnEl.classList.toggle("warn",!!curPrompt());
+  }
+  let s='<span class="st'+(g.phase==="action"?" on":"")+'">Actions '+g.t.actions+'</span>';
+  s+='<span class="st">Buys '+g.t.buys+'</span>';
+  s+='<span class="st">$'+g.t.coins+'</span>';
+  statsEl.innerHTML=s;
+  const me=viewPlayer();
+  const mine=g.players[me], opp=g.players[1-me];
+  const mDeck=onlineLen(mine,"deck"), mDisc=onlineLen(mine,"discard");
+  const oDeck=onlineLen(opp,"deck"), oDisc=onlineLen(opp,"discard");
+  myCountsEl.textContent="deck "+mDeck+" · discard "+mDisc+(mDisc?(" · "+topEmoji(mine)):"");
+  oppCountsEl.textContent="deck "+oDeck+" · discard "+oDisc+(oDisc?(" · "+topEmoji(opp)):"");
+  const dTop=topName(mine); const oTop=topName(opp);
+  deckCountEl.textContent=mDeck+" cards";
+  discardCountEl.textContent=oDisc+" · "+(oTop?(cardInfo(oTop)?cardInfo(oTop).emoji:"?"):"—");
+  trashCountEl.textContent=g.trashLen!=null?g.trashLen:g.trash.length;
+  trashEl.textContent=g.trashTop!=null?(cardInfo(g.trashTop)?cardInfo(g.trashTop).emoji:"?"):"—";
+  discardEl.textContent=dTop?(cardInfo(dTop)?cardInfo(dTop).emoji:"?"):"—";
+}
+function onlineLen(pl,zone){
+  if(pl[zone+"Len"]!=null)return pl[zone+"Len"];
+  return pl[zone]?pl[zone].length:0;
+}
+function topEmoji(pl){ const t=pl.discardTop; return t&&cardInfo(t)?cardInfo(t).emoji:""; }
+function topName(pl){ return pl.discardTop?pl.discardTop:null; }
+function renderScores(){
+  const g=game.g; if(!g)return;
+  const me=viewPlayer();
+  let s0,s1;
+  if(game.mode==="online"&&g.scores){ s0=g.scores[0]; s1=g.scores[1]; }
+  else { s0=score(g,0); s1=score(g,1); }
+  myScoreEl.textContent=s0+" VP";
+  oppScoreEl.textContent=s1+" VP";
+}
+function updateButtons(){
+  const g=game.g; if(!g)return;
+  const online=game.mode==="online";
+  const can=canActUI();
+  endPhaseBtn.hidden=!(can&&g.phase==="action");
+  endPhaseBtn.disabled=!can||g.phase!=="action";
+  endTurnBtn.hidden=!(can&&g.phase==="buy");
+  endTurnBtn.disabled=!can||g.phase!=="buy";
+  if(online){
+    resignBtn.hidden=!!g.over;
+    claimBtn.hidden=!(game.status===2&&!g.over&&!game.oppPresent);
+  }else{
+    resignBtn.hidden=true; claimBtn.hidden=true;
+  }
+  newGameBtn.textContent=online?(g.over?"Rematch":"New match"):"New game";
+  saveBtn.hidden=online||!!g.over;
+  const myTurn = online?(activeP()===game.myPlayer):(game.mode==="ai"?activeP()===0:activeP()===game.view);
+  hintBtn.hidden=online||!!g.over||!myTurn;
+  hintBtn.disabled=!!game.locked||!!game.aiThinking;
+}
+function updateBanner(){
+  const g=game.g; if(!g)return;
+  let msg="";
+  if(g.over)msg="";
+  else if(game.aiThinking)msg="The Machine is scheming…";
+  else if(curPrompt())msg="Complete the prompt on screen to continue.";
+  else if(activeP()<0)msg="Dealing the kingdom…";
+  else if(game.mode==="online"){
+    if(!game.sockOpen)msg="Connecting…";
+    else if(game.status===1)msg="Waiting for an opponent to join…";
+    else if(!game.oppPresent)msg="Your opponent disconnected — they can rejoin with the code. Claim the win anytime.";
+    else if(activeP()===game.myPlayer)msg=g.phase==="action"?"Play Action cards from your hand, then enter the Buy phase.":"Click a supply pile to buy, then end your turn.";
+    else msg=opponentPending()?"Waiting for your opponent to finish a card effect…":"Waiting for your opponent…";
+  }else{
+    if(activeP()===game.view||(game.mode==="ai"&&activeP()===0))msg=g.phase==="action"?"Play Actions, then enter the Buy phase to spend your coins.":"Click a supply pile to buy, then end your turn.";
+  }
+  bannerEl.textContent=msg;
+}
+function opponentPending(){
+  const g=game.g; if(!g)return false;
+  for(let i=0;i<g.pending.length;i++){ if(g.pending[i].player!==game.myPlayer)return true; }
+  return false;
+}
+function renderAll(){
+  if(!game.g)return;
+  renderSupply();
+  renderHand();
+  renderInplay();
+  renderStatus();
+  renderScores();
+  updateButtons();
+  updateBanner();
+  renderPrompts();
+  syncTurnTimer();
+}
+
+/* ══════════ prompt modal ══════════ */
+function hidePromptModal(){ promptModal.hidden=true; }
+function promptTitle(pr){
+  const p=pr.player;
+  let who="";
+  if(game.mode==="local")who=npName(p)+" — ";
+  else who="You — ";
+  if(pr.type==="cellar")return who+"Cellar: discard any number, then draw that many.";
+  if(pr.type==="trashN")return who+"Chapel: trash up to "+pr.data.max+" cards.";
+  if(pr.type==="moneylender")return who+"Moneylender: trash a Copper for +$3?";
+  if(pr.type==="gain")return who+"Gain a card costing up to $"+pr.data.maxCost+".";
+  if(pr.type==="remodelStep1")return who+"Remodel: choose a card to trash.";
+  if(pr.type==="remodelStep2")return who+"Gain a card costing up to $"+pr.data.maxCost+".";
+  if(pr.type==="mineStep1")return who+"Mine: choose a Treasure to trash.";
+  if(pr.type==="mineStep2")return who+"Gain a Treasure costing up to $"+pr.data.maxCost+".";
+  if(pr.type==="throne")return who+"Throne Room: choose an Action to play twice.";
+  if(pr.type==="militia")return who+"Militia! Discard down to 3 cards.";
+  if(pr.type==="bureaucrat")return who+"Bureaucrat: put a Victory card on top of your deck.";
+  return who+"Make a choice.";
+}
+function buildPromptModal(pr){
+  const p=pr.player;
+  const hand=game.mode==="online"?game.hand:game.g.players[p].hand;
+  promptModal.hidden=false;
+  promptTitleEl.textContent=promptTitle(pr);
+  promptBodyEl.innerHTML="";
+  promptBtnsEl.innerHTML="";
+  const body=promptBodyEl, btns=promptBtnsEl;
+  function addBtn(label,cls,fn){ const b=document.createElement("button"); b.className="btn "+(cls||"btn-gold"); b.textContent=label; b.addEventListener("click",fn); btns.appendChild(b); return b; }
+  function submit(resp){ if(game.mode==="online")sendRespond(pr.id,resp); else submitLocalPrompt(pr,resp); }
+
+  if(pr.type==="cellar"||pr.type==="trashN"||pr.type==="militia"){
+    const grid=document.createElement("div"); grid.className="dom-prompt-grid";
+    const picked={};
+    const hint=document.createElement("div"); hint.className="dom-prompt-hint";
+    const isMilitia=pr.type==="militia";
+    const needMin=isMilitia?Math.max(0,hand.length-3):0;
+    const confirmBtn=addBtn(isMilitia?"Discard":"Confirm","btn-gold",function(){ submit({moat:false,cards:Object.keys(picked).map(Number)}); });
+    function refresh(){
+      const n=Object.keys(picked).length;
+      if(isMilitia)hint.textContent="Discard down to 3 — you must discard at least "+needMin+" card"+(needMin===1?"":"s")+".";
+      else if(pr.type==="cellar")hint.textContent="Discarded "+n+" — you'll draw "+n+".";
+      else hint.textContent="Trashing "+n+" of up to "+pr.data.max+".";
+      confirmBtn.disabled=n<needMin;
+    }
+    for(let i=0;i<hand.length;i++){
+      const el=cardEl(hand[i]);
+      el.addEventListener("click",function(){
+        if(picked[i]){ delete picked[i]; el.classList.remove("picked"); }
+        else{
+          if(pr.type==="trashN"&&Object.keys(picked).length>=pr.data.max)return;
+          picked[i]=1; el.classList.add("picked");
+        }
+        refresh();
+      });
+      grid.appendChild(el);
+    }
+    body.appendChild(grid); body.appendChild(hint);
+    if(isMilitia&&hand.indexOf("Moat")>=0){
+      addBtn("🛡️ Reveal Moat (immune)","btn-ghost",function(){ submit({moat:true}); });
+    }
+    refresh();
+  }
+  else if(pr.type==="moneylender"){
+    const grid=document.createElement("div"); grid.className="dom-prompt-grid";
+    let has=false;
+    for(let i=0;i<hand.length;i++){
+      if(hand[i]!=="Copper")continue;
+      has=true;
+      const el=cardEl(hand[i]); el.style.cursor="pointer";
+      el.addEventListener("click",function(){ submit({cards:[i]}); });
+      grid.appendChild(el);
+    }
+    if(!has){ const em=document.createElement("div"); em.className="muted small"; em.textContent="No Copper in hand."; grid.appendChild(em); }
+    body.appendChild(grid);
+    addBtn("Skip","btn-ghost",function(){ submit({skip:true}); });
+  }
+  else if(pr.type==="gain"||pr.type==="remodelStep2"||pr.type==="mineStep2"){
+    const maxCost=pr.data.maxCost||5;
+    const treasureOnly=pr.type==="mineStep2";
+    const grid=document.createElement("div"); grid.className="dom-prompt-grid";
+    const names=["Copper","Silver","Gold","Estate","Duchy","Province","Curse"].concat(game.g.kingdom||[]);
+    let any=false;
+    for(let i=0;i<names.length;i++){
+      const n=names[i];
+      if(game.g.supply[n]==null||game.g.supply[n]<=0)continue;
+      const c=cardInfo(n);
+      if(c.cost>maxCost)continue;
+      if(treasureOnly&&!isTreasure(n))continue;
+      any=true;
+      const el=cardEl(n); el.style.cursor="pointer";
+      const cnt=document.createElement("div"); cnt.className="muted small"; cnt.style.fontSize=".6rem"; cnt.textContent="×"+game.g.supply[n];
+      el.appendChild(cnt);
+      el.addEventListener("click",function(){ submit({pile:n}); });
+      grid.appendChild(el);
+    }
+    if(!any){ const em=document.createElement("div"); em.className="muted small"; em.textContent="Nothing affordable to gain."; grid.appendChild(em); }
+    body.appendChild(grid);
+    addBtn("Skip","btn-ghost",function(){ submit({skip:true}); });
+  }
+  else { // single-pick: remodelStep1, mineStep1, throne, bureaucrat
+    const grid=document.createElement("div"); grid.className="dom-prompt-grid";
+    const pickable = pr.type==="mineStep1"?isTreasure:(pr.type==="throne"?isAction:(pr.type==="bureaucrat"?isVictory:function(){return true;}));
+    for(let i=0;i<hand.length;i++){
+      if(!pickable(hand[i]))continue;
+      const el=cardEl(hand[i]); el.style.cursor="pointer";
+      el.addEventListener("click",function(){ submit({cards:[i]}); });
+      grid.appendChild(el);
+    }
+    if(!grid.children.length){ const em=document.createElement("div"); em.className="muted small"; em.textContent="Nothing eligible."; grid.appendChild(em); }
+    body.appendChild(grid);
+    if(pr.type==="bureaucrat")addBtn("I have none","btn-ghost",function(){ submit({none:true}); });
+  }
+}
+function renderPrompts(){
+  if(!game.g)return;
+  if(game.mode==="online"){
+    if(game.prompts.length){ buildPromptModal(game.prompts[0]); }
+    else hidePromptModal();
+    return;
+  }
+  let pr=null;
+  if(game.mode==="ai")pr=pendingFor(game.g,0);
+  else pr=pendingFor(game.g,0)||pendingFor(game.g,1);
+  if(pr)buildPromptModal(pr);
+  else hidePromptModal();
+}
+function submitLocalPrompt(pr,resp){
+  const g=game.g;
+  const r=respondPrompt(g,pr.player,{id:pr.id,resp:resp});
+  if(!r.ok){ flashBanner("Invalid choice."); return; }
+  if(game.mode==="ai")resolveAiPrompts();
+  flushLog();
+  if(g.over){ hidePromptModal(); showGameOver(); return; }
+  renderAll();
+  saveGame();
+}
+
+/* ══════════ interaction ══════════ */
+function onHandClick(i){
+  sfx("flip");
+  if(!canActUI()||game.g.phase!=="action")return;
+  const me=viewPlayer();
+  if(game.mode==="online"){ sendPlay(i); return; }
+  const r=playCard(game.g,me,i);
+  if(!r.ok){ flashBanner("Can't play that."); return; }
+  if(game.mode==="ai")resolveAiPrompts();
+  flushLog();
+  if(game.g.over){ showGameOver(); return; }
+  renderAll();
+  saveGame();
+}
+function onSupplyClick(pile){
+  if(!canActUI()||game.g.phase!=="buy")return;
+  const me=viewPlayer();
+  if(game.mode==="online"){ sendBuy(pile); return; }
+  const r=buyCard(game.g,me,pile);
+  if(!r.ok){ flashBanner("Can't buy that."); return; }
+  flushLog();
+  if(game.g.over){ showGameOver(); return; }
+  renderAll();
+  saveGame();
+}
+function onClickEndPhase(){
+  if(!canActUI()||game.g.phase!=="action")return;
+  const me=viewPlayer();
+  if(game.mode==="online"){ sendEndActions(); return; }
+  const r=endActions(game.g,me);
+  if(!r.ok){ flashBanner("Can't end the action phase."); return; }
+  flushLog();
+  renderAll();
+  saveGame();
+}
+function onClickEndTurn(){
+  if(!canActUI()||game.g.phase!=="buy")return;
+  const me=viewPlayer();
+  if(game.mode==="online"){ sendEndTurn(); return; }
+  const r=endTurn(game.g,me);
+  if(!r.ok){ flashBanner("Can't end the turn."); return; }
+  flushLog();
+  if(game.g.over){ showGameOver(); return; }
+  renderAll();
+  saveGame();
+  if(game.mode==="ai"&&activeP()===1)aiDoTurn();
+  else if(game.mode==="local")showPassScreen();
+}
+
+/* ══════════ AI ══════════ */
+function aiRespond(g,p,pr){
+  const pl=g.players[p];
+  const resp={};
+  if(pr.type==="cellar"){
+    const drop=[];
+    const coppers=pl.hand.filter(function(x){return x==="Copper";}).length;
+    for(let i=0;i<pl.hand.length;i++){
+      const c=pl.hand[i];
+      if(c==="Curse"||c==="Estate")drop.push(i);
+      else if(c==="Copper"&&coppers>1)drop.push(i);
+    }
+    resp.cards=drop;
+  }
+  else if(pr.type==="trashN"){
+    const drop=[];
+    for(let i=0;i<pl.hand.length;i++){
+      const c=pl.hand[i];
+      if(c==="Curse")drop.push(i);
+      else if(c==="Estate"&&g.turnIndex<8)drop.push(i);
+    }
+    resp.cards=drop.slice(0,pr.data.max);
+  }
+  else if(pr.type==="moneylender"){
+    const i=pl.hand.indexOf("Copper");
+    if(i<0){ resp.skip=true; } else { resp.cards=[i]; }
+  }
+  else if(pr.type==="gain"||pr.type==="remodelStep2"||pr.type==="mineStep2"){
+    const pile=aiPickGain(g,p,pr.data.maxCost,pr.type==="mineStep2");
+    if(pile)resp.pile=pile; else resp.skip=true;
+  }
+  else if(pr.type==="remodelStep1"){
+    let pick=0;
+    const iC=pl.hand.indexOf("Copper");
+    if(pl.hand.indexOf("Curse")>=0)pick=pl.hand.indexOf("Curse");
+    else if(iC>=0&&pl.hand.filter(function(x){return x==="Copper";}).length>=2)pick=iC;
+    else if(pl.hand.indexOf("Estate")>=0)pick=pl.hand.indexOf("Estate");
+    resp.cards=[pick];
+  }
+  else if(pr.type==="mineStep1"){
+    const iC=pl.hand.indexOf("Copper");
+    resp.cards=[iC>=0?iC:0];
+  }
+  else if(pr.type==="throne"){
+    const rank={"Smithy":5,"Market":5,"Witch":6,"Village":4,"Council Room":4,"Moneylender":4,"Moat":3,"Militia":3,"Mine":2,"Remodel":2,"Bureaucrat":2,"Workshop":1,"Cellar":1,"Feast":1,"Chapel":0,"Throne Room":0};
+    let best=-1,bR=-1;
+    for(let i=0;i<pl.hand.length;i++){
+      const c=pl.hand[i];
+      if(!isAction(c))continue;
+      const r=(rank[c]||0);
+      if(r>bR){ bR=r; best=i; }
+    }
+    resp.cards=[best];
+  }
+  else if(pr.type==="militia"){
+    if(pl.hand.indexOf("Moat")>=0&&Math.random()<0.65){ resp.moat=true; }
+    else{
+      const idxs=pl.hand.map(function(c,i){return i;}).sort(function(a,b){return keepVal(pl.hand[b])-keepVal(pl.hand[a]);});
+      resp.moat=false; resp.cards=idxs.slice(3);
+    }
+  }
+  else if(pr.type==="bureaucrat"){
+    const vi=[];
+    for(let i=0;i<pl.hand.length;i++)if(isVictory(pl.hand[i]))vi.push(i);
+    if(vi.length){
+      vi.sort(function(a,b){return cardInfo(pl.hand[b]).vp-cardInfo(pl.hand[a]).vp;});
+      resp.cards=[vi[0]];
+    } else resp.none=true;
+  }
+  return resp;
+}
+function aiPickGain(g,p,maxCost,treasureOnly){
+  const names=pileOrder();
+  const late=g.supply["Province"]<=3||emptyPiles(g)>=2;
+  let best="",bestV=-1e9;
+  for(let i=0;i<names.length;i++){
+    const n=names[i];
+    if(g.supply[n]==null||g.supply[n]<=0)continue;
+    const c=cardInfo(n);
+    if(c.cost>maxCost)continue;
+    if(treasureOnly&&!isTreasure(n))continue;
+    let v=-5;
+    if(isTreasure(n)){ v=(c.coin-1)*3+c.cost; }
+    else if(isVictory(n)){ if(late&&(n==="Duchy"||n==="Estate"))v=2; else v=-3; }
+    else if(isCurse(n)){ v=-99; }
+    else{
+      const a={"Smithy":4,"Market":5,"Village":3,"Witch":7,"Militia":4,"Moneylender":3,"Mine":3,"Remodel":2,"Workshop":3,"Feast":3,"Cellar":1,"Chapel":1,"Moat":2,"Council Room":4,"Throne Room":2,"Bureaucrat":1}[n]||0;
+      v=late?a*0.3:a;
+    }
+    if(v>bestV){ bestV=v; best=n; }
+  }
+  return best||null;
+}
+function aiPickBuy(g,p){
+  const coins=g.t.coins;
+  const late=g.supply["Province"]<=4||emptyPiles(g)>=2;
+  const early=!late&&g.turnIndex<12;
+  const names=pileOrder();
+  let best="",bs=-1e9;
+  for(let i=0;i<names.length;i++){
+    const n=names[i];
+    if(g.supply[n]==null||g.supply[n]<=0)continue;
+    const c=cardInfo(n);
+    if(c.cost>coins)continue;
+    let v=-10;
+    if(isTreasure(n)){ v = n==="Copper"?-5:(n==="Silver"?2.2:(n==="Gold"?3.4:0)); }
+    else if(isVictory(n)){
+      if(n==="Province")v=coins>=8?8:(coins>=6?5:1);
+      else if(n==="Duchy")v=late?2.5:-1;
+      else v=(late&&g.supply["Province"]<=3)?0.6:-3;
+    }
+    else if(isCurse(n)){ v=-99; }
+    else{
+      const a={"Witch":6.5,"Militia":4,"Smithy":3,"Market":5.5,"Mine":3,"Remodel":2,"Village":3,"Moneylender":3,"Workshop":2.5,"Feast":2.5,"Throne Room":2.5,"Bureaucrat":1,"Cellar":1,"Chapel":1,"Moat":1,"Council Room":3}[n]||0;
+      v=early?a:a*0.35;
+    }
+    if(v>bs){ bs=v; best=n; }
+  }
+  return best||null;
+}
+function aiBestAction(g,p){
+  if(g.phase!=="action"||g.t.actions<=0||pendingFor(g,p))return null;
+  const pl=g.players[p];
+  const late=g.supply["Province"]<=4||emptyPiles(g)>=2;
+  const SCORE={"Smithy":6,"Market":7,"Witch":8,"Village":6,"Council Room":6,"Militia":5,"Moat":4,"Moneylender":5,"Mine":4,"Bureaucrat":2,"Remodel":3,"Workshop":3,"Feast":3,"Cellar":3,"Chapel":3,"Throne Room":5};
+  let best=-1,bestS=-1e9;
+  for(let i=0;i<pl.hand.length;i++){
+    const n=pl.hand[i];
+    if(!isAction(n))continue;
+    if(late&&(SCORE[n]||0)<5)continue;
+    let s=SCORE[n]||0;
+    if(n==="Cellar"){ const junk=pl.hand.filter(function(x){return x==="Curse"||x==="Estate";}).length; s=junk?junk+2:0; }
+    if(n==="Chapel"){ const junk=pl.hand.filter(function(x){return x==="Curse"||x==="Estate";}).length; s=junk?junk*2:0; }
+    if(n==="Moneylender"){ if(pl.hand.indexOf("Copper")<0)s=0; }
+    if(n==="Mine"){ s=treasureIndices(g,p).length?s+1:0; }
+    if(n==="Militia"){ if(g.players[1-p].hand.length<=3)s-=2; }
+    if(n==="Bureaucrat"){ if(g.supply["Silver"]<=0)s=0; }
+    if(n==="Throne Room"){ const good=["Smithy","Market","Witch","Village","Council Room","Moneylender","Militia","Moat"].filter(function(x){return pl.hand.indexOf(x)>=0;}); s=good.length?s+3:0; }
+    if(n==="Remodel"){ if(pl.hand.length<2)s=0; }
+    if(n==="Witch"){ if(g.supply["Curse"]<=0)s=1; }
+    s+=Math.random()*(AI_DIFF==="easy"?6:(AI_DIFF==="hard"?0.4:2));
+    if(s>bestS){ bestS=s; best=i; }
+  }
+  return best===-1?null:best;
+}
+function aiActions(g,p){
+  for(let guard=0;guard<40;guard++){
+    if(pendingFor(g,p)){
+      const pr=pendingFor(g,p);
+      const r=respondPrompt(g,p,{id:pr.id,resp:aiRespond(g,p,pr)});
+      if(!r.ok)break;
+      continue;
+    }
+    const i=aiBestAction(g,p);
+    if(i==null)break;
+    const r=playCard(g,p,i);
+    if(!r.ok)break;
+  }
+}
+function aiBuy(g,p){
+  for(let guard=0;guard<20;guard++){
+    if(g.phase!=="buy"||g.t.buys<=0||pendingFor(g,p))break;
+    const pile=aiPickBuy(g,p);
+    if(!pile)break;
+    const r=buyCard(g,p,pile);
+    if(!r.ok)break;
+  }
+}
+function resolveAiPrompts(){
+  if(game.mode!=="ai"||!game.g)return;
+  for(let guard=0;guard<20;guard++){
+    const pr=pendingFor(game.g,1);
+    if(!pr)break;
+    const r=respondPrompt(game.g,1,{id:pr.id,resp:aiRespond(game.g,1,pr)});
+    if(!r.ok)break;
+  }
+}
+function aiDoTurn(){
+  game.aiThinking=true;
+  updateBanner();
+  setTimeout(function(){
+    if(game.mode!=="ai"||!game.g||game.g.over)return;
+    const g=game.g;
+    aiActions(g,1);
+    resolveAiPrompts();
+    endActions(g,1);
+    aiBuy(g,1);
+    endTurn(g,1);
+    game.aiThinking=false;
+    flushLog();
+    if(g.over){ showGameOver(); return; }
+    renderAll();
+    saveGame();
+  },420);
+}
+
+/* ══════════ local / AI game flow ══════════ */
+function startGame(){
+  const g=newGame(pickKingdom(),0);
+  game.g=g;
+  game.view=0; game.passShow=false; game.prompts=[];
+  game.selected=null; game.aiThinking=false; game.locked=false;
+  game.logLines=[]; hintAt=-1; tmrKey=""; tmrStop();
+  flushLog();
+  log("Deck-building duel begins — 10 Kingdom piles are in the supply. Most VP when the game ends wins!");
+  sfx("deal");
+  renderAll();
+  saveGame();
+  if(game.mode==="ai"&&activeP()===1)aiDoTurn();
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket)exitOnline(false);
+  game.mode=mode;
+  game.myPlayer=0; game.myRole=null; game.over=false;
+  myNameEl.textContent=mode==="ai"?"You":"Player 1";
+  oppNameEl.textContent=mode==="ai"?"The Machine":"Player 2";
+  roomBox.hidden=true; claimBtn.hidden=true; resignBtn.hidden=true; chatBox.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  passScreen.hidden=true; overModal.hidden=true; promptModal.hidden=true;
+  startGame();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  chatBox.hidden=true;
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
+    exitOnline(true);
+    refreshContinuePanel();
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+    refreshContinuePanel();
+  }
+}
+
+/* ══════════ save / continue ══════════ */
+const SAVE_KEY="bgn_save_dom";
+function saveGame(){
+  if(!game.g||game.mode==="online")return;
+  if(game.g.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:1,mode:game.mode,g:game.g,logLines:game.logLines,savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved game was found.";
+  try{ const o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — "+(o.mode==="ai"?"vs the Machine":"hotseat")+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.g){ flashBanner("No saved game found."); return; }
+  const mode=(o.mode==="ai")?"ai":"local";
+  game.mode=mode; game.g=o.g;
+  game.view=0; game.hand=[]; game.prompts=[];
+  game.myPlayer=0; game.myRole=null;
+  game.over=!!o.g.over; game.passShow=false; game.aiThinking=false; game.locked=false; game.selected=null;
+  game.logLines=Array.isArray(o.logLines)?o.logLines.slice():[];
+  myNameEl.textContent=mode==="ai"?"You":"Player 1";
+  oppNameEl.textContent=mode==="ai"?"The Machine":"Player 2";
+  roomBox.hidden=true; claimBtn.hidden=true; resignBtn.hidden=true; chatBox.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false; passScreen.hidden=true; overModal.hidden=true; promptModal.hidden=true;
+  sfx("deal");
+  renderAll();
+  saveGame();
+  if(game.mode==="ai"&&activeP()===1&&!game.g.over)aiDoTurn();
+}
+
+/* ══════════ game over ══════════ */
+function showGameOver(){
+  const g=game.g; if(!g)return;
+  const youWon=game.mode==="online"?g.winner===game.myPlayer:(game.mode==="ai"?g.winner===0:(g.winner===game.view));
+  if(g.winner==="draw")sfx("draw2");
+  else if(youWon)sfx("win");
+  else sfx("lose");
+  overTitleEl.textContent="Game over";
+  let banner="";
+  if(g.winner==="draw")banner="It's a tie!";
+  else banner=youWon?"🏆 You win!":"🏆 "+npName(g.winner)+" wins!";
+  overBannerEl.textContent=banner;
+  const s0=g.scores?g.scores[0]:score(g,0);
+  const s1=g.scores?g.scores[1]:score(g,1);
+  const p0=game.mode==="online"?(game.myPlayer===0?"You":"Opponent"):npName(0);
+  const p1=game.mode==="online"?(game.myPlayer===1?"You":"Opponent"):npName(1);
+  overScoresEl.innerHTML='<div class="'+(g.winner===0?"win":"")+'"><span class="muted small">'+esc(p0)+'</span><b>'+s0+'</b><span class="pts-tag">VP</span>'+(g.winner===0?'<span class="win-tag">★ winner</span>':"")+'</div>'+
+                          '<div class="'+(g.winner===1?"win":"")+'"><span class="muted small">'+esc(p1)+'</span><b>'+s1+'</b><span class="pts-tag">VP</span>'+(g.winner===1?'<span class="win-tag">★ winner</span>':"")+'</div>';
+  overReasonEl.textContent=reasonText();
+  playAgainBtn.textContent=game.mode==="online"?"Rematch":"Play again";
+  overModal.hidden=false;
+  promptModal.hidden=true; passScreen.hidden=true;
+  renderAll();
+  deleteSave();
+  const w=g.winner;
+  if(w!==null&&w!==undefined&&w!=="draw"){
+    const sc=score(g,w);
+    if(game.mode==="online"){ if(game.myRole==="host")lbSubmitScore(lbName(),sc,""); }
+    else lbSubmitScore(lbName(),sc,"");
+  }
+}
+function reasonText(){
+  const g=game.g;
+  const w=g.winner;
+  const youWon=game.mode==="online"?w===game.myPlayer:(game.mode==="ai"?w===0:(w===game.view));
+  if(w==="draw")return "It's a tie — most VP would have won.";
+  if(g.reason==="resign")return npName(w)+" wins — "+(game.mode==="online"?(w===game.myPlayer?"your opponent resigned":"you resigned"):npName(1-w)+" resigned")+".";
+  if(g.reason==="forfeit")return game.mode==="online"?(youWon?"You win — your opponent left!":"You lose — your opponent claimed the win."):npName(w)+" wins.";
+  return "The supply ran out — "+npName(w)+" scored the most Victory Points.";
+}
+
+/* ══════════ pass screen (hotseat) ══════════ */
+function showPassScreen(){
+  const np=activeP();
+  tmrStop();
+  promptModal.hidden=true;
+  passTitleEl.textContent="Pass the device to "+npName(np);
+  passSubEl.textContent="Keep "+npName(np)+"'s hand secret — they play and buy from here.";
+  passScreen.hidden=false;
+}
+passGoBtn.addEventListener("click",function(){
+  passScreen.hidden=true;
+  game.view=activeP();
+  renderAll();
+});
+
+/* ══════════ turn timer ══════════ */
+const TURN_TIMER_SECS=60;
+let tmrRemain=0, tmrInt=null, tmrKey="", hintAt=-1;
+function tmrFmt(s){ const m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0"); }
+function tmrStop(){ if(tmrInt){ clearInterval(tmrInt); tmrInt=null; } }
+function tmrStart(){ if(TURN_TIMER_SECS<=0)return; tmrStop(); tmrRemain=TURN_TIMER_SECS; tmrInt=setInterval(tmrTick,1000); tmrTick(); }
+function tmrTick(){
+  tmrRemain--;
+  if(tmrEl){ tmrEl.textContent="⏱ "+tmrFmt(Math.max(0,tmrRemain)); tmrEl.classList.toggle("low",tmrRemain<=10); }
+  if(tmrRemain<=0){
+    tmrStop();
+    flashBanner("Time's up — turn auto-ended.");
+    if(canActUI()){ if(game.g.phase==="action")onClickEndPhase(); else onClickEndTurn(); }
+  }
+}
+function syncTurnTimer(){
+  const g=game.g;
+  const should = TURN_TIMER_SECS>0 && game.mode && g && !g.over && !game.locked && !game.aiThinking && !game.passShow && canActUI();
+  if(!should){ tmrStop(); if(tmrEl)tmrEl.hidden=true; return; }
+  if(tmrEl)tmrEl.hidden=false;
+  const key = game.mode+":"+g.turnIndex+":"+activeP();
+  if(key!==tmrKey){ tmrKey=key; tmrStart(); }
+  else if(!tmrInt)tmrStart();
+}
+
+/* ══════════ hint ══════════ */
+function onHint(){
+  if(game.over||game.locked||!game.g)return;
+  if(game.mode==="ai"&&activeP()!==0)return;
+  if(game.mode==="local"&&activeP()!==game.view)return;
+  const g=game.g;
+  if(g.phase==="action"){
+    const i=aiBestAction(g,viewPlayer());
+    if(i==null){ flashBanner("No useful Actions right now — try the Buy phase."); return; }
+    hintAt=i;
+    sfx("hint");
+    flashBanner("💡 Hint: play the "+myHand()[i]+" from your hand.");
+    renderAll();
+    setTimeout(function(){ if(hintAt===i){ hintAt=-1; renderAll(); } },6000);
+  }else{
+    const pile=aiPickBuy(g,viewPlayer());
+    if(!pile||!canBuyCard(g,viewPlayer(),pile)){ flashBanner("No useful buys left — end your turn."); return; }
+    flashBanner("💡 Hint: buy the "+pile+" (worth trying).");
+  }
+}
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true;
+    game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){
+    if(game.mode==="online")onServerMsg(ev.data);
+  });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null;
+        connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){ connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — share the code to start the match":"Connecting…"); }
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="hand"){ game.hand=msg.hand.slice(); if(game.g)game.g.players[msg.p].hand=game.hand; renderAll(); }
+  else if(msg.t==="promptlist"){ game.prompts=Array.isArray(msg.prompts)?msg.prompts.slice():[]; renderAll(); }
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+}
+function applyServerSnap(s){
+  if(s.deckSig&&s.deckSig!==CFG.sig){
+    if(Array.isArray(s.deck)&&s.deck.length){
+      CFG.pool=s.deck.map(function(d){ return {name:String(d.name||""),cost:Math.floor(d.cost)||0,emoji:String(d.emoji||""),kinds:String(d.kinds||""),coin:0,vp:0}; });
+      setPool(CFG.pool);
+      CFG.sig=kingdomSig();
+      if(!game.deckWarned){
+        game.deckWarned=true;
+        log("Note: the online server's kingdom pool differs from your main.pjs settings — playing with the room's pool. Update the KINGDOM_CFG mirror in index.html to match your main.pjs config.",true);
+      }
+    }
+  }
+  if(!game.g)game.g=newRoom(s.hostFirst);
+  const g=game.g;
+  g.turnIndex=s.turnIndex; g.phase=s.phase;
+  g.t={actions:s.t.actions,buys:s.t.buys,coins:s.t.coins};
+  g.supply=s.supply; g.kingdom=s.kingdom;
+  for(let i=0;i<2;i++){
+    g.players[i].deckLen=s.players[i].deckLen;
+    g.players[i].discardLen=s.players[i].discardLen;
+    g.players[i].discardTop=s.players[i].discardTop;
+    g.players[i].inPlay=s.players[i].inPlay.slice();
+  }
+  g.trashLen=s.trashLen; g.trashTop=s.trashTop;
+  g.scores=s.scores;
+  g.over=s.status===3; g.winner=s.winner; g.reason=s.reason;
+  g.pending=s.pending.map(function(pr){ return {player:pr.player,type:pr.type,id:pr.id}; });
+  game.status=s.status;
+  game.hostIn=s.hostIn; game.guestIn=s.guestIn;
+  game.oppPresent=(game.myPlayer===0)?s.guestIn:s.hostIn;
+  game.locked=false;
+  if(s.seq!==game.lastSeq){
+    if(Array.isArray(s.events)){
+      for(let i=0;i<s.events.length;i++){
+        const e=s.events[i];
+        log((e.p===-1?"⚑ Table: ":npName(e.p)+": ")+e.txt,/wins|stole|Forfeit/.test(e.txt));
+      }
+    }
+    game.lastSeq=s.seq;
+  }
+  if(g.over&&game.mode==="online")showGameOver();
+  const ap=activeP();
+  if(!g.over&&game.status===2&&ap===game.myPlayer&&game._lastAp!==ap)sfx("turn");
+  game._lastAp=ap;
+  renderAll();
+}
+function newRoom(hostFirst){ return newGame([],hostFirst); }
+function enterOnlineGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  roomBox.hidden=false;
+  chatBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  game.locked=false;
+  renderAll();
+  updateButtons();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  game.mode="online";
+  game.myPlayer=0;
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom","");
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    game.myRole=r.role;
+    game.roomCode=r.code;
+    myNameEl.textContent="You";
+    oppNameEl.textContent="Opponent";
+    game.logLines=[];
+    log("Room created — code "+r.code+". Share it with a friend to start.");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); }).catch(function(){});
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  game.mode="online";
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    game.roomCode=code;
+    myNameEl.textContent="You";
+    oppNameEl.textContent="Opponent";
+    game.logLines=[];
+    log("Joined room "+code+".");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); }).catch(function(){});
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+function sendPlay(i){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("play",JSON.stringify({code:game.roomCode,evt:evt,card:i})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Play rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendBuy(pile){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("buy",JSON.stringify({code:game.roomCode,evt:evt,pile:pile})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Buy rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendEndActions(){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("endActions",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Couldn't end the action phase ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendEndTurn(){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("endTurn",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Couldn't end the turn ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendRespond(id,resp){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("respond",JSON.stringify({code:game.roomCode,evt:evt,id:id,resp:resp})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Response rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+let bannerTimer=null;
+function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+
+/* ══════════ leaderboard ══════════ */
+const LB_NAME_KEY="bgn_lb_name";
+function lbName(){ try{ return localStorage.getItem(LB_NAME_KEY)||"Player"; }catch(e){ return "Player"; } }
+function setLbName(n){ try{ localStorage.setItem(LB_NAME_KEY,String(n).trim().slice(0,24)||"Player"); }catch(e){} }
+let lbSock=null, lbReady=false, lbBack=1000, lbQueue=null;
+function lbConnect(){
+  if(lbSock||!window.root||!window.root.createServerSocket)return;
+  try{ lbSock=window.root.createServerSocket(); }catch(e){ return; }
+  lbSock.addEventListener("open",function(){
+    lbReady=true; lbBack=1000;
+    if(lbQueue){ const q=lbQueue; lbQueue=null; lbSubmitNow(q.name,q.score,q.extra); }
+  });
+  lbSock.addEventListener("close",function(e){
+    lbReady=false;
+    if(e.code===4403)return;
+    setTimeout(function(){ lbConnect(); }, Math.min(15000,lbBack)+Math.random()*500);
+    lbBack=Math.min(15000,lbBack*2);
+  });
+}
+function lbSubmitNow(name,score,extra){
+  if(!lbSock||lbSock.readyState!==1)return;
+  lbSock.rpc.submitScore(JSON.stringify({name:name,score:score,extra:extra})).catch(function(){});
+}
+function lbSubmitScore(name,score,extra){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ lbQueue={name:name,score:score,extra:extra}; return; }
+  lbSubmitNow(name,score,extra);
+}
+function lbGetScores(cb){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ setTimeout(function(){ lbGetScores(cb); },600); return; }
+  lbSock.rpc.getScores("").then(function(r){
+    let o; try{ o=JSON.parse(r); }catch(e){ cb([]); return; }
+    cb(o.scores||[]);
+  }).catch(function(){ cb([]); });
+}
+function lbRenderRows(list){
+  if(!list.length){ lbRowsEl.innerHTML='<div class="lb-empty">No scores yet — finish a game to set one.</div>'; return; }
+  lbRowsEl.innerHTML=list.map(function(x,i){
+    return '<div class="lb-row'+(i<3?" top":"")+'"><span class="rk">#'+(i+1)+'</span><span class="nm">'+esc(x.name)+'</span><span class="sc">'+x.score+' VP</span></div>';
+  }).join("");
+}
+function openLb(){
+  lbNameInput.value=lbName();
+  lbModal.hidden=false;
+  lbRowsEl.innerHTML='<div class="lb-empty">Loading…</div>';
+  lbGetScores(lbRenderRows);
+}
+function closeLb(){
+  setLbName(lbNameInput.value);
+  lbNameInput.value=lbName();
+  lbModal.hidden=true;
+}
+
+/* ══════════ AI difficulty ══════════ */
+let AI_DIFF="normal";
+try{ const s=localStorage.getItem("bgn_ai_diff"); if(s==="easy"||s==="normal"||s==="hard")AI_DIFF=s; }catch(e){}
+function setDiff(d){
+  AI_DIFF=d;
+  try{ localStorage.setItem("bgn_ai_diff",d); }catch(e){}
+  document.querySelectorAll(".diff-btns .btn").forEach(function(b){ b.classList.toggle("on",b.dataset.diff===d); });
+}
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    startMode(m);
+  });
+});
+document.querySelectorAll(".diff-btns .btn").forEach(function(b){
+  b.addEventListener("click",function(){ setDiff(b.dataset.diff); });
+});
+setDiff(AI_DIFF);
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true;
+  connectSocket();
+  doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true;
+  connectSocket();
+  doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+endPhaseBtn.addEventListener("click",onClickEndPhase);
+endTurnBtn.addEventListener("click",onClickEndTurn);
+resignBtn.addEventListener("click",function(){
+  if(!game.over&&game.mode==="online"){ rpc("resign",game.roomCode).catch(function(){}); }
+});
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.g&&game.g.over)rpc("rematch",game.roomCode).catch(function(){});
+    return;
+  }
+  startMode(game.mode);
+});
+playAgainBtn.addEventListener("click",function(){
+  overModal.hidden=true;
+  if(game.mode==="online"){ rpc("rematch",game.roomCode).catch(function(){}); return; }
+  startMode(game.mode);
+});
+overMenuBtn.addEventListener("click",function(){ overModal.hidden=true; exitToLobby(); });
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+claimBtn.addEventListener("click",function(){
+  if(game.g&&game.g.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); log("💾 Game saved."); });
+hintBtn.addEventListener("click",onHint);
+lbBtn.addEventListener("click",openLb);
+overLbBtn.addEventListener("click",openLb);
+lbDoneBtn.addEventListener("click",closeLb);
+lbNameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")closeLb(); });
+
+/* debug/testing handle for browser_eval */
+window.__dom={ game, CFG, newGame, pickKingdom, playCard, buyCard, endActions, endTurn, respondPrompt, canPlay, canBuyCard, score, current, pendingFor, drainEvents, flushLog, startMode, startGame, showGameOver, aiRespond, aiBestAction, aiPickBuy, aiActions, aiBuy, aiDoTurn, renderAll, saveGame, continueGame, deleteSave, lbSubmitScore, openLb };
+refreshContinuePanel();
+renderAll();
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"Dominion"); }
+  function importGame(o){
+    if(!o||!o.g)return false;
+    const mode=(o.mode==="ai")?"ai":"local";
+    if(game.mode==="online")exitOnline(false);
+    game.mode=mode; game.g=o.g;
+    game.view=0; game.hand=[]; game.prompts=[];
+    game.myPlayer=0; game.myRole=null;
+    game.over=!!o.g.over; game.passShow=false; game.aiThinking=false; game.locked=false; game.selected=null;
+    game.logLines=Array.isArray(o.logLines)?o.logLines.slice():[];
+    myNameEl.textContent=mode==="ai"?"You":"Player 1";
+    oppNameEl.textContent=mode==="ai"?"The Machine":"Player 2";
+    roomBox.hidden=true; claimBtn.hidden=true; resignBtn.hidden=true; chatBox.hidden=true;
+    lobbyCtn.hidden=true; gameCtn.hidden=false; passScreen.hidden=true; overModal.hidden=true; promptModal.hidden=true;
+    sfx("deal");
+    renderAll();
+    if(game.mode==="ai"&&activeP()===1&&!game.g.over)aiDoTurn();
+    return true;
+  }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-non-standard-deck-template",
+    gameName:tplName,
+    exportData:function(){
+      if(!game.g||game.mode==="online")return null;
+      return {mode:game.mode, g:game.g, logLines:game.logLines};
+    },
+    applySave:importGame,
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs the Machine":"hotseat"; },
+    filenameBase:function(){ return tplName().toLowerCase().replace(/[^a-z0-9]+/g,"-")||"dominion"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+})();
+</script><!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<!-- ═══ BACK TO HUB FLOATING BUTTON ═══ -->
+<script>
+(function(){
+  "use strict";
+  if(document.getElementById("rathjiBackBtn"))return;
+  var st=document.createElement("style");
+  st.textContent="#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:inline-flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,0.82);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.18);box-shadow:0 6px 18px rgba(0,0,0,0.35);text-decoration:none;line-height:1;color:#fff;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;cursor:pointer;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;-webkit-tap-highlight-color:transparent;}#rathjiBackBtn:hover{transform:translate(-50%,-2px);border-color:rgba(167,139,250,0.65);box-shadow:0 10px 24px rgba(139,92,246,0.35);}#rathjiBackBtn:focus-visible{outline:2px solid rgba(167,139,250,0.9);outline-offset:2px;}#rathjiBackBtn .rbBadge{width:28px;height:28px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;font-size:15px;font-weight:700;}#rathjiBackBtn .rbLabel{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;}#rathjiBackBtn .rbArrow{flex:none;opacity:.9;}@media(max-width:479px){#rathjiBackBtn{padding:6px;}#rathjiBackBtn .rbLabel,#rathjiBackBtn .rbArrow{display:none;}}";
+  document.head.appendChild(st);
+  var a=document.createElement("a");
+  a.id="rathjiBackBtn";
+  a.href="https://perchance.org/rathjis-generators";
+  a.target="_blank";
+  a.rel="noopener";
+  a.setAttribute("aria-label","Back to my projects");
+  a.title="Back to my projects";
+  a.innerHTML='<span class="rbBadge" aria-hidden="true">R</span><span class="rbLabel">My projects</span><svg class="rbArrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>';
+  document.body.appendChild(a);
+})();
+</script>

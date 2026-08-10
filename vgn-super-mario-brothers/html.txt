@@ -1,0 +1,246 @@
+<!--
+  Super Mario Bros. — World 1-1, playable mockup.
+
+  Code lives in src/: 00-core.js (loop, input, physics, camera, HUD),
+  10-level.js (disassembly-derived 1-1 level data), 20-tiles.js (rendering,
+  tile art, backdrop parallax, animations), 30-mario.js (Mario),
+  40-actors.js (enemies, items, block strikes), 50-audio.js (WebAudio SFX
+  and the level-clear sequence). They are plain classic scripts loaded in
+  filename order — the order is load-bearing, so keep the numeric prefixes.
+  Edit the src/ files directly; there is no build step.
+
+  All art and audio are generated procedurally at runtime: no images, no
+  sprite sheets, no audio files, no fonts, no CDN.
+
+  Technical homage. Super Mario Bros. is Nintendo's intellectual property;
+  this is not for commercial or public distribution.
+-->
+
+<style>
+  :root {
+    --nes-red: #e40000;
+    --nes-blue: #0058f8;
+    --nes-gold: #fcbc3c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: 'Courier New', Courier, monospace;
+    color: #fcfcfc;
+  }
+  #stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas#game {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    background: #5c94fc;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: rgba(0, 0, 0, 0.82);
+    padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: clamp(20px, 5vw, 34px);
+    margin: 0 0 4px;
+    color: var(--nes-red);
+    text-shadow: 2px 2px 0 #000;
+    letter-spacing: 1px;
+  }
+  .overlay h2 {
+    font-size: clamp(14px, 3vw, 20px);
+    margin: 0 0 18px;
+    color: var(--nes-gold);
+    letter-spacing: 3px;
+  }
+  .overlay p {
+    max-width: 420px;
+    line-height: 1.7;
+    font-size: 12px;
+    color: #d8d8d8;
+  }
+  .overlay .stat-line {
+    font-size: 14px;
+    color: var(--nes-gold);
+    margin: 10px 0 4px;
+  }
+  button.big {
+    margin-top: 18px;
+    background: var(--nes-red);
+    border: 3px solid #fff;
+    padding: 12px 30px;
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 4px 4px 0 #000;
+  }
+  button.big:active {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 #000;
+  }
+  #muteBtn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+    background: rgba(0,0,0,0.6);
+    border: 2px solid #fff;
+    color: #fff;
+    font-size: 14px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  #touchControls {
+    position: absolute;
+    inset: 0;
+    display: none;
+    pointer-events: none;
+    z-index: 4;
+  }
+  @media (pointer: coarse) {
+    #touchControls { display: block; }
+  }
+  .touch-zone {
+    position: absolute;
+    bottom: 18px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.18);
+    border: 2px solid rgba(255,255,255,0.5);
+    color: #fff;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: auto;
+    user-select: none;
+    touch-action: none;
+  }
+  #touchLeft { left: 16px; }
+  #touchRight { left: 82px; }
+  #touchRun { right: 82px; }
+  #touchJump { right: 16px; }
+  footer.credit {
+    position: absolute;
+    bottom: 6px;
+    right: 10px;
+    font-size: 9px;
+    color: rgba(255,255,255,0.3);
+    pointer-events: none;
+  }
+</style>
+
+<div id="stage">
+  <canvas id="game"></canvas>
+
+  <button id="muteBtn" title="Toggle sound">🔊</button>
+
+  <div id="touchControls">
+    <div class="touch-zone" id="touchLeft">◀</div>
+    <div class="touch-zone" id="touchRight">▶</div>
+    <div class="touch-zone" id="touchRun">B</div>
+    <div class="touch-zone" id="touchJump">A</div>
+  </div>
+
+  <div id="titleOverlay" class="overlay">
+    <h1>SUPER MARIO BROS.</h1>
+    <h2>WORLD 1-1</h2>
+    <p>
+      ARROWS / WASD — move &nbsp;&middot;&nbsp; SPACE / UP / W / Z — jump
+      &nbsp;&middot;&nbsp; SHIFT / X — run<br>
+      Touch: on-screen ◀ ▶ B A zones on mobile.
+    </p>
+    <button class="big" id="startBtn">START</button>
+  </div>
+
+  <div id="gameOverOverlay" class="overlay hidden">
+    <h1>GAME OVER</h1>
+    <p>World 1-1 will have to wait.</p>
+    <button class="big" id="restartBtn">RETRY</button>
+  </div>
+
+  <footer class="credit">mockups / mario-1-1</footer>
+</div>
+
+<script src="src/00-core.js"></script>
+<script src="src/10-level.js"></script>
+<script src="src/20-tiles.js"></script>
+<script src="src/30-mario.js"></script>
+<script src="src/40-actors.js"></script>
+<script src="src/50-audio.js"></script>
+
+<script>
+  (function () {
+    if (document.getElementById('rathjiBackBtn')) return;
+
+    var style = document.createElement('style');
+    style.textContent = [
+      '#rathjiBackBtn {',
+      '  position: fixed; left: 90%; bottom: 18px; transform: translateX(-50%);',
+      '  z-index: 2147483000;',
+      '  display: inline-flex; align-items: center; gap: 10px;',
+      '  padding: 8px 16px 8px 8px; border-radius: 999px;',
+      '  background: rgba(13,15,21,0.82);',
+      '  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);',
+      '  border: 1px solid rgba(255,255,255,0.18);',
+      '  box-shadow: 0 4px 16px rgba(0,0,0,0.35);',
+      '  text-decoration: none;',
+      '  transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease;',
+      '}',
+      '#rathjiBackBtn .rb-badge {',
+      '  width: 28px; height: 28px; border-radius: 50%; flex: none;',
+      '  background: linear-gradient(135deg, #8b5cf6, #d946ef);',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  font: 600 14px/1 system-ui, sans-serif; color: #fff;',
+      '}',
+      '#rathjiBackBtn .rb-label {',
+      '  font: 600 14px/1 system-ui, sans-serif; color: #fff; white-space: nowrap;',
+      '}',
+      '#rathjiBackBtn .rb-arrow { flex: none; color: #fff; opacity: .8; }',
+      '#rathjiBackBtn:hover {',
+      '  transform: translateX(-50%) translateY(-2px);',
+      '  border-color: rgba(167,139,250,0.65);',
+      '  box-shadow: 0 6px 20px rgba(139,92,246,0.35);',
+      '}',
+      '@media (max-width: 479px) {',
+      '  #rathjiBackBtn { padding: 6px; }',
+      '  #rathjiBackBtn .rb-label, #rathjiBackBtn .rb-arrow { display: none; }',
+      '}'
+    ].join('\n');
+    document.head.appendChild(style);
+
+    var a = document.createElement('a');
+    a.id = 'rathjiBackBtn';
+    a.href = 'https://perchance.org/rathjis-generators';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.setAttribute('aria-label', 'Back to my projects');
+    a.title = 'Back to my projects';
+    a.innerHTML =
+      '<span class="rb-badge">R</span>' +
+      '<span class="rb-label">My projects</span>' +
+      '<svg class="rb-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>';
+    document.body.appendChild(a);
+  })();
+</script>

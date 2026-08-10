@@ -1,0 +1,1565 @@
+<!-- ════════════════════════════════════════════════════════════════
+     COVER YOUR ASSETS — index.html
+     A 2-player vault card game: hotseat · vs AI · online.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative game server (rooms, hidden hands, turn order,
+       play validation, game-over detection). It is PUBLIC source —
+       no secrets here. Its rules engine is mirrored in the client
+       script below (keep the two in sync if you change rules).
+     - Durable room state lives in the server-plugin `state` bytes.
+       Private hands are pushed to each connection directly (never
+       broadcast); only vaults/deck/discard are public.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Cover Your Assets server ────────────────────────────
+   Rooms: 5-letter codes. Host creates and moves first; a guest
+   joining with the code starts the match. The server keeps the
+   deck, discard pile and BOTH hands authoritatively (private
+   hands are pushed per-connection, never broadcast) and re-runs
+   the full rules engine to validate every play. Public info —
+   vaults, deck count, discard top, whose turn, scores — is
+   broadcast via pubsub. Durable room state lives in the plugin
+   `state` bytes (versioned binary layout).                       */
+const CARD_N=44, NT=8, WILD_T=8;
+const VAL=[5,10,15,20,25,30,40,50,15];
+const NAMES=["Coins","Urn","Ring","Clock","Painting","Trophy","Diamond","Crown","Wild"];
+const EMO=["🪙","⚱️","💍","🕰️","🖼️","🏆","💎","👑","⭐"];
+const SCHEMA=3;
+const SLOT=512;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const O_STAT=0,O_CODE=1,O_HF=9,O_SCHEMA=10,O_TURN=11,O_FLAGS=12,O_LAST=13,O_WIN=17,O_REASON=18,O_PLAYS=19,O_ENDTURN=20;
+const O_DISCARD=24,O_DECK=69,O_HAND0=114,O_HAND1=159,O_VAULT0=204,O_VAULT1=300,O_SEQ=400;
+
+/* ── pure rules engine (mirrors client — keep in sync) ── */
+function cardType(id){ return id<40?Math.floor(id/5):8; }
+function cardVal(id){ return VAL[cardType(id)]; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(){ const d=[]; for(let i=0;i<CARD_N;i++)d.push(i); return shuffle(d); }
+function newRoom(hostFirst){ return {turnIndex:-1,hostFirst:hostFirst||0,deck:buildDeck(),discard:[],hands:[[],[]],vaults:[[],[],[]],playsLeft:0,finalRound:false,endTurn:1e9,over:false,winner:null,reason:"",scores:null,seq:0,event:""}; }
+function turnPlayer(g){ return (g.turnIndex+(g.hostFirst?1:0))%2; }
+function vaultEmpty(g,p){ const v=g.vaults[p]; return !v[0]&&!v[1]&&!v[2]; }
+function vaultVal(g,p){ let s=0; const v=g.vaults[p]; for(let i=0;i<3;i++){ const st=v[i]; if(st)for(let j=0;j<st.cards.length;j++)s+=cardVal(st.cards[j]); } return s; }
+function stackVal(st){ let s=0; if(st)for(let j=0;j<st.cards.length;j++)s+=cardVal(st.cards[j]); return s; }
+function draw(g,p,n){ let got=0; while(n>0&&g.deck.length){ g.hands[p].push(g.deck.pop()); n--; got++; } return got; }
+function setFinalRound(g){ if(g.finalRound)return; g.finalRound=true; g.endTurn=g.turnIndex+(g.turnIndex%2===0?2:1); }
+function legalKinds(g,p){
+  const mine=g.vaults[p], opp=g.vaults[1-p], hand=g.hands[p], out=[];
+  for(let i=0;i<hand.length;i++){
+    const base=cardType(hand[i]);
+    const types=base===8?[0,1,2,3,4,5,6,7]:[base];
+    for(const ty of types){
+      let emptySlot=-1, ownStack=-1, oppStack=-1;
+      for(let s=0;s<3;s++){ const st=mine[s]; if(!st){ if(emptySlot===-1)emptySlot=s; } else if(st.type===ty) ownStack=s; }
+      for(let s=0;s<3;s++){ const st=opp[s]; if(st&&st.type===ty){ oppStack=s; break; } }
+      if(emptySlot!==-1&&ownStack===-1)out.push({i:i,kind:"start",type:ty,stack:emptySlot});
+      if(ownStack!==-1)out.push({i:i,kind:"build",type:ty,stack:ownStack});
+      if(oppStack!==-1&&(ownStack!==-1||emptySlot!==-1))out.push({i:i,kind:"cover",type:ty,stack:oppStack});
+    }
+  }
+  return out;
+}
+function applyPlay(g,p,k){
+  const hand=g.hands[p], id=hand[k.i];
+  hand.splice(k.i,1);
+  const mine=g.vaults[p], opp=g.vaults[1-p];
+  if(k.kind==="start"){
+    mine[k.stack]={type:k.type,cards:[id]};
+  }else if(k.kind==="build"){
+    mine[k.stack].cards.push(id);
+  }else{
+    const st=opp[k.stack];
+    opp[k.stack]=null;
+    let target=-1;
+    for(let s=0;s<3;s++){ if(mine[s]&&mine[s].type===k.type){ target=s; break; } }
+    if(target===-1){ for(let s=0;s<3;s++){ if(!mine[s]){ target=s; break; } } }
+    if(target===-1)return false;
+    if(mine[target]){ mine[target].cards.push.apply(mine[target].cards,st.cards); mine[target].cards.push(id); }
+    else mine[target]={type:k.type,cards:st.cards.concat([id])};
+  }
+  return true;
+}
+function deal(g){ for(let k=0;k<5;k++){ g.hands[0].push(g.deck.pop()); g.hands[1].push(g.deck.pop()); } g.turnIndex=0; startTurn(g); }
+function startTurn(g){ const got=draw(g,turnPlayer(g),2); if(got<2)setFinalRound(g); g.playsLeft=2; }
+function finishTurn(g){
+  const p=turnPlayer(g);
+  if(vaultEmpty(g,p)){ const got=draw(g,p,5); if(got<5)setFinalRound(g); }
+  g.turnIndex++;
+  if(g.finalRound&&g.turnIndex>=g.endTurn){ endByScore(g); return; }
+  startTurn(g);
+}
+function endByScore(g){
+  g.over=true; g.reason="deckOut";
+  const s0=vaultVal(g,0), s1=vaultVal(g,1);
+  g.scores=[s0,s1];
+  g.winner=s0>s1?0:s1>s0?1:"draw";
+}
+function pName(p){ return p===0?"Host":"Guest"; }
+function cardTxt(ty){ return NAMES[ty]+" ("+EMO[ty]+")"; }
+
+/* ── durable state helpers ── */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+O_LAST]<<24)|(state[o+O_LAST+1]<<16)|(state[o+O_LAST+2]<<8)|state[o+O_LAST+3]; }
+function slotStatus(i){ return state[off(i)+O_STAT]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function reasonCode(r){ return r==="deckOut"?1:r==="forfeit"?2:r==="resign"?3:0; }
+function reasonName(c){ return c===1?"deckOut":c===2?"forfeit":c===3?"resign":""; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o+O_STAT]=room.status;
+  writeCode(o,room.code);
+  state[o+O_HF]=room.hostFirst;
+  state[o+O_SCHEMA]=SCHEMA;
+  state[o+O_TURN]=room.turnIndex;
+  state[o+O_FLAGS]=room.finalRound?1:0;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+O_LAST]=(la>>>24)&255; state[o+O_LAST+1]=(la>>>16)&255; state[o+O_LAST+2]=(la>>>8)&255; state[o+O_LAST+3]=la&255;
+  state[o+O_WIN]=room.winner==="draw"?3:room.winner===1?2:room.winner===0?1:0;
+  state[o+O_REASON]=reasonCode(room.reason);
+  state[o+O_PLAYS]=room.playsLeft;
+  state[o+O_ENDTURN]=Math.min(65535,room.endTurn)&255; state[o+O_ENDTURN+1]=(Math.min(65535,room.endTurn)>>8)&255;
+  state[o+O_SEQ]=room.seq&255; state[o+O_SEQ+1]=(room.seq>>8)&255;
+  let p=o+O_DISCARD; state[p]=room.discard.length; for(let i=0;i<room.discard.length&&i<44;i++)state[p+1+i]=room.discard[i];
+  p=o+O_DECK; state[p]=room.deck.length; for(let i=0;i<room.deck.length&&i<44;i++)state[p+1+i]=room.deck[i];
+  for(let pi=0;pi<2;pi++){
+    p=o+(pi===0?O_HAND0:O_HAND1); state[p]=room.hands[pi].length;
+    for(let i=0;i<room.hands[pi].length&&i<44;i++)state[p+1+i]=room.hands[pi][i];
+    p=o+(pi===0?O_VAULT0:O_VAULT1);
+    for(let s=0;s<3;s++){ const st=room.vaults[pi][s]; if(!st)continue; const q=p+s*32; state[q]=st.type; state[q+1]=st.cards.length; for(let j=0;j<st.cards.length&&j<30;j++)state[q+2+j]=st.cards[j]; }
+  }
+}
+function loadRoom(i){
+  const o=off(i), st=slotStatus(i);
+  const readHand=function(bp){ const n=state[bp]; const a=[]; for(let k=0;k<n&&k<44;k++)a.push(state[bp+1+k]); return a; };
+  const readVault=function(bp){ const v=[[],[],[]]; for(let s=0;s<3;s++){ const q=bp+s*32, ty=state[q], n=state[q+1]; if(!n)continue; const cards=[]; for(let j=0;j<n&&j<30;j++)cards.push(state[q+2+j]); v[s]={type:ty,cards:cards}; } return v; };
+  const hands=[readHand(o+O_HAND0),readHand(o+O_HAND1)];
+  const vaults=[readVault(o+O_VAULT0),readVault(o+O_VAULT1)];
+  const endTurn=(state[o+O_ENDTURN+1]<<8)|state[o+O_ENDTURN];
+  const seq=(state[o+O_SEQ+1]<<8)|state[o+O_SEQ];
+  const win=state[o+O_WIN];
+  const room={
+    slot:i, code:codeAt(i), status:st, hostFirst:state[o+O_HF],
+    turnIndex:state[o+O_TURN], finalRound:state[o+O_FLAGS]===1, playsLeft:state[o+O_PLAYS],
+    endTurn:endTurn||1e9, seq, event:"",
+    deck:[], discard:[], hands, vaults,
+    over:st===3, winner:win===3?"draw":win===2?1:win===1?0:null, reason:reasonName(state[o+O_REASON]),
+    hostId:-1, guestId:-1, lastAct:readLastAct(i)
+  };
+  const dl=state[o+O_DISCARD], dp=o+O_DISCARD; for(let k=0;k<dl&&k<44;k++)room.discard.push(state[dp+1+k]);
+  const klen=state[o+O_DECK], kp=o+O_DECK; for(let k=0;k<klen&&k<44;k++)room.deck.push(state[kp+1+k]);
+  room.scores=[vaultVal(room,0),vaultVal(room,1)];
+  return room;
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+O_SCHEMA]!==SCHEMA){ state.fill(0,o,o+SLOT); continue; }
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }   // abandoned waiting rooms are reclaimed
+    rooms.set(codeAt(i),loadRoom(i));
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── connection / broadcast ── */
+let rooms=new Map();                 // code -> room
+const conns=new Map();               // conn.id -> {code, role, conn}
+function topic(code){ return "ch:"+code; }
+function vaultsJ(vault){ const out=[]; for(let s=0;s<3;s++){ const st=vault[s]; out.push(st?{type:st.type,cards:st.cards.slice()}:null); } return out; }
+function snap(room){
+  const discTop=room.discard.length?room.discard[room.discard.length-1]:null;
+  return {
+    code:room.code, status:room.status, turnIndex:room.turnIndex,
+    turn:room.over?-1:turnPlayer(room), playsLeft:room.playsLeft,
+    deckCount:room.deck.length, discardTop:discTop, hostFirst:room.hostFirst,
+    vaults:[vaultsJ(room.vaults[0]),vaultsJ(room.vaults[1])],
+    handsLen:[room.hands[0].length,room.hands[1].length],
+    finalRound:room.finalRound, winner:room.winner, reason:room.reason,
+    scores:[vaultVal(room,0),vaultVal(room,1)],
+    hostIn:room.hostId!==-1, guestIn:room.guestId!==-1, seq:room.seq, event:room.event||""
+  };
+}
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function sendHands(room){
+  const targets=[[room.hostId,0],[room.guestId,1]];
+  for(const pair of targets){
+    if(pair[0]===-1)continue;
+    const info=conns.get(pair[0]);
+    if(!info)continue;
+    try{ info.conn.send(JSON.stringify({t:"hand",hand:room.hands[pair[1]].slice()})); }catch(e){}
+  }
+}
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function saveBroadcast(room){ saveRoom(room); broadcast(room); sendHands(room); }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room=newRoom(0);
+    room.slot=slot; room.code=code; room.status=1; room.hostId=conn.id; room.guestId=-1; room.lastAct=nowSec();
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host",conn});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    let started=false;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1){
+      room.status=2; room.turnIndex=-1; deal(room); room.seq++;
+      room.event="Deal! 5 cards each — "+pName(turnPlayer(room))+" moves first and draws 2.";
+      started=true;
+    }
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role,conn});
+    room.lastAct=nowSec();
+    saveBroadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    sendHands(room);
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  play({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(turnPlayer(room)!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==room.turnIndex)return JSON.stringify({ok:false,err:"stale"});
+    if(!room.playsLeft)return JSON.stringify({ok:false,err:"no_plays_left"});
+    const k=obj.kind, ty=obj.type, stk=obj.stack, ci=obj.card;
+    if(k!=="start"&&k!=="build"&&k!=="cover")return JSON.stringify({ok:false,err:"bad_kind"});
+    if(typeof ci!=="number"||ci<0||ci>=room.hands[idx].length)return JSON.stringify({ok:false,err:"bad_card"});
+    if(typeof ty!=="number"||ty<0||ty>7)return JSON.stringify({ok:false,err:"bad_type"});
+    if(typeof stk!=="number"||stk<0||stk>2)return JSON.stringify({ok:false,err:"bad_stack"});
+    const id=room.hands[idx][ci];
+    if(cardType(id)!==8&&cardType(id)!==ty)return JSON.stringify({ok:false,err:"illegal"});
+    let found=false;
+    const kinds=legalKinds(room,idx);
+    for(const lk of kinds){ if(lk.i===ci&&lk.kind===k&&lk.type===ty&&lk.stack===stk){ found=true; break; } }
+    if(!found)return JSON.stringify({ok:false,err:"illegal"});
+    const stolen=k==="cover"?stackVal(room.vaults[1-idx][stk]):0;
+    applyPlay(room,idx,{i:ci,kind:k,type:ty,stack:stk});
+    room.playsLeft--;
+    const by=pName(idx), at=pName(1-idx);
+    if(k==="start")room.event=by+" placed "+cardTxt(ty)+" in a new vault stack.";
+    else if(k==="build")room.event=by+" added "+cardTxt(ty)+" to a stack.";
+    else room.event=by+" COVERED "+at+"'s "+NAMES[ty]+" stack — stole "+stolen+" pts!";
+    room.seq++; room.lastAct=nowSec();
+    if(room.playsLeft<=0){ finishTurn(room); }
+    else if(!legalKinds(room,idx).length){ room.event+=" No plays left — turn ends."; finishTurn(room); }
+    if(room.over)room.event="Game over — "+(room.winner==="draw"?"draw":pName(room.winner))+" wins "+room.scores[0]+"–"+room.scores[1]+"!";
+    saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  discard({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(turnPlayer(room)!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==room.turnIndex)return JSON.stringify({ok:false,err:"stale"});
+    const ci=obj.card;
+    if(typeof ci!=="number"||ci<0||ci>=room.hands[idx].length)return JSON.stringify({ok:false,err:"bad_card"});
+    const id=room.hands[idx][ci];
+    room.hands[idx].splice(ci,1);
+    room.discard.push(id);
+    room.event=pName(idx)+" discarded "+cardTxt(cardType(id))+".";
+    room.seq++; room.lastAct=nowSec();
+    saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  pass({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=role==="host"?0:1;
+    if(turnPlayer(room)!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==room.turnIndex)return JSON.stringify({ok:false,err:"stale"});
+    room.event=pName(idx)+" ended their turn.";
+    room.seq++; room.lastAct=nowSec();
+    finishTurn(room);
+    if(room.over)room.event="Game over — "+(room.winner==="draw"?"draw":pName(room.winner))+" wins "+room.scores[0]+"–"+room.scores[1]+"!";
+    saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      room.status=3; room.over=true; room.winner=1-idx; room.reason="resign"; room.seq++;
+      room.event=pName(1-idx)+" wins — "+pName(idx)+" resigned.";
+      room.lastAct=nowSec(); saveBroadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.over=true; room.winner=idx; room.reason="forfeit"; room.seq++;
+    room.event=pName(idx)+" wins — the opponent disconnected.";
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const idx=roleOf(conn)==="host"?0:1;
+    const oppPresent=idx===0?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.hostFirst=1-room.hostFirst;
+    room.status=2; room.turnIndex=-1;
+    room.deck=buildDeck(); room.discard=[]; room.hands=[[],[]]; room.vaults=[[],[],[]];
+    room.playsLeft=0; room.finalRound=false; room.endTurn=1e9; room.over=false; room.winner=null; room.reason=""; room.scores=null;
+    deal(room);
+    room.event="Rematch! "+pName(turnPlayer(room))+" moves first.";
+    room.seq++; room.lastAct=nowSec();
+    saveBroadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      const idx=roleOf(conn)==="host"?0:1;
+      room.status=3; room.over=true; room.winner=1-idx; room.reason="forfeit"; room.seq++;
+      room.event=pName(1-idx)+" wins — "+pName(idx)+" left.";
+      room.lastAct=nowSec(); saveBroadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Stack coins, rings, paintings and crowns in your vault for points. Cover an opponent's stack with a matching card and the whole pile is yours. Most valuable vault when the deck runs out wins.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Hotseat</span>
+        <span class="bgn-mode-sub">Two players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">vs the Machine</span>
+        <span class="bgn-mode-sub">You against a greedy AI thief</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online</span>
+        <span class="bgn-mode-sub">Live match, hidden hands</span>
+      </button>
+    </div>
+
+    <div class="panel" style="margin-top:26px; padding:20px 24px;">
+      <div class="sec-eyebrow" style="text-align:center">How to play</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:14px;">
+        <div class="muted small"><b class="goldtext">1 · Draw</b><br>Draw 2 cards from the deck each turn.</div>
+        <div class="muted small"><b class="goldtext">2 · Play 2</b><br>Start stacks or add matching cards to your own stacks.</div>
+        <div class="muted small"><b class="goldtext">3 · Cover &amp; steal</b><br>Play a matching card onto an opponent's stack to take the whole pile.</div>
+        <div class="muted small"><b class="goldtext">4 · Score</b><br>When the deck runs out, the most valuable vault wins. Wilds count as any asset.</div>
+      </div>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs. Hands stay private — only vaults are shared.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table cya-table">
+
+      <div class="panel bgn-boardpanel cya-boardpanel">
+
+        <!-- opponent -->
+        <div class="cya-playerrow" id="oppRow">
+          <span class="bgn-avatar opp" id="oppAvatar"></span>
+          <span class="cya-pname" id="oppNameEl">Opponent</span>
+          <span class="cya-score" id="oppScoreEl">0</span>
+          <span class="cya-handcount" id="oppHandEl">0 cards</span>
+        </div>
+        <div class="cya-vault" id="oppVaultEl"></div>
+
+        <!-- tabletop: deck / status / discard -->
+        <div class="cya-tabletop">
+          <div class="cya-pilebox">
+            <div class="cya-pile deck-pile"></div>
+            <div class="muted small" id="deckCountEl">deck</div>
+          </div>
+          <div class="cya-status">
+            <div class="cya-turn" id="turnEl">Loading…</div>
+            <div class="cya-banner" id="bannerEl"></div>
+            <div class="muted small" id="playsEl"></div>
+          </div>
+          <div class="cya-pilebox">
+            <div class="cya-pile discard-pile" id="discardEl">—</div>
+            <div class="muted small">discard</div>
+          </div>
+        </div>
+
+        <!-- me -->
+        <div class="cya-playerrow" id="myRow">
+          <span class="bgn-avatar me" id="myAvatar"></span>
+          <span class="cya-pname" id="myNameEl">You</span>
+          <span class="cya-score" id="myScoreEl">0</span>
+        </div>
+        <div class="cya-vault" id="myVaultEl"></div>
+
+        <!-- hand -->
+        <div class="cya-handstrip">
+          <div class="cya-hand" id="handEl"></div>
+        </div>
+      </div>
+
+      <div class="bgn-side">
+        <div class="bgn-room" id="roomBox" hidden>
+          <div class="bgn-room-code">Room code <b id="roomCodeEl">—</b></div>
+          <div class="muted small" id="connEl">Connecting…</div>
+          <div class="cya-roombtns">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+          </div>
+        </div>
+
+        <div class="cya-actions">
+          <button class="btn btn-gold" id="endTurnBtn">End turn</button>
+          <button class="btn btn-ghost" id="resignBtn" hidden>Resign</button>
+          <button class="btn btn-ghost" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+        </div>
+
+        <div class="cya-logwrap">
+          <div class="sec-eyebrow" style="margin-bottom:8px">Heist log</div>
+          <div class="bgn-log" id="logEl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ MODALS ═══ -->
+<div class="promo" id="wildModal" hidden>
+  <div class="promo-title">Play your Wild as…</div>
+  <div class="wild-picker" id="wildPickerEl"></div>
+  <button class="btn btn-ghost btn-sm" style="margin-top:10px" id="wildCancelBtn">Cancel</button>
+</div>
+
+<div class="promo" id="passScreen" hidden>
+  <div class="promo-title" id="passTitleEl">Pass the device</div>
+  <div style="font-size:2.6rem; margin:6px 0 2px;">🤫</div>
+  <div class="promo-sub muted small" id="passSubEl"></div>
+  <button class="btn btn-gold" style="margin-top:14px" id="passGoBtn">It's my turn</button>
+</div>
+
+<div class="promo" id="overModal" hidden>
+  <div class="promo-title" id="overTitleEl">Game over</div>
+  <div class="over-banner" id="overBannerEl"></div>
+  <div class="over-scores" id="overScoresEl"></div>
+  <div class="muted small" id="overReasonEl"></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="playAgainBtn">Play again</button>
+    <button class="btn btn-ghost" id="overMenuBtn">Main menu</button>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="ornament">◆</div>
+  <p>Cover Your Assets — a card game of vaults and heists.</p>
+  <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ COVER YOUR ASSETS ═══ */
+.bgn-lobby{ max-width:820px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+.cya-table{ grid-template-columns:minmax(0,1fr) 330px; max-width:1060px; margin:0 auto; }
+@media (max-width:900px){ .cya-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.cya-boardpanel{ text-align:center; padding:20px 18px 24px; }
+
+.cya-playerrow{ display:flex; align-items:center; gap:10px; justify-content:center; margin:4px 0 10px; }
+.cya-playerrow .bgn-avatar.opp{ background:radial-gradient(circle at 35% 30%, #7a5cff, #241840); }
+.cya-playerrow .bgn-avatar.me{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.cya-pname{ font-weight:800; font-size:.95rem; letter-spacing:.04em; }
+.cya-score{ font-family:var(--bgn-serif); color:var(--bgn-accent2); font-weight:700; background:rgba(212,175,55,.1); border:1px solid rgba(212,175,55,.3); border-radius:999px; padding:2px 10px; font-size:.8rem; }
+.cya-handcount{ font-size:.72rem; opacity:.6; letter-spacing:.08em; text-transform:uppercase; }
+
+/* vault */
+.cya-vault{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; max-width:600px; margin:0 auto; }
+.cya-slot{ position:relative; min-height:118px; min-width:0; border:1px dashed rgba(255,255,255,.16); border-radius:12px; background:rgba(255,255,255,.02); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; transition:border-color .12s, box-shadow .12s, transform .12s; }
+.cya-slot.empty{ color:rgba(255,255,255,.22); font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; }
+.cya-slot.canplay{ border-color:rgba(212,175,55,.7); box-shadow:inset 0 0 0 1px rgba(212,175,55,.3), 0 0 18px rgba(212,175,55,.18); cursor:pointer; }
+.cya-slot.canplay:hover{ transform:translateY(-2px); border-color:#f6e6a4; }
+.cya-slot.has{ border:1px solid rgba(255,255,255,.14); background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.015)); }
+.cya-slot.playable{ cursor:pointer; }
+.cya-slot.playable:hover{ border-color:#f6e6a4; box-shadow:0 0 18px rgba(212,175,55,.3); transform:translateY(-2px); }
+.cya-topcard{ display:flex; flex-direction:column; align-items:center; gap:1px; }
+.cya-topcard .em{ font-size:1.7rem; line-height:1.1; }
+.cya-topcard .nm{ font-size:.62rem; letter-spacing:.06em; text-transform:uppercase; opacity:.85; }
+.cya-stackmeta{ display:flex; gap:6px; align-items:center; font-size:.68rem; }
+.cya-stackmeta .x{ color:var(--bgn-accent2); font-weight:700; }
+.cya-stackmeta .pts{ opacity:.75; }
+.cya-minirow{ display:flex; gap:2px; flex-wrap:wrap; justify-content:center; max-width:100%; }
+.cya-mini{ width:22px; height:30px; border-radius:4px; display:flex; align-items:center; justify-content:center; font-size:.8rem; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.14); box-shadow:0 1px 2px rgba(0,0,0,.4); }
+.cya-mini-more{ font-size:.58rem; opacity:.6; display:flex; align-items:center; }
+
+/* tabletop */
+.cya-tabletop{ display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:12px; max-width:600px; margin:16px auto; }
+.cya-pilebox{ flex:none; width:84px; display:flex; flex-direction:column; align-items:center; gap:6px; }
+.cya-pile{ width:74px; height:104px; border-radius:10px; position:relative; display:flex; align-items:center; justify-content:center; font-size:2rem; }
+.deck-pile{ background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 6px); border:1px solid rgba(212,175,55,.5); box-shadow:inset 0 0 0 1px rgba(212,175,55,.25), 4px 4px 0 0 rgba(0,0,0,.35), 8px 8px 0 0 rgba(212,175,55,.18); }
+.deck-pile::after{ content:"🔒"; }
+.discard-pile{ background:linear-gradient(150deg,#241d2e,#17111f); border:1px dashed rgba(255,255,255,.25); }
+.cya-status{ min-width:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 6px; }
+.cya-turn{ font-family:var(--bgn-serif); font-size:1.15rem; letter-spacing:.05em; color:var(--bgn-cream); text-align:center; }
+.cya-banner{ min-height:18px; font-size:.82rem; font-weight:600; color:#f6e6a4; text-align:center; }
+.cya-turn.warn{ color:#ffb07a; }
+@media (max-width:560px){
+  .cya-tabletop{ grid-template-columns:1fr 1fr; gap:8px; }
+  .cya-tabletop .cya-status{ grid-column:1/-1; order:-1; }
+  .cya-turn{ font-size:1rem; }
+  .cya-pilebox{ width:auto; }
+  .cya-slot{ min-height:96px; }
+  .cya-topcard .em{ font-size:1.35rem; }
+  .cya-topcard .nm{ font-size:.5rem; }
+  .cya-stackmeta{ font-size:.6rem; }
+  .cya-boardpanel{ padding:14px 8px 18px; }
+}
+
+/* hand */
+.cya-handstrip{ margin-top:18px; }
+.cya-hand{ display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:132px; padding:10px 4px; align-items:flex-end; }
+@media (min-width:640px){ .cya-hand{ flex-wrap:nowrap; overflow-x:auto; justify-content:flex-start; padding-bottom:6px; } }
+.cya-card{ width:clamp(66px,9vw,88px); aspect-ratio:2/3; border-radius:11px; position:relative; flex:none; cursor:pointer; border:2px solid rgba(255,255,255,.22); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.3); display:flex; flex-direction:column; align-items:center; justify-content:space-between; padding:8px 4px 7px; transition:transform .12s, box-shadow .12s, border-color .12s; user-select:none; }
+.cya-card:hover{ transform:translateY(-8px); border-color:#f6e6a4; }
+.cya-card.selected{ transform:translateY(-12px); border-color:var(--bgn-accent2); box-shadow:0 0 0 2px rgba(212,175,55,.55), 0 14px 26px rgba(0,0,0,.55); }
+.cya-card .em{ font-size:clamp(1.7rem,4vw,2.3rem); line-height:1; filter:drop-shadow(0 3px 5px rgba(0,0,0,.45)); }
+.cya-card .nm{ font-size:.56rem; letter-spacing:.05em; text-transform:uppercase; opacity:.9; font-weight:700; }
+.cya-card .vl{ position:absolute; top:5px; right:6px; font-size:.68rem; font-weight:800; color:#221803; background:linear-gradient(180deg,#f6e6a4,#d4af37); border-radius:999px; padding:0 5px; line-height:1.5; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+.cya-card .dc{ position:absolute; top:2px; left:3px; width:18px; height:18px; border-radius:50%; background:rgba(0,0,0,.55); color:#ff9d9d; font-size:.72rem; line-height:18px; text-align:center; opacity:0; transition:opacity .12s; }
+.cya-card:hover .dc{ opacity:1; }
+.cya-card.dead .dc{ opacity:1; background:rgba(255,80,60,.22); }
+.cya-card .tybadge{ font-size:.5rem; letter-spacing:.06em; text-transform:uppercase; opacity:.65; }
+.cya-card.face-down{ background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 6px); border-color:rgba(212,175,55,.45); cursor:default; }
+.cya-card.face-down::after{ content:"🔒"; font-size:1.4rem; }
+.cya-card.face-down:hover{ transform:none; }
+
+/* card type tints */
+.t0{ background:linear-gradient(160deg,#f2c14e,#b8860b 55%,#7a5a00); }
+.t1{ background:linear-gradient(160deg,#d98e73,#a0522d 55%,#6b3321); }
+.t2{ background:linear-gradient(160deg,#e8b4d8,#b76e9d 55%,#7d4a6a); }
+.t3{ background:linear-gradient(160deg,#c8a96a,#8a6d3b 55%,#5c4726); }
+.t4{ background:linear-gradient(160deg,#a98ad4,#6f4f9e 55%,#4a326b); }
+.t5{ background:linear-gradient(160deg,#6fd0b0,#2f8f74 55%,#1e5c4a); }
+.t6{ background:linear-gradient(160deg,#9fe8f5,#3fa9c4 55%,#25708a); }
+.t7{ background:linear-gradient(160deg,#c09bf0,#6b4fa0 55%,#463372); }
+.t8{ background:linear-gradient(160deg,#ff9de2,#a05ae0 50%,#4a6fe0); }
+
+/* side */
+.cya-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.cya-actions .btn{ padding:12px 18px; font-size:.72rem; }
+.cya-roombtns{ display:flex; gap:8px; justify-content:center; margin-top:8px; }
+.cya-logwrap{ margin-top:18px; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:6px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.bgn-log{ max-height:300px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item .ev{ color:var(--bgn-accent2); }
+.log-item .st{ color:#ff9d9d; font-weight:700; }
+
+/* modals */
+.promo{ position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:50; background:rgba(12,9,5,.97); border:1px solid var(--bgn-gold2,#d4af37); border-radius:12px; padding:18px 20px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,.65); max-width:92vw; }
+.promo-title{ font-size:.8rem; opacity:.85; margin-bottom:10px; letter-spacing:.5px; }
+.promo-sub{ margin-top:8px; }
+.wild-picker{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; max-width:340px; }
+.wild-picker .wp{ border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:9px 4px; background:rgba(255,255,255,.05); color:inherit; font:inherit; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:2px; transition:transform .1s, border-color .1s; }
+.wild-picker .wp .em{ font-size:1.4rem; }
+.wild-picker .wp .nm{ font-size:.58rem; text-transform:uppercase; letter-spacing:.04em; opacity:.85; }
+.wild-picker .wp:hover{ transform:translateY(-2px); border-color:#f6e6a4; }
+.wild-picker .wp.dis{ opacity:.3; cursor:default; transform:none; }
+.wild-picker .wp.dis:hover{ border-color:rgba(255,255,255,.18); }
+.over-banner{ font-family:var(--bgn-serif); font-size:1.35rem; line-height:1.3; margin:2px 0 12px; color:#f6e6a4; }
+.over-scores{ display:flex; gap:30px; justify-content:center; margin:6px 0 10px; font-size:.9rem; align-items:flex-start; }
+.over-scores > div{ display:flex; flex-direction:column; align-items:center; gap:2px; min-width:96px; }
+.over-scores .muted{ white-space:nowrap; }
+.over-scores b{ font-family:var(--bgn-serif); font-size:1.6rem; color:var(--bgn-accent2); display:block; line-height:1.1; }
+.over-scores .pts-tag{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.6; }
+.over-scores .win b{ color:#7fe0b0; }
+.win-tag{ font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:#7fe0b0; border:1px solid rgba(127,224,176,.4); border-radius:999px; padding:1px 8px; margin-top:3px; }
+.over-btns{ display:flex; gap:10px; justify-content:center; margin-top:14px; flex-wrap:wrap; }
+.over-btns .btn{ white-space:nowrap; padding:14px 22px; }
+@media (max-width:380px){
+  .over-scores{ flex-direction:column; gap:10px; }
+  .over-scores > div{ min-width:0; }
+  .over-banner{ font-size:1.15rem; }
+  .promo{ padding:14px 14px; }
+}
+</style>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ rules engine (mirrors server — keep in sync) ══════════ */
+const CARD_N=44, NT=8, WILD_T=8;
+const VAL=[5,10,15,20,25,30,40,50,15];
+const NAMES=["Coins","Urn","Ring","Clock","Painting","Trophy","Diamond","Crown","Wild"];
+const EMO=["🪙","⚱️","💍","🕰️","🖼️","🏆","💎","👑","⭐"];
+function cardType(id){ return id<40?Math.floor(id/5):8; }
+function cardVal(id){ return VAL[cardType(id)]; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(){ const d=[]; for(let i=0;i<CARD_N;i++)d.push(i); return shuffle(d); }
+function newRoom(hostFirst){ return {turnIndex:-1,hostFirst:hostFirst||0,deck:buildDeck(),discard:[],hands:[[],[]],vaults:[[],[],[]],playsLeft:0,finalRound:false,endTurn:1e9,over:false,winner:null,reason:"",scores:null,seq:0,event:""}; }
+function turnPlayer(g){ return (g.turnIndex+(g.hostFirst?1:0))%2; }
+function vaultEmpty(g,p){ const v=g.vaults[p]; return !v[0]&&!v[1]&&!v[2]; }
+function vaultVal(g,p){ let s=0; const v=g.vaults[p]; for(let i=0;i<3;i++){ const st=v[i]; if(st)for(let j=0;j<st.cards.length;j++)s+=cardVal(st.cards[j]); } return s; }
+function stackVal(st){ let s=0; if(st)for(let j=0;j<st.cards.length;j++)s+=cardVal(st.cards[j]); return s; }
+function draw(g,p,n){ let got=0; while(n>0&&g.deck.length){ g.hands[p].push(g.deck.pop()); n--; got++; } return got; }
+function setFinalRound(g){ if(g.finalRound)return; g.finalRound=true; g.endTurn=g.turnIndex+(g.turnIndex%2===0?2:1); }
+function legalKinds(g,p){
+  const mine=g.vaults[p], opp=g.vaults[1-p], hand=g.hands[p], out=[];
+  for(let i=0;i<hand.length;i++){
+    const base=cardType(hand[i]);
+    const types=base===8?[0,1,2,3,4,5,6,7]:[base];
+    for(const ty of types){
+      let emptySlot=-1, ownStack=-1, oppStack=-1;
+      for(let s=0;s<3;s++){ const st=mine[s]; if(!st){ if(emptySlot===-1)emptySlot=s; } else if(st.type===ty) ownStack=s; }
+      for(let s=0;s<3;s++){ const st=opp[s]; if(st&&st.type===ty){ oppStack=s; break; } }
+      if(emptySlot!==-1&&ownStack===-1)out.push({i:i,kind:"start",type:ty,stack:emptySlot});
+      if(ownStack!==-1)out.push({i:i,kind:"build",type:ty,stack:ownStack});
+      if(oppStack!==-1&&(ownStack!==-1||emptySlot!==-1))out.push({i:i,kind:"cover",type:ty,stack:oppStack});
+    }
+  }
+  return out;
+}
+function applyPlay(g,p,k){
+  const hand=g.hands[p], id=hand[k.i];
+  hand.splice(k.i,1);
+  const mine=g.vaults[p], opp=g.vaults[1-p];
+  if(k.kind==="start"){
+    mine[k.stack]={type:k.type,cards:[id]};
+  }else if(k.kind==="build"){
+    mine[k.stack].cards.push(id);
+  }else{
+    const st=opp[k.stack];
+    opp[k.stack]=null;
+    let target=-1;
+    for(let s=0;s<3;s++){ if(mine[s]&&mine[s].type===k.type){ target=s; break; } }
+    if(target===-1){ for(let s=0;s<3;s++){ if(!mine[s]){ target=s; break; } } }
+    if(target===-1)return false;
+    if(mine[target]){ mine[target].cards.push.apply(mine[target].cards,st.cards); mine[target].cards.push(id); }
+    else mine[target]={type:k.type,cards:st.cards.concat([id])};
+  }
+  return true;
+}
+function deal(g){ for(let k=0;k<5;k++){ g.hands[0].push(g.deck.pop()); g.hands[1].push(g.deck.pop()); } g.turnIndex=0; startTurn(g); }
+function startTurn(g){ const got=draw(g,turnPlayer(g),2); if(got<2)setFinalRound(g); g.playsLeft=2; }
+function finishTurn(g){
+  const p=turnPlayer(g);
+  if(vaultEmpty(g,p)){ const got=draw(g,p,5); if(got<5)setFinalRound(g); }
+  g.turnIndex++;
+  if(g.finalRound&&g.turnIndex>=g.endTurn){ endByScore(g); return; }
+  startTurn(g);
+}
+function endByScore(g){
+  g.over=true; g.reason="deckOut";
+  const s0=vaultVal(g,0), s1=vaultVal(g,1);
+  g.scores=[s0,s1];
+  g.winner=s0>s1?0:s1>s0?1:"draw";
+}
+
+/* ══════════ game state ══════════ */
+const game={ mode:null, g:null, view:0, hand:[], selected:null,
+  passShow:false, aiThinking:false, locked:false,
+  myPlayer:0, myRole:null, hostFirst:0, status:"idle", oppPresent:true, hostIn:false, guestIn:false,
+  lastSeq:-1, logLines:[],
+  socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null, openResolvers:[] };
+
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const handEl=document.getElementById("handEl");
+const myVaultEl=document.getElementById("myVaultEl");
+const oppVaultEl=document.getElementById("oppVaultEl");
+const turnEl=document.getElementById("turnEl");
+const bannerEl=document.getElementById("bannerEl");
+const playsEl=document.getElementById("playsEl");
+const logEl=document.getElementById("logEl");
+const deckCountEl=document.getElementById("deckCountEl");
+const discardEl=document.getElementById("discardEl");
+const myNameEl=document.getElementById("myNameEl");
+const oppNameEl=document.getElementById("oppNameEl");
+const myScoreEl=document.getElementById("myScoreEl");
+const oppScoreEl=document.getElementById("oppScoreEl");
+const oppHandEl=document.getElementById("oppHandEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const resignBtn=document.getElementById("resignBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const endTurnBtn=document.getElementById("endTurnBtn");
+const wildModal=document.getElementById("wildModal");
+const wildPickerEl=document.getElementById("wildPickerEl");
+const wildCancelBtn=document.getElementById("wildCancelBtn");
+const passScreen=document.getElementById("passScreen");
+const passTitleEl=document.getElementById("passTitleEl");
+const passSubEl=document.getElementById("passSubEl");
+const passGoBtn=document.getElementById("passGoBtn");
+const overModal=document.getElementById("overModal");
+const overTitleEl=document.getElementById("overTitleEl");
+const overBannerEl=document.getElementById("overBannerEl");
+const overScoresEl=document.getElementById("overScoresEl");
+const overReasonEl=document.getElementById("overReasonEl");
+const playAgainBtn=document.getElementById("playAgainBtn");
+const overMenuBtn=document.getElementById("overMenuBtn");
+
+/* ══════════ helpers ══════════ */
+function npName(p){ if(game.mode==="online")return p===game.myPlayer?"You":"Opponent"; if(game.mode==="ai")return p===0?"You":"The Machine"; return "Player "+(p+1); }
+function myHand(){ return game.mode==="online"?game.hand:game.g.hands[game.view]; }
+function activePlayer(){ return game.g&&game.g.turnIndex>=0?turnPlayer(game.g):-1; }
+function log(txt,steal){
+  game.logLines.push(steal?'<div class="log-item"><span class="st">'+txt+'</span></div>':'<div class="log-item"><span class="ev">'+txt+'</span></div>');
+  if(game.logLines.length>80)game.logLines.splice(0,game.logLines.length-80);
+  renderLog();
+}
+function renderLog(){
+  logEl.innerHTML=game.logLines.join("");
+  logEl.scrollTop=logEl.scrollHeight;
+}
+
+/* ══════════ input rules ══════════ */
+function isMyTurn(){
+  if(game.over||game.locked||game.passShow)return false;
+  const g=game.g; if(!g||g.over)return false;
+  const active=activePlayer();
+  if(active<0)return false;
+  if(game.mode==="local")return active===game.view&&g.playsLeft>0;
+  if(game.mode==="ai")return active===0&&g.playsLeft>0;
+  return game.sockOpen&&game.status===2&&active===game.myPlayer&&g.playsLeft>0;
+}
+
+/* ══════════ rendering ══════════ */
+function cardEl(id,opts){
+  opts=opts||{};
+  const d=document.createElement("div");
+  const t=cardType(id);
+  d.className="cya-card t"+t+(opts.faceDown?" face-down":"");
+  if(opts.faceDown){ return d; }
+  d.innerHTML='<div class="em">'+EMO[t]+'</div><div class="nm">'+NAMES[t]+'</div><div class="vl">'+cardVal(id)+'</div>';
+  if(opts.dead&&!opts.hideDead)d.classList.add("dead");
+  if(opts.dead)d.innerHTML+='<div class="dc">✕</div>';
+  if(opts.selected)d.classList.add("selected");
+  return d;
+}
+function renderSlot(container,p,s){
+  const st=container.__vault[p][s];
+  const slot=document.createElement("div");
+  const can=isMyTurn();
+  let playable=false;
+  slot.className="cya-slot"+(st?" has":" empty");
+  if(!st){
+    slot.textContent="empty";
+    if(can&&game.selected&&selectedLegalSlot(p,s)){ slot.classList.add("canplay"); playable=true; }
+  }else{
+    const top=st.cards[st.cards.length-1];
+    const meta=document.createElement("div");
+    meta.className="cya-stackmeta";
+    const x=document.createElement("span"); x.className="x"; x.textContent="×"+st.cards.length;
+    const pts=document.createElement("span"); pts.className="pts"; pts.textContent=stackVal(st)+" pts";
+    meta.appendChild(x); meta.appendChild(pts);
+    const topwrap=document.createElement("div");
+    topwrap.className="cya-topcard";
+    const em=document.createElement("span"); em.className="em"; em.textContent=EMO[st.type];
+    const nm=document.createElement("span"); nm.className="nm"; nm.textContent=NAMES[st.type];
+    topwrap.appendChild(em); topwrap.appendChild(nm);
+    slot.appendChild(topwrap); slot.appendChild(meta);
+    if(st.cards.length>1){
+      const row=document.createElement("div"); row.className="cya-minirow";
+      const others=st.cards.slice(0,st.cards.length-1);
+      for(let i=0;i<others.length&&i<7;i++){
+        const m=document.createElement("div"); m.className="cya-mini"; m.textContent=EMO[cardType(others[i])]; m.title=NAMES[cardType(others[i])];
+        row.appendChild(m);
+      }
+      if(others.length>7){ const m=document.createElement("div"); m.className="cya-mini-more"; m.textContent="+"+(others.length-7); row.appendChild(m); }
+      slot.appendChild(row);
+    }
+    if(can&&game.selected&&selectedLegalSlot(p,s)){ slot.classList.add("playable"); playable=true; }
+  }
+  if(playable){
+    slot.addEventListener("click",function(){ onSlotClick(p,s); });
+  }
+  container.appendChild(slot);
+}
+function selectedLegalSlot(p,s){
+  const sel=game.selected; if(!sel)return false;
+  const g=game.g;
+  if(game.mode==="online"){ if(p!==game.myPlayer&&s!==undefined&&false)return false; return onlinePlayLegal(sel.kindHint,sel.type,p,s); }
+  const kinds=legalKinds(g,game.view);
+  for(const k of kinds){ if(k.i===sel.i&&k.stack===s){ const isMine=p===game.view; if(k.kind==="start"||k.kind==="build"){ if(isMine)return true; } else if(k.kind==="cover"){ if(!isMine)return true; } } }
+  return false;
+}
+function onlinePlayLegal(kind,type,p,s){
+  const sel=game.selected; if(!sel)return false;
+  const g=game.g;
+  const kinds=legalKinds(g,game.myPlayer);
+  for(const k of kinds){ if(k.i===sel.i&&k.type===type&&k.stack===s){ const isMine=p===game.myPlayer; if(k.kind==="start"||k.kind==="build"){ if(isMine)return true; } else if(k.kind==="cover"){ if(!isMine)return true; } } }
+  return false;
+}
+function renderVaults(){
+  myVaultEl.innerHTML="";
+  oppVaultEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  myVaultEl.__vault=g.vaults; oppVaultEl.__vault=g.vaults;
+  for(let s=0;s<3;s++){ renderSlot(myVaultEl,0,s); renderSlot(oppVaultEl,1,s); }
+}
+function renderHand(){
+  handEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  const mine=game.mode==="online"?game.hand:(game.mode==="local"?g.hands[game.view]:g.hands[0]);
+  const can=isMyTurn();
+  for(let i=0;i<mine.length;i++){
+    const el=cardEl(mine[i],{selected:game.selected&&game.selected.i===i});
+    if(can&&(!game.selected||(game.selected.kindHint!=="wild"))){
+      el.addEventListener("click",function(){ onHandClick(i); });
+    }
+    if(can){
+      const dc=document.createElement("div");
+      dc.className="dc"; dc.textContent="✕"; dc.title="Discard";
+      dc.addEventListener("click",function(ev){ ev.stopPropagation(); onDiscard(i); });
+      el.appendChild(dc);
+    }
+    handEl.appendChild(el);
+  }
+  if(!mine.length&&game.g&&game.g.turnIndex>=0){
+    const em=document.createElement("div"); em.className="muted small"; em.style.padding="20px 0"; em.textContent="No cards in hand.";
+    handEl.appendChild(em);
+  }
+  const oppHandN=game.mode==="online"?g.handsLen[1-game.myPlayer]:(game.mode==="local"?g.hands[1-game.view].length:g.hands[1].length);
+  oppHandEl.textContent=oppHandN+" card"+(oppHandN===1?"":"s");
+}
+function renderTabletop(){
+  const g=game.g; if(!g)return;
+  const dc=(game.mode==="online"&&g.deckCount!=null)?g.deckCount:g.deck.length;
+  deckCountEl.textContent=g.finalRound?("final round · "+dc+" left"):(dc+" cards");
+  const top=(game.mode==="online")?g.discardTop:(g.discard.length?g.discard[g.discard.length-1]:null);
+  discardEl.textContent=top==null?"—":EMO[cardType(top)];
+}
+function renderTurn(){
+  const g=game.g; if(!g)return;
+  let t="";
+  if(g.over){ t="Game over"; }
+  else if(activePlayer()<0){ t=game.mode==="online"?"Waiting for a rival…":"Dealing…"; }
+  else{
+    const p=activePlayer();
+    const you=game.mode==="online"?p===game.myPlayer:(game.mode==="ai"?p===0:(p===game.view));
+    t=(you?"Your turn — ":npName(p)+"'s turn — ")+"play "+g.playsLeft+" more";
+  }
+  turnEl.textContent=t;
+  playsEl.textContent=game.aiThinking?"The Machine is scheming…":(g.over||activePlayer()<0?"":("plays left: "+g.playsLeft));
+}
+function updateScores(){
+  const g=game.g; if(!g)return;
+  const s0=g.scores?vaultVal(g,0):vaultVal(g,0);
+  myScoreEl.textContent=vaultVal(g,0)+" pts";
+  oppScoreEl.textContent=vaultVal(g,1)+" pts";
+}
+function reasonText(){
+  const w=game.g.winner;
+  const youWon=game.mode==="online"?w===game.myPlayer:(game.mode==="ai"?w===0:(game.mode==="local"?null:null));
+  if(w==="draw")return "It's a tie!";
+  if(game.g.reason==="resign")return npName(w)+" wins — "+(game.mode==="online"?(w===game.myPlayer?"your opponent resigned":"you resigned"):npName(1-w)+" resigned")+".";
+  if(game.g.reason==="forfeit")return game.mode==="online"?(youWon?"You win — your opponent left!":"You lose — your opponent claimed the win."):npName(w)+" wins.";
+  return "The deck ran out and "+npName(w)+" has the most valuable vault.";
+}
+function updateButtons(){
+  const g=game.g; if(!g)return;
+  const online=game.mode==="online";
+  endTurnBtn.style.display=!g.over&&online&&activePlayer()===game.myPlayer&&game.sockOpen?"":"none";
+  if(!online&&!g.over)endTurnBtn.style.display="";
+  endTurnBtn.disabled=game.locked||!isMyTurn();
+  if(online){
+    resignBtn.style.display=g.over?"none":"";
+    claimBtn.hidden=!(game.status===2&&!g.over&&!game.oppPresent);
+  }else{
+    resignBtn.style.display="none";
+    claimBtn.hidden=true;
+  }
+  newGameBtn.textContent=online?(g.over?"Rematch":"New match"):"New game";
+}
+function updateBanner(){
+  const g=game.g; if(!g)return;
+  let msg="";
+  if(g.over)msg="";
+  else if(game.aiThinking)msg="The Machine is scheming…";
+  else if(activePlayer()<0)msg="Shuffling the deck…";
+  else if(game.mode==="online"){
+    if(!game.sockOpen)msg="Connecting…";
+    else if(game.status===1)msg="Waiting for an opponent to join…";
+    else if(!game.oppPresent)msg="Your opponent disconnected — they can rejoin with the code. Claim the win anytime.";
+    else if(activePlayer()===game.myPlayer)msg="Pick cards from your hand, then click a vault slot to play.";
+    else msg="Waiting for your opponent…";
+  }else{
+    if(activePlayer()===game.view||game.mode==="ai"&&activePlayer()===0)msg="Play a card from your hand, then click a vault to stack or steal.";
+    else msg="";
+  }
+  bannerEl.textContent=msg;
+}
+function renderAll(){
+  if(!game.g)return;
+  renderVaults();
+  renderHand();
+  renderTabletop();
+  renderTurn();
+  updateScores();
+  updateButtons();
+  updateBanner();
+}
+
+/* ══════════ interaction ══════════ */
+function onHandClick(i){
+  if(game.selected){ game.selected=null; renderAll(); return; }
+  const id=myHand()[i];
+  if(cardType(id)===8){ openWildPicker(i); return; }
+  game.selected={i:i,type:cardType(id),kindHint:"normal"};
+  renderAll();
+}
+function openWildPicker(i){
+  const g=game.g;
+  const kinds=legalKinds(g,game.mode==="online"?game.myPlayer:game.view);
+  const usable={}; for(let k=0;k<8;k++)usable[k]=false;
+  for(const k of kinds){ if(k.i===i)usable[k.type]=true; }
+  wildPickerEl.innerHTML="";
+  for(let t=0;t<8;t++){
+    const b=document.createElement("button");
+    b.className="wp"+(usable[t]?"":" dis");
+    b.innerHTML='<span class="em">'+EMO[t]+'</span><span class="nm">'+NAMES[t]+'</span>';
+    b.addEventListener("click",function(){ if(!usable[t])return; game.selected={i:i,type:t,kindHint:"wild"}; wildModal.hidden=true; renderAll(); });
+    wildPickerEl.appendChild(b);
+  }
+  wildModal.hidden=false;
+}
+function onSlotClick(p,s){
+  if(!game.selected)return;
+  const sel=game.selected;
+  const me=game.mode==="online"?game.myPlayer:game.view;
+  const isMine=(p===me);
+  const g=game.g;
+  const kinds=legalKinds(g,me);
+  let chosen=null;
+  for(const k of kinds){
+    if(k.i===sel.i&&k.stack===s){
+      if((k.kind==="start"||k.kind==="build")&&isMine){ chosen=k; break; }
+      if(k.kind==="cover"&&!isMine){ chosen=k; break; }
+    }
+  }
+  if(!chosen){ game.selected=null; renderAll(); return; }
+  doPlay(chosen);
+}
+function doPlay(k){
+  const me=game.mode==="online"?game.myPlayer:game.view;
+  game.selected=null;
+  if(game.mode==="online"){ sendPlay(k); return; }
+  if(k.kind==="cover"){
+    k.stolen=stackVal(game.g.vaults[1-me][k.stack]);
+  }
+  applyPlay(game.g,me,k);
+  game.g.playsLeft--;
+  logPlay(me,k);
+  if(game.g.playsLeft<=0){ endPlayerTurn(); }
+  else if(!legalKinds(game.g,me).length){ log("No legal plays left — turn ends."); endPlayerTurn(); }
+  else renderAll();
+}
+function logPlay(p,k){
+  const txt=NAMES[k.type]+" ("+EMO[k.type]+")";
+  if(k.kind==="start")log(npName(p)+" stashed "+txt+" in a new vault stack.");
+  else if(k.kind==="build")log(npName(p)+" added "+txt+" to a stack.");
+  else log(npName(p)+" COVERED the opponent's "+NAMES[k.type]+" stack — stole "+k.stolen+" pts!",true);
+}
+function endPlayerTurn(){
+  const g=game.g;
+  const p=turnPlayer(g);
+  const oldP=g.hands[p].length, oldN=g.hands[(p+1)%2].length;
+  finishTurn(g);
+  if(g.over){ showGameOver(); return; }
+  const np=turnPlayer(g);
+  if(g.hands[p].length>oldP)log("Vault was empty — "+npName(p)+" drew "+(g.hands[p].length-oldP)+" cards.");
+  if(g.hands[np].length>oldN)log(npName(np)+" drew "+(g.hands[np].length-oldN)+" cards.");
+  if(g.finalRound)log("The deck ran out — final round!");
+  renderAll();
+  if(game.mode==="local")showPassScreen();
+  else if(game.mode==="ai"&&turnPlayer(g)===1)aiDoTurn();
+}
+function onDiscard(i){
+  const me=game.mode==="online"?game.myPlayer:game.view;
+  const hand=game.mode==="online"?game.hand:game.g.hands[me];
+  if(i>=hand.length)return;
+  const id=hand[i];
+  if(game.mode==="online"){ sendDiscard(i); return; }
+  game.g.hands[me].splice(i,1);
+  game.g.discard.push(id);
+  log(npName(me)+" discarded "+NAMES[cardType(id)]+" ("+EMO[cardType(id)]+").");
+  if(game.selected&&game.selected.i===i)game.selected=null;
+  else if(game.selected&&game.selected.i>i)game.selected.i--;
+  renderAll();
+}
+function onPass(){
+  if(!isMyTurn())return;
+  if(game.mode==="online"){ sendPass(); return; }
+  log(npName(game.view)+" ended their turn.");
+  endPlayerTurn();
+}
+
+/* ══════════ AI ══════════ */
+function aiChoosePlay(g,p){
+  const kinds=legalKinds(g,p);
+  if(!kinds.length)return null;
+  let best=null, bestS=-1e9;
+  for(const k of kinds){
+    const id=g.hands[p][k.i];
+    let gain=cardVal(id);
+    if(k.kind==="cover"){
+      gain=stackVal(g.vaults[1-p][k.stack])+cardVal(id);
+      gain*=1.15;
+    }else if(k.kind==="build"){
+      gain=cardVal(id)*1.2;
+      let more=0;
+      for(let j=0;j<g.hands[p].length;j++){ if(j!==k.i&&(cardType(g.hands[p][j])===k.type||cardType(g.hands[p][j])===8))more++; }
+      gain+=more*cardVal(id)*0.35;
+    }else{
+      gain=cardVal(id)*0.85;
+    }
+    gain+=Math.random()*8;
+    if(gain>bestS){ bestS=gain; best=k; }
+  }
+  return best;
+}
+function aiDoTurn(){
+  game.aiThinking=true;
+  updateBanner();
+  setTimeout(function(){
+    if(game.mode!=="ai"||game.over)return;
+    const g=game.g;
+    for(let step=0;step<2;step++){
+      const k=aiChoosePlay(g,1);
+      if(!k)break;
+      if(k.kind==="cover")k.stolen=stackVal(g.vaults[0][k.stack]);
+      applyPlay(g,1,k);
+      g.playsLeft--;
+      logPlay(1,k);
+    }
+    game.aiThinking=false;
+    if(g.playsLeft>0&&!legalKinds(g,1).length)log("No legal plays left — turn ends.");
+    endPlayerTurn();
+  },480);
+}
+
+/* ══════════ game flow (local / AI) ══════════ */
+function startGame(){
+  const g=newRoom(0);
+  deal(g);
+  game.g=g;
+  game.hand=g.hands[game.mode==="ai"?0:0];
+  game.view=0;
+  game.passShow=false;
+  game.over=false;
+  game.logLines=[];
+  log("Deal — 5 cards each. "+npName(0)+" draws 2 to start.");
+  log(npName(0)+" drew 2 cards.");
+  log("Goal: most valuable vault when the deck runs out. Stack up, and cover to steal!");
+  renderAll();
+  if(game.mode==="ai"&&turnPlayer(g)===1)aiDoTurn();
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  game.mode=mode;
+  game.myPlayer=0; game.myRole=null; game.over=false;
+  myNameEl.textContent=mode==="ai"?"You":"Player 1";
+  oppNameEl.textContent=mode==="ai"?"The Machine":"Player 2";
+  roomBox.hidden=true;
+  claimBtn.hidden=true;
+  resignBtn.style.display="none";
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  passScreen.hidden=true;
+  overModal.hidden=true;
+  wildModal.hidden=true;
+  startGame();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
+    exitOnline(true);
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+  }
+}
+
+/* ══════════ game over ══════════ */
+function showGameOver(){
+  const g=game.g; if(!g)return;
+  overTitleEl.textContent="Game over";
+  let banner="";
+  if(g.winner==="draw")banner="It's a tie!";
+  else{
+    const youWon=game.mode==="online"?g.winner===game.myPlayer:(game.mode==="ai"?g.winner===0:(g.winner===game.view));
+    banner=youWon?"🏆 You win!":"🏆 "+npName(g.winner)+" wins!";
+  }
+  overBannerEl.textContent=banner;
+  const s0=g.scores?vaultVal(g,0):vaultVal(g,0);
+  const s1=vaultVal(g,1);
+  const p0=game.mode==="online"?(game.myPlayer===0?"You":"Opponent"):npName(0);
+  const p1=game.mode==="online"?(game.myPlayer===1?"You":"Opponent"):npName(1);
+  overScoresEl.innerHTML='<div class="'+(g.winner===0?"win":"")+'"><span class="muted small">'+p0+'</span><b>'+s0+'</b><span class="pts-tag">pts</span>'+(g.winner===0?'<span class="win-tag">★ winner</span>':"")+'</div>'+
+                          '<div class="'+(g.winner===1?"win":"")+'"><span class="muted small">'+p1+'</span><b>'+s1+'</b><span class="pts-tag">pts</span>'+(g.winner===1?'<span class="win-tag">★ winner</span>':"")+'</div>';
+  overReasonEl.textContent=reasonText();
+  playAgainBtn.textContent=game.mode==="online"?"Rematch":"Play again";
+  overModal.hidden=false;
+  renderAll();
+}
+
+/* ══════════ pass screen (hotseat) ══════════ */
+function showPassScreen(){
+  const np=turnPlayer(game.g);
+  passTitleEl.textContent="Pass the device to "+npName(np);
+  passSubEl.textContent="Keep "+npName(np)+"'s hand secret — they draw and play from here.";
+  passScreen.hidden=false;
+}
+passGoBtn.addEventListener("click",function(){
+  passScreen.hidden=true;
+  game.view=turnPlayer(game.g);
+  renderAll();
+});
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true;
+    game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){
+    if(game.mode==="online")onServerMsg(ev.data);
+  });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null;
+        connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){ connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — share the code to start the match":"Connecting…"); }
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="hand"){ game.hand=msg.hand.slice(); if(game.g&&game.mode==="online")game.g.hands[game.myPlayer]=game.hand; renderAll(); }
+}
+function applyServerSnap(s){
+  if(!game.g)game.g=newRoom(s.hostFirst);
+  const g=game.g;
+  g.turnIndex=s.turnIndex;
+  g.playsLeft=s.playsLeft;
+  g.finalRound=s.finalRound;
+  g.hostFirst=s.hostFirst;
+  g.vaults=[s.vaults[0].map(function(v){return v?{type:v.type,cards:v.cards.slice()}:null;}),s.vaults[1].map(function(v){return v?{type:v.type,cards:v.cards.slice()}:null;})];
+  g.handsLen=[s.handsLen[0],s.handsLen[1]];
+  g.deckCount=s.deckCount; g.discardTop=s.discardTop;
+  g.deck.length=0; g.discard.length=0;
+  g.scores=s.scores;
+  g.over=s.status===3;
+  g.winner=s.winner; g.reason=s.reason;
+  game.status=s.status;
+  game.hostIn=s.hostIn; game.guestIn=s.guestIn;
+  game.oppPresent=(game.myPlayer===0)?s.guestIn:s.hostIn;
+  game.locked=false;
+  if(game.myPlayer>=0)g.hands[game.myPlayer]=game.hand;
+  if(s.event&&s.seq!==game.lastSeq){ log(s.event.replace(/Host/g,npName(0)).replace(/Guest/g,npName(1)),/COVERED|stole|wins/.test(s.event)); }
+  game.lastSeq=s.seq;
+  if(g.over&&game.mode==="online")showGameOver();
+  renderAll();
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  roomBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  game.locked=false;
+  renderAll();
+  updateButtons();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom","");
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=0;
+    game.roomCode=r.code;
+    myNameEl.textContent="You";
+    oppNameEl.textContent="Opponent";
+    game.logLines=[];
+    log("Room created — code "+r.code+". Share it with a friend to start.");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    game.roomCode=code;
+    myNameEl.textContent="You";
+    oppNameEl.textContent="Opponent";
+    game.logLines=[];
+    log("Joined room "+code+".");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+function sendPlay(k){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("play",JSON.stringify({code:game.roomCode,evt:evt,card:k.i,kind:k.kind,type:k.type,stack:k.stack})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Play rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendDiscard(i){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("discard",JSON.stringify({code:game.roomCode,evt:evt,card:i})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Discard rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendPass(){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.turnIndex;
+  rpc("pass",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Couldn't pass ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+let bannerTimer=null;
+function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    startMode(m);
+  });
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true;
+  connectSocket();
+  doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true;
+  connectSocket();
+  doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+endTurnBtn.addEventListener("click",function(){ onPass(); });
+resignBtn.addEventListener("click",function(){
+  if(!game.over&&game.mode==="online"){ rpc("resign",game.roomCode).catch(function(){}); }
+});
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.g&&game.g.over)rpc("rematch",game.roomCode).catch(function(){});
+    return;
+  }
+  startMode(game.mode);
+});
+playAgainBtn.addEventListener("click",function(){
+  overModal.hidden=true;
+  if(game.mode==="online"){ rpc("rematch",game.roomCode).catch(function(){}); return; }
+  startMode(game.mode);
+});
+overMenuBtn.addEventListener("click",function(){ overModal.hidden=true; exitToLobby(); });
+claimBtn.addEventListener("click",function(){
+  if(game.g&&game.g.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+wildCancelBtn.addEventListener("click",function(){ wildModal.hidden=true; game.selected=null; renderAll(); });
+
+/* debug/testing handle for browser_eval */
+window.__cya={ game, newRoom, deal, turnPlayer, legalKinds, applyPlay, finishTurn, vaultVal, stackVal, cardType, cardVal, startMode, startGame, endPlayerTurn, doPlay, aiChoosePlay, buildDeck, VAL, NAMES, EMO, renderAll, showGameOver, onSlotClick };
+renderAll();
+})();
+</script>
+
+<!-- ═══ FLOATING BACK-TO-HUB BUTTON ═══ -->
+<script>
+(function(){
+  "use strict";
+  if (document.getElementById("rathjiBackBtn")) return;
+  var style = document.createElement("style");
+  style.textContent = [
+    "#rathjiBackBtn{position:fixed;left:90%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:inline-flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,0.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.22);box-shadow:0 6px 18px rgba(0,0,0,0.45);text-decoration:none;transition:transform .15s ease, border-color .15s ease, box-shadow .15s ease;}",
+    "#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,0.65);box-shadow:0 8px 22px rgba(139,92,246,0.35),0 6px 18px rgba(0,0,0,0.45);}",
+    "#rathjiBackBtn .rb-badge{flex:none;width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;font:700 15px/28px system-ui,-apple-system,sans-serif;text-align:center;box-shadow:inset 0 1px 0 rgba(255,255,255,0.35);}",
+    "#rathjiBackBtn .rb-label{font:600 14px/1 system-ui,-apple-system,sans-serif;color:#fff;white-space:nowrap;}",
+    "#rathjiBackBtn .rb-arrow{flex:none;width:12px;height:12px;stroke:#fff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}",
+    "@media (max-width:480px){#rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{display:none;}#rathjiBackBtn{padding:8px;gap:0;}}"
+  ].join("\n");
+  document.head.appendChild(style);
+  var a = document.createElement("a");
+  a.id = "rathjiBackBtn";
+  a.href = "https://perchance.org/rathjis-generators";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.setAttribute("aria-label", "Back to my projects");
+  a.title = "Back to my projects";
+  a.innerHTML = '<span class="rb-badge">R</span><span class="rb-label">My projects</span><svg class="rb-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>';
+  document.body.appendChild(a);
+})();
+</script>

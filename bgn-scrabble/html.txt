@@ -1,0 +1,2251 @@
+<!-- ════════════════════════════════════════════════════════════════
+     SCRABBLE — index.html
+     Local play vs a computer rival, plus live online head-to-head.
+     The <script type="text/x-server-plugin"> element is the PUBLIC,
+     authoritative table server: rooms, room codes, turn order, presence,
+     rematch and resign. It holds NO game logic — each turn the acting
+     client submits a compact full-state snapshot (board, scores, turn),
+     and every client runs the same deterministic rules engine in
+     src/game.js. PUBLIC source — no secrets in here.
+     ─────────────────────────────────────────────────────────────
+     Files: main.pjs (config) · src/game.js (rules) · src/ai.js
+            (computer rival) · src/main.js (UI + flow + online client)
+            · src/data/words.txt (dictionary)
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Scrabble table server ──────────────────────────────────────
+   Generic online table for two: rooms of two (host + guest), turn
+   order, presence, durable per-turn payloads, resign/rematch.
+   Each payload is a compact full-state snapshot string produced by
+   the mover's client (see src/main.js buildSnapshot) — the server
+   just sequences and relays it. Durable state in plugin `state`
+   bytes (versioned binary layout). PUBLIC source — no secrets.  */
+const SLOT=24576;
+const STATE_VERSION=4;
+const MAX_ROOMS=Math.min(256, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=900;
+
+let rooms=new Map();            // code -> room object (live cache)
+const conns=new Map();          // conn.id -> {code, role}
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   slot +1..+8: room code (8 ASCII, zero padded)
+   slot +9: first (0=host moves first, 1=guest; rematch flips)
+   slot +10: state version (4 = scrabble table)
+   slot +11: reserved
+   slot +12..+15: uint32 lastActive (unix secs)
+   slot +16: winner 0=none 1=host 2=guest 3=draw
+   slot +17: reason 0=none 1=resign 2=forfeit 3=end
+   slot +18..+19: uint16 moves bytes length
+   slot +20..+23: reserved
+   slot +24..: moves bytes [len][utf8 payload...] per move          */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function encodeMoves(list){ const out=[]; for(const p of list){ const b=utf8Encode(String(p).slice(0,MAX_PAYLOAD)); out.push(b.length); for(const x of b)out.push(x); } return out; }
+function decodeMoves(bytes){ const out=[]; let i=0; while(i<bytes.length){ const len=bytes[i++]; if(!len||i+len>bytes.length)break; out.push(utf8Decode(bytes.slice(i,i+len))); i+=len; } return out; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const mb=encodeMoves(room.moves);
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+18]=(len>>8)&255; state[o+19]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+const REASON=["","resign","forfeit","end"];
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const movesLen=(state[o+18]<<8)|state[o+19];
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      first:state[o+9], hostId:-1, guestId:-1,
+      moves:decodeMoves(state.slice(o+24,o+24+movesLen)),
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,last:room.moves[room.moves.length-1]||null,first:room.first,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,first:0,hostId:conn.id,guestId:-1,moves:[],winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.moves.length,room.first)!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(typeof obj.evt!=="number"||obj.evt!==room.moves.length)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.moves.push(obj.data);
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.moves=[]; room.winner=null; room.reason=null;
+    room.first=1-room.first;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<style>
+/* ═══ SCRABBLE ═══ */
+:root{
+  --felt:#123c27; --felt2:#0b2a1a; --felt3:#1c5136;
+  --cream:#f4ecd7; --tile:#f6ead0; --tile-edge:#c9b489; --ink:#3a2a14;
+  --gold:#e8c56a; --gold2:#b98a2e;
+  --card:rgba(0,0,0,.32); --card-border:rgba(255,255,255,.12);
+  --dl:#a9cde6; --tl:#7aa9d6; --dw:#f2c4b4; --tw:#e58c8c; --star:#b9a0e8;
+}
+*{box-sizing:border-box;}
+.btn[disabled]{opacity:.45; cursor:default;}
+
+/* loading */
+#loadingEl{padding:40px; text-align:center; font-size:1.1rem; color:var(--gold);}
+.loader{display:inline-block; width:14px; height:14px; border-radius:50%; margin-right:8px;
+  border:2px solid rgba(232,197,106,.3); border-top-color:var(--gold); animation:spin .8s linear infinite; vertical-align:-2px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* lobby */
+.bgn-modes{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px;}
+.bgn-mode{background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit;}
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+.diff-row{display:flex; gap:6px; justify-content:center; margin-top:12px;}
+.diff-btn{background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); color:inherit; border-radius:999px; padding:5px 12px; font-size:.8rem; cursor:pointer;}
+.diff-btn.on{background:var(--gold); color:#20160a; border-color:var(--gold); font-weight:700;}
+
+#onlinePanel{max-width:640px; margin:20px auto 0; text-align:center;}
+#onlinePanel h3{margin:0 0 6px; color:var(--bgn-gold2);}
+input#joinCodeInput{background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:120px; text-align:center; letter-spacing:.35em; text-transform:uppercase; font-weight:700;}
+
+/* game */
+.topbar{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; flex-wrap:wrap;}
+.topbar .brand{font-weight:800; font-size:1.25rem; letter-spacing:.03em; color:#fdf6e3;}
+.topbar .brand small{color:var(--gold); font-weight:600;}
+#turnEl{font-weight:700; color:var(--gold); font-size:1rem;}
+#bagEl{opacity:.75; font-size:.85rem;}
+.table{display:grid; grid-template-columns:minmax(0,620px) minmax(250px,340px); gap:16px; justify-content:center; align-items:start;}
+@media (max-width:940px){ .table{grid-template-columns:minmax(0,1fr);} }
+
+.board-wrap{
+  background:linear-gradient(180deg,#3b2610,#241503); border-radius:18px; padding:14px;
+  box-shadow:inset 0 2px 10px rgba(0,0,0,.6), 0 18px 40px rgba(0,0,0,.5);
+  border:1px solid rgba(0,0,0,.4);
+}
+#boardEl{display:grid; grid-template-columns:repeat(15,1fr); gap:2px; aspect-ratio:1/1;}
+.cell{position:relative; border-radius:4px; background:#e9dcbe; display:flex; align-items:center; justify-content:center; font-size:clamp(7px, 2.4vw, 11px); min-width:0; min-height:0;}
+.cell.dl{background:var(--dl);} .cell.tl{background:var(--tl);} .cell.dw{background:var(--dw);} .cell.tw{background:var(--tw);}
+.cell.star{background:radial-gradient(circle at 50% 45%, #d3c2f5, var(--star));}
+.prem-label{font-size:clamp(6px,1.9vw,10px); font-weight:800; color:rgba(0,0,0,.55); letter-spacing:-.02em;}
+.cell.occupied{background:#e5d6b4;}
+.tile{
+  width:100%; height:100%; border-radius:4px; display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(160deg,#fbf3dd,#ecd9ac 70%,#d9bf8c);
+  color:var(--ink); font-weight:800; font-size:clamp(9px, 3vw, 16px);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.12), inset 0 -3px 0 rgba(0,0,0,.14), 0 1px 2px rgba(0,0,0,.4);
+  position:relative; text-shadow:0 1px 0 rgba(255,255,255,.4);
+}
+.tile.blank{background:linear-gradient(160deg,#efeae0,#d8cfc0 70%,#c3b9a8); color:#555;}
+.tile-val{position:absolute; bottom:1px; right:2px; font-size:clamp(5px,1.5vw,8px); font-weight:700; color:rgba(60,42,20,.75);}
+.cell.pending{cursor:pointer;}
+.cell.pending .tile{transform:scale(.96);}
+.cell.pending.ok .tile{box-shadow:inset 0 0 0 2px #2e9e5b, 0 1px 2px rgba(0,0,0,.4);}
+.cell.pending.valid .tile{background:linear-gradient(160deg,#e6f7dd,#c7e8b2 70%,#a8d690);}
+.cell.pending.bad .tile{box-shadow:inset 0 0 0 2px #d9603f, 0 1px 2px rgba(0,0,0,.4); background:linear-gradient(160deg,#fbe2d5,#f0c3ad 70%,#e2a98e);}
+.cell.occupied{cursor:default;}
+
+.sidebar{display:flex; flex-direction:column; gap:12px; min-width:0;}
+.score-cards{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+.score-card{background:var(--card); border:1px solid var(--card-border); border-radius:12px; padding:10px 12px; transition:border-color .15s, box-shadow .15s;}
+.score-card.on{border-color:var(--gold); box-shadow:0 0 16px rgba(232,197,106,.3);}
+.score-card .row1{display:flex; justify-content:space-between; align-items:center; gap:6px;}
+.score-card .pname{font-weight:700; font-size:.92rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.score-card .pscore{font-weight:800; font-size:1.35rem; color:var(--gold);}
+.score-card .psub{font-size:.72rem; opacity:.7; margin-top:2px;}
+.thinking-dot{display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--gold); animation:pulse 1s infinite; margin-right:5px; vertical-align:1px;}
+@keyframes pulse{0%,100%{opacity:.25;}50%{opacity:1;}}
+
+.controls{display:flex; flex-direction:column; gap:8px;}
+.controls .row{display:flex; gap:8px; flex-wrap:wrap;}
+.controls .row .btn{flex:1; min-width:0; padding:12px 8px; font-size:.68rem; letter-spacing:.1em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+#msgEl{min-height:40px; font-size:.9rem; padding:8px 2px; color:#ffd9c2; line-height:1.35;}
+
+.rack-wrap{background:linear-gradient(180deg,#3b2610,#241503); border-radius:16px; padding:12px 14px; margin-top:14px; border:1px solid rgba(0,0,0,.4);}
+#rackEl{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; max-width:560px; margin:0 auto;}
+.rack-slot{aspect-ratio:1/1; border-radius:6px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); position:relative;}
+.rack-slot .tile{width:100%; height:100%; font-size:clamp(12px,4vw,20px); cursor:pointer;}
+.rack-slot.sel .tile{box-shadow:inset 0 0 0 3px var(--gold), 0 2px 6px rgba(0,0,0,.5); transform:translateY(-6px);}
+.rack-slot.empty{background:rgba(0,0,0,.25);}
+
+.log-box h4{margin:0 0 6px; font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; color:var(--gold); opacity:.9;}
+#logEl{max-height:230px; overflow:auto; background:rgba(0,0,0,.28); border-radius:10px; padding:8px; font-size:.85rem;}
+.log-empty{opacity:.5; font-size:.82rem; padding:4px;}
+.log-item{padding:4px 6px; border-bottom:1px solid rgba(255,255,255,.06); display:flex; gap:8px; align-items:baseline;}
+.log-item b{color:var(--gold); font-size:.8rem;}
+.log-item .log-score{margin-left:auto; color:#9fe08a; font-weight:700; font-size:.8rem;}
+
+.room-box{border:1px dashed rgba(232,197,106,.55); border-radius:12px; padding:12px; text-align:center;}
+.room-box .rcode{font-size:1.6rem; letter-spacing:.4em; color:var(--gold); font-weight:800;}
+.room-box .rlbl{font-size:.7rem; opacity:.7; letter-spacing:.2em; text-transform:uppercase;}
+#connEl{font-size:.78rem; opacity:.8; margin-top:6px;}
+
+.footer-actions{display:flex; gap:8px; flex-wrap:wrap; margin-top:4px;}
+
+/* modals */
+.modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:50; padding:16px;}
+.modal{background:linear-gradient(180deg,#17341f,#0d2416); border:1px solid var(--gold); border-radius:18px; padding:24px 28px; max-width:420px; width:100%; text-align:center; box-shadow:0 24px 60px rgba(0,0,0,.6);}
+.modal h2{margin:0 0 8px; color:#fdf6e3; font-size:1.5rem;}
+.modal p{margin:0 0 16px; color:rgba(239,233,216,.85);}
+.modal .btn{margin:4px;}
+#blankGrid{display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-bottom:14px;}
+.blank-letter{background:var(--tile); color:var(--ink); border:none; border-radius:8px; padding:10px 0; font-weight:800; font-size:1.1rem; cursor:pointer;}
+.blank-letter:hover{filter:brightness(1.08);}
+#exchGrid{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:14px;}
+.exch-chip{background:var(--tile); color:var(--ink); border:none; border-radius:10px; padding:10px 12px; font-weight:800; font-size:1.05rem; cursor:pointer; display:flex; align-items:center; gap:6px;}
+.exch-chip small{font-size:.65rem; opacity:.6; font-weight:700;}
+.exch-chip.on{outline:3px solid var(--gold); outline-offset:1px; transform:translateY(-2px);}
+.hint{font-size:.78rem; opacity:.65; margin-top:10px;}
+</style>
+
+<script>
+/* BGN theme: accent color + hero image from main.pjs */
+(function(){
+  function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n; return (v==null||v==="")?d:String(v); }
+  var r=window.root||{};
+  document.body.style.setProperty("--bgn-accent", val(r.accentColor,"#d4af37"));
+  var img=val(r.heroImage,"").trim();
+  var hero=document.getElementById("gameHero");
+  if(img&&hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+img+"')"); }
+})();
+</script>
+
+<div id="loadingEl"><span class="loader"></span>Loading the dictionary…</div>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+<!-- ═══ LOBBY ═══ -->
+<section id="lobbyCtn" hidden>
+  <div class="sec-head">
+    <div class="sec-eyebrow">Choose a table</div>
+    <h2 class="sec-title goldtext">How would you like to play?</h2>
+    <p class="sec-sub">Scrabble on the Boardgame Network — a clever computer rival, or a live head-to-head online match.</p>
+  </div>
+  <div class="bgn-modes">
+    <div>
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🦉</span>
+        <span class="bgn-mode-name">Play vs Computer</span>
+        <span class="bgn-mode-sub">A crafty rival, three difficulty levels</span>
+      </button>
+      <div class="diff-row">
+        <button class="diff-btn" data-diff="easy">Easy</button>
+        <button class="diff-btn on" data-diff="normal">Normal</button>
+        <button class="diff-btn" data-diff="hard">Hard</button>
+      </div>
+    </div>
+    <button class="bgn-mode" data-mode="online">
+      <span class="bgn-mode-icon">🌐</span>
+      <span class="bgn-mode-name">Play Online</span>
+      <span class="bgn-mode-sub">Head-to-head with a friend</span>
+    </button>
+  </div>
+
+  <div style="display:flex; justify-content:center; margin-top:18px">
+    <button class="btn btn-ghost" id="shareBtn" title="Download this game as JSON or a PNG">📤 Share</button>
+  </div>
+
+  <div id="onlinePanel" class="panel" hidden>
+    <h3>Online table</h3>
+    <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs.</p>
+    <div class="flex center">
+      <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+      <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false" placeholder="CODE">
+      <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+    </div>
+    <p class="muted small" id="onlineMsg" style="margin-top:10px; min-height:18px;"></p>
+  </div>
+</section>
+
+<!-- ═══ GAME ═══ -->
+<section id="gameCtn" hidden>
+  <div class="topbar">
+    <div class="brand">SCRABBLE <small>·</small> <small id="turnEl">Your turn</small></div>
+    <div id="bagEl"></div>
+  </div>
+
+  <div class="table">
+    <div>
+      <div class="board-wrap">
+        <div id="boardEl"></div>
+      </div>
+      <div class="rack-wrap">
+        <div id="rackEl"></div>
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <div class="score-cards">
+        <div class="score-card" id="youCard">
+          <div class="row1"><span class="pname" id="youNameEl">You</span><span class="pscore" id="youScoreEl">0</span></div>
+          <div class="psub" id="youTilesEl">7 tiles</div>
+        </div>
+        <div class="score-card" id="oppCard">
+          <div class="row1"><span class="pname" id="oppNameEl">Computer</span><span class="pscore" id="oppScoreEl">0</span></div>
+          <div class="psub"><span id="oppThinkEl" hidden><span class="thinking-dot"></span>thinking</span><span id="oppTilesEl">7 tiles</span></div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="row">
+          <button class="btn btn-gold" id="playBtn">Play Word</button>
+          <button class="btn" id="clearBtn">Clear</button>
+        </div>
+        <div class="row">
+          <button class="btn" id="passBtn">Pass</button>
+          <button class="btn" id="exchBtn">Exchange</button>
+          <button class="btn" id="shuffleBtn">Shuffle</button>
+        </div>
+        <div id="msgEl"></div>
+      </div>
+
+      <div class="room-box" id="roomBox" hidden>
+        <div class="rlbl">Room code</div>
+        <div class="rcode" id="roomCodeEl">—</div>
+        <div class="flex center" style="margin-top:6px;">
+          <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+          <button class="btn btn-ghost btn-sm" id="leaveBtn">Resign &amp; leave</button>
+        </div>
+        <div id="connEl">Connecting…</div>
+      </div>
+
+      <div class="log-box">
+        <h4>Turn log</h4>
+        <div id="logEl"></div>
+      </div>
+
+      <div class="footer-actions">
+        <button class="btn btn-gold" id="newGameBtn">New Game</button>
+        <button class="btn btn-ghost" id="exitBtn">Exit to menu</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ═══ modals ═══ -->
+<div class="modal-backdrop" id="overModal" hidden>
+  <div class="modal">
+    <h2 id="overTitleEl">You win!</h2>
+    <p id="overSubEl"></p>
+    <button class="btn btn-gold" id="playAgainBtn">Play again</button>
+    <button class="btn btn-ghost" id="closeOverBtn">Close</button>
+  </div>
+</div>
+<div class="modal-backdrop" id="blankModal" hidden>
+  <div class="modal">
+    <h2>Blank tile</h2>
+    <p>What letter should the blank stand for?</p>
+    <div id="blankGrid"></div>
+    <button class="btn btn-ghost" id="blankCancelBtn">Cancel</button>
+  </div>
+</div>
+<div class="modal-backdrop" id="exchModal" hidden>
+  <div class="modal">
+    <h2>Exchange tiles</h2>
+    <p>Tap the tiles you want to swap for new ones.</p>
+    <div id="exchGrid"></div>
+    <button class="btn btn-gold" id="exchConfirmBtn">Exchange</button>
+    <button class="btn btn-ghost" id="exchCancelBtn">Cancel</button>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<script>
+/* game.js — rules engine (inlined into index.html for preview reliability) */
+/* src/game.js — pure Scrabble rules engine (no DOM).
+   Attaches everything to window.Scr. Shared by local vs-AI mode and the
+   online client. Reads optional config globals from main.pjs
+   (LETTER_COUNTS, LETTER_SCORES, PREMIUM, AI_NAMES, endOnPasses,
+   aiDelayMs, bingoBonus); falls back to standard Scrabble defaults. */
+
+(function () {
+"use strict";
+const BOARD_SIZE = 15;
+const RACK_SIZE = 7;
+const BINGO_BONUS = 50;
+const OFFSET_CHARS = "0123456789ABCDE";
+const BOARD_ALPH = "0ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+const win = typeof window !== "undefined" ? window : null;
+function cfg(name, def) {
+  const v = win && win[name];
+  if (v == null) return def;
+  const e = v && typeof v.evaluateItem === "function" ? v.evaluateItem() : v;
+  return e == null ? def : e;
+}
+
+const DEF_COUNTS = { a:9,b:2,c:2,d:4,e:12,f:2,g:3,h:2,i:9,j:1,k:1,l:4,m:2,n:6,o:8,p:2,q:1,r:6,s:4,t:6,u:4,v:2,w:2,x:1,y:2,z:1,"?":2 };
+const DEF_SCORES = { a:1,b:3,c:3,d:2,e:1,f:4,g:2,h:4,i:1,j:8,k:5,l:1,m:3,n:1,o:1,p:3,q:10,r:1,s:1,t:1,u:1,v:4,w:4,x:8,y:4,z:10,"?":0 };
+const DEF_PREMIUM = {
+  tw: ["0,0","0,7","0,14","7,0","7,14","14,0","14,7","14,14"],
+  dw: ["1,1","2,2","3,3","4,4","7,7","10,10","11,11","12,12","13,13","1,13","2,12","3,11","4,10","10,4","11,3","12,2","13,1"],
+  tl: ["1,5","1,9","5,1","5,5","5,9","5,13","9,1","9,5","9,9","9,13","13,5","13,9"],
+  dl: ["0,3","0,11","2,6","2,8","3,0","3,7","3,14","6,2","6,6","6,8","6,12","7,3","7,11","8,2","8,6","8,8","8,12","11,0","11,7","11,14","12,6","12,8","14,3","14,11"]
+};
+
+const LETTER_COUNTS = cfg("LETTER_COUNTS", DEF_COUNTS);
+const LETTER_SCORES = cfg("LETTER_SCORES", DEF_SCORES);
+const PREMIUM = cfg("PREMIUM", DEF_PREMIUM);
+const AI_NAMES = cfg("AI_NAMES", ["Zed","Owl","Rex","Nyx","Odin"]);
+const END_ON_PASSES = cfg("endOnPasses", 6) || 6;
+const AI_DELAY_MS = cfg("aiDelayMs", 900) || 900;
+const BINGO = cfg("bingoBonus", 50) || 50;
+
+// ── small utils ───────────────────────────────────────────────
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+  return arr;
+}
+function fail(reason) { return { ok:false, reason }; }
+function coord(r, c) { return "(row " + (r+1) + ", col " + (c+1) + ")"; }
+
+// ── bag / racks ───────────────────────────────────────────────
+function makeBag() {
+  const bag = [];
+  for (const ch of Object.keys(LETTER_COUNTS)) {
+    const n = LETTER_COUNTS[ch];
+    for (let i = 0; i < n; i++) bag.push({ letter: ch, value: LETTER_SCORES[ch] || 0, isBlank: ch === "?" });
+  }
+  return shuffle(bag);
+}
+function drawFromBag(bag, n) {
+  const out = [];
+  while (n > 0 && bag.length) { out.push(bag.pop()); n--; }
+  return out;
+}
+function refillRack(rack, bag) {
+  while (rack.length < RACK_SIZE && bag.length) rack.push(bag.pop());
+}
+function rackValue(rack) {
+  let s = 0;
+  for (const t of rack) if (!t.isBlank) s += LETTER_SCORES[t.letter.toLowerCase()] || 0;
+  return s;
+}
+function rackLetters(rack) {
+  return rack.map(t => t.isBlank ? "?" : t.letter.toLowerCase()).join("");
+}
+function removeLetterFromBag(bag, ch) {
+  if (ch.toLowerCase() !== ch.toUpperCase()) { // lowercase → a blank was played as this letter
+    const i = bag.findIndex(t => t.isBlank);
+    if (i >= 0) bag.splice(i, 1);
+  } else {
+    const l = ch.toLowerCase();
+    const i = bag.findIndex(t => !t.isBlank && t.letter.toLowerCase() === l);
+    if (i >= 0) bag.splice(i, 1);
+  }
+}
+function bagFromBoard(board) {
+  const counts = {};
+  for (const ch of Object.keys(LETTER_COUNTS)) counts[ch] = LETTER_COUNTS[ch];
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+    const t = board[r][c].tile;
+    if (!t) continue;
+    const ch = t.isBlank ? "?" : t.letter.toLowerCase();
+    if (counts[ch] > 0) counts[ch]--;
+  }
+  const bag = [];
+  for (const ch of Object.keys(counts)) {
+    for (let i = 0; i < counts[ch]; i++) bag.push({ letter: ch, value: LETTER_SCORES[ch] || 0, isBlank: ch === "?" });
+  }
+  return shuffle(bag);
+}
+
+// ── board ─────────────────────────────────────────────────────
+function newBoard() {
+  const g = [];
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    const row = [];
+    for (let c = 0; c < BOARD_SIZE; c++) row.push({ tile: null, premium: null });
+    g.push(row);
+  }
+  for (const prem of Object.keys(PREMIUM)) {
+    for (const s of PREMIUM[prem]) {
+      const [r, c] = String(s).split(",").map(Number);
+      if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) g[r][c].premium = prem;
+    }
+  }
+  return g;
+}
+function boardHasAny(board) {
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) if (board[r][c].tile) return true;
+  return false;
+}
+
+// ── dictionary ─────────────────────────────────────────────────
+function Dictionary(words) {
+  this.set = new Set();
+  this.words = [];
+  for (const w of words) {
+    const u = String(w).trim().toUpperCase();
+    if (u.length >= 2 && u.length <= BOARD_SIZE) { this.words.push(u); this.set.add(u); }
+  }
+}
+Dictionary.prototype.isWord = function (w) { return this.set.has(String(w).toUpperCase()); };
+Dictionary.prototype.size = function () { return this.words.length; };
+const DICT_URL = "https://user.uploads.dev/file/507c0f3f903e73aa95c2d9168e68f902.txt";
+async function fetchWithTimeout(url, ms) {
+  const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const to = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+  try {
+    return await fetch(url, ctrl ? { signal: ctrl.signal } : {});
+  } finally {
+    if (to) clearTimeout(to);
+  }
+}
+async function loadDictionary() {
+  const sources = [DICT_URL, "src/data/words.txt"];
+  for (let attempt = 0; attempt < 4; attempt++) {
+    for (const url of sources) {
+      try {
+        const res = await fetchWithTimeout(url, 12000);
+        if (!res.ok) continue;
+        const text = await res.text();
+        if (text && text.length > 1000) return new Dictionary(text.split(/\s+/));
+      } catch (e) { /* try next source/attempt */ }
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
+  throw new Error("dictionary unavailable");
+}
+
+// ── move analysis ──────────────────────────────────────────────
+// letters: string of letters for each cell starting at (row,col) going `dir`,
+//   including letters that are ALREADY on the board (they must match).
+// dir 0 = across (right), dir 1 = down.
+function analyzePlay(board, dict, rack, row, col, dir, letters) {
+  const R = BOARD_SIZE;
+  const dr = dir === 0 ? 0 : 1, dc = dir === 0 ? 1 : 0;
+  const ls = String(letters).toUpperCase();
+  if (!ls.length) return fail("No tiles placed.");
+  if (ls.length > R) return fail("Word too long.");
+
+  const pool = rack.map(t => ({ ch: t.letter.toLowerCase(), blank: t.isBlank }));
+  const all = []; // every cell the play touches: {r,c,ch,existing,blank,offset}
+  for (let i = 0; i < ls.length; i++) {
+    const r = row + dr * i, c = col + dc * i;
+    if (r < 0 || r >= R || c < 0 || c >= R) return fail("Play goes off the board.");
+    const cell = board[r][c];
+    if (cell.tile) {
+      if (cell.tile.letter.toLowerCase() !== ls[i].toLowerCase())
+        return fail(coord(r, c) + " is already occupied by " + cell.tile.letter.toUpperCase() + ".");
+      all.push({ r, c, ch: cell.tile.letter.toUpperCase(), existing: true, blank: cell.tile.isBlank, offset: i });
+    } else {
+      const need = ls[i].toLowerCase();
+      let idx = pool.findIndex(t => !t.blank && t.ch === need);
+      let usedBlank = false;
+      if (idx === -1) { idx = pool.findIndex(t => t.blank); usedBlank = true; }
+      if (idx === -1) return fail("You don't have a tile for " + ls[i].toUpperCase() + ".");
+      pool.splice(idx, 1);
+      all.push({ r, c, ch: usedBlank ? need.toUpperCase() : ls[i], existing: false, blank: usedBlank, offset: i });
+    }
+  }
+  const placedSet = new Set(all.filter(a => !a.existing).map(a => a.r + "," + a.c));
+
+  // the contiguous run of the played word
+  let sr = row, sc = col;
+  while (sr - dr >= 0 && sr - dr < R && sc - dc >= 0 && sc - dc < R && board[sr - dr][sc - dc].tile) { sr -= dr; sc -= dc; }
+  const run = [];
+  { let r = sr, c = sc;
+    while (r >= 0 && r < R && c >= 0 && c < R) {
+      if (!board[r][c].tile && !placedSet.has(r + "," + c)) break;
+      run.push({ r, c });
+      r += dr; c += dc;
+    }
+  }
+  if (run.length < 2) return fail("That's only one letter — extend it or connect to a word.");
+  for (const a of all) {
+    if (!a.existing && !run.some(x => x.r === a.r && x.c === a.c))
+      return fail("Play would split into two separate words.");
+  }
+  const mainWord = run.map(x => {
+    if (board[x.r][x.c].tile) return board[x.r][x.c].tile.letter.toUpperCase();
+    const a = all.find(y => y.r === x.r && y.c === x.c);
+    return a ? a.ch.toUpperCase() : "";
+  }).join("");
+  if (!dict.isWord(mainWord)) return fail(mainWord + " isn't in the dictionary.");
+
+  // connectivity
+  if (!boardHasAny(board)) {
+    if (!all.some(a => a.r === 7 && a.c === 7)) return fail("The first word must cover the center star.");
+  } else {
+    const touches = all.some(a => !a.existing && (
+      (a.r - 1 >= 0 && board[a.r - 1][a.c].tile) || (a.r + 1 < R && board[a.r + 1][a.c].tile) ||
+      (a.c - 1 >= 0 && board[a.r][a.c - 1].tile) || (a.c + 1 < R && board[a.r][a.c + 1].tile)));
+    if (!touches && !all.some(a => a.existing)) return fail("Play must connect to tiles already on the board.");
+  }
+
+  const pr = dir === 0 ? 1 : 0, pc = dir === 0 ? 0 : 1; // perpendicular direction
+  const placed = all.filter(a => !a.existing);
+
+  // cross-word validation
+  for (const a of placed) {
+    const up = []; let r = a.r - pr, c = a.c - pc;
+    while (r >= 0 && r < R && c >= 0 && c < R && board[r][c].tile) { up.push(board[r][c].tile); r -= pr; c -= pc; }
+    const down = []; let r2 = a.r + pr, c2 = a.c + pc;
+    while (r2 >= 0 && r2 < R && c2 >= 0 && c2 < R && board[r2][c2].tile) { down.push(board[r2][c2].tile); r2 += pr; c2 += pc; }
+    const word = up.reverse().map(t => t.letter.toUpperCase()).join("") + a.ch.toUpperCase() + down.map(t => t.letter.toUpperCase()).join("");
+    if (word.length >= 2 && !dict.isWord(word)) return fail(word + " isn't in the dictionary.");
+  }
+
+  // scoring
+  let mainScore = 0, wordMult = 1;
+  for (const a of placed) {
+    const cell = board[a.r][a.c];
+    const val = a.blank ? 0 : (LETTER_SCORES[a.ch.toLowerCase()] || 0);
+    let mult = 1;
+    if (cell.premium === "dl") mult = 2;
+    else if (cell.premium === "tl") mult = 3;
+    mainScore += val * mult;
+    if (cell.premium === "dw") wordMult *= 2;
+    else if (cell.premium === "tw") wordMult *= 3;
+  }
+  mainScore *= wordMult;
+
+  let crossScore = 0;
+  for (const a of placed) {
+    const up = []; let r = a.r - pr, c = a.c - pc;
+    while (r >= 0 && r < R && c >= 0 && c < R && board[r][c].tile) { up.push(board[r][c].tile); r -= pr; c -= pc; }
+    const down = []; let r2 = a.r + pr, c2 = a.c + pc;
+    while (r2 >= 0 && r2 < R && c2 >= 0 && c2 < R && board[r2][c2].tile) { down.push(board[r2][c2].tile); r2 += pr; c2 += pc; }
+    const runTiles = [...up.reverse(), a, ...down];
+    if (runTiles.length >= 2) {
+      for (const t of runTiles) {
+        if (t.value != null) crossScore += t.isBlank ? 0 : t.value;
+        else crossScore += t.blank ? 0 : (LETTER_SCORES[(t.ch || t.letter).toLowerCase()] || 0);
+      }
+    }
+  }
+
+  const bingo = placed.length === RACK_SIZE;
+  const score = mainScore + crossScore + (bingo ? BINGO : 0);
+  return { ok:true, score, mainWord, all, placed, run, bingo };
+}
+
+// ── applying a move ───────────────────────────────────────────
+function applyPlay(board, rack, bag, res) {
+  let placedCount = 0;
+  for (const a of res.placed) {
+    const need = a.blank ? "?" : a.ch.toLowerCase();
+    let idx = rack.findIndex(t => need === "?" ? t.isBlank : (!t.isBlank && t.letter.toLowerCase() === need));
+    if (idx === -1) idx = rack.findIndex(t => t.isBlank);
+    if (idx === -1) continue;
+    const tile = rack.splice(idx, 1)[0];
+    if (tile.isBlank) tile.letter = a.ch.toLowerCase();
+    board[a.r][a.c].tile = tile;
+    placedCount++;
+  }
+  return placedCount;
+}
+function removeTileFromBag(bag, tile) {
+  const i = bag.findIndex(b => b.letter === tile.letter && b.isBlank === tile.isBlank);
+  if (i >= 0) bag.splice(i, 1);
+}
+function exchangeTiles(rack, bag, letterList) {
+  const tiles = [];
+  for (const ch of String(letterList)) {
+    const needBlank = ch === "?";
+    const idx = rack.findIndex(t => needBlank ? t.isBlank : (!t.isBlank && t.letter.toLowerCase() === ch.toLowerCase()));
+    if (idx === -1) return null;
+    tiles.push(rack.splice(idx, 1)[0]);
+  }
+  bag.push(...tiles);   // exchanged tiles go back into the bag
+  shuffle(bag);
+  rack.push(...drawFromBag(bag, tiles.length));
+  return tiles.length;
+}
+
+// ── move generation (AI + online reuse) ────────────────────────
+function letterCounts(rack) {
+  const cnt = new Int8Array(27);
+  for (const t of rack) {
+    if (t.isBlank) cnt[26]++;
+    else cnt[t.letter.toLowerCase().charCodeAt(0) - 97]++;
+  }
+  return cnt;
+}
+function canForm(w, cnt) {
+  const c = cnt.slice();
+  for (let i = 0; i < w.length; i++) {
+    let code = w.charCodeAt(i);
+    if (code >= 65 && code <= 90) code += 32; // dictionary words are uppercase
+    const k = code - 97;
+    if (c[k] > 0) c[k]--;
+    else if (c[26] > 0) c[26]--;
+    else return false;
+  }
+  return true;
+}
+
+// enumerate distinct letter strings (len 1..maxLen) formable from the rack
+function enumerateStrings(pool, maxLen, out, maxCount) {
+  const seen = new Set();
+  function rec(cur, depth, remaining) {
+    if (out.length >= maxCount) return;
+    if (depth > 0 && !seen.has(cur)) { seen.add(cur); out.push(cur); }
+    if (depth === maxLen) return;
+    const used = new Set();
+    for (let i = 0; i < remaining.length; i++) {
+      const t = remaining[i];
+      if (used.has(t.ch)) continue;
+      used.add(t.ch);
+      const rest = remaining.slice(0, i).concat(remaining.slice(i + 1));
+      if (t.blank) {
+        for (const ch of "abcdefghijklmnopqrstuvwxyz") {
+          const r2 = rest.slice(); r2.push({ ch, blank: false });
+          rec(cur + ch, depth + 1, r2);
+        }
+      } else {
+        rec(cur + t.ch, depth + 1, rest);
+      }
+    }
+  }
+  rec("", 0, pool);
+}
+
+function generateMoves(board, rack, dict) {
+  const R = BOARD_SIZE;
+  const hasTiles = boardHasAny(board);
+  const moves = [];
+  const seen = new Set();
+
+  // quick touch grid: tile or adjacent-to-tile
+  const touch = new Uint8Array(R * R);
+  if (hasTiles) {
+    for (let r = 0; r < R; r++) for (let c = 0; c < R; c++) {
+      if (!board[r][c].tile) continue;
+      touch[r * R + c] = 1;
+      if (r > 0) touch[(r - 1) * R + c] = 1;
+      if (r < R - 1) touch[(r + 1) * R + c] = 1;
+      if (c > 0) touch[r * R + c - 1] = 1;
+      if (c < R - 1) touch[r * R + c + 1] = 1;
+    }
+  }
+
+  function pushIfValid(w, row, col, dir) {
+    const key = row + "," + col + "," + dir + "," + w;
+    if (seen.has(key)) return;
+    const res = analyzePlay(board, dict, rack, row, col, dir, w);
+    if (res.ok) {
+      seen.add(key);
+      moves.push({ word: w, row, col, dir, score: res.score, placedCount: res.placed.length, res });
+    }
+  }
+
+  // phase 1: dictionary words of length 2..7 formable from the rack
+  const cnt = letterCounts(rack);
+  for (const w of dict.words) {
+    if (w.length > RACK_SIZE) continue;
+    if (!canForm(w, cnt)) continue;
+    const len = w.length;
+    const maxStart = R - len;
+    for (let dir = 0; dir < 2; dir++) {
+      const dr = dir ? 1 : 0, dc = dir ? 0 : 1;
+      if (!hasTiles) {
+        // first move: must cover the center square
+        if (dir === 0) {
+          if (7 <= maxStart && 7 >= len - 1) pushIfValid(w, 7, 7 - len + 1, 0);
+        } else {
+          if (7 <= maxStart && 7 >= len - 1) pushIfValid(w, 7 - len + 1, 7, 1);
+        }
+        continue;
+      }
+      for (let r = 0; r <= maxStart; r++) {
+        for (let c = 0; c <= maxStart; c++) {
+          let tch = false;
+          for (let i = 0; i < len; i++) {
+            if (touch[(r + dr * i) * R + (c + dc * i)]) { tch = true; break; }
+          }
+          if (!tch) continue;
+          pushIfValid(w, r, c, dir);
+        }
+      }
+    }
+  }
+
+  // phase 2: extension plays — placed tiles extend an existing run, so the
+  // combined word can be longer than 7 letters (e.g. adding S to a long word).
+  if (hasTiles) {
+    const runs = new Set();
+    for (let r = 0; r < R; r++) for (let c = 0; c < R; c++) {
+      if (!board[r][c].tile) continue;
+      if (c === 0 || !board[r][c - 1].tile) {
+        let s = "", cc = c;
+        while (cc < R && board[r][cc].tile) { s += board[r][cc].tile.letter.toUpperCase(); cc++; }
+        runs.add(r + ":" + c + ":0:" + s);
+      }
+      if (r === 0 || !board[r - 1][c].tile) {
+        let s = "", rr = r;
+        while (rr < R && board[rr][c].tile) { s += board[rr][c].tile.letter.toUpperCase(); rr++; }
+        runs.add(r + ":" + c + ":1:" + s);
+      }
+    }
+    const pool = rack.map(t => ({ ch: t.isBlank ? "?" : t.letter.toLowerCase(), blank: t.isBlank }));
+    for (const entry of runs) {
+      const parts = entry.split(":");
+      const r = +parts[0], c = +parts[1], dir = +parts[2], run = parts[3];
+      if (run.length >= R) continue;
+      const maxLen = Math.min(RACK_SIZE, R - run.length);
+      const prefixes = [];
+      enumerateStrings(pool, maxLen, prefixes, 6000);
+      const dr = dir === 1 ? 1 : 0, dc = dir === 1 ? 0 : 1;
+      for (const p of prefixes) {
+        const w1 = p + run;
+        if (w1.length >= 2 && dict.isWord(w1)) {
+          const sr = r - dr * p.length, sc = c - dc * p.length;
+          if (sr >= 0 && sc >= 0) pushIfValid(w1, sr, sc, dir);
+        }
+        const w2 = run + p;
+        if (w2.length >= 2 && dict.isWord(w2)) {
+          const er = r + dr * run.length, ec = c + dc * run.length;
+          if (er < R && ec < R) pushIfValid(w2, er, ec, dir);
+        }
+      }
+    }
+  }
+
+  moves.sort((a, b) => b.score - a.score);
+  return moves;
+}
+
+window.Scr = {
+  BOARD_SIZE, RACK_SIZE, BINGO_BONUS, OFFSET_CHARS,
+  LETTER_COUNTS, LETTER_SCORES, PREMIUM, AI_NAMES, END_ON_PASSES, AI_DELAY_MS,
+  shuffle, makeBag, drawFromBag, refillRack, rackValue, rackLetters,
+  removeLetterFromBag, bagFromBoard,
+  newBoard, boardHasAny, Dictionary, loadDictionary,
+  analyzePlay, applyPlay, removeTileFromBag, exchangeTiles, generateMoves,
+};
+})();
+
+</script>
+<script>
+/* ai.js — computer opponent */
+/* src/ai.js — computer opponent. Picks from the full legal-move set
+   generated by game.js. Difficulty changes how greedy it is.
+   Attaches { chooseMove, pickExchangeLetters } to window.Ai. */
+
+(function () {
+"use strict";
+const G = window.Scr;
+
+function chooseMove(board, rack, dict, difficulty) {
+  const moves = G.generateMoves(board, rack, dict);
+  if (!moves.length) return null; // no play available
+  const n = moves.length;
+  if (difficulty === "easy") {
+    const pool = moves.slice(0, Math.max(3, Math.floor(n / 2)));
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+  if (difficulty === "hard") {
+    return moves[0]; // best score; bingo bonus already in the score
+  }
+  // normal: random among top 3
+  const top = moves.slice(0, Math.min(n, 3));
+  return top[Math.floor(Math.random() * top.length)];
+}
+
+// letters the AI wants to trade away when it has no play (high-value / awkward)
+function pickExchangeLetters(rack) {
+  const scored = rack.map((t, i) => {
+    let val = 0;
+    if (t.isBlank) val = -1;
+    else {
+      const ch = t.letter.toLowerCase();
+      if (ch === "q" || ch === "z") val = 10;
+      else if (ch === "j" || ch === "x") val = 8;
+      else if (ch === "v") val = 4;
+      else if (ch === "k") val = 5;
+      else if (ch === "f" || ch === "h" || ch === "w" || ch === "y") val = 4;
+    }
+    return { i, val };
+  });
+  scored.sort((a, b) => b.val - a.val);
+  const out = [];
+  for (const s of scored.slice(0, 2)) {
+    const t = rack[s.i];
+    out.push(t.isBlank ? "?" : t.letter.toLowerCase());
+  }
+  return out;
+}
+
+window.Ai = { chooseMove, pickExchangeLetters };
+})();
+
+</script>
+<script>
+/* main.js — UI + game flow + online client */
+/* src/main.js — Scrabble UI + game flow.
+   Local mode: you vs a computer opponent (runs the same engine).
+   Online mode: head-to-head over the server-plugin table. The server only
+   sequences turns and relays a compact full-state snapshot per turn; every
+   client runs the same deterministic rules engine.
+   Classic script: reads window.Scr (game.js) and window.Ai (ai.js). */
+
+(function () {
+"use strict";
+const G = window.Scr;
+const {
+  BOARD_SIZE, RACK_SIZE, BINGO_BONUS, END_ON_PASSES, AI_DELAY_MS,
+  AI_NAMES, LETTER_COUNTS,
+  makeBag, drawFromBag, refillRack, rackValue, rackLetters, shuffle,
+  removeLetterFromBag, bagFromBoard,
+  newBoard, boardHasAny,
+  analyzePlay, applyPlay, exchangeTiles,
+  generateMoves, loadDictionary,
+} = G;
+const { chooseMove, pickExchangeLetters } = window.Ai;
+
+const $ = id => document.getElementById(id);
+const OFFSET_CHARS = "0123456789ABCDE";
+const ALPH = "0ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const delay = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const sfx = n => { if (window.BGN && BGN.sfx) BGN.sfx.play(n); };
+
+// ── state ────────────────────────────────────────────────────
+const S = {
+  mode: null,            // "local" | "online"
+  diff: "normal",
+  myRole: null,          // online: "host" | "guest"
+  myIdx: 0,              // 0 = host/you, 1 = guest/opponent
+  first: 0,              // who moves first (online flips on rematch)
+  board: newBoard(),
+  bag: [],
+  rack: [],              // my tiles
+  aiRack: [],            // local-mode computer rack
+  dict: null,
+  dictReady: false,
+  scores: [0, 0],
+  turnSeq: 0,
+  passStreak: 0,
+  over: false,
+  serverOver: false,
+  serverWinner: null,
+  serverReason: "",
+  winner: -1,            // 0 | 1 | 2(draw)
+  rv: 0,                 // my remaining rack value (post-move)
+  oppRv: 0,              // opponent's remaining rack value (from their last snapshot)
+  oppRack: [],           // opponent's current rack (online, from snapshots)
+  pending: new Map(),    // "r,c" -> {letter, blank}
+  selected: null,        // my rack tile index
+  lastPm: null,          // last resolvePendingMove result
+  aiName: "Computer",
+  aiThinking: false,
+  log: [],
+  resultShown: false,
+
+  status: 0,             // online room status 0/1/2/3
+  hostIn: false, guestIn: false,
+  oppPresent: true,
+  sockOpen: false,
+  socket: null,
+  roomCode: null,
+  wantReconnect: false,
+  retryDelay: 800,
+  seqApplied: -1,
+  locked: false,
+  playing: false,
+  openResolvers: [],
+};
+
+// ── DOM ──────────────────────────────────────────────────────
+const els = {};
+["lobbyCtn","gameCtn","onlinePanel","onlineMsg","joinCodeInput","createRoomBtn","joinRoomBtn",
+ "youNameEl","youScoreEl","youTilesEl","oppNameEl","oppScoreEl","oppTilesEl",
+ "bagEl","turnEl","boardEl","rackEl","msgEl","logEl",
+ "playBtn","clearBtn","shuffleBtn","passBtn","exchBtn","newGameBtn","exitBtn",
+ "roomBox","roomCodeEl","copyCodeBtn","leaveBtn","connEl",
+ "overModal","overTitleEl","overSubEl","playAgainBtn","closeOverBtn",
+ "blankModal","blankGrid","blankCancelBtn","exchModal","exchGrid","exchConfirmBtn","exchCancelBtn",
+ "loadingEl","oppThinkEl"].forEach(id => els[id] = $(id));
+
+// ── names ────────────────────────────────────────────────────
+function meName() { return S.mode === "online" ? "You" : "You"; }
+function roleName(idx) {
+  if (S.mode !== "online") return idx === S.myIdx ? "You" : S.aiName;
+  return idx === S.myIdx ? "You" : (idx === 0 ? "Host" : "Guest");
+}
+function oppName() { return S.mode === "online" ? (S.myIdx === 0 ? "Guest" : "Host") : S.aiName; }
+function turnRoleFor(n) { return ((n + S.first) % 2) === 0 ? 0 : 1; }
+function isMyTurn() {
+  if (S.over || S.serverOver || S.aiThinking || S.locked) return false;
+  if (S.mode === "local") return turnRoleFor(S.turnSeq) === S.myIdx;
+  return S.sockOpen && S.status === 2 && turnRoleFor(S.turnSeq) === S.myIdx && S.oppPresent;
+}
+function canAct() { return S.dictReady && isMyTurn(); }
+
+// ── snapshot / move encoding ─────────────────────────────────
+function encodeBoard(board) {
+  let s = "";
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+    const t = board[r][c].tile;
+    if (!t) s += "0";
+    else if (t.isBlank) s += ALPH[t.letter.toLowerCase().charCodeAt(0) - 97 + 27];
+    else s += ALPH[t.letter.toLowerCase().charCodeAt(0) - 97 + 1];
+  }
+  return s;
+}
+function decodeBoard(board, str) {
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+    const v = ALPH.indexOf(str[r * BOARD_SIZE + c]);
+    board[r][c].tile = null;
+    if (v === 0) continue;
+    if (v <= 26) {
+      const ch = String.fromCharCode(96 + v);
+      board[r][c].tile = { letter: ch, value: ch === "?" ? 0 : 0, isBlank: false };
+      const scores = { a:1,b:3,c:3,d:2,e:1,f:4,g:2,h:4,i:1,j:8,k:5,l:1,m:3,n:1,o:1,p:3,q:10,r:1,s:1,t:1,u:1,v:4,w:4,x:8,y:4,z:10 };
+      board[r][c].tile.value = scores[ch] || 0;
+    } else {
+      const ch = String.fromCharCode(96 + v - 26);
+      board[r][c].tile = { letter: ch, value: 0, isBlank: true };
+    }
+  }
+}
+function encodeMoveMv(res, row, col, dir) {
+  const sorted = [...res.placed].sort((a, b) => a.offset - b.offset);
+  let segs = "";
+  for (const a of sorted) segs += OFFSET_CHARS[a.offset] + (a.blank ? a.ch.toLowerCase() : a.ch);
+  return "P" + String(row).padStart(2, "0") + String(col).padStart(2, "0") + dir + ":" + segs + ":" + res.mainWord;
+}
+function parseMv(mv) {
+  if (!mv) return null;
+  if (mv[0] === "S") return { type: "pass" };
+  if (mv[0] === "X") return { type: "exchange", letters: mv.slice(1) };
+  if (mv[0] === "P") {
+    const row = +mv.slice(1, 3), col = +mv.slice(3, 5), dir = +mv[5];
+    const rest = mv.slice(7);
+    const i = rest.lastIndexOf(":");
+    const segs = rest.slice(0, i), word = rest.slice(i + 1);
+    const placed = [];
+    for (let k = 0; k < segs.length; k += 2) {
+      const off = OFFSET_CHARS.indexOf(segs[k]);
+      const ch = segs[k + 1];
+      placed.push({ off, ch, blank: ch !== ch.toUpperCase() });
+    }
+    return { type: "play", row, col, dir, placed, word };
+  }
+  return null;
+}
+function encodeRack(rack) {
+  return rack.map(t => t.isBlank ? "?" : t.letter.toLowerCase()).join("");
+}
+function decodeRack(str) {
+  const rack = [];
+  for (const ch of String(str)) {
+    if (ch === "?") rack.push({ letter: "?", value: 0, isBlank: true });
+    else { const l = ch.toLowerCase(); rack.push({ letter: l, value: G.LETTER_SCORES[l] || 0, isBlank: false }); }
+  }
+  return rack;
+}
+function buildBag(board, rackA, rackB) {
+  const counts = {};
+  for (const ch of Object.keys(LETTER_COUNTS)) counts[ch] = LETTER_COUNTS[ch];
+  const dec = t => {
+    const ch = t.isBlank ? "?" : t.letter.toLowerCase();
+    if (counts[ch] > 0) counts[ch]--;
+  };
+  for (const t of rackA) dec(t);
+  for (const t of rackB) dec(t);
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+    const t = board[r][c].tile;
+    if (t) dec(t);
+  }
+  const bag = [];
+  for (const ch of Object.keys(counts)) {
+    for (let i = 0; i < counts[ch]; i++) bag.push({ letter: ch, value: ch === "?" ? 0 : (G.LETTER_SCORES[ch] || 0), isBlank: ch === "?" });
+  }
+  return shuffle(bag);
+}
+function buildSnapshot(mv, over, winner) {
+  const rackA = S.myRole === "host" ? S.rack : S.oppRack;
+  const rackB = S.myRole === "host" ? S.oppRack : S.rack;
+  return ["S", "2", S.turnSeq, S.scores[0], S.scores[1], S.passStreak, over ? 1 : 0, winner,
+          encodeRack(rackA), encodeRack(rackB), encodeBoard(S.board), mv].join("|");
+}
+
+// ── applying a received snapshot (online) ─────────────────────
+function applySnapshotStr(str, force) {
+  const parts = str.split("|");
+  if (parts[0] !== "S" || parts.length < 12) return false;
+  const seq = +parts[2];
+  if (!force && seq <= S.seqApplied) return false;
+  const prevScores = S.scores.slice();
+  S.seqApplied = seq;
+  S.turnSeq = seq;
+  decodeBoard(S.board, parts[10]);
+  S.scores = [+parts[3], +parts[4]];
+  S.passStreak = +parts[5];
+  const over = +parts[6] === 1;
+  if (over) S.over = true;
+  S.winner = +parts[7];
+  // racks + bag are fully derivable from the snapshot board + racks
+  const rackA = decodeRack(parts[8]), rackB = decodeRack(parts[9]);
+  const isHost = S.myRole === "host";
+  const mySnap = isHost ? rackA : rackB;
+  const oppSnap = isHost ? rackB : rackA;
+  if (mySnap.length) S.rack = mySnap;
+  if (oppSnap.length) S.oppRack = oppSnap;
+  S.bag = buildBag(S.board, S.rack, S.oppRack);
+  if (!S.rack.length && S.bag.length) S.rack.push(...drawFromBag(S.bag, Math.min(RACK_SIZE, S.bag.length)));
+
+  const mv = parts[11] || "";
+  const parsed = parseMv(mv);
+  const actor = seq >= 1 ? turnRoleFor(seq - 1) : 0;
+  if (parsed && seq > S.logSeqApplied) {
+    if (parsed.type === "play") {
+      const score = S.scores[actor] - prevScores[actor];
+      S.log.push({ who: roleName(actor), text: parsed.word, score });
+    } else if (parsed.type === "exchange") {
+      S.log.push({ who: roleName(actor), text: "exchanged " + parsed.letters.length + " tile" + (parsed.letters.length > 1 ? "s" : ""), score: 0 });
+    } else {
+      S.log.push({ who: roleName(actor), text: "passed", score: 0 });
+    }
+    S.logSeqApplied = seq;
+  }
+  return true;
+}
+S.logSeqApplied = -1;
+
+// ── game setup ────────────────────────────────────────────────
+function freshGame() {
+  S.board = newBoard();
+  S.bag = makeBag();
+  S.rack = drawFromBag(S.bag, RACK_SIZE);
+  S.aiRack = drawFromBag(S.bag, RACK_SIZE);
+  S.scores = [0, 0];
+  S.turnSeq = 0;
+  S.passStreak = 0;
+  S.over = false; S.serverOver = false; S.serverWinner = null; S.serverReason = "";
+  S.winner = -1;
+  S.rv = rackValue(S.rack);
+  S.oppRv = rackValue(S.aiRack);
+  S.oppRack = [];
+  S.pending.clear(); S.selected = null; S.lastPm = null;
+  S.log = [];
+  S.resultShown = false;
+  S.aiThinking = false;
+  S.seqApplied = -1;
+  S.aiName = AI_NAMES[Math.floor(Math.random() * AI_NAMES.length)];
+}
+function startLocal(diff) {
+  S.mode = "local";
+  S.myIdx = 0;
+  S.first = 0;
+  S.diff = diff;
+  S.playing = true;
+  freshGame();
+  els.lobbyCtn.hidden = true;
+  els.gameCtn.hidden = false;
+  els.roomBox.hidden = true;
+  S.locked = false;
+  render();
+  sfx("deal");
+  flash("Your turn — build a word through the center star!");
+}
+function startOnlineGame() {
+  S.board = newBoard();
+  S.bag = makeBag();
+  S.rack = drawFromBag(S.bag, RACK_SIZE);
+  S.aiRack = [];
+  S.scores = [0, 0];
+  S.turnSeq = 0;
+  S.passStreak = 0;
+  S.over = false; S.serverOver = false; S.serverWinner = null; S.serverReason = "";
+  S.winner = -1;
+  S.rv = rackValue(S.rack);
+  S.oppRv = 0;
+  S.oppRack = [];
+  S.pending.clear(); S.selected = null; S.lastPm = null;
+  S.log = [];
+  S.resultShown = false;
+  S.aiThinking = false;
+  S.seqApplied = -1;
+  S.playing = true;
+  render();
+  sfx("deal");
+}
+function exitToLobby() {
+  if (S.mode === "online") {
+    if (S.socket && S.sockOpen) rpc("leave", S.roomCode).catch(() => {});
+    sessionStorage.removeItem("scr-room");
+    S.wantReconnect = false;
+    try { S.socket.close(1000, "bye"); } catch (e) {}
+    S.socket = null; S.sockOpen = false;
+  }
+  S.mode = null;
+  els.gameCtn.hidden = true;
+  els.lobbyCtn.hidden = false;
+}
+
+// ── pending-move resolution ───────────────────────────────────
+function tryDir(dir) {
+  const dr = dir ? 1 : 0, dc = dir ? 0 : 1;
+  const pend = [...S.pending.values()];
+  const fix = dir === 0 ? pend[0].r : pend[0].c;
+  const along = pend.map(p => (dir === 0 ? p.c : p.r));
+  let min = Math.min(...along), max = Math.max(...along);
+  const pos = p => (dir === 0 ? { r: fix, c: p } : { r: p, c: fix });
+  let s = min, e = max;
+  while (true) { const { r, c } = pos(s - 1); if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && S.board[r][c].tile) s--; else break; }
+  while (true) { const { r, c } = pos(e + 1); if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE && S.board[r][c].tile) e++; else break; }
+  let letters = "";
+  for (let p = s; p <= e; p++) {
+    const { r, c } = pos(p);
+    const pe = S.pending.get(r + "," + c);
+    const t = S.board[r][c].tile;
+    if (pe) letters += pe.letter;
+    else if (t) letters += t.letter.toUpperCase();
+    else return { ok: false, reason: "There's a gap between your tiles." };
+  }
+  if (letters.length < 2) return { ok: false, reason: "That's only one letter — extend it or connect to a word." };
+  const res = analyzePlay(S.board, S.dict, S.rack, pos(s).r, pos(s).c, dir, letters);
+  if (res.ok) return { ok: true, res, row: pos(s).r, col: pos(s).c, dir, score: res.score };
+  return { ok: false, reason: res.reason };
+}
+function resolvePendingMove() {
+  const pend = [...S.pending.values()];
+  if (!pend.length) return null;
+  const rows = new Set(pend.map(p => p.r));
+  const cols = new Set(pend.map(p => p.c));
+  if (pend.length > 1) {
+    if (rows.size === 1) return tryDir(0);
+    if (cols.size === 1) return tryDir(1);
+    return { ok: false, reason: "Tiles must line up in one row or column." };
+  }
+  const a = tryDir(0), b = tryDir(1);
+  const av = a && a.ok, bv = b && b.ok;
+  if (av && bv) return a.score >= b.score ? a : b;
+  if (av) return a;
+  if (bv) return b;
+  return a || b;
+}
+
+// ── endgame ───────────────────────────────────────────────────
+function rackValFor(idx) {
+  if (S.mode === "online") return rackValue(idx === S.myIdx ? S.rack : S.oppRack);
+  return rackValue(idx === 0 ? S.rack : S.aiRack);
+}
+function rackFor(idx) {
+  if (S.mode === "online") return idx === S.myIdx ? S.rack : S.oppRack;
+  return idx === 0 ? S.rack : S.aiRack;
+}
+function winnerOf() {
+  if (S.scores[0] > S.scores[1]) return 0;
+  if (S.scores[1] > S.scores[0]) return 1;
+  return 2;
+}
+function checkEnd(moverIdx) {
+  if (S.bag.length === 0 && rackFor(moverIdx).length === 0) {
+    const o = rackValFor(1 - moverIdx);
+    S.scores[moverIdx] += o;
+    S.scores[1 - moverIdx] -= o;
+    return winnerOf();
+  }
+  if (S.passStreak >= END_ON_PASSES) {
+    S.scores[moverIdx] -= rackValFor(moverIdx);
+    S.scores[1 - moverIdx] -= rackValFor(1 - moverIdx);
+    return winnerOf();
+  }
+  return null;
+}
+function finish(winner) {
+  S.over = true;
+  S.winner = winner;
+  render();
+  if (!S.resultShown) {
+    S.resultShown = true;
+    showResultModal();
+  }
+}
+function resultText() {
+  const w = roleName(S.winner);
+  if (S.mode === "local") {
+    if (S.winner === 0) return "You win! 🎉";
+    if (S.winner === 1) return S.aiName + " wins this round.";
+    return "It's a draw!";
+  }
+  if (S.winner === 2) return "It's a draw!";
+  const won = S.winner === S.myIdx;
+  if (S.serverReason === "resign") return won ? "You win — your opponent resigned!" : "You lose — you resigned.";
+  if (S.serverReason === "forfeit") return won ? "You win — your opponent left!" : "You lose — you left the match.";
+  return won ? "You win! 🎉" : "You lose.";
+}
+
+// ── actions ───────────────────────────────────────────────────
+function doPlay() {
+  if (!canAct()) return;
+  const pm = resolvePendingMove();
+  if (!pm || !pm.ok) { flash(pm ? pm.reason : "No tiles placed."); return; }
+  const preSeq = S.turnSeq;
+  applyPlay(S.board, S.rack, S.bag, pm.res);
+  S.scores[S.myIdx] += pm.score;
+  S.passStreak = 0;
+  S.turnSeq = preSeq + 1;
+  S.pending.clear(); S.selected = null;
+  S.log.push({ who: meName(), text: pm.res.mainWord, score: pm.score });
+  refillRack(S.rack, S.bag);
+  S.rv = rackValue(S.rack);
+  const end = checkEnd(S.myIdx);
+  const mv = encodeMoveMv(pm.res, pm.row, pm.col, pm.dir);
+  render();
+  if (pm.res.bingo) sfx("tada"); else sfx("turn");
+  if (end != null) finish(end);
+  afterMyTurn(mv, end);
+}
+function doPass() {
+  if (!canAct()) return;
+  S.passStreak++;
+  S.turnSeq++;
+  S.pending.clear(); S.selected = null;
+  S.log.push({ who: meName(), text: "passed", score: 0 });
+  S.rv = rackValue(S.rack);
+  const end = checkEnd(S.myIdx);
+  render();
+  sfx("turn");
+  if (end != null) finish(end);
+  afterMyTurn("S", end);
+}
+function doExchange(letters) {
+  if (!canAct()) return;
+  if (!letters || !letters.length) return;
+  if (S.bag.length < RACK_SIZE) { flash("You can only exchange when at least 7 tiles remain in the bag."); return; }
+  const n = exchangeTiles(S.rack, S.bag, letters);
+  if (n == null) { flash("You don't have those tiles."); return; }
+  S.passStreak++;
+  S.turnSeq++;
+  S.pending.clear(); S.selected = null;
+  S.log.push({ who: meName(), text: "exchanged " + n + " tile" + (n > 1 ? "s" : ""), score: 0 });
+  S.rv = rackValue(S.rack);
+  const end = checkEnd(S.myIdx);
+  render();
+  sfx("deal");
+  if (end != null) finish(end);
+  afterMyTurn("X" + letters, end);
+}
+function afterMyTurn(mv, end) {
+  if (S.mode === "online") {
+    const preSeq = S.turnSeq - 1;
+    const snapStr = buildSnapshot(mv, !!end, end != null ? end : -1);
+    S.seqApplied = S.turnSeq;
+    submitMove(snapStr, preSeq, end != null ? end : null);
+  } else {
+    if (end == null) scheduleAI();
+  }
+}
+
+// ── local AI turn ─────────────────────────────────────────────
+async function scheduleAI() {
+  S.aiThinking = true;
+  render();
+  await delay(AI_DELAY_MS + Math.random() * 700);
+  if (S.mode !== "local" || S.over) return;
+  const mv = chooseMove(S.board, S.aiRack, S.dict, S.diff);
+  if (mv) {
+    applyPlay(S.board, S.aiRack, S.bag, mv.res);
+    S.scores[1] += mv.score;
+    S.passStreak = 0;
+    S.turnSeq++;
+    S.log.push({ who: S.aiName, text: mv.word, score: mv.score });
+  } else {
+    const exc = S.bag.length >= RACK_SIZE ? pickExchangeLetters(S.aiRack) : null;
+    if (exc && exc.length && exchangeTiles(S.aiRack, S.bag, exc)) {
+      S.passStreak++;
+      S.turnSeq++;
+      S.log.push({ who: S.aiName, text: "exchanged " + exc.length + " tile" + (exc.length > 1 ? "s" : ""), score: 0 });
+    } else {
+      S.passStreak++;
+      S.turnSeq++;
+      S.log.push({ who: S.aiName, text: "passed", score: 0 });
+    }
+  }
+  refillRack(S.aiRack, S.bag);
+  S.aiThinking = false;
+  render();
+  sfx("turn");
+  const end = checkEnd(1);
+  if (end != null) finish(end);
+}
+
+// ── online client ─────────────────────────────────────────────
+function openedP() {
+  return new Promise(res => {
+    if (S.sockOpen) res(true);
+    else S.openResolvers.push(res);
+  });
+}
+function connectSocket() {
+  if (S.socket) return;
+  const root = window.root || {};
+  if (!root.createServerSocket) { setConnLabel("Online isn't available here."); return; }
+  try { S.socket = root.createServerSocket(); } catch (e) { setConnLabel("Online isn't available here."); return; }
+  S.socket.addEventListener("open", () => {
+    S.sockOpen = true;
+    S.retryDelay = 800;
+    const rs = S.openResolvers; S.openResolvers = [];
+    rs.forEach(r => r(true));
+    setConnLabel();
+    if (S.roomCode) rejoinRoom();
+    render();
+  });
+  S.socket.addEventListener("message", ev => { if (S.mode === "online") onServerMsg(ev.data); });
+  S.socket.addEventListener("close", ev => {
+    S.sockOpen = false;
+    const rs = S.openResolvers; S.openResolvers = [];
+    rs.forEach(r => r(false));
+    setConnLabel("Disconnected");
+    if (!S.wantReconnect || S.mode !== "online") return;
+    if (ev.code === 4403) { S.wantReconnect = false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(() => {
+      if (S.wantReconnect && S.mode === "online") {
+        S.retryDelay = Math.min(S.retryDelay * 1.7, 8000);
+        S.socket = null;
+        connectSocket();
+      }
+    }, S.retryDelay);
+  });
+}
+function rpc(method, data) {
+  return new Promise((res, rej) => {
+    if (!S.socket || !S.sockOpen) return rej(new Error("socket not open"));
+    S.socket.rpc[method](data).then(r => { try { res(JSON.parse(r)); } catch (e) { res({ ok: false, err: "parse" }); } }).catch(rej);
+  });
+}
+function setConnLabel(txt) {
+  els.connEl.textContent = txt !== undefined ? txt : (S.sockOpen ? "Connected" : "Connecting…");
+}
+function onServerMsg(raw) {
+  let msg; try { msg = JSON.parse(raw); } catch (e) { return; }
+  if (msg.t === "snap") applyServerSnap(msg.snap);
+}
+function applyServerSnap(s) {
+  const wasOver = S.over || S.serverOver;
+  S.first = s.first;
+  S.status = s.status;
+  S.hostIn = s.hostIn; S.guestIn = s.guestIn;
+  S.oppPresent = S.myRole === "host" ? s.guestIn : s.hostIn;
+  if (s.status === 3) { S.serverOver = true; S.serverWinner = s.winner; S.serverReason = s.reason || ""; }
+  else { S.serverOver = false; S.serverWinner = null; S.serverReason = ""; }
+  if (s.last) {
+    applySnapshotStr(s.last, false);
+  }
+  if (s.status === 3 && !S.resultShown) {
+    if (!S.over) {
+      // ended by resign/forfeit/leave (a legit play-finish already set S.over)
+      S.winner = s.winner === "host" ? 0 : s.winner === "guest" ? 1 : 2;
+      S.over = true;
+    }
+    S.resultShown = true;
+    showResultModal();
+  } else if (s.status === 2 && (wasOver || !S.playing)) {
+    startOnlineGame();
+  }
+  updateRoomUI();
+  render();
+}
+async function submitMove(snapStr, preSeq, endWinner) {
+  try {
+    const r = await rpc("move", JSON.stringify({ code: S.roomCode, evt: preSeq, data: snapStr }));
+    if (r && r.ok) {
+      if (endWinner != null) {
+        const w = endWinner === 2 ? "draw" : endWinner === 0 ? "host" : "guest";
+        try { await rpc("endGame", JSON.stringify({ code: S.roomCode, winner: w })); } catch (e) {}
+      }
+      return;
+    }
+    flash("Move rejected — resyncing…");
+    resyncFromServer();
+  } catch (e) {
+    flash("Connection dropped — resyncing…");
+    resyncFromServer();
+  }
+}
+async function resyncFromServer() {
+  try {
+    const r = await rpc("getRoom", S.roomCode);
+    if (r && r.snap) {
+      const s = r.snap;
+      S.first = s.first; S.status = s.status;
+      S.hostIn = s.hostIn; S.guestIn = s.guestIn;
+      S.oppPresent = S.myRole === "host" ? s.guestIn : s.hostIn;
+      if (s.status === 3) { S.serverOver = true; S.serverWinner = s.winner; S.serverReason = s.reason || ""; }
+      if (s.last) applySnapshotStr(s.last, true);
+      updateRoomUI();
+      render();
+    }
+  } catch (e) {}
+}
+function updateRoomUI() {
+  if (S.mode !== "online") { els.roomBox.hidden = true; return; }
+  els.roomBox.hidden = false;
+  els.roomCodeEl.textContent = S.roomCode || "—";
+  if (S.serverOver) els.connEl.textContent = S.serverReason === "resign" ? "Match ended by resignation." : S.serverReason === "forfeit" ? "Match ended — opponent left." : "Match over.";
+  else if (!S.sockOpen) els.connEl.textContent = "Connecting…";
+  else if (S.status === 1) els.connEl.textContent = "Waiting for an opponent to join…";
+  else if (!S.oppPresent) els.connEl.textContent = "Opponent disconnected — they can rejoin with this code.";
+  else els.connEl.textContent = "Connected";
+}
+function enterGameScreen() {
+  els.lobbyCtn.hidden = true;
+  els.gameCtn.hidden = false;
+  S.playing = false;
+  render();
+}
+async function doCreateRoom() {
+  setOnlineMsg("Creating room…");
+  const ok = await openedP();
+  if (!ok) { setOnlineMsg("Couldn't reach the server."); return; }
+  try {
+    const r = await rpc("createRoom", "");
+    if (!r.ok) { setOnlineMsg("Couldn't create a room (" + r.err + ")."); return; }
+    S.mode = "online";
+    S.roomCode = r.code;
+    S.myRole = r.role;
+    S.myIdx = r.role === "host" ? 0 : 1;
+    sessionStorage.setItem("scr-room", r.code);
+    setOnlineMsg("");
+    S.wantReconnect = true;
+    if (r.snap) { S.first = r.snap.first; S.status = r.snap.status; }
+    enterGameScreen();
+    startOnlineGame();
+    updateRoomUI();
+    render();
+  } catch (e) { setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code) {
+  setOnlineMsg("Joining room " + code + "…");
+  const ok = await openedP();
+  if (!ok) { setOnlineMsg("Couldn't reach the server."); return; }
+  try {
+    const r = await rpc("joinRoom", code);
+    if (!r.ok) { setOnlineMsg("Couldn't join (" + r.err + ")."); return; }
+    S.mode = "online";
+    S.roomCode = code;
+    S.myRole = r.role;
+    S.myIdx = r.role === "host" ? 0 : 1;
+    sessionStorage.setItem("scr-room", code);
+    setOnlineMsg("");
+    S.wantReconnect = true;
+    enterGameScreen();
+    if (r.snap) applyServerSnap(r.snap);
+    else startOnlineGame();
+    updateRoomUI();
+    render();
+  } catch (e) { setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom() {
+  if (!S.roomCode) return;
+  rpc("joinRoom", S.roomCode).then(r => {
+    if (!r.ok) {
+      if (r.err === "game_over" || r.err === "no_such_room") {
+        sessionStorage.removeItem("scr-room");
+        S.mode = null;
+        els.gameCtn.hidden = true;
+        els.lobbyCtn.hidden = false;
+        setOnlineMsg("That room is gone — create a new one.");
+        return;
+      }
+      setConnLabel("Rejoin failed (" + r.err + ").");
+      return;
+    }
+    S.myRole = r.role;
+    S.myIdx = r.role === "host" ? 0 : 1;
+    if (r.snap) applyServerSnap(r.snap);
+    updateRoomUI();
+    render();
+  }).catch(() => { setConnLabel("Rejoin failed."); });
+}
+
+// ── rendering ─────────────────────────────────────────────────
+function flash(msg) {
+  els.msgEl.textContent = msg;
+  clearTimeout(flash._t);
+  flash._t = setTimeout(() => { if (els.msgEl.textContent === msg) els.msgEl.textContent = ""; }, 3500);
+}
+function render() {
+  S.lastPm = S.pending.size ? resolvePendingMove() : null;
+  renderBoard();
+  renderRack();
+  renderScores();
+  renderControls();
+  renderLog();
+  updateRoomUI();
+  renderStatus();
+}
+function renderBoard() {
+  const pm = S.lastPm;
+  const validSet = pm && pm.ok ? new Set(pm.res.placed.map(a => a.r + "," + a.c)) : new Set();
+  let html = "";
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      const cell = S.board[r][c];
+      const key = r + "," + c;
+      const pend = S.pending.get(key);
+      let cls = "cell";
+      if (r === 7 && c === 7) cls += " star";
+      else if (cell.premium) cls += " " + cell.premium;
+      if (pend) {
+        cls += " pending" + (pm && pm.ok ? " ok" : " bad");
+        if (pm && pm.ok && validSet.has(key)) cls += " valid";
+        html += '<div class="' + cls + '" data-r="' + r + '" data-c="' + c + '">' +
+          '<div class="tile ' + (pend.blank ? "blank" : "") + '">' + esc(pend.letter) +
+          (pend.blank ? '<span class="tile-val"></span>' : '<span class="tile-val">' + (LETTER_COUNTS[pend.letter.toLowerCase()] !== undefined ? (tileScore(pend.letter)) : "") + '</span>') +
+          '</div></div>';
+      } else if (cell.tile) {
+        cls += " occupied";
+        html += '<div class="' + cls + '" data-r="' + r + '" data-c="' + c + '">' +
+          '<div class="tile ' + (cell.tile.isBlank ? "blank" : "") + '">' + esc(cell.tile.letter.toUpperCase()) +
+          (cell.tile.isBlank ? "" : '<span class="tile-val">' + tileScore(cell.tile.letter) + '</span>') +
+          '</div></div>';
+      } else {
+        if (r === 7 && c === 7) {
+          html += '<div class="cell star" data-r="7" data-c="7"><span class="prem-label">★</span></div>';
+        } else if (cell.premium) {
+          const labels = { dw: "2W", tw: "3W", dl: "2L", tl: "3L" };
+          html += '<div class="' + cls + '" data-r="' + r + '" data-c="' + c + '"><span class="prem-label">' + labels[cell.premium] + '</span></div>';
+        } else {
+          html += '<div class="cell" data-r="' + r + '" data-c="' + c + '"></div>';
+        }
+      }
+    }
+  }
+  els.boardEl.innerHTML = html;
+}
+function tileScore(ch) {
+  const sc = { a:1,b:3,c:3,d:2,e:1,f:4,g:2,h:4,i:1,j:8,k:5,l:1,m:3,n:1,o:1,p:3,q:10,r:1,s:1,t:1,u:1,v:4,w:4,x:8,y:4,z:10 };
+  return sc[ch.toLowerCase()] || 0;
+}
+function renderRack() {
+  let html = "";
+  for (let i = 0; i < RACK_SIZE; i++) {
+    const t = S.rack[i];
+    if (t) {
+      const sel = S.selected === i ? " sel" : "";
+      html += '<div class="rack-slot' + sel + '" data-i="' + i + '">' +
+        '<div class="tile ' + (t.isBlank ? "blank" : "") + '">' + (t.isBlank ? "?" : t.letter.toUpperCase()) +
+        (t.isBlank ? "" : '<span class="tile-val">' + tileScore(t.letter) + '</span>') +
+        '</div></div>';
+    } else {
+      html += '<div class="rack-slot empty" data-i="' + i + '"></div>';
+    }
+  }
+  els.rackEl.innerHTML = html;
+}
+function renderScores() {
+  els.youNameEl.textContent = meName();
+  els.youScoreEl.textContent = S.scores[0];
+  els.oppNameEl.textContent = oppName();
+  els.oppScoreEl.textContent = S.scores[1];
+  els.bagEl.textContent = "Bag: " + S.bag.length + " tiles";
+  if (S.mode === "local") {
+    els.youTilesEl.textContent = S.rack.length + " tiles";
+    els.oppTilesEl.textContent = S.aiRack.length + " tiles";
+  } else {
+    els.youTilesEl.textContent = S.rack.length + " tiles";
+    els.oppTilesEl.textContent = S.myRole === "host" ? (S.hostIn ? "online" : "away") : (S.guestIn ? "online" : "away");
+  }
+  const youTurn = turnRoleFor(S.turnSeq) === 0 && !S.over && !S.serverOver;
+  const oppTurn = turnRoleFor(S.turnSeq) === 1 && !S.over && !S.serverOver;
+  els.youScoreEl.parentElement.parentElement.classList.toggle("on", youTurn);
+  els.oppScoreEl.parentElement.parentElement.classList.toggle("on", oppTurn);
+}
+function renderControls() {
+  const canPlay = canAct();
+  const pm = S.lastPm;
+  const playable = canPlay && pm && pm.ok;
+  els.playBtn.disabled = !playable;
+  els.clearBtn.disabled = !canPlay || !S.pending.size;
+  els.shuffleBtn.disabled = !canPlay || !S.rack.length;
+  els.passBtn.disabled = !canPlay;
+  els.exchBtn.disabled = !canPlay || S.bag.length < RACK_SIZE;
+  if (playable) {
+    let label = 'Play "' + pm.res.mainWord + '" +' + pm.score;
+    if (pm.res.bingo) label += "  BINGO! +50";
+    els.playBtn.textContent = label;
+  } else {
+    els.playBtn.textContent = "Play Word";
+  }
+  els.newGameBtn.textContent = S.mode === "online" ? (S.over || S.serverOver ? "Rematch" : "New match") : "New Game";
+  els.newGameBtn.style.display = S.mode === "online" && !(S.over || S.serverOver) ? "none" : "";
+  els.exitBtn.textContent = S.mode === "online" ? "Leave match" : "Exit to menu";
+}
+function renderLog() {
+  if (!S.log.length) { els.logEl.innerHTML = '<div class="log-empty">No plays yet.</div>'; return; }
+  els.logEl.innerHTML = S.log.slice(-40).map(l =>
+    '<div class="log-item"><b>' + esc(l.who) + '</b> <span>' + esc(l.text) + '</span>' +
+    (l.score ? '<span class="log-score">+' + l.score + '</span>' : '') + '</div>'
+  ).join("");
+}
+function renderStatus() {
+  const turnEl = els.turnEl;
+  if (S.over || S.serverOver) { turnEl.textContent = "Game over"; return; }
+  if (S.mode === "local") {
+    if (S.aiThinking) { turnEl.textContent = S.aiName + " is thinking…"; els.oppThinkEl.hidden = false; }
+    else if (turnRoleFor(S.turnSeq) === 0) { turnEl.textContent = "Your turn"; els.oppThinkEl.hidden = true; }
+    else { turnEl.textContent = S.aiName + " to move"; els.oppThinkEl.hidden = true; }
+    return;
+  }
+  if (!S.sockOpen) { turnEl.textContent = "Connecting…"; return; }
+  if (S.status === 1) { turnEl.textContent = "Waiting for opponent…"; return; }
+  if (!S.oppPresent) { turnEl.textContent = "Opponent disconnected"; return; }
+  if (turnRoleFor(S.turnSeq) === S.myIdx) { turnEl.textContent = "Your turn"; }
+  else turnEl.textContent = "Waiting for " + oppName() + "…";
+}
+function showResultModal() {
+  if (S.winner === 2) sfx("draw");
+  else if ((S.mode === "online" && S.winner === S.myIdx) || (S.mode !== "online" && S.winner === 0)) sfx("win");
+  else sfx("lose");
+  els.overTitleEl.textContent = resultText();
+  els.overSubEl.textContent = "Final score — " + roleName(0) + ": " + S.scores[0] + " · " + roleName(1) + ": " + S.scores[1] + ".";
+  els.overModal.hidden = false;
+}
+
+// ── UI wiring ─────────────────────────────────────────────────
+function wire() {
+  // mode cards
+  document.querySelectorAll("[data-mode]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const m = btn.dataset.mode;
+      if (m === "online") { els.onlinePanel.hidden = false; setOnlineMsg(""); els.joinCodeInput.focus(); return; }
+      els.onlinePanel.hidden = true;
+      startLocal(S.diff);
+    });
+  });
+  document.querySelectorAll(".diff-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".diff-btn").forEach(b => b.classList.remove("on"));
+      btn.classList.add("on");
+      S.diff = btn.dataset.diff;
+    });
+  });
+  // board
+  els.boardEl.addEventListener("click", ev => {
+    const cell = ev.target.closest(".cell");
+    if (!cell) return;
+    if (!canAct()) { flash(S.aiThinking ? S.aiName + " is thinking…" : "It's not your turn."); return; }
+    onBoardClick(+cell.dataset.r, +cell.dataset.c);
+  });
+  // rack
+  els.rackEl.addEventListener("click", ev => {
+    const slot = ev.target.closest(".rack-slot");
+    if (!slot || slot.classList.contains("empty")) return;
+    if (!canAct()) return;
+    const i = +slot.dataset.i;
+    if (S.selected === i) S.selected = null;
+    else S.selected = i;
+    render();
+  });
+  els.playBtn.addEventListener("click", doPlay);
+  els.clearBtn.addEventListener("click", () => { S.pending.clear(); S.selected = null; render(); sfx("discard"); });
+  els.shuffleBtn.addEventListener("click", () => {
+    if (!canAct()) return;
+    S.rack.sort(() => Math.random() - 0.5);
+    render();
+    sfx("flip");
+  });
+  els.passBtn.addEventListener("click", () => {
+    if (S.pending.size) { if (!confirm("Return placed tiles and pass?")) return; }
+    doPass();
+  });
+  els.exchBtn.addEventListener("click", openExchModal);
+  // blank modal
+  els.blankCancelBtn.addEventListener("click", () => { els.blankModal.hidden = true; S.selected = null; render(); });
+  // exchange modal
+  els.exchCancelBtn.addEventListener("click", () => { els.exchModal.hidden = true; });
+  els.exchConfirmBtn.addEventListener("click", () => {
+    const chosen = [...els.exchGrid.querySelectorAll(".exch-chip.on")].map(el => el.dataset.letter).join("");
+    els.exchModal.hidden = true;
+    if (chosen) doExchange(chosen);
+  });
+  // result modal
+  els.playAgainBtn.addEventListener("click", () => {
+    els.overModal.hidden = true;
+    if (S.mode === "online") {
+      if (S.sockOpen) rpc("rematch", S.roomCode).then(r => { if (!r.ok) flash("Can't rematch yet (" + r.err + ")."); }).catch(() => {});
+    } else {
+      startLocal(S.diff);
+    }
+  });
+  els.closeOverBtn.addEventListener("click", () => { els.overModal.hidden = true; });
+  // online buttons
+  els.createRoomBtn.addEventListener("click", () => { S.wantReconnect = true; connectSocket(); doCreateRoom(); });
+  els.joinRoomBtn.addEventListener("click", () => {
+    const c = els.joinCodeInput.value.trim().toUpperCase();
+    if (c.length < 5) { setOnlineMsg("Enter the 5-letter room code."); return; }
+    S.wantReconnect = true;
+    connectSocket();
+    doJoinRoom(c);
+  });
+  els.joinCodeInput.addEventListener("input", () => {
+    els.joinCodeInput.value = els.joinCodeInput.value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 5);
+  });
+  els.copyCodeBtn.addEventListener("click", () => {
+    try { navigator.clipboard.writeText(S.roomCode || ""); flash("Room code copied!"); } catch (e) { flash(S.roomCode || ""); }
+  });
+  els.leaveBtn.addEventListener("click", exitToLobby);
+  els.exitBtn.addEventListener("click", exitToLobby);
+  els.newGameBtn.addEventListener("click", () => {
+    if (S.mode === "online") {
+      if (S.sockOpen) rpc("rematch", S.roomCode).then(r => { if (!r.ok) flash("Can't rematch yet (" + r.err + ")."); }).catch(() => {});
+      return;
+    }
+    startLocal(S.diff);
+  });
+}
+function onBoardClick(r, c) {
+  const key = r + "," + c;
+  if (S.pending.has(key)) {
+    S.pending.delete(key);
+    S.selected = null;
+    render();
+    sfx("discard");
+    return;
+  }
+  if (S.board[r][c].tile) { flash("That square is already taken."); return; }
+  if (S.selected == null) { flash("Pick a tile from your rack first."); return; }
+  const tile = S.rack[S.selected];
+  if (!tile) return;
+  if (tile.isBlank) openBlankModal(r, c);
+  else {
+    S.pending.set(key, { r, c, letter: tile.letter.toUpperCase(), blank: false });
+    S.selected = null;
+    render();
+    sfx("place");
+  }
+}
+function openBlankModal(r, c) {
+  if (!els.blankGrid.childElementCount) {
+    els.blankGrid.innerHTML = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(ch =>
+      '<button class="blank-letter" data-ch="' + ch + '">' + ch + '</button>').join("");
+    els.blankGrid.addEventListener("click", ev => {
+      const b = ev.target.closest(".blank-letter");
+      if (!b) return;
+      const ch = b.dataset.ch;
+      S.pending.set(r + "," + c, { r, c, letter: ch, blank: true });
+      S.selected = null;
+      els.blankModal.hidden = true;
+      render();
+      sfx("place");
+    });
+  }
+  els.blankModal.hidden = false;
+}
+function openExchModal() {
+  if (!canAct()) return;
+  if (S.bag.length < RACK_SIZE) { flash("You can only exchange when at least 7 tiles remain in the bag."); return; }
+  els.exchGrid.innerHTML = S.rack.map((t, i) =>
+    '<button class="exch-chip" data-letter="' + (t.isBlank ? "?" : t.letter.toLowerCase()) + '" data-i="' + i + '">' +
+    (t.isBlank ? "?" : t.letter.toUpperCase()) + (t.isBlank ? "" : '<small>' + tileScore(t.letter) + '</small>') + '</button>').join("");
+  els.exchGrid.querySelectorAll(".exch-chip").forEach(ch => {
+    ch.addEventListener("click", () => ch.classList.toggle("on"));
+  });
+  els.exchModal.hidden = false;
+}
+function setOnlineMsg(t) { els.onlineMsg.textContent = t; }
+
+// ── boot ──────────────────────────────────────────────────────
+async function boot() {
+  wire();
+  els.oppThinkEl.hidden = true;
+  els.overModal.hidden = true;
+  els.blankModal.hidden = true;
+  els.exchModal.hidden = true;
+  try {
+    S.dict = await loadDictionary();
+    S.dictReady = true;
+  } catch (e) {
+    els.loadingEl.textContent = "Dictionary failed to load — refresh the page.";
+    return;
+  }
+  els.loadingEl.hidden = true;
+  els.lobbyCtn.hidden = false;
+  render();
+  // auto-rejoin a room from a previous session
+  const saved = sessionStorage.getItem("scr-room");
+  if (saved) {
+    S.roomCode = saved;
+    S.wantReconnect = true;
+    connectSocket();
+    els.lobbyCtn.hidden = true;
+    els.gameCtn.hidden = false;
+    render();
+    rejoinRoom();
+  }
+}
+boot();
+
+// ── share / export (bgn-share.js) ─────────────────────────────
+function exportGame() {
+  if (S.mode !== "local") return null;
+  return {
+    v: 1, mode: S.mode, diff: S.diff, first: S.first,
+    scores: S.scores.slice(), turnSeq: S.turnSeq, passStreak: S.passStreak,
+    over: !!S.over, winner: S.winner == null ? -1 : S.winner,
+    log: S.log.slice(), board: encodeBoard(S.board),
+    rack: encodeRack(S.rack), aiRack: encodeRack(S.aiRack)
+  };
+}
+function restoreGame(o) {
+  if (!o || o.v !== 1 || o.mode !== "local" || !o.board || o.board.length < BOARD_SIZE * BOARD_SIZE) return false;
+  if (S.mode === "online") {
+    try { S.socket.close(1000, "bye"); } catch (e) {}
+    S.socket = null; S.sockOpen = false; S.wantReconnect = false;
+    sessionStorage.removeItem("scr-room");
+  }
+  S.mode = "local";
+  S.myIdx = 0;
+  S.first = o.first || 0;
+  S.diff = o.diff || "normal";
+  S.board = newBoard();
+  decodeBoard(S.board, o.board);
+  S.scores = (o.scores || [0, 0]).slice();
+  S.turnSeq = o.turnSeq || 0;
+  S.passStreak = o.passStreak || 0;
+  S.over = !!o.over;
+  S.winner = o.winner == null ? -1 : o.winner;
+  S.serverOver = false; S.serverWinner = null; S.serverReason = ""; S.resultShown = false;
+  S.rack = decodeRack(o.rack || "");
+  S.aiRack = decodeRack(o.aiRack || "");
+  S.oppRack = [];
+  S.bag = buildBag(S.board, S.rack, S.aiRack);
+  S.rv = rackValue(S.rack);
+  S.oppRv = rackValue(S.aiRack);
+  S.log = (o.log || []).slice();
+  S.pending.clear(); S.selected = null; S.lastPm = null;
+  S.playing = true; S.locked = false; S.aiThinking = false;
+  S.seqApplied = -1; S.logSeqApplied = -1;
+  S.aiName = AI_NAMES[Math.floor(Math.random() * AI_NAMES.length)];
+  els.lobbyCtn.hidden = true;
+  els.gameCtn.hidden = false;
+  els.roomBox.hidden = true;
+  render();
+  sfx("deal");
+  if (S.over) showResultModal();
+  else if (turnRoleFor(S.turnSeq) === 1) scheduleAI();
+  return true;
+}
+(function () {
+  var shareBtn = document.getElementById("shareBtn");
+  if (!shareBtn || !window.bgnShare) return;
+  var tplName = function () {
+    var r = window.root || {};
+    return (r.gameTitle && r.gameTitle.evaluateItem ? r.gameTitle.evaluateItem() : "Scrabble");
+  };
+  var panel = window.bgnShare.openPanel({
+    tpl: "bgn-scrabble",
+    gameName: tplName,
+    exportData: exportGame,
+    applySave: restoreGame,
+    source: function () { var g = document.getElementById("gameCtn"); return (g && !g.hidden) ? g : document.getElementById("lobbyCtn"); },
+    title: "SCRABBLE",
+    subtitle: function () { return S.mode === "local" ? "vs " + S.aiName + " · " + new Date().toLocaleDateString() : "online match"; },
+    filenameBase: "scrabble"
+  });
+  shareBtn.addEventListener("click", function () { panel.open(); });
+})();
+
+// ── floating "back to hub" button (rathjis-generators) ────────
+/* Injected style + vanilla JS only. Guarded: never runs twice. */
+(function () {
+  if (document.getElementById("rathjiBackBtn")) return;
+  var css =
+    "#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);" +
+    "z-index:2147483000;display:flex;align-items:center;gap:10px;" +
+    "padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,.82);" +
+    "backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);" +
+    "border:1px solid rgba(255,255,255,.16);box-shadow:0 4px 18px rgba(0,0,0,.35);" +
+    "text-decoration:none;font:600 14px/1 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
+    "color:#fff;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease;}";
+  css += "#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);" +
+    "border-color:rgba(167,139,250,.65);box-shadow:0 6px 20px rgba(139,92,246,.4);}";
+  css += "#rathjiBackBtn .rbb-badge{width:28px;height:28px;border-radius:50%;" +
+    "background:linear-gradient(135deg,#8b5cf6,#d946ef);display:flex;align-items:center;justify-content:center;" +
+    "font-weight:700;font-size:15px;color:#fff;flex:none;}";
+  css += "#rathjiBackBtn .rbb-arrow{width:14px;height:14px;flex:none;opacity:.9;}";
+  css += "@media (max-width:480px){#rathjiBackBtn .rbb-label,#rathjiBackBtn .rbb-arrow{display:none;}" +
+    "#rathjiBackBtn{padding:8px;}}";
+  var st = document.createElement("style");
+  st.textContent = css;
+  (document.head || document.documentElement).appendChild(st);
+  var a = document.createElement("a");
+  a.id = "rathjiBackBtn";
+  a.href = "https://perchance.org/rathjis-generators";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.setAttribute("aria-label", "Back to my projects");
+  a.title = "Back to my projects";
+  var badge = document.createElement("span");
+  badge.className = "rbb-badge";
+  badge.textContent = "R";
+  var label = document.createElement("span");
+  label.className = "rbb-label";
+  label.textContent = "My projects";
+  a.appendChild(badge);
+  a.appendChild(label);
+  a.insertAdjacentHTML("beforeend", '<svg class="rbb-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>');
+  document.body.appendChild(a);
+})();
+
+// test/debug handle
+window.__sc = {
+  S, analyzePlay, generateMoves, chooseMove,
+  resolvePendingMove, applyPlay, exchangeTiles, makeBag, newBoard,
+  buildSnapshot, applySnapshotStr, encodeBoard, decodeBoard,
+  applyServerSnap, onServerMsg, rpc,
+  encodeMoveMv, parseMv, startLocal, startOnlineGame, doPlay, doPass,
+  doCreateRoom, doJoinRoom, isMyTurn, turnRoleFor, checkEnd,
+  render, renderBoard, freshGame, buildBag,
+  exportGame, restoreGame,
+};
+})();
+
+</script>

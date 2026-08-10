@@ -1,0 +1,1784 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN HEARTS — index.html
+     Classic hearts for four: pass three · dodge the queen · shoot
+     the moon. Solo vs 3 bots, or a live 4-player table online.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative game server (rooms, private hands, move
+       validation, scoring). It is PUBLIC source — no secrets here.
+       Its rules engine is mirrored in the client script below
+       (keep the two in sync if you change rules).
+     - Hands are PRIVATE: the server stores every seat's hand and
+       only ever sends each player their own cards. Public state
+       (trick, scores, turns) is broadcast to everyone.
+     - Absent seats are auto-played by a built-in bot so a dropped
+       player never stalls the game; a newcomer may join and take
+       over the vacant seat.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+
+<!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── BGN Hearts server ─────────────────────────────────────────
+   Rooms: 5-letter codes, 4 seats. Host = seat 0, guests fill
+   seats 1-3. The server re-runs the full rules engine to validate
+   every pass and play, keeps every hand private, and broadcasts
+   public state to the whole room on each change. Vacant seats are
+   auto-played so a drop never stalls the table; a new player can
+   join and inherit a vacant seat. Durable room state lives in the
+   plugin `state` bytes (versioned binary layout).               */
+const STATE_VERSION=1;
+const SLOT=256;
+const MAX_ROOMS=Math.min(4096, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const WIN_SCORE=100;
+const QS=11, TWO_CLUBS=27;
+const PASS_LEFT=0, PASS_RIGHT=1, PASS_ACROSS=2, PASS_HOLD=3;
+const O_STATUS=0, O_CODE=1, O_PHASE=9, O_PASSDIR=10, O_HANDNUM=11, O_LEAD=12,
+      O_TURN=13, O_HB=14, O_FT=15, O_VER=16, O_LASTACT=18,
+      O_HANDS=24, O_PASSSEL=76, O_TRICKC=88, O_TRICKSEATS=92, O_TAKEN=96,
+      O_TAKENCNT=148, O_SCORES=152, O_HANDSCORES=160, O_SHOTMOON=168,
+      O_OVER=169, O_PIDS=170, O_NAMES=202;
+
+/* ── card helpers: code 0..51 = suitIdx*13 + rankIdx
+   suits: 0 spades 1 hearts 2 clubs 3 diamonds
+   ranks: 0 A, 1 2 .. 9 10, 10 J, 11 Q, 12 K                        */
+function suitOf(c){return Math.floor(c/13);}
+function rankOf(c){return c%13;}
+function rankVal(c){const r=rankOf(c);return r===0?14:r+1;}
+function isHeart(c){return suitOf(c)===1;}
+function isQS(c){return c===QS;}
+function cardPoints(c){return isHeart(c)?1:(isQS(c)?13:0);}
+function shuffle(a){const b=a.slice();for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const t=b[i];b[i]=b[j];b[j]=t;}return b;}
+
+/* ── rules engine (mirrors the client — keep in sync) ── */
+function legalPlays(hand,trick,heartsBroken,firstTrick){
+  if(trick.length===0){
+    if(firstTrick)return hand.indexOf(TWO_CLUBS)!==-1?[TWO_CLUBS]:hand.slice();
+    let legal=heartsBroken?hand.slice():hand.filter(function(c){return !isHeart(c);});
+    return legal.length?legal:hand.slice();
+  }
+  const led=suitOf(trick[0].card);
+  const follow=hand.filter(function(c){return suitOf(c)===led;});
+  if(follow.length)return follow;
+  if(firstTrick)return hand.filter(function(c){return !isHeart(c)&&!isQS(c);});
+  return hand.slice();
+}
+function trickWinner(trick){
+  const led=suitOf(trick[0].card); let w=trick[0];
+  for(const t of trick)if(suitOf(t.card)===led&&rankVal(t.card)>rankVal(w.card))w=t;
+  return w;
+}
+function dangerOf(c){
+  if(isQS(c))return 1000;
+  const s=suitOf(c),r=rankVal(c);
+  if(s===1)return 30+r;
+  if(s===0)return 25+r;
+  if(s===2)return 10+r*0.4;
+  return 6+r*0.3;
+}
+function autoPass(hand){ return hand.slice().sort(function(a,b){return dangerOf(b)-dangerOf(a);}).slice(0,3); }
+function aiSelectPlay(hand,trick,heartsBroken,firstTrick){
+  const legal=legalPlays(hand,trick,heartsBroken,firstTrick);
+  if(trick.length===0){
+    let best=null,bestScore=1e9;
+    for(const c of legal){
+      const cnt=hand.filter(function(x){return suitOf(x)===suitOf(c);}).length;
+      let score=cnt*100+rankVal(c);
+      if(isHeart(c))score+=200;
+      if(isQS(c))score+=500;
+      if(score<bestScore){bestScore=score;best=c;}
+    }
+    return best;
+  }
+  const led=suitOf(trick[0].card);
+  const points=trick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+  const high=trick.reduce(function(a,t){return (suitOf(t.card)===led&&rankVal(t.card)>rankVal(a.card))?t:a;},trick[0]);
+  let best=null,bestScore=1e9;
+  for(const c of legal){
+    const wins=rankVal(c)>rankVal(high.card);
+    let score=wins?(points>0?100000+points*1000:(rankVal(c)-rankVal(high.card))*2):rankVal(c);
+    if(isQS(c))score+=50000;
+    if(score<bestScore){bestScore=score;best=c;}
+  }
+  return best;
+}
+
+/* ── room lifecycle ── */
+let rooms=new Map();           // code -> room
+const conns=new Map();         // conn.id -> {conn, code, seat}
+const connCreates=new Map();   // conn.id -> count
+const createLog=new Map();     // net[2] -> {n, ts}
+
+function newRoom(code,slot){
+  return {slot:slot,code:code,status:1,phase:0,handNum:0,passDir:0,
+    seats:[-1,-1,-1,-1], seatPlayer:["","","",""], seatName:["","","",""],
+    hands:[[],[],[],[]], passSel:[null,null,null,null],
+    scores:[0,0,0,0], handScores:[0,0,0,0], trick:[], leadSeat:-1,turnSeat:-1,
+    heartsBroken:false, firstTrick:true,
+    taken:[[],[],[],[]], takenCounts:[0,0,0,0],
+    shotMoon:-1, over:false, winnerSeats:[], lastHand:null, lastAct:nowSec()};
+}
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function topic(code){ return "ht:"+code; }
+function ok(o){ return JSON.stringify(Object.assign({ok:true},o||{})); }
+function err(e){ return JSON.stringify({ok:false,err:e}); }
+function parseIn(d){ if(typeof d!=="string")return null; try{return JSON.parse(d);}catch(e){return null;} }
+function cleanName(n){
+  if(typeof n!=="string")return "Player";
+  let s=n.replace(/[^\x20-\x7E]/g,"").replace(/\s+/g," ").trim().slice(0,12);
+  return s||"Player";
+}
+function cleanPid(p){
+  if(typeof p==="string"&&/^[a-z0-9]{6,16}$/.test(p))return p.slice(0,16);
+  let s="";
+  for(let i=0;i<8;i++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)].toLowerCase();
+  return s;
+}
+
+/* ── state serialization (slot layout, SLOT bytes each) ── */
+function off(i){ return 1+i*SLOT; }
+function setU16(o,v){ state[o]=(v>>>8)&255; state[o+1]=v&255; }
+function getU16(o){ return (state[o]<<8)|state[o+1]; }
+function setU32(o,v){ v=Math.max(0,Math.min(0xFFFFFFFF,v)); state[o]=(v>>>24)&255; state[o+1]=(v>>>16)&255; state[o+2]=(v>>>8)&255; state[o+3]=v&255; }
+function getU32(o){ return ((state[o]<<24)|(state[o+1]<<16)|(state[o+2]<<8)|state[o+3])>>>0; }
+function writeStr(o,str,len){ for(let k=0;k<len;k++)state[o+k]=k<str.length?str.charCodeAt(k):0; }
+function readStr(o,len){ let s=""; for(let k=0;k<len;k++){ const ch=state[o+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function slotStatus(i){ return state[off(i)]; }
+function readLastAct(i){ return getU32(off(i)+O_LASTACT); }
+function codeAt(i){ return readStr(off(i)+O_CODE,8); }
+
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o+O_STATUS]=room.status;
+  writeStr(o+O_CODE,room.code,8);
+  state[o+O_PHASE]=room.phase;
+  state[o+O_PASSDIR]=room.passDir;
+  state[o+O_HANDNUM]=room.handNum;
+  state[o+O_LEAD]=room.leadSeat;
+  state[o+O_TURN]=room.turnSeat;
+  state[o+O_HB]=room.heartsBroken?1:0;
+  state[o+O_FT]=room.firstTrick?1:0;
+  state[o+O_VER]=STATE_VERSION;
+  setU32(o+O_LASTACT,room.lastAct);
+  for(let s=0;s<4;s++){
+    const h=room.hands[s];
+    for(let k=0;k<13;k++)state[o+O_HANDS+s*13+k]=k<h.length?h[k]:255;
+  }
+  for(let s=0;s<4;s++){
+    const p=room.passSel[s];
+    for(let k=0;k<3;k++)state[o+O_PASSSEL+s*3+k]=(p&&k<p.length)?p[k]:255;
+  }
+  for(let k=0;k<4;k++){ const t=room.trick[k]; state[o+O_TRICKC+k]=t?t.card:255; state[o+O_TRICKSEATS+k]=t?t.seat:255; }
+  for(let s=0;s<4;s++){
+    const t=room.taken[s];
+    for(let k=0;k<13;k++)state[o+O_TAKEN+s*13+k]=k<t.length?t[k]:255;
+    state[o+O_TAKENCNT+s]=Math.min(255,t.length);
+  }
+  for(let s=0;s<4;s++)setU16(o+O_SCORES+s*2,room.scores[s]);
+  for(let s=0;s<4;s++)setU16(o+O_HANDSCORES+s*2,room.handScores[s]);
+  state[o+O_SHOTMOON]=room.shotMoon===-1?255:room.shotMoon;
+  state[o+O_OVER]=room.over?1:0;
+  for(let s=0;s<4;s++)writeStr(o+O_PIDS+s*8,room.seatPlayer[s],8);
+  for(let s=0;s<4;s++)writeStr(o+O_NAMES+s*13,room.seatName[s],13);
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }   // abandoned waiting rooms die on rebuild
+    const hands=[];
+    for(let s=0;s<4;s++){ const h=[]; for(let k=0;k<13;k++){ const c=state[o+O_HANDS+s*13+k]; if(c!==255)h.push(c);} hands.push(h); }
+    const passSel=[];
+    for(let s=0;s<4;s++){ const p=[]; for(let k=0;k<3;k++){ const c=state[o+O_PASSSEL+s*3+k]; if(c!==255)p.push(c);} passSel.push(p.length?p:null); }
+    const trick=[];
+    for(let k=0;k<4;k++){ const c=state[o+O_TRICKC+k]; if(c!==255&&state[o+O_TRICKSEATS+k]!==255)trick.push({seat:state[o+O_TRICKSEATS+k],card:c}); }
+    const taken=[];
+    for(let s=0;s<4;s++){ const t=[]; for(let k=0;k<13;k++){ const c=state[o+O_TAKEN+s*13+k]; if(c!==255)t.push(c);} taken.push(t); }
+    const scores=[],hs=[];
+    for(let s=0;s<4;s++){ scores.push(getU16(o+O_SCORES+s*2)); hs.push(getU16(o+O_HANDSCORES+s*2)); }
+    const pids=[],names=[];
+    for(let s=0;s<4;s++){ pids.push(readStr(o+O_PIDS+s*8,8)); names.push(readStr(o+O_NAMES+s*13,13)); }
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      phase:state[o+O_PHASE], passDir:state[o+O_PASSDIR], handNum:state[o+O_HANDNUM],
+      seats:[-1,-1,-1,-1], seatPlayer:pids, seatName:names,
+      hands:hands, passSel:passSel, scores:scores, handScores:hs,
+      trick:trick, leadSeat:state[o+O_LEAD], turnSeat:state[o+O_TURN],
+      heartsBroken:!!state[o+O_HB], firstTrick:!!state[o+O_FT],
+      taken:taken, takenCounts:taken.map(function(t){return t.length;}),
+      shotMoon:state[o+O_SHOTMOON]===255?-1:state[o+O_SHOTMOON],
+      over:!!state[o+O_OVER], winnerSeats:[], lastHand:null, lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bFinT=0,bWait=-1,bWaitT=0,bAny=-1,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── game flow (server-authoritative) ── */
+function beginPlay(room){
+  for(let s=0;s<4;s++){
+    if(room.hands[s].indexOf(TWO_CLUBS)!==-1){ room.leadSeat=s; room.turnSeat=s; return; }
+  }
+}
+function resolvePass(room){
+  const dir=room.passDir, p=room.passSel;
+  for(let s=0;s<4;s++){
+    const own=p[s];
+    if(!own)continue;
+    const hand=room.hands[s].slice();
+    for(const c of own){ const i=hand.indexOf(c); if(i!==-1)hand.splice(i,1); }
+    room.hands[s]=hand;
+  }
+  if(dir===PASS_LEFT)      for(let s=0;s<4;s++)room.hands[s]=room.hands[s].concat(p[(s+3)%4]);
+  else if(dir===PASS_RIGHT)for(let s=0;s<4;s++)room.hands[s]=room.hands[s].concat(p[(s+1)%4]);
+  else if(dir===PASS_ACROSS)for(let s=0;s<4;s++)room.hands[s]=room.hands[s].concat(p[(s+2)%4]);
+  room.phase=1;
+  beginPlay(room);
+}
+function startHand(room){
+  room.handNum++;
+  room.passDir=(room.handNum-1)%4;
+  const deck=shuffle([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]);
+  room.hands=[deck.slice(0,13),deck.slice(13,26),deck.slice(26,39),deck.slice(39,52)];
+  room.trick=[]; room.taken=[[],[],[],[]]; room.takenCounts=[0,0,0,0]; room.handScores=[0,0,0,0];
+  room.heartsBroken=false; room.firstTrick=true; room.leadSeat=-1; room.turnSeat=-1;
+  room.passSel=[null,null,null,null]; room.shotMoon=-1;
+  room.phase=room.passDir===3?1:0;
+  if(room.phase===1)beginPlay(room);
+}
+function finishTrick(room){
+  const w=trickWinner(room.trick);
+  const pts=room.trick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+  room.handScores[w.seat]+=pts;
+  for(const t of room.trick)room.taken[w.seat].push(t.card);
+  room.takenCounts[w.seat]=room.taken[w.seat].length;
+  for(const t of room.trick)if(isHeart(t.card))room.heartsBroken=true;
+  room.trick=[];
+  room.firstTrick=false;
+  room.leadSeat=w.seat;
+  room.turnSeat=w.seat;
+  if(room.takenCounts[0]+room.takenCounts[1]+room.takenCounts[2]+room.takenCounts[3]===52)resolveHand(room);
+}
+function resolveHand(room){
+  const hs=room.handScores;
+  let moon=-1;
+  for(let s=0;s<4;s++)if(hs[s]===26)moon=s;
+  room.shotMoon=moon;
+  for(let s=0;s<4;s++)room.scores[s]+=moon!==-1?(s===moon?0:26):hs[s];
+  const lastHand={handNum:room.handNum, scores:hs.slice(), cumulative:room.scores.slice(), shotMoon:moon, over:false, winners:[]};
+  let anyOver=false;
+  for(let s=0;s<4;s++)if(room.scores[s]>=WIN_SCORE)anyOver=true;
+  if(anyOver){
+    room.status=3; room.phase=3; room.over=true;
+    let min=1e9; const ws=[];
+    for(let s=0;s<4;s++)if(room.scores[s]<min)min=room.scores[s];
+    for(let s=0;s<4;s++)if(room.scores[s]===min)ws.push(s);
+    room.winnerSeats=ws;
+    lastHand.over=true; lastHand.winners=ws.slice();
+    room.lastHand=lastHand;
+  }else{
+    room.lastHand=lastHand;
+    startHand(room);
+  }
+  const msg=JSON.stringify({t:"hand", hand:lastHand});
+  for(let s=0;s<4;s++)if(room.seats[s]!==-1)sendTo(room,s,msg);
+}
+function playCardInternal(room,seat,card){
+  const legal=legalPlays(room.hands[seat],room.trick,room.heartsBroken,room.firstTrick);
+  if(legal.indexOf(card)===-1)return false;
+  const i=room.hands[seat].indexOf(card);
+  if(i===-1)return false;
+  room.hands[seat].splice(i,1);
+  room.trick.push({seat:seat,card:card});
+  if(room.trick.length===4)finishTrick(room);
+  else room.turnSeat=(room.turnSeat+1)%4;
+  return true;
+}
+function pump(room){
+  let connected=0;
+  for(let s=0;s<4;s++)if(room.seats[s]!==-1)connected++;
+  if(connected===0)return;
+  let guard=0;
+  while(guard++<220){
+    if(room.status!==2)return;
+    if(room.phase===0){
+      let allDone=true;
+      for(let s=0;s<4;s++){
+        if(room.passSel[s]===null){
+          if(room.seats[s]===-1)room.passSel[s]=autoPass(room.hands[s]);
+          else allDone=false;
+        }
+      }
+      if(!allDone)return;
+      resolvePass(room);
+      continue;
+    }
+    if(room.phase===1){
+      if(room.trick.length===4){ finishTrick(room); continue; }
+      const s=room.turnSeat;
+      if(s===-1)return;
+      if(room.seats[s]!==-1)return;
+      const card=aiSelectPlay(room.hands[s],room.trick,room.heartsBroken,room.firstTrick);
+      if(card==null)return;
+      playCardInternal(room,s,card);
+      continue;
+    }
+    return;
+  }
+}
+
+/* ── broadcast / presence ── */
+function sendTo(room,seat,raw){
+  const c=conns.get(room.seats[seat]);
+  if(c&&c.conn&&c.conn.readyState===1){ try{ c.conn.send(raw); }catch(e){} }
+}
+function pubOf(room){
+  const seats=room.seats.map(function(conn,seat){
+    return {present:conn!==-1, name:room.seatName[seat]||("Player "+(seat+1)), score:room.scores[seat], count:room.hands[seat].length};
+  });
+  return {code:room.code, status:room.status, phase:room.phase, handNum:room.handNum, passDir:room.passDir,
+    seats:seats, passDone:room.passSel.map(function(p){return p!==null;}),
+    trick:room.trick, leadSeat:room.leadSeat, turnSeat:room.turnSeat,
+    heartsBroken:room.heartsBroken, firstTrick:room.firstTrick,
+    handScores:room.handScores.slice(), shotMoon:room.shotMoon,
+    over:room.over, winnerSeats:room.winnerSeats.slice()};
+}
+function broadcastAll(room){
+  const raw=JSON.stringify({t:"pub", pub:pubOf(room)});
+  for(let s=0;s<4;s++){
+    if(room.seats[s]===-1)continue;
+    const c=conns.get(room.seats[s]);
+    if(!c)continue;
+    const you={seat:s, hand:room.hands[s].slice(), playerId:room.seatPlayer[s]};
+    sendTo(room,s,JSON.stringify({t:"pub", pub:pubOf(room), you:you}));
+  }
+}
+
+/* ── RPC handlers ── */
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return err("already_in_room");
+    let obj=parseIn(data); if(!obj)return err("bad_request");
+    const pid=cleanPid(obj.playerId); const name=cleanName(obj.name);
+    const ccount=connCreates.get(conn.id)||0;
+    if(ccount>=3)return err("rate_limited");
+    connCreates.set(conn.id,ccount+1);
+    const key=conn.net[2];
+    const now=nowSec();
+    let e=createLog.get(key);
+    if(!e||now-e.ts>3600){e={n:0,ts:now};createLog.set(key,e);}
+    if(e.n>=8)return err("rate_limited");
+    e.n++;
+    const slot=findSlot();
+    if(slot<0)return err("server_full");
+    for(const [code,r] of rooms)if(r.slot===slot)rooms.delete(code);
+    const code=genCode();
+    const room=newRoom(code,slot);
+    rooms.set(code,room);
+    room.seats[0]=conn.id; room.seatPlayer[0]=pid; room.seatName[0]=name;
+    saveRoom(room);
+    try{conn.subscribe(topic(code));}catch(e2){}
+    conns.set(conn.id,{conn:conn,code:code,seat:0});
+    return ok({code:code, seat:0, pid:pid, pub:pubOf(room), you:{seat:0,hand:room.hands[0].slice(),playerId:pid}});
+  },
+  joinRoom({conn},data){
+    let obj=parseIn(data); if(!obj)return err("bad_request");
+    const code=String(obj.code||"").trim().toUpperCase();
+    const pid=cleanPid(obj.playerId); const name=cleanName(obj.name);
+    const room=rooms.get(code);
+    if(!room)return err("no_such_room");
+    if(room.status===3)return err("game_over");
+    const existing=conns.get(conn.id);
+    if(existing&&existing.code===code){
+      const s=existing.seat;
+      if(room.seats[s]===-1||room.seats[s]===conn.id)room.seats[s]=conn.id;
+      conns.set(conn.id,{conn:conn,code:code,seat:s});
+      return ok({code:code, seat:s, pid:room.seatPlayer[s], pub:pubOf(room), you:{seat:s,hand:room.hands[s].slice(),playerId:room.seatPlayer[s]}});
+    }
+    let s=-1;
+    for(let k=0;k<4;k++)if(room.seatPlayer[k]===pid&&room.seats[k]===-1){s=k;break;}
+    if(s===-1)for(let k=0;k<4;k++)if(room.seats[k]===-1){s=k;break;}
+    if(s===-1)return err("room_full");
+    room.seats[s]=conn.id; room.seatPlayer[s]=pid; room.seatName[s]=name;
+    if(room.status===1){
+      let full=true;
+      for(let k=0;k<4;k++)if(room.seats[k]===-1)full=false;
+      if(full){ room.status=2; room.handNum=0; room.lastHand=null; room.over=false; room.winnerSeats=[]; startHand(room); }
+    }
+    room.lastAct=nowSec();
+    try{conn.subscribe(topic(code));}catch(e2){}
+    conns.set(conn.id,{conn:conn,code:code,seat:s});
+    saveRoom(room);
+    pump(room);
+    saveRoom(room);
+    broadcastAll(room);
+    return ok({code:code, seat:s, pid:pid, pub:pubOf(room), you:{seat:s,hand:room.hands[s].slice(),playerId:pid}});
+  },
+  getState({conn},data){
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    const s=info.seat;
+    return ok({pub:pubOf(room), you:{seat:s,hand:room.hands[s].slice(),playerId:room.seatPlayer[s]}});
+  },
+  passCards({conn},data){
+    let obj=parseIn(data); if(!obj)return err("bad_request");
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    if(room.status!==2||room.phase!==0)return err("not_passing");
+    const s=info.seat;
+    const cards=obj.cards;
+    if(!Array.isArray(cards)||cards.length!==3)return err("need_3");
+    if(new Set(cards).size!==3)return err("dup");
+    const hand=room.hands[s];
+    for(const c of cards){ if(typeof c!=="number"||c<0||c>51||hand.indexOf(c)===-1)return err("bad_card"); }
+    room.passSel[s]=cards.slice();
+    room.lastAct=nowSec();
+    saveRoom(room);
+    pump(room);
+    saveRoom(room);
+    broadcastAll(room);
+    return ok({});
+  },
+  playCard({conn},data){
+    let obj=parseIn(data); if(!obj)return err("bad_request");
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    if(room.status!==2)return err("not_playing");
+    const s=info.seat;
+    if(room.phase!==1)return err("not_play_phase");
+    if(room.turnSeat!==s)return err("not_your_turn");
+    const card=obj.card;
+    if(typeof card!=="number"||card<0||card>51)return err("bad_card");
+    if(!playCardInternal(room,s,card))return err("illegal");
+    room.lastAct=nowSec();
+    saveRoom(room);
+    pump(room);
+    saveRoom(room);
+    broadcastAll(room);
+    return ok({});
+  },
+  rematch({conn},data){
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    if(room.status!==3)return err("not_finished");
+    room.scores=[0,0,0,0]; room.handNum=0; room.over=false; room.winnerSeats=[]; room.lastHand=null; room.shotMoon=-1;
+    room.status=2;
+    startHand(room);
+    room.lastAct=nowSec();
+    saveRoom(room);
+    pump(room);
+    saveRoom(room);
+    broadcastAll(room);
+    return ok({});
+  },
+  leave({conn},data){
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    const s=info.seat;
+    conns.delete(conn.id);
+    if(room.seats[s]===conn.id)room.seats[s]=-1;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    pump(room);
+    saveRoom(room);
+    broadcastAll(room);
+    return ok({});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(room.seats[info.seat]===conn.id)room.seats[info.seat]=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  pump(room);
+  saveRoom(room);
+  broadcastAll(room);
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Classic hearts for four. Pass three cards, dodge the hearts and the queen of spades, and try to shoot the moon.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="solo">
+        <span class="bgn-mode-icon">🃏</span>
+        <span class="bgn-mode-name">Solo — vs 3 bots</span>
+        <span class="bgn-mode-sub">You against three crafty bots</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online</span>
+        <span class="bgn-mode-sub">A live 4-player table over the network</span>
+      </button>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a table and share the 5-letter code with three friends, or join theirs. If someone drops, bots fill in so the game keeps flowing — and a newcomer can take over the empty seat.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <input id="nameInput" class="field" maxlength="12" autocomplete="off" spellcheck="false"
+               placeholder="Your name" style="max-width:170px; padding:10px 14px;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a table</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" class="field" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE" style="width:118px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700; padding:10px;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+
+    <div class="panel" style="margin-top:26px">
+      <h3 class="goldtext">How to play</h3>
+      <ul class="bgn-list">
+        <li>Each hand everyone <b>passes 3 cards</b> — left, right, across, then hold — repeating.</li>
+        <li>The holder of the <b>2 of clubs</b> leads the first trick. You must <b>follow suit</b> when you can.</li>
+        <li>Every <b>heart is 1 point</b>; the <b>queen of spades is 13</b>. Lowest score wins.</li>
+        <li>Don't lead hearts until <b>hearts are broken</b>, and no points may be dumped on the first trick.</li>
+        <li>Take all 13 hearts <i>and</i> the queen of spades to <b>shoot the moon</b> — everyone else gets 26 instead.</li>
+        <li>When someone passes <b>100 points</b> the game ends; the lowest total wins.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="h-wrap">
+      <div class="panel h-tablepanel">
+        <div class="h-table">
+          <div class="h-seat top" id="seat_top">
+            <span class="h-avatar s2" id="seat_top_av"></span>
+            <div class="h-seatinfo">
+              <div class="h-sname" id="seat_top_name">—</div>
+              <div class="h-ssub" id="seat_top_sub">0 pts</div>
+            </div>
+            <div class="h-fan mini" id="seat_top_fan"></div>
+          </div>
+          <div class="h-seat left" id="seat_left">
+            <span class="h-avatar s3" id="seat_left_av"></span>
+            <div class="h-seatinfo">
+              <div class="h-sname" id="seat_left_name">—</div>
+              <div class="h-ssub" id="seat_left_sub">0 pts</div>
+            </div>
+            <div class="h-fan mini" id="seat_left_fan"></div>
+          </div>
+          <div class="h-trick" id="trickArea">
+            <div class="tslot top" id="ts_top"></div>
+            <div class="tslot left" id="ts_left"></div>
+            <div class="h-trickcenter" id="heartsChip">♥</div>
+            <div class="tslot right" id="ts_right"></div>
+            <div class="tslot bottom" id="ts_bottom"></div>
+          </div>
+          <div class="h-seat right" id="seat_right">
+            <span class="h-avatar s1" id="seat_right_av"></span>
+            <div class="h-seatinfo">
+              <div class="h-sname" id="seat_right_name">—</div>
+              <div class="h-ssub" id="seat_right_sub">0 pts</div>
+            </div>
+            <div class="h-fan mini" id="seat_right_fan"></div>
+          </div>
+          <div class="h-handbar">
+            <div class="h-hand-caption">
+              <div class="h-seat bot" id="seat_bot">
+                <span class="h-avatar s0" id="seat_bot_av"></span>
+                <div class="h-seatinfo">
+                  <div class="h-sname" id="seat_bot_name">You</div>
+                  <div class="h-ssub" id="seat_bot_sub">0 pts · 13 cards</div>
+                </div>
+              </div>
+              <div class="h-hand-right">
+                <button class="h-chip h-chipcode" id="roomChip" title="Tap to copy the room code" hidden>Room: <b>—</b></button>
+                <div class="h-chip" id="brokenChip">♥ broken</div>
+                <button class="h-menu-btn" id="menuSheetBtn" aria-label="Scores and menu">☰</button>
+              </div>
+            </div>
+            <div class="h-fan" id="handFan"></div>
+          </div>
+        </div>
+        <div class="h-banner" id="bannerEl"></div>
+      </div>
+
+      <aside class="panel h-side">
+        <div id="roomBox" class="bgn-room" hidden>
+          <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
+          <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:6px;">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+          </div>
+          <p class="muted small" id="connEl">Connecting…</p>
+        </div>
+        <h3>Scoreboard</h3>
+        <div class="h-scorehead"><span>Player</span><span>Hand</span><span>Total</span></div>
+        <div id="scoreBody" class="h-scorebody"></div>
+        <p class="muted small" id="handInfoEl" style="margin:10px 0 0"></p>
+        <h3 style="margin-top:20px">Trick log</h3>
+        <div class="bgn-log" id="logEl"></div>
+        <div class="bgn-actions">
+          <button class="btn btn-gold" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+        </div>
+      </aside>
+      <div class="h-sheet-backdrop" id="sheetBackdrop"></div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">♥</div>
+  <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<!-- ═══ FLOATING BACK-TO-HUB BUTTON ═══ -->
+<script>
+(function(){
+  if(document.getElementById("rathjiBackBtn")) return;
+  var styleEl = document.createElement("style");
+  styleEl.textContent =
+    "#rathjiBackBtn{ position:fixed; left:90%; bottom:18px; transform:translateX(-50%);" +
+    " z-index:2147483000; display:inline-flex; align-items:center; gap:9px; color:#fff;" +
+    " padding:8px 16px 8px 8px; border-radius:999px; text-decoration:none;" +
+    " background:rgba(13,15,21,0.82); -webkit-backdrop-filter:blur(10px); backdrop-filter:blur(10px);" +
+    " border:1px solid rgba(255,255,255,0.14); box-shadow:0 6px 18px -6px rgba(0,0,0,0.55);" +
+    " font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
+    " transition:transform .18s ease, border-color .18s ease, box-shadow .18s ease;" +
+    " -webkit-tap-highlight-color:transparent; box-sizing:content-box; }" +
+    "#rathjiBackBtn .rathji-badge{ width:28px; height:28px; flex:none; border-radius:50%;" +
+    " display:grid; place-items:center; background:linear-gradient(135deg,#8b5cf6,#d946ef);" +
+    " color:#fff; font-size:14px; font-weight:700; line-height:1;" +
+    " box-shadow:inset 0 0 0 1px rgba(255,255,255,0.18); }" +
+    "#rathjiBackBtn .rathji-label{ font-size:14px; font-weight:600; color:#fff; line-height:1; white-space:nowrap; }" +
+    "#rathjiBackBtn .rathji-arrow{ flex:none; width:14px; height:14px; opacity:0.85; display:block; }" +
+    "#rathjiBackBtn:hover{ transform:translateX(-50%) translateY(-2px);" +
+    " border-color:rgba(167,139,250,0.65);" +
+    " box-shadow:0 10px 24px -8px rgba(0,0,0,0.6), 0 0 20px rgba(139,92,246,0.35); }" +
+    "#rathjiBackBtn:active{ transform:translateX(-50%) translateY(0); }" +
+    "@media (max-width:479px){ #rathjiBackBtn{ padding:8px; }" +
+    " #rathjiBackBtn .rathji-label, #rathjiBackBtn .rathji-arrow{ display:none; } }";
+  (document.head||document.documentElement).appendChild(styleEl);
+  var a = document.createElement("a");
+  a.id = "rathjiBackBtn";
+  a.href = "https://perchance.org/rathjis-generators";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.setAttribute("aria-label", "Back to my projects");
+  a.title = "Back to my projects";
+  a.innerHTML =
+    '<span class="rathji-badge">R</span>' +
+    '<span class="rathji-label">My projects</span>' +
+    '<svg class="rathji-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"' +
+    ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>';
+  document.body.appendChild(a);
+})();
+</script>
+
+<!-- ═══ PASS MODAL ═══ -->
+<div class="h-overlay" id="passModal" hidden>
+  <div class="h-modal">
+    <h3 class="goldtext" id="passTitle">Pass 3 cards</h3>
+    <p class="muted small" id="passSub"></p>
+    <div id="passRow" class="h-passrow"></div>
+    <p class="muted small" id="passCountEl" style="text-align:center">Choose 3 cards to pass.</p>
+    <div class="flex center" style="justify-content:center; gap:10px; margin-top:12px;">
+      <button class="btn btn-gold btn-sm" id="passConfirmBtn" disabled>Pass these 3</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ HAND-OVER / GAME-OVER MODAL ═══ -->
+<div class="h-overlay" id="handModal" hidden>
+  <div class="h-modal">
+    <h3 class="goldtext" id="handTitle">Hand complete</h3>
+    <p class="muted small" id="handSub"></p>
+    <div id="handScoresBox" class="h-handscore"></div>
+    <div class="flex center" style="justify-content:center; gap:10px; margin-top:16px;">
+      <button class="btn btn-ghost btn-sm" id="handMenuBtn" hidden>Main menu</button>
+      <button class="btn btn-gold btn-sm" id="handOkBtn">Continue</button>
+    </div>
+  </div>
+</div>
+
+<style>
+/* ═══ BGN HEARTS ═══ */
+
+/* base card engine (from the BGN deck template) */
+.bgn-card{ --w:74px; width:var(--w); aspect-ratio:200/280; position:relative; flex:none;
+  perspective:850px; cursor:zoom-in; will-change:transform, z-index;
+  transition:transform .18s ease-out; user-select:none; }
+.bgn-card-dim{ position:absolute; inset:0; transform-style:preserve-3d; transition:transform .5s cubic-bezier(.25,.7,.3,1); }
+.bgn-card.flipped .bgn-card-dim{ transform:rotateY(180deg); }
+.bgn-card-face, .bgn-card-back{ position:absolute; inset:0; border-radius:11px; overflow:hidden;
+  backface-visibility:hidden; -webkit-backface-visibility:hidden;
+  box-shadow:0 3px 9px rgba(0,0,0,.42), inset 0 0 0 1px rgba(0,0,0,.3);
+  transition:box-shadow .18s ease-out; }
+.bgn-card-back{ transform:rotateY(180deg); }
+.bgn-card svg{ display:block; width:100%; height:100%; }
+.bgn-card:not(.nohover):hover{ transform:scale(1.5); z-index:60; }
+@media (hover:none){ .bgn-card:not(.nohover):hover{ transform:none; } }
+
+.bgn-lobby{ max-width:760px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+/* table layout */
+.h-wrap{ display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:18px; align-items:start; }
+@media (max-width:980px){ .h-wrap{ grid-template-columns:minmax(0,1fr); } }
+.h-tablepanel{ text-align:center; }
+.h-table{ display:grid; grid-template-areas:"top top top" "left trick right" "bot bot bot";
+  grid-template-columns:minmax(0,140px) minmax(0,1fr) minmax(0,140px); grid-template-rows:auto minmax(195px,1fr) auto; gap:10px; }
+
+/* seats */
+.h-seat{ display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px;
+  background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; transition:box-shadow .2s, border-color .2s; }
+.h-seat.on{ border-color:var(--bgn-accent); box-shadow:0 0 18px rgba(212,175,55,.45); }
+.h-seat.vacant{ opacity:.45; }
+.h-seat.top{ grid-area:top; justify-content:center; }
+.h-seat.left{ grid-area:left; flex-direction:column; justify-content:center; text-align:center; gap:6px; }
+.h-seat.right{ grid-area:right; flex-direction:column; justify-content:center; text-align:center; gap:6px; }
+.h-seat.bot{ grid-area:bot; padding:0; background:none; border:none; box-shadow:none; }
+.h-avatar{ width:30px; height:30px; border-radius:50%; flex:none; box-shadow:0 0 0 2px rgba(255,255,255,.22); }
+.h-avatar.s0{ background:radial-gradient(circle at 35% 30%, #ffd98a, #c98f2e 55%, #7a5310); }
+.h-avatar.s1{ background:radial-gradient(circle at 35% 30%, #7de6c8, #2fae8c 55%, #0f5e47); }
+.h-avatar.s2{ background:radial-gradient(circle at 35% 30%, #ff9d8a, #c23a2a 55%, #70120a); }
+.h-avatar.s3{ background:radial-gradient(circle at 35% 30%, #9ab4ff, #4a63c9 55%, #1c2a7a); }
+.h-seatinfo{ min-width:0; }
+.h-sname{ font-weight:700; font-size:.9rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.h-ssub{ font-size:.68rem; opacity:.75; white-space:nowrap; }
+
+/* opponent mini fans */
+.h-fan.mini{ display:flex; align-items:center; justify-content:center; min-height:0; padding:0; }
+.h-fan.mini .bgn-card{ --w:30px; }
+.h-fan.mini .bgn-card:not(:first-child){ margin-left:-20px; }
+
+/* trick area */
+.h-trick{ grid-area:trick; display:grid; grid-template-columns:1fr auto 1fr; grid-template-rows:1fr 1fr 1fr; gap:4px; height:205px; }
+.tslot{ width:64px; height:90px; margin:auto; border:1px dashed rgba(255,255,255,.13); border-radius:9px; display:flex; }
+.tslot.has-card{ border:none; }
+.tslot .bgn-card{ --w:64px; animation:hpop .22s ease; }
+.tslot.top{ grid-column:2; grid-row:1; align-self:end; }
+.tslot.left{ grid-column:1; grid-row:2; }
+.tslot.right{ grid-column:3; grid-row:2; }
+.tslot.bottom{ grid-column:2; grid-row:3; align-self:start; }
+.h-trickcenter{ grid-column:2; grid-row:2; align-self:center; justify-self:center; font-size:1.6rem; color:#b3122b; opacity:.7; text-shadow:0 0 18px rgba(179,18,43,.5); }
+@keyframes hpop{ 0%{ transform:scale(.55); opacity:0; } 100%{ transform:scale(1); opacity:1; } }
+
+/* my hand */
+.h-handbar{ grid-area:bot; }
+.h-hand-caption{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:4px; }
+.h-hand-right{ display:flex; align-items:center; gap:6px; }
+.h-chip{ font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:rgba(179,18,43,.55);
+  border:1px solid rgba(179,18,43,.35); padding:4px 10px; border-radius:999px; transition:all .3s; white-space:nowrap; }
+.h-chip.on{ color:#ffb3c0; border-color:rgba(255,90,120,.6); background:rgba(179,18,43,.14); box-shadow:0 0 12px rgba(255,60,90,.25); }
+.h-chipcode{ color:var(--bgn-accent2); border-color:rgba(212,175,55,.45); background:rgba(212,175,55,.07); cursor:pointer; font-family:var(--bgn-serif); }
+.h-chipcode:hover{ background:rgba(212,175,55,.16); }
+.h-chipcode b{ letter-spacing:.12em; margin-left:4px; }
+
+/* mobile menu sheet */
+.h-menu-btn{ display:none; align-items:center; justify-content:center; width:38px; height:38px; flex:none;
+  border:1px solid rgba(255,255,255,.22); border-radius:10px; background:rgba(255,255,255,.06); color:var(--bgn-cream);
+  font-size:1.15rem; cursor:pointer; line-height:1; transition:border-color .2s, background .2s; }
+.h-menu-btn:hover{ border-color:var(--bgn-accent); background:rgba(212,175,55,.14); }
+.h-sheet-backdrop{ display:none; position:fixed; inset:0; z-index:110; background:rgba(6,5,10,.55); }
+.h-sheet-backdrop.show{ display:block; }
+
+.bgn-card, .btn, .bgn-mode, .chip{ touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+.h-seatinfo, .h-fan, .h-trick, .h-banner{ user-select:none; -webkit-user-select:none; }
+.h-fan{ display:flex; justify-content:center; align-items:flex-end; min-height:150px; padding-top:8px; }
+.h-fan .bgn-card{ --w:76px; transition:transform .15s ease, opacity .15s, box-shadow .15s; }
+.h-fan .bgn-card:not(:first-child){ margin-left:-46px; }
+.h-fan.playable .bgn-card:not(.legal){ opacity:.5; filter:grayscale(.5) brightness(.7); }
+.h-fan.playable .bgn-card:not(.legal):hover{ transform:none; }
+.h-fan.playable .bgn-card.legal{ cursor:pointer; transform:translateY(-10px); box-shadow:0 0 0 3px rgba(212,175,55,.6), 0 18px 34px rgba(0,0,0,.45); }
+.h-fan.playable .bgn-card.legal:hover{ transform:translateY(-16px) scale(1.07); }
+.h-fan .bgn-card.received{ box-shadow:0 0 0 3px rgba(47,174,140,.85), 0 12px 26px rgba(0,0,0,.4); }
+
+/* banner */
+.h-banner{ min-height:26px; margin-top:16px; text-align:center; font-weight:600; color:#f6e6a4; font-size:.95rem; }
+
+/* side panel */
+.h-side{ min-width:0; }
+.h-scorehead,.h-scorerow{ display:grid; grid-template-columns:auto 1fr 42px 50px; gap:8px; align-items:center; }
+.h-scorehead{ color:var(--bgn-muted); font-size:.62rem; letter-spacing:.14em; text-transform:uppercase; margin-bottom:6px; }
+.h-scorehead span:nth-last-child(2){ text-align:center; }
+.h-scorehead span:last-child{ text-align:right; }
+.h-scorerow{ padding:7px 4px; border-bottom:1px solid rgba(255,255,255,.05); font-size:.85rem; }
+.h-scorerow.on{ background:rgba(212,175,55,.08); border-radius:6px; }
+.h-scorerow .h-avatar{ width:22px; height:22px; }
+.h-scorerow .h-shand{ text-align:center; color:var(--bgn-muted); font-size:.78rem; }
+.h-scorerow .h-stot{ text-align:right; font-size:.98rem; color:#f6e6a4; font-weight:700; }
+.bgn-log{ max-height:240px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.82rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item.warn{ color:#ffb3c0; }
+.log-item.ok{ color:#9be3cd; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+
+/* modals */
+.h-overlay{ position:fixed; inset:0; z-index:200; background:rgba(6,5,10,.74); backdrop-filter:blur(4px);
+  display:flex; align-items:center; justify-content:center; padding:18px; }
+.h-modal{ background:linear-gradient(180deg,#1b1730,#141020); border:1px solid var(--bgn-line); border-radius:16px;
+  padding:26px; max-width:660px; width:100%; max-height:88vh; overflow:auto; box-shadow:0 30px 80px rgba(0,0,0,.6); }
+.h-passrow{ display:flex; flex-wrap:wrap; gap:10px; justify-content:center; padding:14px 0 6px; }
+.h-passrow .bgn-card{ --w:76px; cursor:pointer; transition:transform .15s, box-shadow .15s; }
+.h-passrow .bgn-card:hover{ transform:translateY(-6px); }
+.h-passrow .bgn-card.sel{ transform:translateY(-16px); box-shadow:0 0 0 3px var(--bgn-accent), 0 20px 44px rgba(0,0,0,.5); }
+.h-passrow .bgn-card.sel::after{ content:"✓"; position:absolute; top:-9px; right:-9px; width:22px; height:22px; border-radius:50%;
+  background:var(--bgn-accent); color:#221803; font-weight:900; font-size:13px; display:flex; align-items:center; justify-content:center; z-index:6; }
+.h-handscore{ display:grid; gap:6px; margin-top:12px; }
+.h-handscore .h-scorerow{ border-bottom:none; background:rgba(255,255,255,.04); border-radius:8px; padding:9px 10px; }
+.h-handscore .h-scorerow.win{ background:linear-gradient(180deg, rgba(47,174,140,.22), rgba(47,174,140,.08)); box-shadow:inset 0 0 0 1px rgba(47,174,140,.45); }
+.h-handscore .h-scorerow.win .h-stot{ color:#7de6c8; }
+
+@media (max-width:720px){
+  /* compact hero — skip the heavy background image on phones */
+  .game-hero{ padding:34px 0 26px; }
+  .game-hero.has-img{ background-image:linear-gradient(180deg,#0e0c17,#0a0912); }
+  .hero-kicker{ margin-bottom:8px; }
+  .hero-sub{ display:none; }
+  .hero-meta{ margin-top:14px; }
+  .sec-head{ margin-bottom:26px; }
+
+  /* scoreboard / actions become a slide-up sheet */
+  .h-wrap{ grid-template-columns:minmax(0,1fr); }
+  .h-side{ position:fixed; left:10px; right:10px; bottom:0; z-index:120; max-height:68vh;
+    transform:translateY(108%); transition:transform .28s ease; overflow:auto;
+    border-radius:16px 16px 0 0; padding-bottom:calc(18px + env(safe-area-inset-bottom));
+    box-shadow:0 -18px 54px rgba(0,0,0,.65); }
+  .h-side.open{ transform:translateY(0); }
+  .h-menu-btn{ display:inline-flex; }
+
+  /* portrait table */
+  .h-table{ grid-template-columns:minmax(0,84px) minmax(0,1fr) minmax(0,84px); grid-template-rows:auto minmax(150px,auto) auto; gap:8px; }
+  .h-trick{ height:150px; }
+  .tslot{ width:44px; height:62px; }
+  .tslot .bgn-card{ --w:44px; }
+  .h-fan{ min-height:118px; padding-top:6px; }
+  .h-fan .bgn-card{ --w:56px; }
+  .h-fan .bgn-card:not(:first-child){ margin-left:-38px; }
+  .h-seat{ padding:8px; }
+  .h-seat.left .h-ssub, .h-seat.right .h-ssub{ max-width:66px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .h-seat.left .h-fan.mini, .h-seat.right .h-fan.mini{ display:none; }
+  .h-hand-caption{ flex-wrap:wrap; justify-content:center; }
+  .h-passrow .bgn-card{ --w:64px; }
+  .h-banner{ font-size:.85rem; }
+
+  /* modals go full-screen */
+  .h-overlay{ padding:0; }
+  .h-modal{ max-width:100%; max-height:100vh; border-radius:0; padding-bottom:calc(20px + env(safe-area-inset-bottom)); }
+}
+@media (max-width:480px){
+  .h-seat.top .h-fan.mini{ display:none; }
+}
+@media (max-width:420px){
+  .h-fan .bgn-card{ --w:52px; }
+  .h-fan .bgn-card:not(:first-child){ margin-left:-34px; }
+  .h-passrow .bgn-card{ --w:58px; }
+  .h-seat.left .h-ssub, .h-seat.right .h-ssub{ max-width:58px; }
+}
+</style>
+
+<script src="https://user.uploads.dev/file/4166609fa079bc2b77e409ff97770415.js"></script> <!-- BGN shared SVG card engine (bgn-deck.js) — keep in sync with the standard-deck template -->
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ card model & rules engine ══════════
+   code 0..51 = suitIdx*13 + rankIdx.
+   suits: 0 spades, 1 hearts, 2 clubs, 3 diamonds.
+   ranks: 0 A, 1 2 ... 9 10, 10 J, 11 Q, 12 K.
+   MIRROR any rules change in the server script above. */
+var SUITS=["spades","hearts","clubs","diamonds"];
+var RANKS=["A","2","3","4","5","6","7","8","9","10","J","Q","K"];
+var QS=11, TWO_CLUBS=27, ALL52=[];
+for(var i=0;i<52;i++)ALL52.push(i);
+function suitOf(c){ return Math.floor(c/13); }
+function rankOf(c){ return c%13; }
+function rankVal(c){ var r=rankOf(c); return r===0?14:r+1; }
+function isHeart(c){ return suitOf(c)===1; }
+function isQS(c){ return c===QS; }
+function cardPoints(c){ return isHeart(c)?1:(isQS(c)?13:0); }
+function shuffle(a){ var b=a.slice(); for(var i=b.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=b[i]; b[i]=b[j]; b[j]=t; } return b; }
+function cmpCode(a,b){ var sa=suitOf(a),sb=suitOf(b); if(sa!==sb)return sa-sb; return rankVal(a)-rankVal(b); }
+function toCard(c){ return {suit:SUITS[suitOf(c)], rank:RANKS[rankOf(c)]}; }
+function legalPlays(hand,trick,heartsBroken,firstTrick){
+  if(trick.length===0){
+    if(firstTrick)return hand.indexOf(TWO_CLUBS)!==-1?[TWO_CLUBS]:hand.slice();
+    var legal=heartsBroken?hand.slice():hand.filter(function(c){return !isHeart(c);});
+    return legal.length?legal:hand.slice();
+  }
+  var led=suitOf(trick[0].card);
+  var follow=hand.filter(function(c){return suitOf(c)===led;});
+  if(follow.length)return follow;
+  if(firstTrick)return hand.filter(function(c){return !isHeart(c)&&!isQS(c);});
+  return hand.slice();
+}
+function trickWinner(trick){
+  var led=suitOf(trick[0].card), w=trick[0];
+  for(var i=0;i<trick.length;i++){ var t=trick[i]; if(suitOf(t.card)===led&&rankVal(t.card)>rankVal(w.card))w=t; }
+  return w;
+}
+function dangerOf(c){
+  if(isQS(c))return 1000;
+  var s=suitOf(c),r=rankVal(c);
+  if(s===1)return 30+r;
+  if(s===0)return 25+r;
+  if(s===2)return 10+r*0.4;
+  return 6+r*0.3;
+}
+function autoPass(hand){ return hand.slice().sort(function(a,b){return dangerOf(b)-dangerOf(a);}).slice(0,3); }
+function aiSelectPlay(hand,trick,heartsBroken,firstTrick){
+  var legal=legalPlays(hand,trick,heartsBroken,firstTrick);
+  if(trick.length===0){
+    var best=null,bestScore=1e9;
+    for(var k=0;k<legal.length;k++){
+      var c=legal[k];
+      var cnt=hand.filter(function(x){return suitOf(x)===suitOf(c);}).length;
+      var score=cnt*100+rankVal(c);
+      if(isHeart(c))score+=200;
+      if(isQS(c))score+=500;
+      if(score<bestScore){bestScore=score;best=c;}
+    }
+    return best;
+  }
+  var led=suitOf(trick[0].card);
+  var points=trick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+  var high=trick[0];
+  for(var k=0;k<trick.length;k++){ var t=trick[k]; if(suitOf(t.card)===led&&rankVal(t.card)>rankVal(high.card))high=t; }
+  best=null;bestScore=1e9;
+  for(var k=0;k<legal.length;k++){
+    var c=legal[k];
+    var wins=rankVal(c)>rankVal(high.card);
+    var score=wins?(points>0?100000+points*1000:(rankVal(c)-rankVal(high.card))*2):rankVal(c);
+    if(isQS(c))score+=50000;
+    if(score<bestScore){bestScore=score;best=c;}
+  }
+  return best;
+}
+
+/* solo engine — mutates a game object like G */
+function passDelta(dir){ return dir===0?1:dir===1?3:dir===2?2:0; }
+function beginPlay(game){
+  for(var s=0;s<4;s++){ if(game.hands[s].indexOf(TWO_CLUBS)!==-1){ game.leadSeat=s; game.turnSeat=s; return; } }
+}
+function startNextHand(game){
+  game.handNum++;
+  game.passDir=(game.handNum-1)%4;
+  var deck=shuffle(ALL52.slice());
+  game.hands=[deck.slice(0,13),deck.slice(13,26),deck.slice(26,39),deck.slice(39,52)];
+  game.trick=[]; game.taken=[[],[],[],[]]; game.takenCounts=[0,0,0,0]; game.handScores=[0,0,0,0];
+  game.heartsBroken=false; game.firstTrick=true; game.leadSeat=-1; game.turnSeat=-1;
+  game.passSel=[null,null,null,null]; game.shotMoon=-1;
+  game.phase=game.passDir===3?"play":"pass";
+  if(game.phase==="play")beginPlay(game);
+}
+function resolvePass(game){
+  if(game.passDir===3){ game.phase="play"; beginPlay(game); return; }
+  var d=passDelta(game.passDir), p=game.passSel;
+  var hands=game.hands.map(function(hand,s){
+    var h=hand.slice();
+    var own=p[s];
+    if(own)for(var k=0;k<own.length;k++){ var i=h.indexOf(own[k]); if(i!==-1)h.splice(i,1); }
+    return h;
+  });
+  for(var s=0;s<4;s++)hands[s]=hands[s].concat(p[(s-d+4)%4]);
+  game.hands=hands;
+  game.phase="play";
+  beginPlay(game);
+}
+function enginePlayCard(game,seat,card){
+  var legal=legalPlays(game.hands[seat],game.trick,game.heartsBroken,game.firstTrick);
+  if(legal.indexOf(card)===-1)return {err:"illegal"};
+  var i=game.hands[seat].indexOf(card);
+  if(i===-1)return {err:"no_such_card"};
+  game.hands[seat].splice(i,1);
+  game.trick.push({seat:seat,card:card});
+  game.lastPlay={seat:seat,card:card};
+  return {ok:true};
+}
+function engineAdvance(game){
+  if(game.trick.length===4){
+    var w=trickWinner(game.trick);
+    var pts=game.trick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+    game.handScores[w.seat]+=pts;
+    for(var k=0;k<game.trick.length;k++)game.taken[w.seat].push(game.trick[k].card);
+    game.takenCounts[w.seat]=game.taken[w.seat].length;
+    for(var k=0;k<game.trick.length;k++)if(isHeart(game.trick[k].card))game.heartsBroken=true;
+    game.trick=[]; game.firstTrick=false; game.leadSeat=w.seat; game.turnSeat=w.seat;
+    game.handTrickNo++;
+    if(game.takenCounts[0]+game.takenCounts[1]+game.takenCounts[2]+game.takenCounts[3]===52){
+      return engineHandOver(game);
+    }
+  }else{
+    game.turnSeat=(game.turnSeat+1)%4;
+  }
+  return {ok:true};
+}
+function engineHandOver(game){
+  var hs=game.handScores, moon=-1;
+  for(var s=0;s<4;s++)if(hs[s]===26)moon=s;
+  game.shotMoon=moon;
+  for(var s=0;s<4;s++)game.scores[s]+=moon!==-1?(s===moon?0:26):hs[s];
+  var hand={handNum:game.handNum, scores:hs.slice(), cumulative:game.scores.slice(), shotMoon:moon};
+  game.lastHand=hand;
+  var anyOver=false;
+  for(var s=0;s<4;s++)if(game.scores[s]>=100)anyOver=true;
+  if(anyOver){
+    game.over=true;
+    var min=1e9, ws=[];
+    for(var s=0;s<4;s++)if(game.scores[s]<min)min=game.scores[s];
+    for(var s=0;s<4;s++)if(game.scores[s]===min)ws.push(s);
+    game.winnerSeats=ws;
+    return {hand:hand, over:true, winners:ws};
+  }
+  startNextHand(game);
+  return {hand:hand, over:false};
+}
+
+/* ══════════ card rendering (shared BGN deck engine — bgn-deck.js) ══════════ */
+function renderCardEl(card,opts){
+  opts=opts||{};
+  var el=document.createElement("div");
+  el.className="bgn-card"+(opts.hover===false?" nohover":"");
+  var dim=document.createElement("div"); dim.className="bgn-card-dim";
+  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=bgnDeck.cardFaceSVG(card);
+  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=bgnDeck.cardBackSVG();
+  dim.appendChild(face); dim.appendChild(back); el.appendChild(dim);
+  el.title=bgnDeck.cardName(card);
+  return el;
+}
+function renderCardBackEl(){
+  var el=document.createElement("div");
+  el.className="bgn-card nohover flipped";
+  var dim=document.createElement("div"); dim.className="bgn-card-dim";
+  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=bgnDeck.cardBackSVG();
+  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=bgnDeck.cardBackSVG();
+  dim.appendChild(face); dim.appendChild(back); el.appendChild(dim);
+  el.title="Card back";
+  return el;
+}
+
+/* ══════════ state ══════════ */
+var G={ mode:null, mySeat:0,
+  hands:[[],[],[],[]], scores:[0,0,0,0], handNum:0, passDir:0, phase:"lobby",
+  passSel:[null,null,null,null], trick:[], leadSeat:-1, turnSeat:-1,
+  heartsBroken:false, firstTrick:true, taken:[[],[],[],[]], takenCounts:[0,0,0,0],
+  handScores:[0,0,0,0], shotMoon:-1, over:false, winnerSeats:[], lastHand:null,
+  handTrickNo:0, log:[], receivedFlash:[], lastPlay:null,
+  myHand:[], passDone:[false,false,false,false], seatsPub:null, status:0,
+  socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null,
+  pid:null, locked:false, openResolvers:[] };
+
+function q(id){ return document.getElementById(id); }
+var lobbyCtn=q("lobbyCtn"), gameCtn=q("gameCtn"), onlinePanel=q("onlinePanel"), onlineMsgEl=q("onlineMsg");
+var nameInput=q("nameInput"), joinCodeInput=q("joinCodeInput");
+var handFan=q("handFan"), bannerEl=q("bannerEl"), brokenChip=q("brokenChip");
+var scoreBody=q("scoreBody"), logEl=q("logEl"), handInfoEl=q("handInfoEl");
+var roomBox=q("roomBox"), roomCodeEl=q("roomCodeEl"), connEl=q("connEl");
+var passModal=q("passModal"), passRow=q("passRow"), passTitle=q("passTitle"), passSub=q("passSub"), passCountEl=q("passCountEl"), passConfirmBtn=q("passConfirmBtn");
+var handModal=q("handModal"), handTitle=q("handTitle"), handSub=q("handSub"), handScoresBox=q("handScoresBox"), handOkBtn=q("handOkBtn"), handMenuBtn=q("handMenuBtn");
+var newGameBtn=q("newGameBtn"), menuBtn=q("menuBtn");
+var menuSheetBtn=q("menuSheetBtn"), sheetBackdrop=q("sheetBackdrop"), roomChip=q("roomChip");
+var sheetEl=document.querySelector(".h-side");
+var SOLO_BOTS=["Bot A","Bot B","Bot C"];
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(m){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];}); }
+function getPid(){
+  try{
+    var p=localStorage.getItem("bgnHearts_pid");
+    if(p&&/^[a-z0-9]{6,16}$/.test(p))return p;
+    var s=""; for(var i=0;i<10;i++)s+=("abcdefghjkmnpqrstuvwxyz23456789")[Math.floor(Math.random()*31)];
+    localStorage.setItem("bgnHearts_pid",s);
+    return s;
+  }catch(e){ return "local"+Math.floor(Math.random()*1e8); }
+}
+function getName(){ var n=(nameInput&&nameInput.value||"").trim(); if(n)return n; return "Player"; }
+
+/* ══════════ naming / state helpers ══════════ */
+function seatName(s){
+  if(G.mode==="solo")return s===0?"You":SOLO_BOTS[s-1];
+  var ps=G.seatsPub&&G.seatsPub[s];
+  if(!ps)return "Player "+(s+1);
+  return ps.present?ps.name:"Empty";
+}
+function seatScore(s){ return G.mode==="solo"?G.scores[s]:(G.seatsPub&&G.seatsPub[s]?G.seatsPub[s].score:0); }
+function seatCount(s){ return G.mode==="solo"?G.hands[s].length:(G.seatsPub&&G.seatsPub[s]?G.seatsPub[s].count:0); }
+function seatPresent(s){ return G.mode==="solo"||(G.seatsPub&&G.seatsPub[s]&&G.seatsPub[s].present); }
+function myHand(){ return G.mode==="online"?G.myHand:G.hands[G.mySeat]; }
+function isMyTurn(){ return G.mode!==null&&!G.over&&G.phase==="play"&&G.turnSeat===G.mySeat; }
+function passWord(d){ return ["left","right","across","hold"][d]; }
+
+/* ══════════ rendering ══════════ */
+function renderSeats(){
+  var myS=G.mySeat;
+  var order=[{pos:"right",s:(myS+1)%4},{pos:"top",s:(myS+2)%4},{pos:"left",s:(myS+3)%4}];
+  for(var oi=0;oi<order.length;oi++){
+    var o=order[oi], s=o.s;
+    var panel=q("seat_"+o.pos);
+    var on=!G.over&&G.phase==="play"&&G.turnSeat===s&&G.mode!=="lobby";
+    panel.classList.toggle("on",on);
+    var vacant=!seatPresent(s);
+    panel.classList.toggle("vacant",vacant);
+    q("seat_"+o.pos+"_av").className="h-avatar s"+s;
+    q("seat_"+o.pos+"_name").textContent=vacant?"Empty seat":seatName(s);
+    var cnt=seatCount(s);
+    q("seat_"+o.pos+"_sub").textContent=vacant?"no player — a friend can join":(seatScore(s)+" pts · "+cnt+" card"+(cnt===1?"":"s"));
+    var fan=q("seat_"+o.pos+"_fan");
+    fan.innerHTML="";
+    if(vacant){ fan.innerHTML='<span class="muted small">—</span>'; }
+    else if(cnt>0){
+      var n=Math.min(cnt,7);
+      for(var k=0;k<n;k++){ var b=renderCardBackEl(); fan.appendChild(b); }
+      if(cnt>7){ var sp=document.createElement("span"); sp.className="muted small"; sp.textContent="+"+(cnt-7); fan.appendChild(sp); }
+    }
+  }
+  q("seat_bot_name").textContent=G.mode==="online"?seatName(myS):"You";
+  q("seat_bot_sub").textContent=seatScore(myS)+" pts · "+seatCount(myS)+" card"+(seatCount(myS)===1?"":"s");
+  q("seat_bot_av").className="h-avatar s"+myS;
+}
+function renderTrick(){
+  var myS=G.mySeat;
+  var posOf={};
+  for(var d=0;d<4;d++){ var seat=(myS+d)%4; posOf[seat]= d===0?"bottom":d===1?"right":d===2?"top":"left"; }
+  var slotIds={bottom:"ts_bottom",right:"ts_right",top:"ts_top",left:"ts_left"};
+  var poss=["bottom","right","top","left"];
+  for(var i=0;i<poss.length;i++){
+    var el=q(slotIds[poss[i]]);
+    el.className="tslot "+poss[i];
+    el.innerHTML="";
+  }
+  for(var k=0;k<G.trick.length;k++){
+    var t=G.trick[k];
+    var el2=q(slotIds[posOf[t.seat]]);
+    el2.className="tslot "+posOf[t.seat]+" has-card";
+    el2.appendChild(renderCardEl(toCard(t.card),{hover:false}));
+  }
+  brokenChip.classList.toggle("on",!!G.heartsBroken);
+}
+function renderMyHand(){
+  handFan.innerHTML="";
+  var hand=myHand();
+  if(!hand)return;
+  var sorted=hand.slice().sort(cmpCode);
+  var legal=[];
+  if(isMyTurn())legal=legalPlays(hand,G.trick,G.heartsBroken,G.firstTrick);
+  var playable=isMyTurn();
+  for(var i=0;i<sorted.length;i++){
+    var code=sorted[i];
+    var el=renderCardEl(toCard(code),{hover:true});
+    el.dataset.code=code;
+    if(playable&&legal.indexOf(code)!==-1)el.classList.add("legal");
+    el.addEventListener("click",(function(c){ return function(){ onHandClick(c); }; })(code));
+    if(G.receivedFlash&&G.receivedFlash.indexOf(code)!==-1)el.classList.add("received");
+    handFan.appendChild(el);
+  }
+  handFan.classList.toggle("playable",playable);
+}
+function renderBanner(){
+  var t="";
+  if(G.mode==="online"&&G.status===1){
+    t="Waiting for players ("+G.seatsPub.filter(function(s){return s.present;}).length+"/4) — share your room code.";
+  }else if(G.over){
+    if(G.mode==="solo"&&G.mySeat===0){
+      t=G.winnerSeats.indexOf(0)!==-1?"You win the game with the lowest score!":"Game over — "+(G.winnerSeats[0]===0?"you":"one of the bots")+" won the table.";
+    }else{
+      t="Game over — "+G.winnerSeats.map(seatName).join(" & ")+(G.winnerSeats.length>1?" are":" is")+" the winner"+(G.winnerSeats.length>1?"s":"")+".";
+    }
+  }else if(G.phase==="pass"){
+    if(G.passDir===3)t="No passing this hand — hold.";
+    else if(G.mode==="solo")t="Pass 3 cards to your "+passWord(G.passDir)+".";
+    else{
+      var done=G.passDone.filter(Boolean).length;
+      t="Pass to your "+passWord(G.passDir)+" — "+done+" of 4 have passed.";
+    }
+  }else if(G.phase==="play"){
+    if(G.turnSeat===G.mySeat){
+      if(G.trick.length===0){
+        t=G.heartsBroken?"Your lead — any card (hearts are broken ♥).":"Your lead — any card except hearts.";
+      }else{
+        t="Your turn — follow "+bgnDeck.suitName(SUITS[suitOf(G.trick[0].card)])+" if you can.";
+      }
+    }else{
+      t="Waiting for "+seatName(G.turnSeat)+"…";
+    }
+  }
+  bannerEl.textContent=t;
+}
+function renderSide(){
+  scoreBody.innerHTML="";
+  for(var s=0;s<4;s++){
+    var row=document.createElement("div");
+    row.className="h-scorerow"+(!G.over&&G.phase==="play"&&G.turnSeat===s&&G.mode!=="lobby"?" on":"");
+    row.innerHTML='<span class="h-avatar s'+s+'"></span><span class="h-sname">'+esc(seatName(s))+'</span>'+
+      '<span class="h-shand">'+G.handScores[s]+'</span><b class="h-stot">'+seatScore(s)+'</b>';
+    scoreBody.appendChild(row);
+  }
+  handInfoEl.textContent=G.handNum>0?("Hand "+G.handNum+(G.mode==="online"?"":" · pass "+passWord(G.passDir))):"";
+  logEl.innerHTML="";
+  if(!G.log.length){ logEl.innerHTML='<div class="muted small">No tricks yet.</div>'; }
+  else{
+    var start=Math.max(0,G.log.length-12);
+    for(var i=G.log.length-1;i>=start;i--){
+      var li=document.createElement("div");
+      li.className="log-item"+(G.log[i].cls?" "+G.log[i].cls:"");
+      li.textContent=G.log[i].txt;
+      logEl.appendChild(li);
+    }
+  }
+  if(G.mode==="online"){
+    newGameBtn.hidden=!G.over;
+    newGameBtn.textContent="Rematch";
+    menuBtn.textContent="Exit table";
+    roomBox.hidden=false;
+    roomCodeEl.textContent=G.roomCode||"—";
+    roomChip.hidden=false;
+    roomChip.innerHTML='Room: <b>'+esc(G.roomCode||"—")+'</b>';
+  }else{
+    newGameBtn.hidden=false;
+    newGameBtn.textContent="New game";
+    menuBtn.textContent="Main menu";
+    roomBox.hidden=true;
+    roomChip.hidden=true;
+  }
+}
+function renderAll(){ renderSeats(); renderTrick(); renderMyHand(); renderSide(); renderBanner(); }
+function enableHand(){ handFan.classList.add("playable"); }
+function disableHand(){ handFan.classList.remove("playable"); }
+function flashBanner(t){ bannerEl.textContent=t; }
+function closeSheet(){ if(sheetEl)sheetEl.classList.remove("open"); if(sheetBackdrop)sheetBackdrop.classList.remove("show"); }
+
+/* trick-change detection → log */
+var _prevTrick=null, _prevPhase=null, _trickSeq=0;
+function logTrickComplete(){
+  if(!G.trick||G.trick.length!==4)return;
+  var w=trickWinner(G.trick);
+  var pts=G.trick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+  _trickSeq++;
+  G.log.push({txt:"Trick "+_trickSeq+": "+seatName(w.seat)+" took "+pts+" point"+(pts===1?"":"s"), cls:pts>0?"warn":"ok"});
+}
+function detectTrick(){
+  var now=G.trick||[];
+  if(_prevTrick&&_prevTrick.length===4&&now.length===0){
+    var w=trickWinner(_prevTrick);
+    var pts=_prevTrick.reduce(function(a,t){return a+cardPoints(t.card);},0);
+    _trickSeq++;
+    G.log.push({txt:"Trick "+_trickSeq+": "+seatName(w.seat)+" took "+pts+" point"+(pts===1?"":"s"), cls:pts>0?"warn":"ok"});
+  }
+  if(_prevPhase==="pass"&&G.phase==="play"){
+    G.log.push({txt:"Passing done — play begins.", cls:""});
+  }
+  _prevTrick=now;
+  _prevPhase=G.phase;
+}
+
+/* ══════════ card clicks ══════════ */
+function onHandClick(code){
+  if(!isMyTurn()||G.locked)return;
+  var hand=myHand();
+  var legal=legalPlays(hand,G.trick,G.heartsBroken,G.firstTrick);
+  if(legal.indexOf(code)===-1)return;
+  if(G.mode==="online"){ sendPlay(code); }
+  else soloPlay(code);
+}
+function soloPlay(code){
+  var r=enginePlayCard(G,0,code);
+  if(!r.ok)return;
+  if(G.trick.length===4)logTrickComplete();
+  var ev=engineAdvance(G);
+  renderAll();
+  if(ev&&ev.hand){ showSoloHandOver(ev); return; }
+  if(!G.over){
+    if(G.turnSeat===0)enableHand();
+    else scheduleBot();
+  }
+}
+
+/* ══════════ solo flow ══════════ */
+function scheduleBot(){
+  if(G.over||G.mode!=="solo"||G.phase!=="play")return;
+  if(G.turnSeat===0)return;
+  setTimeout(function(){
+    if(G.over||G.mode!=="solo"||G.phase!=="play")return;
+    if(G.turnSeat===0){ enableHand(); return; }
+    var card=aiSelectPlay(G.hands[G.turnSeat],G.trick,G.heartsBroken,G.firstTrick);
+    if(card==null)return;
+    enginePlayCard(G,G.turnSeat,card);
+    if(G.trick.length===4)logTrickComplete();
+    var ev=engineAdvance(G);
+    renderAll();
+    if(ev&&ev.hand){ showSoloHandOver(ev); return; }
+    if(!G.over)scheduleBot();
+  },820);
+}
+function soloStart(){
+  closeSheet();
+  exitOnline(false);
+  G.mode="solo"; G.mySeat=0;
+  G.scores=[0,0,0,0]; G.handNum=0; G.over=false; G.winnerSeats=[]; G.lastHand=null;
+  G.shotMoon=-1; G.log=[]; G.receivedFlash=[]; G.trick=[]; G.handScores=[0,0,0,0];
+  G.locked=false;
+  startNextHand(G);
+  lobbyCtn.hidden=true; gameCtn.hidden=false; roomBox.hidden=true;
+  _prevTrick=null; _prevPhase=null; _trickSeq=0;
+  renderAll();
+  if(G.phase==="pass")openPassModal();
+}
+function doSoloPass(sel){
+  G.passSel[0]=sel.slice();
+  G.passSel[1]=autoPass(G.hands[1]);
+  G.passSel[2]=autoPass(G.hands[2]);
+  G.passSel[3]=autoPass(G.hands[3]);
+  var dir=G.passDir;
+  resolvePass(G);
+  passModal.hidden=true;
+  var d=passDelta(dir);
+  var received=G.passSel[(0-d+4)%4];
+  G.receivedFlash=received.slice();
+  setTimeout(function(){ G.receivedFlash=[]; renderMyHand(); },3200);
+  G.log.push({txt:"Passing done — play begins.", cls:""});
+  renderAll();
+  if(!G.over){
+    if(G.turnSeat===0)enableHand();
+    else scheduleBot();
+  }
+}
+
+/* ══════════ pass modal ══════════ */
+var passSelSet=new Set();
+function openPassModal(){
+  if(!handModal.hidden)return;
+  closeSheet();
+  passSelSet.clear();
+  passModal.hidden=false;
+  passRow.innerHTML="";
+  var hand=myHand();
+  var sorted=hand.slice().sort(cmpCode);
+  for(var i=0;i<sorted.length;i++){
+    (function(code){
+      var el=renderCardEl(toCard(code),{hover:true});
+      el.addEventListener("click",function(){ togglePassCard(code,el); });
+      passRow.appendChild(el);
+    })(sorted[i]);
+  }
+  var dirs=["left","right","across","—"];
+  passTitle.textContent=G.passDir===3?"No passing this hand":"Pass 3 cards";
+  passSub.textContent=G.passDir===3?"This is a hold hand — no cards are exchanged.":"Send three cards to the player on your "+dirs[G.passDir]+".";
+  passCountEl.textContent="Choose 3 cards to pass.";
+  passConfirmBtn.disabled=true;
+}
+function togglePassCard(code,el){
+  if(passSelSet.has(code)){ passSelSet.delete(code); el.classList.remove("sel"); }
+  else{
+    if(passSelSet.size>=3)return;
+    passSelSet.add(code); el.classList.add("sel");
+  }
+  passCountEl.textContent=passSelSet.size===3?"Ready to pass.":(3-passSelSet.size)+" more to choose.";
+  passConfirmBtn.disabled=passSelSet.size!==3;
+}
+
+/* ══════════ hand-over / game-over modal ══════════ */
+function fillHandModal(hand,over,winners){
+  handTitle.textContent=over? (G.mode==="solo"&&winners.indexOf(0)!==-1?"You win the game!":"Game over") : ("Hand "+(hand.handNum||G.handNum)+" complete");
+  handSub.textContent=hand.shotMoon!==-1
+    ? (seatName(hand.shotMoon)+" shot the moon! Everyone else takes 26.")
+    : "Points are in for this hand.";
+  handScoresBox.innerHTML="";
+  for(var s=0;s<4;s++){
+    var row=document.createElement("div");
+    row.className="h-scorerow"+(over&&winners.indexOf(s)!==-1?" win":"");
+    row.innerHTML='<span class="h-avatar s'+s+'"></span><span class="h-sname">'+esc(seatName(s))+'</span>'+
+      '<span class="h-shand">'+hand.scores[s]+'</span><b class="h-stot">'+hand.cumulative[s]+'</b>';
+    handScoresBox.appendChild(row);
+  }
+  handMenuBtn.hidden=!over;
+  handOkBtn.textContent=over?"Play again":"Continue";
+  handModal.hidden=false;
+}
+function showSoloHandOver(ev){
+  closeSheet();
+  fillHandModal(ev.hand,ev.over,ev.winners);
+  handMenuBtn.onclick=function(){ handModal.hidden=true; exitToLobby(); };
+  handOkBtn.onclick=function(){
+    handModal.hidden=true;
+    if(ev.over){ soloStart(); }
+    else{
+      if(G.phase==="pass")openPassModal();
+      else if(G.turnSeat===0)enableHand();
+      else scheduleBot();
+    }
+  };
+}
+function showHandOverServer(hand){
+  closeSheet();
+  fillHandModal(hand,hand.over,hand.winners||[]);
+  if(hand.over){
+    handOkBtn.onclick=function(){
+      handModal.hidden=true;
+      sendRematch();
+    };
+    handMenuBtn.onclick=function(){ handModal.hidden=true; exitToLobby(); };
+  }else{
+    handOkBtn.onclick=function(){
+      handModal.hidden=true;
+      checkMyAction();
+    };
+  }
+}
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(G.sockOpen)res(true);
+    else G.openResolvers.push(res);
+  });
+}
+function setConnLabel(txt){
+  connEl.textContent=txt!==undefined?txt:(G.sockOpen?"Connected — bots fill empty seats.":"Connecting…");
+}
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!G.socket||!G.sockOpen)return rej(new Error("socket not open"));
+    G.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function connectSocket(){
+  if(G.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ G.socket=rootRef.createServerSocket(); }
+  catch(e){ setConnLabel("Online unavailable."); return; }
+  G.socket.addEventListener("open",function(){
+    G.sockOpen=true; G.retryDelay=800;
+    var rs=G.openResolvers; G.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(G.roomCode&&G.mode==="online")rejoinRoom();
+  });
+  G.socket.addEventListener("message",function(ev){
+    if(G.mode==="online")onServerMsg(ev.data);
+  });
+  G.socket.addEventListener("close",function(ev){
+    G.sockOpen=false;
+    var rs=G.openResolvers; G.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    disableHand();
+    if(!G.wantReconnect||G.mode!=="online")return;
+    if(ev.code===4403){ G.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(G.wantReconnect&&G.mode==="online"){
+        G.retryDelay=Math.min(G.retryDelay*1.7,8000);
+        G.socket=null;
+        connectSocket();
+      }
+    },G.retryDelay);
+  });
+}
+function onServerMsg(raw){
+  var m;
+  try{ m=JSON.parse(raw); }catch(e){ return; }
+  if(m.t==="pub")applyPub(m.pub,m.you);
+  else if(m.t==="hand")showHandOverServer(m.hand);
+}
+function applyPub(pub,you){
+  G.status=pub.status;
+  G.phase=pub.phase===0?"pass":pub.phase===1?"play":"over";
+  G.handNum=pub.handNum; G.passDir=pub.passDir;
+  G.passDone=pub.passDone; G.seatsPub=pub.seats;
+  G.trick=pub.trick||[]; G.leadSeat=pub.leadSeat; G.turnSeat=pub.turnSeat;
+  G.heartsBroken=!!pub.heartsBroken; G.firstTrick=!!pub.firstTrick;
+  G.handScores=pub.handScores; G.shotMoon=pub.shotMoon;
+  G.over=!!pub.over; G.winnerSeats=pub.winnerSeats||[];
+  if(you){ G.mySeat=you.seat; G.myHand=you.hand; G.pid=you.playerId; }
+  detectTrick();
+  renderAll();
+  checkMyAction();
+}
+function checkMyAction(){
+  disableHand();
+  if(G.mode!=="online")return;
+  if(G.status===1||G.over)return;
+  if(handModal.hidden&&G.phase==="pass"&&G.passDone[G.mySeat]!==true){ openPassModal(); return; }
+  if(G.phase==="play"&&G.turnSeat===G.mySeat)enableHand();
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating table…");
+  var ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    var r=await rpc("createRoom",JSON.stringify({name:getName(),playerId:getPid()}));
+    if(!r.ok){ setOnlineMsg("Couldn't create a table ("+r.err+")."); return; }
+    G.mode="online"; G.roomCode=r.code; G.mySeat=r.seat; G.pid=r.pid;
+    G.wantReconnect=true; G.retryDelay=800;
+    enterOnlineGame();
+    setOnlineMsg("");
+    if(r.pub)applyPub(r.pub,r.you);
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(){
+  var code=joinCodeInput.value.trim().toUpperCase();
+  if(!code){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  setOnlineMsg("Joining "+code+"…");
+  var ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    var r=await rpc("joinRoom",JSON.stringify({code:code,name:getName(),playerId:getPid()}));
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    G.mode="online"; G.roomCode=code; G.mySeat=r.seat; G.pid=r.pid;
+    G.wantReconnect=true; G.retryDelay=800;
+    enterOnlineGame();
+    setOnlineMsg("");
+    if(r.pub)applyPub(r.pub,r.you);
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!G.roomCode||G.mode!=="online")return;
+  rpc("joinRoom",JSON.stringify({code:G.roomCode,name:getName(),playerId:getPid()})).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"||r.err==="game_over"){
+        setTimeout(function(){ if(G.mode==="online"&&G.sockOpen)rejoinRoom(); },2000);
+      }
+      return;
+    }
+    G.mySeat=r.seat; G.pid=r.pid;
+    if(r.pub)applyPub(r.pub,r.you);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+async function sendPlay(code){
+  G.locked=true;
+  disableHand();
+  try{
+    var r=await rpc("playCard",JSON.stringify({code:G.roomCode,card:code}));
+    if(!r||!r.ok){
+      G.locked=false;
+      flashBanner("Play rejected — re-syncing…");
+      var s=await rpc("getState","");
+      if(s&&s.ok)applyPub(s.pub,s.you);
+    }else{
+      G.locked=false;
+    }
+  }catch(e){
+    G.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  }
+}
+async function sendPass(cards){
+  try{
+    var r=await rpc("passCards",JSON.stringify({code:G.roomCode,cards:cards}));
+    if(!r||!r.ok){
+      flashBanner("Pass rejected — try again.");
+      if(handModal.hidden&&G.mode==="online"&&G.phase==="pass"&&G.passDone[G.mySeat]!==true)openPassModal();
+      var s=await rpc("getState","");
+      if(s&&s.ok)applyPub(s.pub,s.you);
+    }
+  }catch(e){
+    flashBanner("Couldn't reach the server.");
+    if(handModal.hidden&&G.mode==="online"&&G.phase==="pass"&&G.passDone[G.mySeat]!==true)openPassModal();
+  }
+}
+async function sendRematch(){
+  try{
+    var r=await rpc("rematch","");
+    if(!r||!r.ok)flashBanner("Couldn't start a rematch.");
+  }catch(e){ flashBanner("Couldn't reach the server."); }
+}
+function exitOnline(showLobby){
+  G.wantReconnect=false;
+  if(G.socket){ try{ G.socket.close(1000,"bye"); }catch(e){} G.socket=null; }
+  G.sockOpen=false;
+  G.roomCode=null; G.mySeat=0; G.myHand=[]; G.mode=null; G.seatsPub=null;
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  closeSheet();
+  if(G.mode==="online"){
+    if(G.socket&&G.sockOpen){ rpc("leave","").catch(function(){}); }
+    exitOnline(true);
+  }else{
+    G.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+  }
+}
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    var m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    if(m==="solo")soloStart();
+  });
+});
+try{ nameInput.value=localStorage.getItem("bgnHearts_name")||""; }catch(e){}
+nameInput.addEventListener("input",function(){ try{ localStorage.setItem("bgnHearts_name",nameInput.value); }catch(e){} });
+createRoomBtn.addEventListener("click",function(){ doCreateRoom(); });
+joinRoomBtn.addEventListener("click",function(){ doJoinRoom(); });
+joinCodeInput.addEventListener("keydown",function(e){ if(e.key==="Enter")doJoinRoom(); });
+menuBtn.addEventListener("click",exitToLobby);
+newGameBtn.addEventListener("click",function(){
+  if(G.mode==="online"){ if(G.over)sendRematch(); }
+  else soloStart();
+});
+passConfirmBtn.addEventListener("click",function(){
+  if(passSelSet.size!==3)return;
+  var sel=[];
+  passSelSet.forEach(function(c){ sel.push(c); });
+  if(G.mode==="online"){ passModal.hidden=true; sendPass(sel); }
+  else doSoloPass(sel);
+});
+copyCodeBtn.addEventListener("click",function(){
+  var c=G.roomCode||"";
+  if(!c)return;
+  try{ navigator.clipboard.writeText(c); }catch(e){}
+  flashBanner("Room code copied — "+c);
+});
+if(menuSheetBtn)menuSheetBtn.addEventListener("click",function(){
+  var open=sheetEl.classList.toggle("open");
+  sheetBackdrop.classList.toggle("show",open);
+});
+if(sheetBackdrop)sheetBackdrop.addEventListener("click",closeSheet);
+if(roomChip)roomChip.addEventListener("click",function(){
+  if(!G.roomCode)return;
+  try{ navigator.clipboard.writeText(G.roomCode); }catch(e){}
+  flashBanner("Room code copied — "+G.roomCode);
+});
+connectSocket();
+
+/* ══════════ test hooks ══════════ */
+window.__heartsTest={
+  G:G,
+  cardFaceSVG:function(card){ return bgnDeck.cardFaceSVG(card); },
+  renderAll:renderAll,
+  startSolo:function(){ soloStart(); },
+  legalPlays:legalPlays, aiSelectPlay:aiSelectPlay, autoPass:autoPass,
+  enginePlayCard:enginePlayCard, engineAdvance:engineAdvance, resolvePass:resolvePass,
+  passWord:passWord,
+  runHands:function(n){
+    if(G.mode!=="solo"){ G.mode="solo"; G.mySeat=0; G.scores=[0,0,0,0]; G.handNum=0; G.over=false; }
+    var res=[];
+    for(var k=0;k<n;k++){
+      if(G.over)break;
+      if(G.phase!=="pass"&&G.phase!=="play")startNextHand(G);
+      for(var s=0;s<4;s++)G.passSel[s]=autoPass(G.hands[s]);
+      resolvePass(G);
+      var guard=0;
+      while(!G.over&&G.phase==="play"&&guard++<200){
+        var c=aiSelectPlay(G.hands[G.turnSeat],G.trick,G.heartsBroken,G.firstTrick);
+        if(c==null)break;
+        enginePlayCard(G,G.turnSeat,c);
+        var ev=engineAdvance(G);
+        if(ev&&ev.hand)res.push(ev.hand);
+      }
+    }
+    return {scores:G.scores, handsPlayed:res.length, lastHand:res.length?res[res.length-1]:null, over:G.over, winners:G.winnerSeats};
+  }
+};
+
+renderAll();
+})();
+</script>

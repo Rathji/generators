@@ -1,0 +1,2580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Splendor — Boardgame Network</title>
+  <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+  <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+  <script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+  <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+  <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+  <style>
+
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Manrope:wght@500;700;800&display=swap');
+
+:root {
+  --bg: #0b0e14;
+  --panel: #151b26;
+  --panel-2: #1c2432;
+  --border: rgba(148,163,184,.16);
+  --border-strong: rgba(148,163,184,.32);
+  --gold: #e8b25a;
+  --gold-bright: #f6d488;
+  --gold-deep: #a8722a;
+  --text: #f2f4f8;
+  --muted: #8a94a6;
+  --font-display: 'Cinzel', Georgia, serif;
+  --font-body: 'Manrope', system-ui, -apple-system, sans-serif;
+
+  --gem-diamond: #e2e8f0;
+  --gem-sapphire: #60a5fa;
+  --gem-emerald: #34d399;
+  --gem-ruby: #f87171;
+  --gem-onyx: #475569;
+  --gem-gold: #f59e0b;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+body {
+  font-family: var(--font-body);
+  background:
+    radial-gradient(1200px 640px at 12% -12%, rgba(232,178,90,.13), transparent 60%),
+    radial-gradient(1000px 760px at 112% 108%, rgba(59,130,246,.12), transparent 55%),
+    linear-gradient(180deg, #0a0d13 0%, #0e1219 55%, #090b10 100%);
+  background-attachment: fixed;
+  color: var(--text);
+  padding: 0;
+  min-height: 100vh;
+  text-align: left;
+}
+
+
+.game-grid { display: grid; grid-template-columns: 1fr 300px; gap: 14px; }
+@media (max-width: 900px) { .game-grid { grid-template-columns: 1fr; } }
+
+.panel {
+  background: linear-gradient(180deg, rgba(32,41,58,.82), rgba(18,23,33,.94));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 4px 20px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+}
+.panel-title {
+  font-family: var(--font-display);
+  font-size: .72rem;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--gold);
+  margin-bottom: 10px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+}
+.panel-title::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--gold-bright), var(--gold-deep));
+  box-shadow: 0 0 6px rgba(232,178,90,.6);
+}
+
+/* Nobles */
+.nobles-flex { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.noble-card {
+  width: 86px; height: 98px;
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(232,178,90,.16), transparent 60%),
+    linear-gradient(165deg, #1d2534, #10141d 75%);
+  border: 1px solid rgba(232,178,90,.5);
+  border-radius: 10px;
+  padding: 7px;
+  display: flex; flex-direction: column; justify-content: space-between;
+  font-size: .74rem; font-weight: bold;
+  box-shadow: 0 3px 12px rgba(0,0,0,.45), inset 0 0 20px rgba(232,178,90,.05);
+  position: relative;
+}
+.noble-card::before {
+  content: ''; position: absolute; inset: 3px;
+  border: 1px solid rgba(232,178,90,.22);
+  border-radius: 7px; pointer-events: none;
+}
+.noble-pts { font-family: var(--font-display); font-size: 1.25rem; color: var(--gold-bright); text-shadow: 0 1px 3px rgba(0,0,0,.6); text-align: center; line-height: 1.1; }
+.noble-crown { display: flex; justify-content: center; align-items: center; }
+.noble-crown svg { filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); }
+.noble-reqs { display: flex; flex-wrap: wrap; gap: 4px 7px; justify-content: center; align-items: center; margin-top: 2px; }
+.noble-req { display: inline-flex; align-items: center; gap: 3px; font-size: .68rem; font-weight: 800; color: var(--gold); }
+.noble-req .gem-ic { margin-right: 1px; }
+
+/* Market */
+.market-rows { display: flex; flex-direction: column; gap: 10px; }
+.market-row { display: grid; grid-template-columns: 75px repeat(4, 1fr); gap: 10px; align-items: center; }
+
+.deck-tile {
+  height: 170px; border-radius: 10px;
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  font-weight: 700; border: 1px solid; cursor: pointer; font-size: .85rem;
+  font-family: var(--font-display); letter-spacing: 1px;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.deck-tile:hover { transform: translateY(-3px); }
+.deck-tile svg { filter: drop-shadow(0 2px 4px rgba(0,0,0,.55)); margin-bottom: 3px; }
+.deck-count {
+  margin-top: 3px; padding: 1px 8px; border-radius: 10px;
+  font-size: .7rem; font-weight: 800; color: #e2e8f0;
+  background: rgba(0,0,0,.42); border: 1px solid rgba(255,255,255,.14);
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+}
+.deck-3 { background: linear-gradient(165deg, #24407a 0%, #101a2e 70%); border-color: rgba(96,165,250,.55); box-shadow: 0 4px 14px rgba(59,130,246,.22), inset 0 1px 0 rgba(255,255,255,.1); }
+.deck-3:hover { box-shadow: 0 8px 22px rgba(59,130,246,.35), inset 0 1px 0 rgba(255,255,255,.1); }
+.deck-2 { background: linear-gradient(165deg, #8a5a1d 0%, #1c1306 72%); border-color: rgba(245,158,11,.5); box-shadow: 0 4px 14px rgba(245,158,11,.18), inset 0 1px 0 rgba(255,255,255,.08); }
+.deck-2:hover { box-shadow: 0 8px 22px rgba(245,158,11,.3), inset 0 1px 0 rgba(255,255,255,.08); }
+.deck-1 { background: linear-gradient(165deg, #0f4a3a 0%, #07150f 72%); border-color: rgba(52,211,153,.5); box-shadow: 0 4px 14px rgba(16,185,129,.18), inset 0 1px 0 rgba(255,255,255,.08); }
+.deck-1:hover { box-shadow: 0 8px 22px rgba(16,185,129,.3), inset 0 1px 0 rgba(255,255,255,.08); }
+
+.card {
+  min-height: 170px; height: auto;
+  background:
+    radial-gradient(140% 90% at 50% 0%, rgba(148,163,184,.10), transparent 55%),
+    linear-gradient(165deg, #242d3e 0%, #141a26 52%, #1a2231 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 8px 8px 13px;
+  display: flex; flex-direction: column; justify-content: flex-start; gap: 7px;
+  position: relative; font-size: .74rem;
+  box-shadow: 0 3px 12px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07);
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+.card::before {
+  content: ''; position: absolute; inset: 3px;
+  border: 1px solid rgba(255,255,255,.05);
+  border-radius: 7px; pointer-events: none;
+}
+.card:hover { transform: translateY(-4px); border-color: rgba(232,178,90,.45); box-shadow: 0 12px 28px rgba(0,0,0,.6), 0 0 0 1px rgba(232,178,90,.25), inset 0 1px 0 rgba(255,255,255,.08); }
+.card.affordable { border-color: rgba(52,211,153,.75); box-shadow: 0 0 14px rgba(16,185,129,.32), 0 3px 12px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07); }
+.card-top { display: flex; justify-content: space-between; align-items: center; }
+.card-pts { font-family: var(--font-display); font-size: 1.3rem; font-weight: 700; color: var(--gold-bright); text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+
+.gem-ic { display: inline-block; flex: none; vertical-align: middle; filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
+
+.card-cost-list { display: flex; flex-direction: column; gap: 3px; }
+.cost-item {
+  display: flex; align-items: center; gap: 5px; font-weight: 700;
+  padding: 2px 6px; border-radius: 5px;
+  background: linear-gradient(180deg, rgba(0,0,0,.5), rgba(0,0,0,.35));
+  border: 1px solid rgba(255,255,255,.05);
+  width: fit-content; font-size: .72rem;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.4);
+}
+
+.card-btns { display: flex; gap: 5px; margin-top: auto; padding-top: 2px; }
+.res-card { width: 88px; height: auto; min-height: 0; padding: 6px; gap: 5px; }
+.res-card .card-cost-list { gap: 2px; }
+.res-card .cost-item { padding: 1px 5px; font-size: .66rem; }
+.btn-xs {
+  flex: 1; padding: 4px 0; font-size: .62rem; font-weight: 800;
+  border: none; border-radius: 5px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px;
+  transition: transform .1s ease, filter .1s ease, box-shadow .1s ease;
+}
+.btn-xs:hover { transform: translateY(-1px); filter: brightness(1.1); }
+.btn-buy { background: linear-gradient(180deg, #34d399, #059669 90%); color: #052e22; box-shadow: 0 2px 6px rgba(16,185,129,.4), inset 0 1px 0 rgba(255,255,255,.4); }
+.btn-buy:disabled { background: linear-gradient(180deg, #1e2634, #151b26); color: #647089; box-shadow: inset 0 1px 0 rgba(255,255,255,.05); cursor: not-allowed; }
+.btn-res { background: linear-gradient(180deg, #f6d488, #d9932b 90%); color: #33200a; box-shadow: 0 2px 6px rgba(232,178,90,.35), inset 0 1px 0 rgba(255,255,255,.45); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 7px 2px 3px; border-radius: 20px;
+  background: linear-gradient(180deg, rgba(0,0,0,.45), rgba(0,0,0,.3));
+  border: 1px solid rgba(255,255,255,.09);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.35);
+}
+.chip b { font-size: .7rem; font-weight: 800; min-width: 9px; text-align: center; color: #fff; }
+
+/* Bank & Side */
+.bank-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+.token-btn {
+  background: linear-gradient(180deg, #1e2636, #12161f);
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  padding: 7px;
+  display: flex; flex-direction: column; align-items: center; cursor: pointer;
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.token-btn:hover { transform: translateY(-2px); border-color: var(--border-strong); box-shadow: 0 6px 16px rgba(0,0,0,.4); }
+.token-btn.selected {
+  border-color: var(--gold);
+  background: radial-gradient(130% 130% at 50% 0%, rgba(232,178,90,.2), #12161f 70%);
+  box-shadow: 0 0 16px rgba(232,178,90,.28), 0 4px 14px rgba(0,0,0,.4);
+  transform: translateY(-2px);
+}
+.token-gem {
+  position: relative; width: 38px; height: 38px; margin-bottom: 3px;
+  display: flex; align-items: center; justify-content: center;
+}
+.token-gem svg { width: 100%; height: 100%; filter: drop-shadow(0 3px 5px rgba(0,0,0,.5)); }
+.token-n {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-weight: 900; font-size: 1rem; color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.9), 0 0 10px rgba(0,0,0,.6);
+  padding-bottom: 3px;
+}
+.token-label { font-size: .66rem; font-weight: 800; letter-spacing: .4px; text-transform: uppercase; }
+.token-sel { color: var(--gold-bright); }
+
+.btn {
+  padding: 9px 14px; border: none; border-radius: 9px; font-weight: 800;
+  cursor: pointer; font-family: var(--font-body); letter-spacing: .5px;
+  transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+}
+.btn-primary {
+  background: linear-gradient(180deg, var(--gold-bright) 0%, var(--gold) 45%, var(--gold-deep) 100%);
+  color: #211503;
+  border: 1px solid rgba(255,255,255,.25);
+  box-shadow: 0 4px 14px rgba(232,178,90,.35), inset 0 1px 0 rgba(255,255,255,.5);
+  text-shadow: 0 1px 0 rgba(255,255,255,.3);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 20px rgba(232,178,90,.45), inset 0 1px 0 rgba(255,255,255,.5); filter: brightness(1.06); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { background: #232b3a; color: #5a6476; box-shadow: none; text-shadow: none; cursor: not-allowed; transform: none; }
+.btn-secondary { background: linear-gradient(180deg, #39445a, #232c3d); color: #e2e8f0; border: 1px solid rgba(255,255,255,.08); box-shadow: 0 3px 10px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.12); }
+.btn-secondary:hover { transform: translateY(-1px); filter: brightness(1.12); }
+
+.log-box {
+  background: linear-gradient(180deg, rgba(5,8,12,.6), rgba(8,11,16,.75));
+  border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px; height: 160px; overflow-y: auto;
+  font-family: var(--font-body); font-size: .74rem; color: #b8c2d0;
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.5);
+}
+.log-box > div { padding-bottom: 4px; }
+.log-box::-webkit-scrollbar { width: 8px; }
+.log-box::-webkit-scrollbar-thumb { background: #2a3344; border-radius: 4px; }
+
+/* Players */
+.players-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 14px; }
+.player-card {
+  background: linear-gradient(180deg, rgba(30,38,54,.85), rgba(16,20,29,.95));
+  border: 1px solid var(--border);
+  border-radius: 13px; padding: 12px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.35);
+  transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease;
+}
+.player-card.active {
+  border-color: var(--gold);
+  box-shadow: 0 0 24px rgba(232,178,90,.14), 0 6px 20px rgba(0,0,0,.45);
+  transform: translateY(-2px);
+}
+.player-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 9px; }
+
+.badge {
+  padding: 2px 8px; border-radius: 12px; font-size: .7rem; font-weight: 800;
+  border: 1px solid rgba(255,255,255,.18);
+  box-shadow: inset 0 -2px 3px rgba(0,0,0,.28), inset 0 1px 2px rgba(255,255,255,.35);
+  letter-spacing: .5px;
+}
+.gem-bg-diamond { background: radial-gradient(circle at 35% 30%, #ffffff, #cbd5e1 62%, #94a3b8); color: #0f172a; }
+.gem-bg-sapphire { background: radial-gradient(circle at 35% 30%, #93c5fd, #3b82f6 62%, #1e3a8a); color: #fff; }
+.gem-bg-emerald { background: radial-gradient(circle at 35% 30%, #6ee7b7, #10b981 62%, #065f46); color: #fff; }
+.gem-bg-ruby { background: radial-gradient(circle at 35% 30%, #fca5a5, #ef4444 62%, #7f1d1d); color: #fff; }
+.gem-bg-onyx { background: radial-gradient(circle at 35% 30%, #64748b, #334155 55%, #0f172a); color: #fff; }
+.gem-bg-gold { background: radial-gradient(circle at 35% 30%, #fde68a, #f59e0b 62%, #92400e); color: #211503; }
+
+/* Modals */
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(5,7,11,.72);
+  display: flex; justify-content: center; align-items: center; z-index: 200;
+}
+.modal {
+  background: linear-gradient(180deg, #1d2534, #12161f 80%);
+  border: 1px solid rgba(232,178,90,.55);
+  border-radius: 15px; padding: 22px;
+  width: 90%; max-width: 400px; text-align: center;
+  box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(255,255,255,.04), inset 0 1px 0 rgba(255,255,255,.06);
+}
+.modal h2 { font-family: var(--font-display); letter-spacing: 2px; }
+.hidden { display: none !important; }
+
+/* Setup */
+.setup-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 13px; }
+.setup-row label { font-weight: 700; font-size: .85rem; color: var(--muted); letter-spacing: .5px; }
+.setup-row select {
+  background: linear-gradient(180deg, #1b2230, #12161f);
+  color: var(--text); border: 1px solid var(--border-strong);
+  border-radius: 9px; padding: 7px 12px; font-size: 1rem; font-weight: 800;
+  font-family: var(--font-body);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,.4);
+}
+.setup-total { font-size: .8rem; color: var(--muted); margin-bottom: 16px; letter-spacing: .5px; }
+
+/* Leaderboard */
+.lb-modal { max-width: 480px; text-align: left; }
+.lb-section { margin-bottom: 14px; }
+.lb-section-title {
+  font-family: var(--font-display); font-size: .72rem; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--gold); margin-bottom: 7px; display: flex; align-items: center; gap: 7px;
+}
+.lb-section-title::before {
+  content: ''; width: 5px; height: 5px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--gold-bright), var(--gold-deep));
+  box-shadow: 0 0 6px rgba(232,178,90,.6);
+}
+.lb-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 9px; border-radius: 8px; margin-bottom: 3px;
+  background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.01));
+  border: 1px solid rgba(255,255,255,.05);
+}
+.lb-row.lb-you { border-color: rgba(232,178,90,.55); background: radial-gradient(120% 140% at 0% 0%, rgba(232,178,90,.16), transparent 70%); }
+.lb-rank {
+  width: 22px; height: 22px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .7rem; font-weight: 800; color: var(--gold-bright);
+  background: rgba(0,0,0,.4); border: 1px solid rgba(232,178,90,.35);
+}
+.lb-row:first-child .lb-rank {
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold-deep));
+  color: #211503; border-color: rgba(255,255,255,.3);
+}
+.lb-name { flex: 1; font-weight: 700; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-val { font-weight: 800; color: var(--gold-bright); font-size: .82rem; white-space: nowrap; }
+.lb-your {
+  margin-top: 6px; padding: 10px 12px; border-radius: 10px; text-align: center;
+  background: rgba(232,178,90,.07); border: 1px solid rgba(232,178,90,.35);
+  font-size: .8rem;
+}
+.lb-rankline { margin-top: 4px; font-size: .72rem; color: var(--muted); }
+.lb-nomatch { color: var(--muted); }
+.lb-note {
+  margin-bottom: 10px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.35);
+  color: var(--gold-bright); font-size: .72rem; line-height: 1.5;
+}
+
+
+/* ── BGN frame integration ── */
+.bgn-nav-right{ display:flex; align-items:center; gap:14px; }
+.sp-toolbar{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding-bottom:10px; border-bottom:1px solid var(--border); margin-bottom:14px; }
+#turn-indicator{ font-weight:800; letter-spacing:1.2px; color:var(--gold-bright); font-size:.85rem; text-shadow:0 1px 3px rgba(0,0,0,.5); }
+.sp-actions{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.bgn-lobby{ max-width:760px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:26px 18px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--gold); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+.bgn-table{ display:grid; grid-template-columns:minmax(0,1fr); gap:18px; align-items:start; justify-content:stretch; }
+#gameCtn.online .bgn-table{ grid-template-columns:minmax(0,1fr) 320px; justify-content:center; }
+@media (max-width:1100px){ #gameCtn.online .bgn-table{ grid-template-columns:minmax(0,1fr); } #gameCtn.online .bgn-side{ display:none !important; } }
+.bgn-stagepanel{ text-align:left; min-width:0; }
+#gameCtn.online .game-grid{ grid-template-columns:minmax(0,1fr); }
+#gameCtn.online #logPanel{ display:none !important; }
+#gameCtn .bgn-stagepanel, #gameCtn .bgn-stagepanel .panel{ overflow:visible; }
+#gameCtn .bgn-stagepanel::before, #gameCtn .bgn-stagepanel .panel::before{ display:none; }
+.bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
+.bgn-player.right{ flex-direction:row-reverse; text-align:right; }
+.bgn-player.on{ border-color:var(--gold); box-shadow:0 0 14px rgba(212,175,55,.35); }
+.bgn-avatar{ width:26px; height:26px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.25); flex:none; }
+.bgn-avatar.host{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.bgn-avatar.guest{ background:radial-gradient(circle at 35% 30%, #3c3c44, #050507); }
+.bgn-pname{ font-weight:700; font-size:.92rem; white-space:nowrap; }
+.bgn-psub{ font-size:.7rem; opacity:.7; white-space:nowrap; }
+.bgn-turn{ font-size:.78rem; opacity:.8; text-align:center; white-space:nowrap; }
+.bgn-banner{ min-height:24px; margin-top:12px; font-weight:600; color:var(--gold-bright); font-size:.95rem; text-align:center; }
+.bgn-side{ min-width:0; }
+.bgn-log{ max-height:300px; overflow-y:auto; background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.05); border-radius:8px; padding:10px; font-size:.82rem; color:#b8c2d0; box-shadow:inset 0 2px 8px rgba(0,0,0,.4); }
+.bgn-log::-webkit-scrollbar{ width:8px; }
+.bgn-log::-webkit-scrollbar-thumb{ background:#2a3344; border-radius:4px; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item b{ color:var(--gold); margin-right:6px; }
+.log-item .resp{ opacity:.75; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:var(--gold-bright); opacity:1; }
+.btn[disabled]{ opacity:.45; cursor:default; }
+#gameCtn{ padding-bottom:30px; }
+  </style>
+</head>
+<body>
+
+  <!-- Hidden comments-plugin instance: used as the shared account-attributed leaderboard data channel -->
+  <div id="lb-host" style="position:fixed;bottom:0;right:0;width:14px;height:14px;pointer-events:none;opacity:0;z-index:-1;overflow:hidden;">
+    [lbCom = root.commentsPlugin({
+      channel: 'splendor-leaderboard-v1',
+      hideComments: true,
+      hideSettingsButton: true,
+      hideFullscreenButton: true,
+      width: 300,
+      height: 220,
+      onLoad: (cs, ex) => { if (window.LB) window.LB.onCommentsLoaded(cs, ex); },
+      onLoadMore: (cs) => { if (window.LB) window.LB.onMoreComments(cs); },
+      onComment: (c) => { if (window.LB) window.LB.onNewComment(c); }
+    })]
+  </div>
+
+<script type="text/x-server-plugin">
+/* ── BGN table server ─────────────────────────────────────────────
+   Generic two-player rooms: host + guest, 5-letter codes. The
+   server sequences turns (host first unless a rematch flips it),
+   stores ONE full-game snapshot per room (opaque string submitted
+   by whichever player is on turn), and tracks winner/reason for
+   resign, forfeit and end-of-game. No game logic here — the
+   snapshot is whatever the game decides it should be.
+   Durable state in the plugin `state` bytes (versioned layout).  */
+const SLOT=1024;
+const STATE_VERSION=4;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=2000;
+
+let rooms=new Map();           // code -> room object (live cache)
+const conns=new Map();         // conn.id -> {code, role}
+const moveTimes=new Map();     // conn.id -> last move ms (rate limit)
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   slot +1..+8: room code (8 ASCII, zero padded)
+   slot +9: first (0=host moves first, 1=guest; rematch flips)
+   slot +10: state version
+   slot +11: reserved
+   slot +12..+15: uint32 lastActive (unix secs)
+   slot +16: winner 0=none 1=host 2=guest 3=draw
+   slot +17: reason 0=none 1=resign 2=forfeit 3=end
+   slot +18..+19: uint16 turn counter (completed turns)
+   slot +20..+21: uint16 snapshot bytes length
+   slot +22..+23: reserved
+   slot +24..: snapshot bytes (utf8, latest only)                */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const tn=Math.max(0,Math.min(0xFFFF,room.turn));
+  state[o+18]=(tn>>8)&255; state[o+19]=tn&255;
+  const mb=room.snapshot?utf8Encode(room.snapshot):[];
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+20]=(len>>8)&255; state[o+21]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+const REASON=["","resign","forfeit","end"];
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const snapLen=(state[o+20]<<8)|state[o+21];
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      first:state[o+9], hostId:-1, guestId:-1,
+      turn:(state[o+18]<<8)|state[o+19],
+      snapshot:snapLen?utf8Decode(state.slice(o+24,o+24+snapLen)):null,
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,snapshot:room.snapshot,first:room.first,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,first:0,hostId:conn.id,guestId:-1,turn:0,snapshot:null,winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.turn,room.first)!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number"||obj.evt!==room.turn)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length<1||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.snapshot=obj.data;
+    room.turn++;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snapshot=null; room.winner=null; room.reason=null;
+    room.first=1-room.first;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  if(!info)return;
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+
+</script>
+
+  <nav class="bgn-nav">
+    <div class="wrap">
+      <a class="bgn-nav-brand" href="[hubUrl]">
+        <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+          <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+          <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+          <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+          <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+          <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+        </svg>
+        ← Boardgame Network
+      </a>
+      <span class="bgn-nav-right">
+        <span class="bgn-nav-title">[gameTitle]</span>
+        <button class="btn btn-ghost btn-sm" id="lbNavBtn">Leaderboard</button>
+      </span>
+    </div>
+  </nav>
+
+  <header class="game-hero" id="gameHero">
+    <div class="wrap">
+      <div class="hero-kicker">[gameKicker]</div>
+      <h1 class="hero-title goldtext">[gameTitle]</h1>
+      <p class="hero-sub">[gameTagline]</p>
+      <div class="hero-meta">
+        <span class="tag">[gameGenre]</span>
+        <span class="tag">[gamePlayers]</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap" style="padding-top:44px">
+
+    <section id="lobbyCtn" class="bgn-lobby">
+      <div class="sec-head">
+        <div class="sec-eyebrow">Choose a table</div>
+        <h2 class="sec-title goldtext">How would you like to play?</h2>
+        <p class="sec-sub">The classic gem-trading game of merchants &amp; nobles — gather gems, buy development cards, attract nobles, and reach 15 prestige before anyone else.</p>
+      </div>
+      <div class="bgn-modes">
+        <button class="bgn-mode" data-mode="local">
+          <span class="bgn-mode-icon">🛋️</span>
+          <span class="bgn-mode-name">Local table</span>
+          <span class="bgn-mode-sub">1–4 players, one screen · AI optional</span>
+        </button>
+        <button class="bgn-mode" data-mode="online">
+          <span class="bgn-mode-icon">🌐</span>
+          <span class="bgn-mode-name">Online table</span>
+          <span class="bgn-mode-sub">Live 2-player match on the network</span>
+        </button>
+      </div>
+      <div style="display:flex; justify-content:center; margin-top:18px">
+        <button class="btn btn-ghost" id="shareBtn" title="Download this game as JSON or a PNG">📤 Share</button>
+      </div>
+      <div id="onlinePanel" class="panel center hidden">
+        <h3>Online table</h3>
+        <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs.</p>
+        <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+          <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false" placeholder="CODE"
+                   style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+            <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+          </div>
+        </div>
+        <p class="muted small" id="onlineMsg"></p>
+      </div>
+    </section>
+
+    <section id="gameCtn" class="hidden">
+      <div class="bgn-table">
+        <div class="panel bgn-stagepanel">
+          <div class="sp-toolbar">
+            <span id="turn-indicator"></span>
+            <span class="sp-actions">
+              <button class="btn btn-ghost btn-sm" id="toolbarNewBtn">New Game</button>
+              <button class="btn btn-ghost btn-sm" id="toolbarLbBtn">Leaderboard</button>
+              <button class="btn btn-ghost btn-sm" id="toolbarBackBtn">Back to lobby</button>
+            </span>
+          </div>
+
+          <div class="bgn-players hidden" id="playersRow">
+            <div class="bgn-player" id="pHost">
+              <span class="bgn-avatar host"></span>
+              <div>
+                <div class="bgn-pname" id="hostNameEl">Host</div>
+                <div class="bgn-psub">sitting at the table</div>
+              </div>
+            </div>
+            <div class="bgn-turn" id="turnEl">Host to move</div>
+            <div class="bgn-player right" id="pGuest">
+              <span class="bgn-avatar guest"></span>
+              <div>
+                <div class="bgn-pname" id="guestNameEl">Guest</div>
+                <div class="bgn-psub">sitting at the table</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="game-grid">
+            <div class="panel">
+              <div class="panel-title">Nobles</div>
+              <div class="nobles-flex" id="nobles-container"></div>
+              <div class="panel-title">Development Cards</div>
+              <div class="market-rows">
+                <div class="market-row" id="row-tier-3"></div>
+                <div class="market-row" id="row-tier-2"></div>
+                <div class="market-row" id="row-tier-1"></div>
+              </div>
+            </div>
+
+            <div style="display:flex; flex-direction:column; gap:12px;">
+              <div class="panel">
+                <div class="panel-title">Bank Tokens</div>
+                <div class="bank-grid" id="bank-grid"></div>
+                <div style="display:flex; gap:6px;">
+                  <button class="btn btn-primary" id="btn-collect" style="flex:2;" onclick="confirmTokens()" disabled>Collect</button>
+                  <button class="btn btn-secondary" style="flex:1;" onclick="clearTokenSelection()">Reset</button>
+                </div>
+              </div>
+
+              <div class="panel" id="logPanel" style="flex:1;">
+                <div class="panel-title">Action Log</div>
+                <div class="log-box" id="log-box"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="players-grid" id="players-container"></div>
+
+          <div class="bgn-banner" id="bannerEl"></div>
+        </div>
+
+        <div class="panel bgn-side hidden" id="sidePanel">
+          <div id="roomBox" class="bgn-room hidden">
+            <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
+            <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:8px;">
+              <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+              <button class="btn btn-ghost btn-sm" id="leaveBtn">Resign &amp; leave</button>
+            </div>
+            <p class="muted small" id="connEl">Connecting…</p>
+          </div>
+          <h3 id="sideTitleEl">Match log</h3>
+          <div class="bgn-log" id="logEl"></div>
+          <div class="bgn-actions">
+            <button class="btn btn-ghost hidden" id="claimBtn">Claim win</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="bgn-footer">
+    <div class="ornament">✦</div>
+    <p>Part of <b style="color:var(--bgn-accent2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+    <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+  </footer>
+
+  <!-- Setup Modal -->
+  <div class="modal-overlay hidden" id="setup-modal">
+    <div class="modal">
+      <h2 style="color:var(--gold); margin-bottom:12px;">Start Game</h2>
+      <div class="setup-row">
+        <label for="setup-humans">Human Players</label>
+        <select id="setup-humans" onchange="updateSetupTotal()">
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+        </select>
+      </div>
+      <div class="setup-row">
+        <label for="setup-ai">Computer Players</label>
+        <select id="setup-ai" onchange="updateSetupTotal()">
+          <option value="0">0</option>
+          <option value="1" selected>1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+      <div class="setup-total" id="setup-total">1 human + 1 computer</div>
+      <button class="btn btn-primary" style="width:100%;" onclick="startCustomGame()">Start Game</button>
+      <button class="btn btn-secondary" style="width:100%; margin-top:8px;" onclick="closeSetupModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Turn Modal -->
+  <div class="modal-overlay hidden" id="turn-modal">
+    <div class="modal">
+      <h2 style="color:var(--gold); margin-bottom:12px;" id="turn-title">Next Turn</h2>
+      <p style="margin-bottom:16px;" id="turn-body">Pass device to next player.</p>
+      <button class="btn btn-primary" style="width:100%;" onclick="closeTurnModal()">Start Turn</button>
+    </div>
+  </div>
+
+  <!-- Game Over Modal -->
+  <div class="modal-overlay hidden" id="gameover-modal">
+    <div class="modal">
+      <h2 style="color:var(--gold); margin-bottom:12px;">Game Over</h2>
+      <div id="gameover-standings" style="margin-bottom:16px; text-align:left;"></div>
+      <button class="btn btn-primary" style="width:100%; margin-bottom:8px;" id="gameover-newbtn" onclick="closeGameOver(true)">New Game</button>
+      <button class="btn btn-secondary" style="width:100%;" onclick="closeGameOver(false)">View Board</button>
+    </div>
+  </div>
+
+  <!-- Leaderboard Modal -->
+  <div class="modal-overlay hidden" id="lb-modal">
+    <div class="modal lb-modal">
+      <h2 style="color:var(--gold); margin-bottom:6px; text-align:center;">Leaderboard</h2>
+      <p style="text-align:center; font-size:.74rem; color:var(--muted); margin-bottom:14px;">Tied to your Perchance account &amp; updates whenever a game finishes.</p>
+      <div id="lb-content"></div>
+      <div id="lb-yourstats"></div>
+      <button class="btn btn-primary" style="width:100%; margin-top:14px;" onclick="closeLeaderboard()">Close</button>
+    </div>
+  </div>
+
+<script>
+(function() {
+"use strict";
+
+    /* ══════════ theme config (from main.pjs) ══════════ */
+    function val(n, d) { if (n == null) return d; var v = (n && typeof n.evaluateItem === 'function') ? n.evaluateItem() : n.evaluateItem; return v == null ? d : String(v); }
+    var rootRef = window.root || {};
+    var accent = val(rootRef.accentColor, '#d4af37');
+    document.body.style.setProperty('--bgn-accent', accent);
+    (function() {
+      function parseHex(h) { h = h.replace('#', ''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+      function shade(h, f) { if (!/^#[0-9a-fA-F]{6}$/.test(h)) return h; const c = parseHex(h); const t = f > 0 ? 255 : 0; const a = Math.abs(f); const m = c.map(function(v) { return Math.round(v + (t - v) * a); }); return '#' + m.map(function(v) { return v.toString(16).padStart(2, '0'); }).join(''); }
+      const r = document.documentElement.style;
+      r.setProperty('--gold', accent);
+      r.setProperty('--gold-bright', shade(accent, 0.45));
+      r.setProperty('--gold-deep', shade(accent, -0.45));
+    })();
+    var heroImg = val(rootRef.heroImage, '').trim();
+    var hero = document.getElementById('gameHero');
+    if (heroImg && hero) { hero.classList.add('has-img'); hero.style.setProperty('--bgn-hero-img', "url('" + heroImg + "')"); }
+
+    /* ══════════ BGN audio (guarded — no-op if the audio system didn't load) ══════════ */
+    function sfxPlay(name) { try { if (window.BGN && BGN.sfx) BGN.sfx.play(name); } catch (e) {} }
+
+    /* ══════════ BGN frame elements ══════════ */
+    const lobbyCtn = document.getElementById('lobbyCtn');
+    const gameCtn = document.getElementById('gameCtn');
+    const onlinePanel = document.getElementById('onlinePanel');
+    const onlineMsgEl = document.getElementById('onlineMsg');
+    const joinCodeInput = document.getElementById('joinCodeInput');
+    const turnEl = document.getElementById('turnEl');
+    const bannerEl = document.getElementById('bannerEl');
+    const logEl = document.getElementById('logEl');
+    const hostNameEl = document.getElementById('hostNameEl');
+    const guestNameEl = document.getElementById('guestNameEl');
+    const roomBox = document.getElementById('roomBox');
+    const roomCodeEl = document.getElementById('roomCodeEl');
+    const connEl = document.getElementById('connEl');
+    const copyCodeBtn = document.getElementById('copyCodeBtn');
+    const leaveBtn = document.getElementById('leaveBtn');
+    const claimBtn = document.getElementById('claimBtn');
+    const pHost = document.getElementById('pHost');
+    const pGuest = document.getElementById('pGuest');
+    const playersRow = document.getElementById('playersRow');
+    const sidePanel = document.getElementById('sidePanel');
+    const toolbarNewBtn = document.getElementById('toolbarNewBtn');
+    const toolbarLbBtn = document.getElementById('toolbarLbBtn');
+    const toolbarBackBtn = document.getElementById('toolbarBackBtn');
+    const lbNavBtn = document.getElementById('lbNavBtn');
+
+    const game = { mode: null, myRole: null, roomCode: null, socket: null, sockOpen: false, wantReconnect: false, retryDelay: 800,
+      openResolvers: [], serverTurn: 0, first: 0, status: 'idle', oppPresent: true, over: false, winner: null, reason: '',
+      locked: false, log: [], lastLoggedTurn: 0, initialBuilt: false, waitingForInit: true };
+function getItem(obj, key) {
+      return Reflect.get(obj, key);
+    }
+
+    function setItem(obj, key, val) {
+      Reflect.set(obj, key, val);
+    }
+
+    
+const GEMS = Array('diamond', 'sapphire', 'emerald', 'ruby', 'onyx');
+    const ALL_GEMS = Array('diamond', 'sapphire', 'emerald', 'ruby', 'onyx', 'gold');
+
+    const DECK_DATA = {
+      t1: Array(
+        { id:'1_1', tier:1, bonus:'emerald', pts:0, cost:{diamond:1, sapphire:1, emerald:1, ruby:1, onyx:0} },
+        { id:'1_2', tier:1, bonus:'sapphire', pts:0, cost:{diamond:0, sapphire:0, emerald:1, ruby:2, onyx:1} },
+        { id:'1_3', tier:1, bonus:'ruby', pts:0, cost:{diamond:2, sapphire:1, emerald:0, ruby:0, onyx:0} },
+        { id:'1_4', tier:1, bonus:'diamond', pts:0, cost:{diamond:0, sapphire:2, emerald:2, ruby:0, onyx:1} },
+        { id:'1_5', tier:1, bonus:'onyx', pts:0, cost:{diamond:1, sapphire:0, emerald:1, ruby:1, onyx:1} },
+        { id:'1_6', tier:1, bonus:'emerald', pts:1, cost:{diamond:0, sapphire:0, emerald:0, ruby:4, onyx:0} },
+        { id:'1_7', tier:1, bonus:'sapphire', pts:0, cost:{diamond:1, sapphire:0, emerald:1, ruby:1, onyx:1} },
+        { id:'1_8', tier:1, bonus:'ruby', pts:1, cost:{diamond:0, sapphire:0, emerald:4, ruby:0, onyx:0} }
+      ),
+      t2: Array(
+        { id:'2_1', tier:2, bonus:'diamond', pts:2, cost:{diamond:0, sapphire:0, emerald:2, ruby:2, onyx:3} },
+        { id:'2_2', tier:2, bonus:'sapphire', pts:1, cost:{diamond:2, sapphire:2, emerald:3, ruby:0, onyx:0} },
+        { id:'2_3', tier:2, bonus:'emerald', pts:2, cost:{diamond:3, sapphire:0, emerald:2, ruby:3, onyx:0} },
+        { id:'2_4', tier:2, bonus:'ruby', pts:3, cost:{diamond:6, sapphire:0, emerald:0, ruby:0, onyx:0} },
+        { id:'2_5', tier:2, bonus:'onyx', pts:2, cost:{diamond:0, sapphire:3, emerald:2, ruby:2, onyx:0} },
+        { id:'2_6', tier:2, bonus:'sapphire', pts:2, cost:{diamond:0, sapphire:2, emerald:4, ruby:1, onyx:0} }
+      ),
+      t3: Array(
+        { id:'3_1', tier:3, bonus:'diamond', pts:4, cost:{diamond:3, sapphire:0, emerald:0, ruby:0, onyx:7} },
+        { id:'3_2', tier:3, bonus:'sapphire', pts:3, cost:{diamond:3, sapphire:3, emerald:5, ruby:3, onyx:0} },
+        { id:'3_3', tier:3, bonus:'emerald', pts:4, cost:{diamond:0, sapphire:7, emerald:3, ruby:0, onyx:0} },
+        { id:'3_4', tier:3, bonus:'ruby', pts:5, cost:{diamond:3, sapphire:0, emerald:0, ruby:7, onyx:0} },
+        { id:'3_5', tier:3, bonus:'onyx', pts:4, cost:{diamond:7, sapphire:0, emerald:0, ruby:0, onyx:3} }
+      )
+    };
+
+    const NOBLE_DATA = Array(
+      { id:'n1', pts:3, reqs:{diamond:3, sapphire:3, emerald:3} },
+      { id:'n2', pts:3, reqs:{ruby:3, onyx:3, diamond:3} },
+      { id:'n3', pts:3, reqs:{emerald:3, ruby:3, sapphire:3} },
+      { id:'n4', pts:3, reqs:{onyx:3, sapphire:3, emerald:3} },
+      { id:'n5', pts:3, reqs:{diamond:4, emerald:0, ruby:4} }
+    );
+
+    const GEM_COLORS = {
+      diamond:  { l:'#ffffff', m:'#cbd5e1', d:'#94a3b8' },
+      sapphire: { l:'#93c5fd', m:'#3b82f6', d:'#1e3a8a' },
+      emerald:  { l:'#6ee7b7', m:'#10b981', d:'#065f46' },
+      ruby:     { l:'#fca5a5', m:'#ef4444', d:'#7f1d1d' },
+      onyx:     { l:'#64748b', m:'#334155', d:'#0f172a' },
+      gold:     { l:'#fde68a', m:'#f59e0b', d:'#92400e' }
+    };
+    let gemUid = 0;
+    function gemSVG(gem, size) {
+      const c = GEM_COLORS[gem] || GEM_COLORS.diamond;
+      const uid = 'g' + (++gemUid);
+      const s = Number(size);
+      return '<svg class="gem-ic" width="' + s + '" height="' + s + '" viewBox="0 0 100 100" aria-hidden="true">' +
+        '<defs>' +
+          '<linearGradient id="' + uid + 'b" x1="0" y1="0" x2="1" y2="1">' +
+            '<stop offset="0" stop-color="' + c.l + '"/><stop offset=".5" stop-color="' + c.m + '"/><stop offset="1" stop-color="' + c.d + '"/>' +
+          '</linearGradient>' +
+          '<linearGradient id="' + uid + 't" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="' + c.l + '"/>' +
+          '</linearGradient>' +
+        '</defs>' +
+        '<path d="M50 5 L88 26 L85 66 L50 95 L15 66 L12 26 Z" fill="url(#' + uid + 'b)" stroke="rgba(0,0,0,.45)" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M12 26 L50 47 L88 26 M15 66 L50 66 L85 66 M50 47 L50 66" fill="none" stroke="rgba(0,0,0,.32)" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M15 66 L50 95 M85 66 L50 95" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="2" stroke-linejoin="round"/>' +
+        '<path d="M50 16 L68 27 L66 46 L50 53 L34 46 L32 27 Z" fill="url(#' + uid + 't)" stroke="rgba(255,255,255,.5)" stroke-width="1.5" stroke-linejoin="round"/>' +
+        '<ellipse cx="36" cy="36" rx="15" ry="8" fill="#fff" opacity=".38" transform="rotate(-18 36 36)"/>' +
+        '<ellipse cx="31" cy="32" rx="6" ry="3" fill="#fff" opacity=".72" transform="rotate(-18 31 32)"/>' +
+      '</svg>';
+    }
+    const CROWN_SVG = '<svg class="crown-ic" width="20" height="20" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="crownG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffedbe"/><stop offset="1" stop-color="#a8722a"/></linearGradient></defs><path d="M14 30 L27 58 L50 22 L73 58 L86 30 L86 74 L14 74 Z" fill="url(#crownG)" stroke="rgba(0,0,0,.35)" stroke-width="2" stroke-linejoin="round"/></svg>';
+
+    
+
+    const CARD_BY_ID = {};
+    (function() { for (const t of ['t1','t2','t3']) for (const c of DECK_DATA[t]) CARD_BY_ID[c.id] = c; })();
+    let state = {
+      numPlayers: 2,
+      humans: 2,
+      currentPlayer: 0,
+      blockInput: false,
+      mode: 'local',
+      bank: {},
+      players: Array(),
+      decks: {},
+      market: { t1: Array(), t2: Array(), t3: Array() },
+      nobles: Array(),
+      selectedTokens: Array(),
+      resultPosted: false,
+      lastActionMsg: '',
+      log: Array()
+    };
+function shuffle(arr) {
+      const a = Array.from(arr);
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const temp = getItem(a, i);
+        setItem(a, i, getItem(a, j));
+        setItem(a, j, temp);
+      }
+      return a;
+    }
+
+    function showSetupModal() {
+      updateSetupTotal();
+      document.getElementById('setup-modal').classList.remove('hidden');
+    }
+
+    function updateSetupTotal() {
+      const h = parseInt(document.getElementById('setup-humans').value);
+      const a = parseInt(document.getElementById('setup-ai').value);
+      document.getElementById('setup-total').innerText = h + ' human' + (h !== 1 ? 's' : '') + ' + ' + a + ' computer' + (a !== 1 ? 's' : '');
+    }
+
+    function startCustomGame() {
+      const humans = parseInt(document.getElementById('setup-humans').value);
+      const ais = parseInt(document.getElementById('setup-ai').value);
+      if (humans + ais < 2 || humans + ais > 4) {
+        alert('Total players must be between 2 and 4.');
+        return;
+      }
+      startGame(humans, ais);
+    }
+
+    function makePlayer(name, isAI) {
+      return {
+        name: name,
+        isAI: isAI,
+        score: 0,
+        tokens: { diamond:0, sapphire:0, emerald:0, ruby:0, onyx:0, gold:0 },
+        bonuses: { diamond:0, sapphire:0, emerald:0, ruby:0, onyx:0 },
+        reserved: Array()
+      };
+    }
+
+    
+function startGame(humans, ais) {
+      document.getElementById('setup-modal').classList.add('hidden');
+      
+      const count = humans + ais;
+      const tokenCount = count === 2 ? 4 : (count === 3 ? 5 : 7);
+
+      const botNames = ['Ada', 'Kai', 'Rhea', 'Zane'];
+      const players = [];
+      for (let i = 0; i < humans; i++) {
+        players.push(makePlayer('Player ' + (i + 1), false));
+      }
+      for (let i = 0; i < ais; i++) {
+        players.push(makePlayer('Bot ' + botNames[i], true));
+      }
+      
+      state = {
+        numPlayers: count,
+        humans: humans,
+        currentPlayer: 0,
+        blockInput: false,
+        gameId: (state.gameId || 0) + 1,
+        mode: 'local',
+        lastActionMsg: '',
+        bank: { diamond: tokenCount, sapphire: tokenCount, emerald: tokenCount, ruby: tokenCount, onyx: tokenCount, gold: 5 },
+        players: players,
+        decks: {
+          t1: shuffle(getItem(DECK_DATA, 't1')),
+          t2: shuffle(getItem(DECK_DATA, 't2')),
+          t3: shuffle(getItem(DECK_DATA, 't3'))
+        },
+        market: { t1: Array(), t2: Array(), t3: Array() },
+        nobles: shuffle(NOBLE_DATA).slice(0, count + 1),
+        selectedTokens: Array(),
+        resultPosted: false,
+        log: Array('Game started with ' + count + ' players (' + humans + ' human, ' + ais + ' bot).')
+      };
+
+      const tiers = Array(1, 2, 3);
+      for (let t = 0; t < tiers.length; t++) {
+        const tier = getItem(tiers, t);
+        const deckKey = 't' + tier;
+        const deck = getItem(state.decks, deckKey);
+        const marketRow = getItem(state.market, deckKey);
+        for (let i = 0; i < 4; i++) {
+          if (deck.length > 0) {
+            marketRow.push(deck.pop());
+          }
+        }
+      }
+
+      render();
+      sfxPlay('deal');
+    }
+
+    
+    function logAction(msg) {
+      const p = getItem(state.players, state.currentPlayer);
+      state.log.unshift(p.name + ': ' + msg);
+      state.lastActionMsg = msg;
+      renderGameLog();
+    }
+function selectToken(gem) {
+      if (gem === 'gold' || state.blockInput) return;
+      const sel = state.selectedTokens;
+      const bankVal = getItem(state.bank, gem);
+
+      if (sel.length === 1 && getItem(sel, 0) === gem) {
+        if (bankVal >= 4) sel.push(gem);
+        else state.selectedTokens = Array();
+      } else if (sel.includes(gem)) {
+        state.selectedTokens = sel.filter(g => g !== gem);
+      } else if (sel.length < 3 && !(sel.length === 2 && getItem(sel, 0) === getItem(sel, 1))) {
+        if (bankVal > 0) sel.push(gem);
+      }
+      renderBank();
+    }
+
+    function clearTokenSelection() {
+      if (state.blockInput) return;
+      state.selectedTokens = Array();
+      renderBank();
+    }
+
+    function confirmTokens(byAI) {
+      if (state.blockInput && !byAI) return;
+      const p = getItem(state.players, state.currentPlayer);
+      state.selectedTokens.forEach(g => {
+        setItem(state.bank, g, getItem(state.bank, g) - 1);
+        setItem(p.tokens, g, getItem(p.tokens, g) + 1);
+      });
+
+      logAction('Took tokens (' + state.selectedTokens.map(g => g.substring(0,3)).join(', ') + ')');
+      state.selectedTokens = Array();
+      endTurn();
+      sfxPlay('chip');
+    }
+
+    
+function getCardCostDetails(player, card) {
+      let goldNeeded = 0;
+      let affordable = true;
+
+      GEMS.forEach(g => {
+        const cost = getItem(card.cost, g) || 0;
+        const netCost = Math.max(0, cost - getItem(player.bonuses, g));
+        const pTokens = getItem(player.tokens, g);
+        if (netCost > pTokens) {
+          goldNeeded += (netCost - pTokens);
+        }
+      });
+
+      if (goldNeeded > getItem(player.tokens, 'gold')) {
+        affordable = false;
+      }
+
+      return { affordable: affordable, goldNeeded: goldNeeded };
+    }
+
+    function buyCard(tier, index, fromReserved, byAI) {
+      if (state.blockInput && !byAI) return;
+      const p = getItem(state.players, state.currentPlayer);
+      const marketRow = tier ? getItem(state.market, 't' + tier) : null;
+      const card = fromReserved ? getItem(p.reserved, index) : getItem(marketRow, index);
+      
+      const costInfo = getCardCostDetails(p, card);
+      if (!costInfo.affordable) return;
+
+      GEMS.forEach(g => {
+        const netCost = Math.max(0, (getItem(card.cost, g) || 0) - getItem(p.bonuses, g));
+        const pTokens = getItem(p.tokens, g);
+        const tokenPay = Math.min(netCost, pTokens);
+        const goldPay = netCost - tokenPay;
+
+        setItem(p.tokens, g, pTokens - tokenPay);
+        setItem(state.bank, g, getItem(state.bank, g) + tokenPay);
+
+        setItem(p.tokens, 'gold', getItem(p.tokens, 'gold') - goldPay);
+        setItem(state.bank, 'gold', getItem(state.bank, 'gold') + goldPay);
+      });
+
+      setItem(p.bonuses, card.bonus, getItem(p.bonuses, card.bonus) + 1);
+      p.score += card.pts;
+
+      if (fromReserved) {
+        p.reserved.splice(index, 1);
+      } else {
+        const deck = getItem(state.decks, 't' + tier);
+        setItem(marketRow, index, deck.length > 0 ? deck.pop() : null);
+      }
+
+      logAction('Bought a Tier ' + card.tier + ' card (+' + card.pts + ' pts, ' + card.bonus + ' bonus)');
+      endTurn();
+      sfxPlay('draw');
+    }
+
+    function reserveCard(tier, index, byAI) {
+      if (state.blockInput && !byAI) return;
+      const p = getItem(state.players, state.currentPlayer);
+      if (p.reserved.length >= 3) return;
+
+      const marketRow = getItem(state.market, 't' + tier);
+      const card = getItem(marketRow, index);
+      if (!card) return;
+
+      p.reserved.push(card);
+      const deck = getItem(state.decks, 't' + tier);
+      setItem(marketRow, index, deck.length > 0 ? deck.pop() : null);
+
+      if (getItem(state.bank, 'gold') > 0) {
+        setItem(state.bank, 'gold', getItem(state.bank, 'gold') - 1);
+        setItem(p.tokens, 'gold', getItem(p.tokens, 'gold') + 1);
+      }
+
+      logAction('Reserved a Tier ' + tier + ' card');
+      endTurn();
+      sfxPlay('flip');
+    }
+
+    function reserveTopDeck(tier, byAI) {
+      if (state.blockInput && !byAI) return;
+      const p = getItem(state.players, state.currentPlayer);
+      const deck = getItem(state.decks, 't' + tier);
+      if (p.reserved.length >= 3 || deck.length === 0) return;
+
+      const card = deck.pop();
+      p.reserved.push(card);
+
+      if (getItem(state.bank, 'gold') > 0) {
+        setItem(state.bank, 'gold', getItem(state.bank, 'gold') - 1);
+        setItem(p.tokens, 'gold', getItem(p.tokens, 'gold') + 1);
+      }
+
+      logAction('Reserved top card from Tier ' + tier + ' deck');
+      endTurn();
+      sfxPlay('flip');
+    }
+
+    function checkNobles() {
+      const p = getItem(state.players, state.currentPlayer);
+      for (let i = 0; i < state.nobles.length; i++) {
+        const n = getItem(state.nobles, i);
+        let qualifies = true;
+        GEMS.forEach(g => {
+          if ((getItem(n.reqs, g) || 0) > getItem(p.bonuses, g)) qualifies = false;
+        });
+
+        if (qualifies) {
+          p.score += n.pts;
+          state.nobles.splice(i, 1);
+          logAction('Was visited by a Noble (+' + n.pts + ' pts)!');
+          break;
+        }
+      }
+    }
+
+    function totalTokens(player) {
+      return ALL_GEMS.reduce((sum, g) => sum + getItem(player.tokens, g), 0);
+    }
+
+    
+    function endTurn() {
+      checkNobles();
+
+      const hasWinner = state.players.some(p => p.score >= 15);
+      const nextP = (state.currentPlayer + 1) % state.numPlayers;
+      state.currentPlayer = nextP;
+
+      if (state.mode === 'online') {
+        const roundComplete = ((game.serverTurn + 1) % 2) === 0;
+        if (hasWinner && roundComplete) { finishOnlineGame(); }
+        else { submitOnlineMove(); }
+        return;
+      }
+
+      if (hasWinner && nextP === 0) {
+        if (!state.resultPosted) {
+          state.resultPosted = true;
+          postResultFor(state.players.findIndex(p => p.score >= 15));
+        }
+        render();
+        showGameOver();
+        return;
+      }
+
+      proceedToNextTurn();
+    }
+function proceedToNextTurn() {
+      render();
+      const p = getItem(state.players, state.currentPlayer);
+      state.blockInput = p.isAI;
+      if (p.isAI) {
+        const gameId = state.gameId;
+        setTimeout(function() {
+          if (state.gameId === gameId) runAITurn();
+        }, 850);
+      } else {
+        showTurnModal();
+      }
+    }
+
+    function showTurnModal() {
+      const p = getItem(state.players, state.currentPlayer);
+      document.getElementById('turn-title').innerText = p.name + "'s Turn";
+      document.getElementById('turn-body').innerText = state.humans > 1 ? 'Hand device to ' + p.name + '.' : "It's " + p.name + "'s turn. Make a move!";
+      document.getElementById('turn-modal').classList.remove('hidden');
+    }
+
+    function closeTurnModal() {
+      document.getElementById('turn-modal').classList.add('hidden');
+    }
+
+    
+    function showGameOver() {
+      const sorted = Array.from(state.players).sort((a, b) => b.score - a.score);
+      let rows = '';
+      for (let i = 0; i < sorted.length; i++) {
+        const p = getItem(sorted, i);
+        rows += '<div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border);' + (i === 0 ? ' color:var(--gold); font-weight:bold;' : '') + '">' +
+          '<span>' + (i + 1) + '. ' + p.name + (p.isAI ? ' (Bot)' : '') + (i === 0 ? ' 👑' : '') + '</span>' +
+          '<span>' + p.score + ' pts</span>' +
+          '</div>';
+      }
+      document.getElementById('gameover-standings').innerHTML = rows;
+      if (state.mode !== 'online') {
+        const top = sorted[0];
+        sfxPlay(top && !top.isAI ? 'win' : 'lose');
+      }
+      const nbtn = document.getElementById('gameover-newbtn');
+      if (nbtn) nbtn.textContent = (state.mode === 'online') ? 'Rematch' : 'New Game';
+      document.getElementById('gameover-modal').classList.remove('hidden');
+    }
+    function closeGameOver(newGame) {
+      document.getElementById('gameover-modal').classList.add('hidden');
+      if (newGame) {
+        if (state.mode === 'online' && game.mode === 'online') {
+          rpc('rematch', game.roomCode).then(function(r) { if (r && r.ok) refreshFromServer(); }).catch(function() {});
+          return;
+        }
+        showSetupModal();
+      }
+    }
+function cardCostSum(card) {
+      return GEMS.reduce(function(s, g) { return s + (getItem(card.cost, g) || 0); }, 0);
+    }
+
+    function aiThink() {
+      const p = getItem(state.players, state.currentPlayer);
+      const all = [];
+      for (let t = 1; t <= 3; t++) {
+        const row = getItem(state.market, 't' + t);
+        for (let i = 0; i < 4; i++) {
+          const card = getItem(row, i);
+          if (card) all.push({ card: card, tier: t, index: i, fromReserved: false });
+        }
+      }
+      for (let i = 0; i < p.reserved.length; i++) {
+        all.push({ card: getItem(p.reserved, i), tier: null, index: i, fromReserved: true });
+      }
+
+      const affordable = all.filter(function(c) { return getCardCostDetails(p, c.card).affordable; });
+      if (affordable.length) {
+        affordable.sort(function(a, b) {
+          return (b.card.pts * 100 + cardCostSum(b.card)) - (a.card.pts * 100 + cardCostSum(a.card));
+        });
+        return { action: 'buy', tier: getItem(affordable, 0).tier, index: getItem(affordable, 0).index, fromReserved: getItem(affordable, 0).fromReserved };
+      }
+
+      const reserveable = all.filter(function(c) { return !c.fromReserved; });
+      if (p.reserved.length < 3 && reserveable.length && Math.random() < 0.3) {
+        reserveable.sort(function(a, b) {
+          return (b.card.pts * 100 + cardCostSum(b.card)) - (a.card.pts * 100 + cardCostSum(a.card));
+        });
+        const target = getItem(reserveable, 0);
+        if (target.card.pts >= 1 || Math.random() < 0.5) {
+          return { action: 'reserve', tier: target.tier, index: target.index };
+        }
+      }
+
+      return { action: 'collect', gems: aiCollectGems(p) };
+    }
+
+    function aiCollectGems(p) {
+      const targets = [];
+      for (let t = 1; t <= 3; t++) {
+        const row = getItem(state.market, 't' + t);
+        for (let i = 0; i < 4; i++) {
+          const card = getItem(row, i);
+          if (card) targets.push(card);
+        }
+      }
+
+      let best = null;
+      let bestScore = -1;
+      for (let c = 0; c < targets.length; c++) {
+        const card = getItem(targets, c);
+        let dist = 0;
+        const needed = [];
+        for (let g = 0; g < GEMS.length; g++) {
+          const gem = getItem(GEMS, g);
+          const net = Math.max(0, (getItem(card.cost, gem) || 0) - getItem(p.bonuses, gem) - getItem(p.tokens, gem));
+          if (net > 0) {
+            dist += net;
+            needed.push({ g: gem, net: net });
+          }
+        }
+        const value = (card.pts || 0) * 100 + cardCostSum(card);
+        const score = dist === 0 ? 1e9 : value / dist;
+        if (score > bestScore) {
+          bestScore = score;
+          best = needed;
+        }
+      }
+
+      if (!best) return Array();
+
+      const take = [];
+      best.sort(function(a, b) { return b.net - a.net; });
+      for (let i = 0; i < best.length; i++) {
+        if (take.length >= 3) break;
+        if (getItem(state.bank, best[i].g) > 0) take.push(best[i].g);
+      }
+
+      if (take.length === 1) {
+        let added = false;
+        for (let i = 0; i < GEMS.length; i++) {
+          const g = getItem(GEMS, i);
+          if (!take.includes(g) && getItem(state.bank, g) > 0) {
+            take.push(g);
+            added = true;
+            break;
+          }
+        }
+        if (!added && getItem(state.bank, take[0]) >= 4) take.push(take[0]);
+      }
+      if (take.length === 0) {
+        const avail = GEMS.filter(function(g) { return getItem(state.bank, g) > 0; });
+        if (avail.length >= 3) take.push(getItem(avail, 0), getItem(avail, 1), getItem(avail, 2));
+        else if (avail.length === 2) take.push(getItem(avail, 0), getItem(avail, 1));
+        else if (avail.length === 1 && getItem(state.bank, avail[0]) >= 4) take.push(getItem(avail, 0), getItem(avail, 0));
+        else if (avail.length === 1) take.push(getItem(avail, 0));
+      }
+
+      return take;
+    }
+
+    function runAITurn() {
+      const move = aiThink();
+      if (move.action === 'buy') {
+        buyCard(move.tier, move.index, move.fromReserved, true);
+      } else if (move.action === 'reserve') {
+        reserveCard(move.tier, move.index, true);
+      } else {
+        state.selectedTokens = move.gems;
+        confirmTokens(true);
+      }
+    }
+
+    
+    function render() {
+      const ind = document.getElementById('turn-indicator');
+      const p = state.players[state.currentPlayer];
+      if (ind) {
+        if (state.mode === 'online' && !p) { ind.textContent = game.waitingForInit ? 'Waiting for opponent…' : ''; }
+        else if (p) { ind.textContent = (state.mode === 'online' && game.myRole && state.players[myIndex()] === p) ? 'Your turn' : p.name + "'s Turn"; }
+        else { ind.textContent = ''; }
+      }
+      renderNobles();
+      renderMarket();
+      renderBank();
+      renderPlayers();
+      renderGameLog();
+      refreshTurn();
+      updateBanner();
+    }
+function renderNobles() {
+      const el = document.getElementById('nobles-container');
+      let html = '';
+      for (let i = 0; i < state.nobles.length; i++) {
+        const n = getItem(state.nobles, i);
+        let reqsHtml = '';
+        for (let g = 0; g < GEMS.length; g++) {
+          const gem = getItem(GEMS, g);
+          const reqVal = getItem(n.reqs, gem);
+          if (reqVal) {
+            reqsHtml += '<span class="noble-req">' + gemSVG(gem, 15) + '<b>&times;' + reqVal + '</b></span>';
+          }
+        }
+        html += '<div class="noble-card">' +
+          '<div class="noble-crown">' + CROWN_SVG + '</div>' +
+          '<div class="noble-pts">+' + n.pts + '</div>' +
+          '<div class="noble-reqs">' + reqsHtml + '</div>' +
+          '</div>';
+      }
+      el.innerHTML = html;
+    }
+
+    function renderMarket() {
+      const tiers = Array(3, 2, 1);
+      for (let t = 0; t < tiers.length; t++) {
+        const tier = getItem(tiers, t);
+        const row = document.getElementById('row-tier-' + tier);
+        const deck = getItem(state.decks, 't' + tier);
+        const marketRow = getItem(state.market, 't' + tier);
+        
+        let html = '<div class="deck-tile deck-' + tier + '" onclick="reserveTopDeck(' + tier + ')">' +
+          gemSVG({1:'emerald', 2:'gold', 3:'sapphire'}[tier], 30) +
+          '<div>Tier ' + tier + '</div>' +
+          '<div class="deck-count">' + deck.length + '</div>' +
+          '</div>';
+
+        for (let i = 0; i < 4; i++) {
+          const card = getItem(marketRow, i);
+          if (!card) {
+            html += '<div class="card" style="opacity:0.2;">Empty</div>';
+          } else {
+            const p = getItem(state.players, state.currentPlayer);
+            const costInfo = getCardCostDetails(p, card);
+            const affordable = costInfo.affordable;
+            
+            let costsHtml = '';
+            for (let g = 0; g < GEMS.length; g++) {
+              const gem = getItem(GEMS, g);
+              const costVal = getItem(card.cost, gem);
+              if (costVal) {
+                costsHtml += '<div class="cost-item">' +
+                  gemSVG(gem, 14) +
+                  '<span>' + costVal + '</span>' +
+                  '</div>';
+              }
+            }
+
+            html += '<div class="card ' + (affordable ? 'affordable' : '') + '">' +
+              '<div class="card-top">' +
+                '<span class="card-pts">' + (card.pts || '') + '</span>' +
+                gemSVG(card.bonus, 19) +
+              '</div>' +
+              '<div class="card-cost-list">' + costsHtml + '</div>' +
+              '<div class="card-btns">' +
+                '<button class="btn-xs btn-buy" onclick="buyCard(' + tier + ', ' + i + ')" ' + (affordable ? '' : 'disabled') + '>Buy</button>' +
+                '<button class="btn-xs btn-res" onclick="reserveCard(' + tier + ', ' + i + ')" ' + (p.reserved.length < 3 ? '' : 'disabled') + '>Res</button>' +
+              '</div>' +
+            '</div>';
+          }
+        }
+        row.innerHTML = html;
+      }
+    }
+
+    function renderBank() {
+      const grid = document.getElementById('bank-grid');
+      const sel = state.selectedTokens;
+      let html = '';
+
+      for (let i = 0; i < ALL_GEMS.length; i++) {
+        const g = getItem(ALL_GEMS, i);
+        const count = getItem(state.bank, g);
+        let selectedCount = 0;
+        for (let s = 0; s < sel.length; s++) {
+          if (getItem(sel, s) === g) selectedCount++;
+        }
+        const isSelected = selectedCount > 0;
+
+        html += '<div class="token-btn ' + (isSelected ? 'selected' : '') + '" onclick="selectToken(\'' + g + '\')">' +
+          '<div class="token-gem">' + gemSVG(g, 34) + '<span class="token-n">' + count + '</span></div>' +
+          '<div class="token-label">' + g.toUpperCase() + (selectedCount ? ' <span class="token-sel">x' + selectedCount + '</span>' : '') + '</div>' +
+          '</div>';
+      }
+
+      grid.innerHTML = html;
+
+      const btnCollect = document.getElementById('btn-collect');
+      const isValid = (sel.length === 3 && (new Set(sel)).size === 3) || (sel.length === 2 && getItem(sel, 0) === getItem(sel, 1));
+      btnCollect.disabled = !isValid;
+    }
+
+    function renderPlayers() {
+      const container = document.getElementById('players-container');
+      let html = '';
+
+      for (let idx = 0; idx < state.players.length; idx++) {
+        const p = getItem(state.players, idx);
+        const isActive = idx === state.currentPlayer;
+
+        let bonusesHtml = '';
+        for (let g = 0; g < GEMS.length; g++) {
+          const gem = getItem(GEMS, g);
+          bonusesHtml += '<span class="chip">' + gemSVG(gem, 15) + '<b>' + getItem(p.bonuses, gem) + '</b></span>';
+        }
+
+        let tokensHtml = '';
+        for (let g = 0; g < ALL_GEMS.length; g++) {
+          const gem = getItem(ALL_GEMS, g);
+          tokensHtml += '<span class="chip">' + gemSVG(gem, 15) + '<b>' + getItem(p.tokens, gem) + '</b></span>';
+        }
+
+        let reservedHtml = '';
+        if (p.reserved.length > 0) {
+          reservedHtml = '<div style="font-size:0.75rem; color:var(--muted); font-weight:bold; margin-top:6px;">Reserved Cards:</div><div style="display:flex; gap:6px; flex-wrap:wrap;">';
+          for (let rIdx = 0; rIdx < p.reserved.length; rIdx++) {
+            const c = getItem(p.reserved, rIdx);
+            const costInfo = getCardCostDetails(p, c);
+            const affordable = costInfo.affordable;
+            let resCosts = '';
+            for (let g = 0; g < GEMS.length; g++) {
+              const gem = getItem(GEMS, g);
+              const costVal = getItem(c.cost, gem);
+              if (costVal) {
+                resCosts += '<div class="cost-item">' + gemSVG(gem, 12) + '<span>' + costVal + '</span></div>';
+              }
+            }
+            reservedHtml += '<div class="card res-card">' +
+              '<div class="card-top">' +
+                '<span style="font-weight:bold; font-size:0.8rem;">' + (c.pts || '') + '</span>' +
+                gemSVG(c.bonus, 15) +
+              '</div>' +
+              '<div class="card-cost-list">' + resCosts + '</div>' +
+              (isActive ? '<div class="card-btns"><button class="btn-xs btn-buy" onclick="buyCard(null, ' + rIdx + ', true)" ' + (affordable ? '' : 'disabled') + '>Buy</button></div>' : '') +
+              '</div>';
+          }
+          reservedHtml += '</div>';
+        }
+
+        html += '<div class="player-card ' + (isActive ? 'active' : '') + '">' +
+          '<div class="player-header">' +
+            '<span style="font-weight:bold;">' + p.name + (p.isAI ? ' <span class="badge gem-bg-onyx">BOT</span>' : '') + (isActive ? ' <span class="badge gem-bg-gold">TURN</span>' : '') + '</span>' +
+            '<span style="font-weight:bold; color:var(--gold); font-size:1.1rem;">' + p.score + ' PTS</span>' +
+          '</div>' +
+          '<div style="font-size:0.75rem; color:var(--muted); font-weight:bold; margin-top:2px;">Cards/Bonuses:</div>' +
+          '<div style="display:flex; gap:4px; flex-wrap:wrap;">' + bonusesHtml + '</div>' +
+          '<div style="font-size:0.75rem; color:var(--muted); font-weight:bold; margin-top:6px;">Tokens (' + totalTokens(p) + '/10):</div>' +
+          '<div style="display:flex; gap:4px; flex-wrap:wrap;">' + tokensHtml + '</div>' +
+          reservedHtml +
+          '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
+    
+    function renderGameLog() {
+      const logBox = document.getElementById('log-box');
+      if (!logBox) return;
+      let html = '';
+      for (let i = 0; i < state.log.length; i++) {
+        html += '<div>' + escapeHtml(getItem(state.log, i)) + '</div>';
+      }
+      logBox.innerHTML = html;
+    }
+function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    function parseLbResult(msg) {
+      if (typeof msg !== 'string') return null;
+      const pre = 'SPLENDOR-LB|';
+      if (msg.slice(0, pre.length) !== pre) return null;
+      try {
+        const o = JSON.parse(msg.slice(pre.length));
+        if (!o || !Array.isArray(o.players) || o.players.length < 2) return null;
+        if (typeof o.winner !== 'number' || o.winner < 0 || o.winner >= o.players.length) return null;
+        if (typeof o.margin !== 'number' || o.margin < 0) return null;
+        return o;
+      } catch (e) { return null; }
+    }
+
+    const LB = {
+      accounts: {},
+      myId: null,
+      raw: [],
+      seen: {},
+      loadingHistory: false,
+      postStatus: null,
+
+      reset() {
+        this.accounts = {};
+        this.raw = [];
+        this.seen = {};
+        this.myId = null;
+        this.loadingHistory = false;
+      },
+
+      onCommentsLoaded(comments, extras) {
+        this.reset();
+        this.ingest(comments || []);
+        if (extras && extras.loadMoreButton) this.loadAllHistory(extras.loadMoreButton);
+        this.drainQueue();
+        refreshLbDisplay();
+      },
+
+      onMoreComments(comments) {
+        this.ingest(comments || []);
+        refreshLbDisplay();
+      },
+
+      onNewComment(c) {
+        this.ingest([c]);
+        refreshLbDisplay();
+      },
+
+      loadAllHistory(btn) {
+        if (this.loadingHistory) return;
+        this.loadingHistory = true;
+        const iframe = document.querySelector('#lb-host iframe');
+        if (!iframe) { this.loadingHistory = false; return; }
+        const uid = Array.from(iframe.classList).find(c => /^id\d+$/.test(c));
+        if (!uid) { this.loadingHistory = false; return; }
+        const step = async () => {
+          for (let i = 0; i < 40; i++) {
+            if (btn.style.display === 'none' || btn.disabled) break;
+            iframe.contentWindow.postMessage({ iframeUniqueId: uid, loadMoreButtonClick: true }, '*');
+            await new Promise(r => setTimeout(r, 1500));
+          }
+          this.loadingHistory = false;
+          refreshLbDisplay();
+        };
+        step();
+      },
+
+      ingest(comments) {
+        for (let i = 0; i < comments.length; i++) {
+          const c = comments[i];
+          if (!c || this.seen[c.id]) continue;
+          this.seen[c.id] = true;
+          if (c.byCurrentUser && c.user && c.user.id) this.myId = c.user.id;
+          const rec = parseLbResult(c.message);
+          if (!rec) continue;
+          rec.userId = (c.user && c.user.id) || 'anon';
+          rec.userName = (c.user && (c.user.nickname || c.user.visualId)) || 'Guest';
+          const a = this.accounts[rec.userId] || (this.accounts[rec.userId] = { id: rec.userId, name: rec.userName, games: 0, wins: 0, bestMargin: 0, gamesSeen: {} });
+          if (rec.gid && a.gamesSeen[rec.gid]) continue;
+          if (rec.gid) a.gamesSeen[rec.gid] = true;
+          a.name = rec.userName;
+          this.raw.push(rec);
+          a.games++;
+          if (rec.players[rec.winner] && rec.players[rec.winner].h === 1) {
+            a.wins++;
+            if (rec.margin > a.bestMargin) a.bestMargin = rec.margin;
+          }
+        }
+      },
+
+      submitResult(record) {
+        const com = root.lbCom;
+        if (!com || typeof com.submit !== 'function') { this.queuePending(record); return; }
+        record.gid = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+        this.postStatus = 'pending';
+        const msg = 'SPLENDOR-LB|' + JSON.stringify(record);
+        com.submit(msg).then(function(res) {
+          if (res && res.success) { LB.postStatus = 'ok'; console.log('Leaderboard: result posted.'); }
+        }).catch(function(err) {
+          LB.postStatus = 'failed';
+          LB.queuePending(record);
+          console.warn('Leaderboard post failed:', err && err.message);
+        });
+      },
+
+      queuePending(record) {
+        let q = [];
+        try { q = JSON.parse(localStorage.getItem('splendor-lb-queue') || '[]'); } catch (e) {}
+        q.push(record);
+        try { localStorage.setItem('splendor-lb-queue', JSON.stringify(q.slice(-50))); } catch (e) {}
+      },
+
+      drainQueue() {
+        let q = [];
+        try { q = JSON.parse(localStorage.getItem('splendor-lb-queue') || '[]'); } catch (e) {}
+        if (!q.length) return;
+        const com = root.lbCom;
+        if (!com || typeof com.submit !== 'function') return;
+        const submitNext = (i) => {
+          if (i >= q.length) {
+            try { localStorage.removeItem('splendor-lb-queue'); } catch (e) {}
+            return;
+          }
+          const rec = q[i];
+          if (!rec.gid) rec.gid = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+          com.submit('SPLENDOR-LB|' + JSON.stringify(rec)).then(function(res) {
+            if (res && res.success) submitNext(i + 1);
+          }).catch(function() {
+            LB.postStatus = 'failed';
+          });
+        };
+        submitNext(0);
+      }
+    };
+    window.LB = LB;
+
+    function lbRank(accounts, sortFn) {
+      const sorted = Array.from(accounts).sort(sortFn);
+      const myIdx = LB.myId ? sorted.findIndex(a => a.id === LB.myId) : -1;
+      return { list: sorted.slice(0, 5), myRank: myIdx === -1 ? null : myIdx + 1 };
+    }
+
+    function renderLeaderboard() {
+      const ctn = document.getElementById('lb-content');
+      const your = document.getElementById('lb-yourstats');
+      if (!ctn) return;
+      const accounts = Object.values(LB.accounts);
+      let note = '';
+      let queued = 0;
+      try { queued = JSON.parse(localStorage.getItem('splendor-lb-queue') || '[]').length; } catch (e) {}
+      if (LB.postStatus === 'failed' || queued > 0) {
+        note = '<div class="lb-note">Your last result couldn\u2019t be posted yet (network blocked). It\u2019s saved and will be sent automatically when possible.</div>';
+      }
+      if (accounts.length === 0) {
+        ctn.innerHTML = note + '<div style="text-align:center; color:var(--muted); padding:18px 0; font-size:.85rem; line-height:1.6;">No games recorded yet.<br>Finish a game and the result is posted to your account automatically.</div>';
+        your.innerHTML = '<div class="lb-your lb-nomatch">Play a game to appear here.</div>';
+        return;
+      }
+
+      const byWins = function(a, b) { return b.wins - a.wins || b.games - a.games || b.bestMargin - a.bestMargin; };
+      const byMargin = function(a, b) { return b.bestMargin - a.bestMargin || b.wins - a.wins; };
+      const byGames = function(a, b) { return b.games - a.games || b.wins - a.wins; };
+
+      function rowHtml(a, i, val) {
+        const me = LB.myId && a.id === LB.myId;
+        return '<div class="lb-row' + (me ? ' lb-you' : '') + '">' +
+          '<span class="lb-rank">' + (i + 1) + '</span>' +
+          '<span class="lb-name">' + escapeHtml(a.name) + (me ? ' <span class="badge gem-bg-gold">YOU</span>' : '') + '</span>' +
+          '<span class="lb-val">' + val + '</span>' +
+          '</div>';
+      }
+
+      function section(title, entries, valFn) {
+        if (!entries.length) return '';
+        let rows = '';
+        for (let i = 0; i < entries.length; i++) rows += rowHtml(entries[i], i, valFn(entries[i]));
+        return '<div class="lb-section"><div class="lb-section-title">' + title + '</div>' + rows + '</div>';
+      }
+
+      const winRank = lbRank(accounts, byWins);
+      const margRank = lbRank(accounts, byMargin);
+      const gameRank = lbRank(accounts, byGames);
+
+      ctn.innerHTML = note +
+        section('Most Wins', winRank.list, function(a) { return a.wins + ' win' + (a.wins === 1 ? '' : 's'); }) +
+        section('Biggest Win Margin', margRank.list, function(a) { return 'won by ' + a.bestMargin; }) +
+        section('Most Games Played', gameRank.list, function(a) { return a.games + ' game' + (a.games === 1 ? '' : 's'); });
+
+      const me = LB.myId ? LB.accounts[LB.myId] : null;
+      if (me) {
+        const rankParts = [];
+        if (winRank.myRank) rankParts.push('#' + winRank.myRank + ' in wins');
+        if (margRank.myRank) rankParts.push('#' + margRank.myRank + ' in margin');
+        if (gameRank.myRank) rankParts.push('#' + gameRank.myRank + ' in games');
+        your.innerHTML = '<div class="lb-your"><b>Your record:</b> ' + me.games + ' game' + (me.games === 1 ? '' : 's') +
+          ' · ' + me.wins + ' win' + (me.wins === 1 ? '' : 's') + ' · best margin ' + me.bestMargin +
+          (rankParts.length ? '<div class="lb-rankline">' + rankParts.join(' · ') + '</div>' : '') +
+          '</div>';
+      } else {
+        your.innerHTML = '<div class="lb-your lb-nomatch">Play a game to see your rank here.</div>';
+      }
+    }
+
+    function refreshLbDisplay() {
+      const m = document.getElementById('lb-modal');
+      if (m && !m.classList.contains('hidden')) renderLeaderboard();
+    }
+
+    function showLeaderboard() {
+      document.getElementById('lb-modal').classList.remove('hidden');
+      renderLeaderboard();
+    }
+
+    function closeLeaderboard() {
+      document.getElementById('lb-modal').classList.add('hidden');
+    }
+
+    
+    function closeSetupModal() {
+      document.getElementById('setup-modal').classList.add('hidden');
+    }
+
+    /* ══════════ online-mode helpers (BGN table) ══════════ */
+    function myIndex() { return game.myRole === 'host' ? 0 : 1; }
+
+    function computeOnlineWinner() {
+      const a = state.players[0], b = state.players[1];
+      if (!a || !b) return 'draw';
+      const cards = (p) => GEMS.reduce((s, g) => s + getItem(p.bonuses, g), 0);
+      if (a.score !== b.score) return a.score > b.score ? 'host' : 'guest';
+      const ca = cards(a), cb = cards(b);
+      if (ca !== cb) return ca < cb ? 'host' : 'guest';
+      return 'draw';
+    }
+
+    function serializeState(finFlag, lastMsg) {
+      return JSON.stringify({
+        v: 1,
+        c: state.currentPlayer,
+        b: ALL_GEMS.map(g => getItem(state.bank, g)),
+        d: ['t1','t2','t3'].map(k => getItem(state.decks, k).map(c => c.id)),
+        m: ['t1','t2','t3'].map(k => getItem(state.market, k).map(c => c ? c.id : 0)),
+        n: state.nobles.map(no => NOBLE_DATA.indexOf(no)),
+        p: state.players.map(pl => ({ s: pl.score, t: ALL_GEMS.map(g => getItem(pl.tokens, g)), b: GEMS.map(g => getItem(pl.bonuses, g)), r: pl.reserved.map(c => c.id) })),
+        f: finFlag ? 1 : 0,
+        x: lastMsg || ''
+      });
+    }
+
+    function applySnapData(s) {
+      state.mode = 'online';
+      state.bank = {};
+      ALL_GEMS.forEach((g, i) => { state.bank[g] = s.b[i]; });
+      state.decks = { t1: [], t2: [], t3: [] };
+      state.market = { t1: [], t2: [], t3: [] };
+      ['t1','t2','t3'].forEach((k, i) => {
+        state.decks[k] = s.d[i].map(id => CARD_BY_ID[id]);
+        state.market[k] = s.m[i].map(id => id ? CARD_BY_ID[id] : null);
+      });
+      state.nobles = s.n.map(i => NOBLE_DATA[i]);
+      state.players = s.p.map(pp => {
+        const pl = makePlayer('', false);
+        pl.score = pp.s;
+        ALL_GEMS.forEach((g, i) => { pl.tokens[g] = pp.t[i]; });
+        GEMS.forEach((g, i) => { pl.bonuses[g] = pp.b[i]; });
+        pl.reserved = pp.r.map(id => CARD_BY_ID[id]);
+        return pl;
+      });
+      if (state.players[0]) state.players[0].name = 'Host';
+      if (state.players[1]) state.players[1].name = 'Guest';
+      state.currentPlayer = s.c;
+      state.numPlayers = 2;
+      state.humans = 0;
+      state.selectedTokens = [];
+      state.resultPosted = false;
+      const prevActor = 1 - s.c;
+      const prevName = state.players[prevActor] ? state.players[prevActor].name : (prevActor === 0 ? 'Host' : 'Guest');
+      state.log = s.x ? Array(prevName + ': ' + s.x) : Array();
+      state.lastActionMsg = s.x || '';
+      return s.f === 1;
+    }
+
+    function makeEmptyOnlineState() {
+      state.mode = 'online';
+      state.numPlayers = 2; state.humans = 0; state.currentPlayer = 0; state.blockInput = true;
+      state.bank = {};
+      ALL_GEMS.forEach(g => { state.bank[g] = 0; });
+      state.players = [];
+      state.selectedTokens = [];
+      state.decks = { t1: [], t2: [], t3: [] };
+      state.market = { t1: [], t2: [], t3: [] };
+      state.nobles = [];
+      state.resultPosted = false;
+      state.log = [];
+      state.lastActionMsg = '';
+    }
+
+    function buildOnlineInitial() {
+      const tokenCount = 4;
+      state.mode = 'online';
+      state.numPlayers = 2; state.humans = 0;
+      state.currentPlayer = myIndex();
+      state.blockInput = true;
+      state.gameId = (state.gameId || 0) + 1;
+      state.bank = { diamond: tokenCount, sapphire: tokenCount, emerald: tokenCount, ruby: tokenCount, onyx: tokenCount, gold: 5 };
+      state.players = [makePlayer('Host', false), makePlayer('Guest', false)];
+      state.decks = { t1: shuffle(getItem(DECK_DATA, 't1')), t2: shuffle(getItem(DECK_DATA, 't2')), t3: shuffle(getItem(DECK_DATA, 't3')) };
+      state.market = { t1: Array(), t2: Array(), t3: Array() };
+      for (let t = 1; t <= 3; t++) {
+        const k = 't' + t;
+        const deck = getItem(state.decks, k);
+        const row = getItem(state.market, k);
+        for (let i = 0; i < 4; i++) { if (deck.length > 0) row.push(deck.pop()); }
+      }
+      state.nobles = shuffle(NOBLE_DATA).slice(0, 3);
+      state.selectedTokens = Array();
+      state.resultPosted = false;
+      state.log = Array((game.myRole === 'host' ? 'Host' : 'Guest') + ' is hosting this table.');
+      state.lastActionMsg = '';
+      game.waitingForInit = false;
+      game.initialBuilt = true;
+      render();
+    }
+
+    function postResultFor(winnerIdx) {
+      const wi = Math.max(0, winnerIdx);
+      let bestOther = -1;
+      for (let i = 0; i < state.players.length; i++) {
+        if (i !== wi && state.players[i].score > bestOther) bestOther = state.players[i].score;
+      }
+      LB.submitResult({
+        v: 1,
+        players: state.players.map(p => ({ n: p.name, s: p.score, h: p.isAI ? 0 : 1 })),
+        winner: wi,
+        margin: Math.max(0, state.players[wi].score - bestOther)
+      });
+    }
+
+    function submitOnlineMove() {
+      if (!game.sockOpen || game.status !== 2) return;
+      game.locked = true;
+      const data = serializeState(0, state.lastActionMsg);
+      const evt = game.serverTurn;
+      rpc('move', JSON.stringify({ code: game.roomCode, evt: evt, data: data })).then(function(r) {
+        game.locked = false;
+        if (!r || !r.ok) {
+          flashBanner("Couldn't send your move (" + (r && r.err ? r.err : 'error') + ").");
+          refreshFromServer();
+          return;
+        }
+        state.blockInput = true;
+        updateBanner();
+      }).catch(function() {
+        game.locked = false;
+        flashBanner("Couldn't reach the server — reconnecting…");
+      });
+    }
+
+    function finishOnlineGame() {
+      const winnerRole = computeOnlineWinner();
+      const data = serializeState(1, state.lastActionMsg);
+      const evt = game.serverTurn;
+      game.locked = true;
+      rpc('move', JSON.stringify({ code: game.roomCode, evt: evt, data: data })).then(function() {
+        finalizeEndGame(winnerRole, 0);
+      }).catch(function() {
+        finalizeEndGame(winnerRole, 0);
+      });
+    }
+
+    function finalizeEndGame(winnerRole, attempt) {
+      rpc('endGame', JSON.stringify({ code: game.roomCode, winner: winnerRole })).then(function() {
+        game.locked = false;
+        state.blockInput = true;
+        postResultFor(winnerRole === 'host' ? 0 : winnerRole === 'guest' ? 1 : 0);
+        render();
+      }).catch(function() {
+        if (attempt < 4) { setTimeout(function() { finalizeEndGame(winnerRole, attempt + 1); }, 1200); }
+        else { game.locked = false; flashBanner("Couldn't finalize the match."); }
+      });
+    }
+
+    function applyServerSnap(s) {
+      game.serverTurn = s.turn;
+      game.first = s.first;
+      game.status = s.status;
+      game.oppPresent = game.myRole === 'host' ? s.guestIn : s.hostIn;
+      let snapData = null;
+      if (s.snapshot) { try { snapData = JSON.parse(s.snapshot); } catch (e) {} }
+      if (snapData) {
+        game.waitingForInit = false;
+        const fin = applySnapData(snapData);
+        if (s.status === 3) { game.over = true; game.winner = s.winner; game.reason = s.reason || ''; }
+        state.blockInput = game.over ? true : !(snapData.c === myIndex());
+        game.locked = fin ? true : false;
+        render();
+        if (fin) { flashBanner('The round is over — finalizing the result…'); }
+        addLog(snapData.c === 0 ? 'guest' : 'host', snapData.x || 'played a turn');
+      } else if (game.mode === 'online') {
+        if (s.status === 2 && turnRoleFor(s.turn) === game.myRole) {
+          if (!game.initialBuilt || game.over) { game.over = false; buildOnlineInitial(); }
+          state.blockInput = false;
+          render();
+        } else if (s.status === 2) {
+          game.waitingForInit = true;
+          if (!state.players.length || game.over) makeEmptyOnlineState();
+          game.over = false;
+          state.blockInput = true;
+          render();
+        }
+      }
+      if (s.status === 3) {
+        game.over = true; game.winner = s.winner; game.reason = s.reason || '';
+        state.blockInput = true;
+        sfxPlay(game.winner === 'draw' ? 'draw2' : (game.winner === game.myRole ? 'win' : 'lose'));
+        render();
+        showGameOver();
+      }
+      renderAll();
+    }
+
+    /* ══════════ BGN frame logic ══════════ */
+    function turnRoleFor(n) { return ((n + (game.first ? 1 : 0)) % 2) === 0 ? 'host' : 'guest'; }
+    function roleName(r) { return r === 'host' ? 'Host' : 'Guest'; }
+    function esc(s) { return String(s).replace(/[&<>"']/g, function(c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+    function updateNames() {
+      if (game.mode === 'online' && game.myRole) {
+        hostNameEl.textContent = game.myRole === 'host' ? 'You' : 'Host';
+        guestNameEl.textContent = game.myRole === 'host' ? 'Guest' : 'You';
+      } else {
+        hostNameEl.textContent = 'Host';
+        guestNameEl.textContent = 'Guest';
+      }
+    }
+    function addLog(role, msg) {
+      game.log.push({ r: role, m: msg });
+      if (game.log.length > 60) game.log.shift();
+      renderMatchLog();
+    }
+    function renderMatchLog() {
+      logEl.innerHTML = '';
+      if (!game.log.length) { logEl.innerHTML = '<div class="muted small">No turns yet.</div>'; return; }
+      const frag = document.createDocumentFragment();
+      for (const e of game.log) {
+        const div = document.createElement('div');
+        div.className = 'log-item';
+        div.innerHTML = '<b>' + esc(roleName(e.r)) + '</b><span class="resp">' + esc(e.m) + '</span>';
+        frag.appendChild(div);
+      }
+      logEl.appendChild(frag);
+    }
+    function resultText() {
+      if (game.winner === 'draw') return 'Draw — the match is over.';
+      const w = roleName(game.winner);
+      const youWon = game.mode === 'online' && game.winner === game.myRole;
+      if (youWon) {
+        if (game.reason === 'resign') return 'You win — your opponent resigned!';
+        if (game.reason === 'forfeit') return 'You win — your opponent left!';
+        return 'You win!';
+      }
+      if (game.mode === 'online' && game.winner !== game.myRole) {
+        if (game.reason === 'resign') return 'You lose — you resigned.';
+        if (game.reason === 'forfeit') return 'You lose — you left the match.';
+        return 'You lose.';
+      }
+      if (game.reason === 'resign') return w + ' wins by resignation.';
+      if (game.reason === 'forfeit') return w + ' wins — the other side left.';
+      return w + ' wins!';
+    }
+    function updateBanner() {
+      let msg = '';
+      if (game.mode === 'online') {
+        if (game.over) msg = resultText();
+        else if (!game.sockOpen) msg = 'Connecting…';
+        else if (game.status === 1) msg = 'Waiting for an opponent to join — share the room code.';
+        else if (game.waitingForInit) msg = 'Waiting for the first move to start the game…';
+        else if (!game.oppPresent) msg = 'Your opponent disconnected — they can rejoin with the code. Claim the win anytime.';
+        else if (turnRoleFor(game.serverTurn) === game.myRole) msg = 'Your turn — make a move!';
+        else msg = 'Waiting for your opponent…';
+      } else {
+        msg = '';
+      }
+      bannerEl.textContent = msg;
+    }
+    let bannerTimer = null;
+    function flashBanner(msg) { bannerEl.textContent = msg; if (bannerTimer) clearTimeout(bannerTimer); bannerTimer = setTimeout(updateBanner, 2600); }
+    function refreshTurn() {
+      if (game.mode !== 'online') { pHost.classList.remove('on'); pGuest.classList.remove('on'); turnEl.textContent = ''; return; }
+      if (game.over) { pHost.classList.remove('on'); pGuest.classList.remove('on'); turnEl.textContent = 'Match over'; return; }
+      const r = turnRoleFor(game.serverTurn);
+      pHost.classList.toggle('on', r === 'host');
+      pGuest.classList.toggle('on', r === 'guest');
+      turnEl.textContent = (r === game.myRole ? 'Your move — ' : '') + roleName(r) + ' to move';
+    }
+    function updateButtons() {
+      if (game.mode === 'online') {
+        toolbarNewBtn.textContent = game.over ? 'Rematch' : 'New match';
+        toolbarNewBtn.classList.toggle('hidden', !game.over);
+        claimBtn.classList.toggle('hidden', !(game.status === 2 && !game.over && !game.oppPresent));
+      } else {
+        toolbarNewBtn.textContent = 'New Game';
+        toolbarNewBtn.classList.remove('hidden');
+        claimBtn.classList.add('hidden');
+      }
+    }
+    function renderAll() {
+      updateNames();
+      refreshTurn();
+      updateBanner();
+      updateButtons();
+      renderMatchLog();
+    }
+    function resetTable() {
+      game.log = [];
+      game.lastLoggedTurn = 0;
+      game.over = false; game.winner = null; game.reason = '';
+      game.locked = false;
+      game.initialBuilt = false;
+      game.waitingForInit = true;
+    }
+    function enterGameView(mode) {
+      lobbyCtn.classList.add('hidden');
+      gameCtn.classList.remove('hidden');
+      gameCtn.classList.toggle('online', mode === 'online');
+      playersRow.classList.toggle('hidden', mode !== 'online');
+      sidePanel.classList.toggle('hidden', mode !== 'online');
+      roomBox.classList.add('hidden');
+      hero.classList.add('hidden');
+    }
+    function startMode(mode) {
+      if (game.mode === 'online' && game.socket) { exitOnline(false); }
+      resetTable();
+      game.mode = mode;
+      claimBtn.classList.add('hidden');
+      enterGameView(mode);
+      if (mode === 'local') {
+        state.mode = 'local';
+        showSetupModal();
+      }
+      renderAll();
+    }
+    function exitOnline(showLobby) {
+      if (game.socket) { game.wantReconnect = false; try { game.socket.close(1000, 'bye'); } catch (e) {} game.socket = null; }
+      game.sockOpen = false;
+      game.roomCode = null; game.myRole = null; game.mode = null;
+      if (showLobby) { gameCtn.classList.add('hidden'); lobbyCtn.classList.remove('hidden'); hero.classList.remove('hidden'); gameCtn.classList.remove('online'); }
+    }
+    function exitToLobby() {
+      if (game.mode === 'online') {
+        if (game.socket && game.sockOpen) rpc('leave', game.roomCode).catch(function() {});
+        exitOnline(true);
+      } else {
+        game.mode = null;
+        gameCtn.classList.add('hidden');
+        lobbyCtn.classList.remove('hidden');
+        hero.classList.remove('hidden');
+        gameCtn.classList.remove('online');
+      }
+    }
+    function openedP() {
+      return new Promise(function(res) {
+        if (game.sockOpen) res(true);
+        else game.openResolvers.push(res);
+      });
+    }
+    function connectSocket() {
+      if (game.socket) return;
+      if (!rootRef.createServerSocket) { setConnLabel('Online unavailable.'); return; }
+      try { game.socket = rootRef.createServerSocket(); }
+      catch (e) { setConnLabel('Online unavailable.'); return; }
+      game.socket.addEventListener('open', function() {
+        game.sockOpen = true; game.retryDelay = 800;
+        const rs = game.openResolvers; game.openResolvers = [];
+        rs.forEach(function(r) { r(true); });
+        setConnLabel();
+        if (game.roomCode) rejoinRoom();
+        updateBanner();
+      });
+      game.socket.addEventListener('message', function(ev) { if (game.mode === 'online') onServerMsg(ev.data); });
+      game.socket.addEventListener('close', function(ev) {
+        game.sockOpen = false;
+        const rs = game.openResolvers; game.openResolvers = [];
+        rs.forEach(function(r) { r(false); });
+        setConnLabel('Disconnected');
+        if (!game.wantReconnect || game.mode !== 'online') return;
+        if (ev.code === 4403) { game.wantReconnect = false; setConnLabel('Online is unavailable on this page.'); return; }
+        setTimeout(function() {
+          if (game.wantReconnect && game.mode === 'online') {
+            game.retryDelay = Math.min(game.retryDelay * 1.7, 8000);
+            game.socket = null; connectSocket();
+          }
+        }, game.retryDelay);
+      });
+    }
+    function rpc(method, data) {
+      return new Promise(function(res, rej) {
+        if (!game.socket || !game.sockOpen) return rej(new Error('socket not open'));
+        game.socket.rpc[method](data).then(function(r) {
+          try { res(JSON.parse(r)); } catch (e) { res({ ok: false, err: 'parse' }); }
+        }).catch(rej);
+      });
+    }
+    function setConnLabel(txt) {
+      connEl.textContent = txt !== undefined ? txt : (game.sockOpen ? 'Connected — sharing code with a friend starts the match' : 'Connecting…');
+    }
+    function setOnlineMsg(t) { onlineMsgEl.textContent = t; }
+    function onServerMsg(raw) {
+      let msg;
+      try { msg = JSON.parse(raw); } catch (e) { return; }
+      if (msg.t === 'snap') applyServerSnap(msg.snap);
+    }
+    function refreshFromServer() {
+      return rpc('getRoom', game.roomCode).then(function(r) {
+        if (r && r.snap) applyServerSnap(r.snap);
+      }).catch(function() {});
+    }
+    function enterOnlineGame() {
+      enterGameView('online');
+      roomBox.classList.remove('hidden');
+      roomCodeEl.textContent = game.roomCode;
+      state.mode = 'online';
+      if (game.myRole === 'host') {
+        if (!game.initialBuilt) buildOnlineInitial();
+      } else {
+        if (!state.players.length) makeEmptyOnlineState();
+      }
+      updateNames();
+      renderAll();
+    }
+    async function doCreateRoom() {
+      setOnlineMsg('Creating room…');
+      const ok = await openedP();
+      if (!ok) { setOnlineMsg("Couldn't reach the server."); return; }
+      try {
+        const r = await rpc('createRoom', '');
+        if (!r.ok) { setOnlineMsg("Couldn't create a room (" + r.err + ")."); return; }
+        resetTable();
+        game.mode = 'online'; game.roomCode = r.code; game.myRole = r.role;
+        setOnlineMsg('');
+        enterOnlineGame();
+        if (r.snap) applyServerSnap(r.snap);
+      } catch (e) { setOnlineMsg('Server error — please retry.'); }
+    }
+    async function doJoinRoom(code) {
+      setOnlineMsg('Joining room ' + code + '…');
+      const ok = await openedP();
+      if (!ok) { setOnlineMsg("Couldn't reach the server."); return; }
+      try {
+        const r = await rpc('joinRoom', code);
+        if (!r.ok) { setOnlineMsg("Couldn't join (" + r.err + ")."); return; }
+        resetTable();
+        game.mode = 'online'; game.roomCode = code; game.myRole = r.role;
+        setOnlineMsg('');
+        enterOnlineGame();
+        if (r.snap) applyServerSnap(r.snap);
+      } catch (e) { setOnlineMsg('Server error — please retry.'); }
+    }
+    function rejoinRoom() {
+      if (!game.roomCode) return;
+      rpc('joinRoom', game.roomCode).then(function(r) {
+        if (!r.ok) {
+          setConnLabel('Rejoin failed (' + r.err + ').');
+          if (r.err === 'room_full' && game.mode === 'online' && game.sockOpen) {
+            setTimeout(function() { if (game.mode === 'online' && game.sockOpen) rejoinRoom(); }, 1500);
+          }
+          return;
+        }
+        game.myRole = r.role;
+        if (r.snap) applyServerSnap(r.snap);
+        setConnLabel();
+      }).catch(function() { setConnLabel('Rejoin failed.'); });
+    }
+
+    /* ══════════ wire up UI ══════════ */
+    document.querySelectorAll('.bgn-mode').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        const m = btn.dataset.mode;
+        if (m === 'online') { onlinePanel.classList.remove('hidden'); setOnlineMsg(''); joinCodeInput.focus(); return; }
+        onlinePanel.classList.add('hidden');
+        startMode(m);
+      });
+    });
+    document.getElementById('createRoomBtn').addEventListener('click', function() {
+      game.wantReconnect = true; connectSocket(); doCreateRoom();
+    });
+    document.getElementById('joinRoomBtn').addEventListener('click', function() {
+      const c = joinCodeInput.value.trim().toUpperCase();
+      if (c.length < 5) { setOnlineMsg('Enter the 5-letter room code.'); return; }
+      game.wantReconnect = true; connectSocket(); doJoinRoom(c);
+    });
+    joinCodeInput.addEventListener('input', function() {
+      this.value = this.value.toUpperCase().replace(/[^A-Z2-9]/g, '').slice(0, 5);
+    });
+    copyCodeBtn.addEventListener('click', function() {
+      try { navigator.clipboard.writeText(game.roomCode || ''); flashBanner('Room code copied!'); } catch (e) { flashBanner(game.roomCode || ''); }
+    });
+    leaveBtn.addEventListener('click', function() { exitToLobby(); });
+    toolbarBackBtn.addEventListener('click', function() { exitToLobby(); });
+    toolbarLbBtn.addEventListener('click', function() { showLeaderboard(); });
+    lbNavBtn.addEventListener('click', function() { showLeaderboard(); });
+    toolbarNewBtn.addEventListener('click', function() {
+      if (game.mode === 'online') {
+        if (game.over) rpc('rematch', game.roomCode).then(function(r) { if (r && r.ok) refreshFromServer(); }).catch(function() {});
+        return;
+      }
+      showSetupModal();
+    });
+    claimBtn.addEventListener('click', function() {
+      if (game.over) return;
+      rpc('claimWin', game.roomCode).then(function(r) {
+        if (!r.ok) flashBanner(r.err === 'opp_present' ? 'Your opponent came back!' : "Can't claim yet.");
+      }).catch(function() {});
+    });
+    document.querySelectorAll('.modal-overlay').forEach(function(ov) {
+      ov.addEventListener('click', function(e) { if (e.target === ov) ov.classList.add('hidden'); });
+    });
+
+    /* ══════════ share / export (bgn-share.js) ══════════ */
+    function serializeLocalState() {
+      return {
+        v: 2,
+        np: state.numPlayers, hm: state.humans, cp: state.currentPlayer,
+        b: ALL_GEMS.map(g => getItem(state.bank, g)),
+        d: ['t1','t2','t3'].map(k => getItem(state.decks, k).map(c => c.id)),
+        m: ['t1','t2','t3'].map(k => getItem(state.market, k).map(c => c ? c.id : 0)),
+        n: state.nobles.map(no => NOBLE_DATA.indexOf(no)),
+        p: state.players.map(pl => ({ n: pl.name, ai: pl.isAI ? 1 : 0, s: pl.score, t: ALL_GEMS.map(g => getItem(pl.tokens, g)), b: GEMS.map(g => getItem(pl.bonuses, g)), r: pl.reserved.map(c => c.id) })),
+        log: state.log.slice(),
+        over: state.resultPosted ? 1 : 0
+      };
+    }
+    function restoreLocalState(o) {
+      if (!o || o.v !== 2 || !Array.isArray(o.p) || o.p.length < 2) return false;
+      if (game.mode === 'online') exitOnline(false);
+      state.mode = 'local';
+      state.numPlayers = o.np || o.p.length;
+      state.humans = (o.hm != null) ? o.hm : o.p.filter(x => !x.ai).length;
+      state.currentPlayer = Math.max(0, Math.min(o.cp || 0, state.numPlayers - 1));
+      state.gameId = (state.gameId || 0) + 1;
+      state.bank = {}; ALL_GEMS.forEach((g, i) => { state.bank[g] = o.b[i]; });
+      state.decks = { t1: [], t2: [], t3: [] };
+      state.market = { t1: [], t2: [], t3: [] };
+      ['t1','t2','t3'].forEach((k, i) => {
+        state.decks[k] = o.d[i].map(id => CARD_BY_ID[id]);
+        state.market[k] = o.m[i].map(id => id ? CARD_BY_ID[id] : null);
+      });
+      state.nobles = o.n.map(i => NOBLE_DATA[i]);
+      state.players = o.p.map(pp => {
+        const pl = makePlayer(pp.n || 'Player', !!pp.ai);
+        pl.score = pp.s;
+        ALL_GEMS.forEach((g, i) => { pl.tokens[g] = pp.t[i]; });
+        GEMS.forEach((g, i) => { pl.bonuses[g] = pp.b[i]; });
+        pl.reserved = (pp.r || []).map(id => CARD_BY_ID[id]);
+        return pl;
+      });
+      state.selectedTokens = [];
+      state.resultPosted = !!o.over;
+      state.log = Array.isArray(o.log) ? o.log.slice() : [];
+      state.lastActionMsg = state.log[0] ? String(state.log[0]).split(': ').slice(1).join(': ') : '';
+      resetTable();
+      game.mode = 'local';
+      enterGameView('local');
+      render();
+      renderAll();
+      if (state.resultPosted) {
+        state.blockInput = true;
+      } else {
+        const cp = state.players[state.currentPlayer];
+        state.blockInput = !!cp.isAI;
+        if (cp.isAI) { const gid = state.gameId; setTimeout(function() { if (state.gameId === gid) runAITurn(); }, 850); }
+        else if (state.humans > 1) showTurnModal();
+      }
+      return true;
+    }
+    (function() {
+      var shareBtn = document.getElementById('shareBtn');
+      if (!shareBtn || !window.bgnShare) return;
+      var panel = window.bgnShare.openPanel({
+        tpl: 'bgn-splendor',
+        gameName: function() { return val(rootRef.gameTitle, 'Splendor'); },
+        exportData: function() {
+          if (state.mode === 'online' || game.mode === 'online' || !state.players.length) return null;
+          return { mode: 'local', state: serializeLocalState() };
+        },
+        applySave: function(o) {
+          if (!o || !o.state) return false;
+          return restoreLocalState(o.state);
+        },
+        source: function() {
+          var g = document.getElementById('gameCtn');
+          if (g && !g.classList.contains('hidden')) return g;
+          return document.getElementById('lobbyCtn');
+        },
+        title: function() { return val(rootRef.gameTitle, 'Splendor'); },
+        subtitle: function() { return 'local game · ' + new Date().toISOString().slice(0, 10); },
+        filenameBase: 'splendor'
+      });
+      shareBtn.addEventListener('click', function() { panel.open(); });
+    })();
+
+    renderAll();
+
+    Object.defineProperty(window, 'state', { get: function() { return state; }, configurable: true });
+    window.getState = function() { return state; };
+    window.showSetupModal = showSetupModal;
+    window.closeSetupModal = closeSetupModal;
+    window.startCustomGame = startCustomGame;
+    window.updateSetupTotal = updateSetupTotal;
+    window.startGame = startGame;
+    window.clearTokenSelection = clearTokenSelection;
+    window.confirmTokens = confirmTokens;
+    window.selectToken = selectToken;
+    window.buyCard = buyCard;
+    window.reserveCard = reserveCard;
+    window.reserveTopDeck = reserveTopDeck;
+    window.closeTurnModal = closeTurnModal;
+    window.closeGameOver = closeGameOver;
+    window.showLeaderboard = showLeaderboard;
+    window.closeLeaderboard = closeLeaderboard;
+    window.runAITurn = runAITurn;
+    window.aiThink = aiThink;
+    window.endTurn = endTurn;
+    window.render = render;
+    window.__t = { game: game, get state() { return state; }, serializeState: serializeState, applySnapData: applySnapData,
+      buildOnlineInitial: buildOnlineInitial, makeEmptyOnlineState: makeEmptyOnlineState, computeOnlineWinner: computeOnlineWinner,
+      turnRoleFor: turnRoleFor, myIndex: myIndex, startMode: startMode, doCreateRoom: doCreateRoom, doJoinRoom: doJoinRoom,
+      applyServerSnap: applyServerSnap, refreshFromServer: refreshFromServer, enterOnlineGame: enterOnlineGame,
+      serializeLocalState: serializeLocalState, restoreLocalState: restoreLocalState };
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<!-- Floating "back to hub" button (rathjis-generators) -->
+<script>
+(function () {
+  "use strict";
+  if (document.getElementById("rathjiBackBtn")) return;
+  var style = document.createElement("style");
+  style.textContent = [
+    '#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:inline-flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,.82);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.18);box-shadow:0 6px 22px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.08);text-decoration:none;cursor:pointer;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;}',
+    '#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,.65);box-shadow:0 0 24px rgba(167,139,250,.4),0 8px 26px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.1);}',
+    '#rathjiBackBtn .rbj-badge{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#d946ef);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:600;flex:none;box-shadow:0 2px 6px rgba(217,70,239,.4),inset 0 1px 0 rgba(255,255,255,.35);}',
+    '#rathjiBackBtn .rbj-label{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;}',
+    '#rathjiBackBtn .rbj-arrow{color:rgba(255,255,255,.85);flex:none;margin-left:2px;}',
+    '@media (max-width:480px){#rathjiBackBtn{padding:8px;gap:0;}#rathjiBackBtn .rbj-label,#rathjiBackBtn .rbj-arrow{display:none;}}'
+  ].join("");
+  document.head.appendChild(style);
+
+  var link = document.createElement("a");
+  link.id = "rathjiBackBtn";
+  link.href = "https://perchance.org/rathjis-generators";
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.setAttribute("aria-label", "Back to my projects");
+  link.setAttribute("title", "Back to my projects");
+  link.innerHTML = '<span class="rbj-badge">R</span><span class="rbj-label">My projects</span>' +
+    '<svg class="rbj-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><path d="M8 7h9v9"/></svg>';
+  document.body.appendChild(link);
+})();
+</script>
+</body>
+</html>

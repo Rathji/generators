@@ -1,0 +1,1769 @@
+<!-- ════════════════════════════════════════════════════════════════
+     SKULL KING — index.html
+     A pirate trick-taking card game: hotseat · vs AI · online.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative game server (rooms, sealed bids, trick play,
+       scoring). It is PUBLIC source — no secrets here. Its rules
+       engine is mirrored in the client script below (keep the two
+       in sync if you change rules).
+     - Durable room state lives in the server-plugin `state` bytes.
+       Private hands and sealed bids are pushed per-connection;
+       only bids-after-reveal, tricks, scores and totals are public.
+     - Rules (modern Grandpa Beck's Skull King): 87-card deck
+       (5 suits × 1–13, 5 mermaids, 2 pirates, 1 Skull King,
+       1 Tigress, 13 tide cards), ten rounds, N cards in round N,
+       sealed simultaneous bids. Mermaid only beats the Skull King;
+       must follow suit unless playing a special card.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Skull King server ────────────────────────────────
+   Rooms: 5-letter codes. Host creates; a guest joining with the
+   code starts round 1. The server keeps the deck, BOTH hands and
+   sealed bids authoritatively (private hand pushed per-connection,
+   never broadcast) and re-runs the rules engine to validate every
+   bid and play. Public info — revealed bids, tricks in play, taken
+   tricks, scores, totals — is broadcast via pubsub. Durable room
+   state lives in the plugin `state` bytes (versioned layout).     */
+const MAXR=10, NSUITS=5, NUMC=13, DECK_N=87;
+const M0=65, P0=70, KING=72, TIG=73, TIDE0=74;
+const SCHEMA=4;
+const SLOT=512;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const O_STAT=0,O_CODE=1,O_SCHEMA=9,O_PHASE=10,O_ROUND=11,O_TURN=12,O_LEADER=13,O_FLAGS=14,O_WIN=15,O_REASON=16,O_LAST=17;
+const O_TOTALS=21,O_RSCORE=25,O_TRICKS=29,O_BIDS=32,O_SPECIALS=34,O_TRICK=36,O_HANDS=45,O_DECK=67;
+
+/* ── pure rules engine (mirrors client — keep in sync) ── */
+function cardType(id){ if(id<M0)return {k:"color",suit:Math.floor(id/13),num:id%13+1}; if(id<P0)return {k:"mermaid"}; if(id<KING)return {k:"pirate"}; if(id===KING)return {k:"skullKing"}; if(id===TIG)return {k:"tigress"}; return {k:"tide"}; }
+function isColor(id){ return id<M0; }
+function suitOf(id){ return id<M0?Math.floor(id/13):-1; }
+function numOf(id){ return id<M0?id%13+1:0; }
+function pVal(k){ return k==="skullKing"?30:(k==="pirate"||k==="mermaid"||k==="tigress"?20:10); }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(){ const d=[]; for(let i=0;i<DECK_N;i++)d.push(i); return shuffle(d); }
+function trickPower(card,role,ledSuit,hasKing){
+  const t=cardType(card);
+  if(t.k==="mermaid")return hasKing?6:0;
+  if(t.k==="skullKing")return 5;
+  if(t.k==="tigress")return role==="pirate"?4:0;
+  if(t.k==="pirate")return 3;
+  if(t.k==="color")return t.suit===ledSuit?t.num:0;
+  return 0;
+}
+function resolveTrick(plays,ledSuit){
+  const hasKing=plays.some(function(pl){return cardType(pl.card).k==="skullKing";});
+  let wi=-1,wpow=-1;
+  for(let i=0;i<plays.length;i++){
+    const pow=trickPower(plays[i].card,plays[i].role,ledSuit,hasKing);
+    if(pow>wpow){ wpow=pow; wi=plays[i].p; }
+  }
+  return {winner:wi,power:wpow};
+}
+function legalPlays(hand,ledSuit){
+  if(ledSuit===-1){ const a=[]; for(let i=0;i<hand.length;i++)a.push(i); return a; }
+  let hasSuit=false;
+  for(let i=0;i<hand.length;i++){ if(isColor(hand[i])&&suitOf(hand[i])===ledSuit){ hasSuit=true; break; } }
+  const out=[];
+  for(let i=0;i<hand.length;i++){
+    const id=hand[i];
+    if(!isColor(id)){ out.push(i); continue; }
+    if(suitOf(id)===ledSuit)out.push(i);
+    else if(!hasSuit)out.push(i);
+  }
+  return out;
+}
+function specialPts(plays){ let s=0; for(const pl of plays){ const k=cardType(pl.card).k; if(k!=="color")s+=pVal(k); } return s; }
+function roundScore(round,bid,tricks,spec){
+  if(bid===0)return tricks===0?round*10:-round*10;
+  if(tricks===bid)return 20*tricks+10+spec;
+  return -10*Math.abs(tricks-bid);
+}
+function pName(p){ return p===0?"Host":"Guest"; }
+function cardName(id,role){
+  const t=cardType(id);
+  if(t.k==="color")return {suit:["Red","Yellow","Green","Blue","Purple"][t.suit],num:t.num};
+  const n={mermaid:"Mermaid",pirate:"Pirate",skullKing:"Skull King",tigress:"Tigress",tide:"Tide"}[t.k];
+  return {suit:n,num:null};
+}
+function cardTxt(id,role){ const c=cardName(id,role); return c.num?c.suit+" "+c.num:c.suit+(tigRoleExtra(id,role)); }
+function tigRoleExtra(id,role){ return cardType(id).k==="tigress"?(role==="pirate"?" (Pirate)":" (Escape)"):""; }
+
+/* ── room helpers ── */
+function newRoom(){ return {slot:-1,code:"",status:1,hostId:-1,guestId:-1,lastAct:0,
+  round:1,phase:0,deck:[],hands:[[],[]],bids:[null,null],bidLocked:[false,false],
+  turn:-1,leader:0,trick:{plays:[],ledSuit:-1,leadPlayer:-1},
+  tricksTaken:[0,0],tricksPlayed:0,specials:[0,0],totals:[0,0],roundScores:null,
+  over:false,winner:null,reason:"",seq:0,event:""}; }
+function dealRound(g){ g.deck=buildDeck(); g.hands=[[],[]]; for(let p=0;p<2;p++){ for(let k=0;k<g.round;k++)g.hands[p].push(g.deck.pop()); } }
+function startRound(g){
+  g.phase=0; g.bids=[null,null]; g.bidLocked=[false,false]; g.turn=-1;
+  g.leader=(g.round-1)%2; g.trick={plays:[],ledSuit:-1,leadPlayer:-1};
+  g.tricksTaken=[0,0]; g.tricksPlayed=0; g.specials=[0,0]; g.roundScores=null;
+  dealRound(g);
+  g.event="Round "+g.round+": "+(g.round===1?"1 card":"cards")+" each — bid your tricks in secret!";
+}
+function finishRound(g){
+  const rs=[0,0];
+  for(let p=0;p<2;p++){
+    const bid=g.bids[p]===null?0:g.bids[p];
+    const tk=g.tricksTaken[p];
+    const spec=(bid===tk&&bid>0)?g.specials[p]:0;
+    rs[p]=roundScore(g.round,bid,tk,spec);
+    g.totals[p]+=rs[p];
+  }
+  g.roundScores=rs; g.phase=2; g.turn=-1;
+  g.event="Round "+g.round+" scored: Host "+(rs[0]>=0?"+":"")+rs[0]+", Guest "+(rs[1]>=0?"+":"")+rs[1]+". Totals: "+g.totals[0]+"–"+g.totals[1]+".";
+  if(g.round>=MAXR){
+    g.status=3; g.over=true;
+    g.winner=g.totals[0]>g.totals[1]?0:g.totals[1]>g.totals[0]?1:"draw";
+    g.reason="gameOver";
+    g.event=(g.winner==="draw"?"It's a draw — "+g.totals[0]+" to "+g.totals[1]+"!":pName(g.winner)+" wins the sea — "+g.totals[0]+" to "+g.totals[1]+"!");
+  }
+}
+function handlePlay(g,idx,ci,role){
+  const id=g.hands[idx][ci];
+  g.hands[idx].splice(ci,1);
+  const t=cardType(id);
+  g.trick.plays.push({p:idx,card:id,role:t.k==="tigress"?(role==="pirate"?"pirate":"escape"):null});
+  if(g.trick.ledSuit===-1&&isColor(id))g.trick.ledSuit=suitOf(id);
+  g.tricksPlayed++;
+  const who=pName(idx);
+  if(g.trick.plays.length<2){
+    g.turn=1-idx;
+    g.event=who+" plays "+cardTxt(id,role)+". Waiting for the next play…";
+  }else{
+    const r=resolveTrick(g.trick.plays,g.trick.ledSuit);
+    g.tricksTaken[r.winner]++;
+    g.specials[r.winner]+=specialPts(g.trick.plays);
+    const winN=pName(r.winner);
+    if(g.tricksPlayed>=g.round*2){ finishRound(g); }
+    else{
+      g.trick={plays:[],ledSuit:-1,leadPlayer:r.winner};
+      g.leader=r.winner; g.turn=r.winner;
+      g.event=winN+" takes the trick ("+g.tricksTaken[r.winner]+"/"+g.round+") — they lead next.";
+    }
+  }
+}
+
+/* ── durable state helpers ── */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+O_LAST]<<24)|(state[o+O_LAST+1]<<16)|(state[o+O_LAST+2]<<8)|state[o+O_LAST+3]; }
+function slotStatus(i){ return state[off(i)+O_STAT]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function reasonCode(r){ return r==="gameOver"?1:r==="forfeit"?2:r==="resign"?3:0; }
+function reasonName(c){ return c===1?"gameOver":c===2?"forfeit":c===3?"resign":""; }
+function i16write(o,v){ const x=v|0; state[o]=(x>>8)&255; state[o+1]=x&255; }
+function i16read(o){ const v=((state[o]<<8)|state[o+1]); return v>32767?v-65536:v; }
+function saveRoom(g){
+  const o=off(g.slot);
+  state.fill(0,o,o+SLOT);
+  state[o+O_STAT]=g.status;
+  writeCode(o,g.code);
+  state[o+O_SCHEMA]=SCHEMA;
+  state[o+O_PHASE]=g.phase;
+  state[o+O_ROUND]=g.round;
+  state[o+O_TURN]=g.turn<0?255:g.turn;
+  state[o+O_LEADER]=g.leader;
+  state[o+O_FLAGS]=(g.bidLocked[0]?1:0)|(g.bidLocked[1]?2:0);
+  state[o+O_WIN]=g.winner==="draw"?2:g.winner===1?1:g.winner===0?0:255;
+  state[o+O_REASON]=reasonCode(g.reason);
+  const la=Math.max(0,Math.min(0xFFFFFFFF,g.lastAct));
+  state[o+O_LAST]=(la>>>24)&255; state[o+O_LAST+1]=(la>>>16)&255; state[o+O_LAST+2]=(la>>>8)&255; state[o+O_LAST+3]=la&255;
+  i16write(o+O_TOTALS,g.totals[0]); i16write(o+O_TOTALS+2,g.totals[1]);
+  i16write(o+O_RSCORE,g.roundScores?g.roundScores[0]:0); i16write(o+O_RSCORE+2,g.roundScores?g.roundScores[1]:0);
+  state[o+O_TRICKS]=g.tricksTaken[0]; state[o+O_TRICKS+1]=g.tricksTaken[1]; state[o+O_TRICKS+2]=g.tricksPlayed;
+  state[o+O_BIDS]=g.bids[0]===null?255:g.bids[0]; state[o+O_BIDS+1]=g.bids[1]===null?255:g.bids[1];
+  state[o+O_SPECIALS]=g.specials[0]; state[o+O_SPECIALS+1]=g.specials[1];
+  const tr=g.trick;
+  state[o+O_TRICK]=tr.leadPlayer<0?255:tr.leadPlayer;
+  state[o+O_TRICK+1]=tr.ledSuit;
+  state[o+O_TRICK+2]=tr.plays.length;
+  for(let i=0;i<tr.plays.length&&i<2;i++){ const q=o+O_TRICK+3+i*3; state[q]=tr.plays[i].p; state[q+1]=tr.plays[i].card; state[q+2]=tr.plays[i].role==="pirate"?1:(tr.plays[i].role==="escape"?2:0); }
+  for(let pi=0;pi<2;pi++){
+    const p=o+(pi===0?O_HANDS:O_HANDS+11); state[p]=g.hands[pi].length;
+    for(let i=0;i<g.hands[pi].length&&i<11;i++)state[p+1+i]=g.hands[pi][i];
+  }
+  let p=o+O_DECK; state[p]=g.deck.length;
+  for(let i=0;i<g.deck.length&&i<DECK_N;i++)state[p+1+i]=g.deck[i];
+}
+function loadRoom(i){
+  const o=off(i), st=slotStatus(i);
+  const readHand=function(bp){ const n=state[bp]; const a=[]; for(let k=0;k<n&&k<11;k++)a.push(state[bp+1+k]); return a; };
+  const readRole=function(x){ return x===1?"pirate":x===2?"escape":null; };
+  const g=newRoom();
+  g.slot=i; g.code=codeAt(i); g.status=st; g.hostFirst=0;
+  g.phase=state[o+O_PHASE]; g.round=state[o+O_ROUND];
+  g.turn=state[o+O_TURN]===255?-1:state[o+O_TURN]; g.leader=state[o+O_LEADER];
+  const fl=state[o+O_FLAGS]; g.bidLocked=[!!(fl&1),!!(fl&2)];
+  const w=state[o+O_WIN]; g.winner=w===2?"draw":w===1?1:w===0?0:null;
+  g.reason=reasonName(state[o+O_REASON]);
+  g.lastAct=readLastAct(i);
+  g.totals=[i16read(o+O_TOTALS),i16read(o+O_TOTALS+2)];
+  const r0=i16read(o+O_RSCORE), r1=i16read(o+O_RSCORE+2);
+  g.roundScores=(g.phase===2)?[r0,r1]:null;
+  g.tricksTaken=[state[o+O_TRICKS],state[o+O_TRICKS+1]]; g.tricksPlayed=state[o+O_TRICKS+2];
+  g.bids=[state[o+O_BIDS]===255?null:state[o+O_BIDS],state[o+O_BIDS+1]===255?null:state[o+O_BIDS+1]];
+  g.trick.leadPlayer=state[o+O_TRICK]===255?-1:state[o+O_TRICK];
+  g.trick.ledSuit=state[o+O_TRICK+1]===255?-1:state[o+O_TRICK+1];
+  const npl=state[o+O_TRICK+2];
+  for(let k=0;k<npl&&k<2;k++){ const q=o+O_TRICK+3+k*3; g.trick.plays.push({p:state[q],card:state[q+1],role:readRole(state[q+2])}); }
+  g.hands=[readHand(o+O_HANDS),readHand(o+O_HANDS+11)];
+  const dl=state[o+O_DECK], dp=o+O_DECK; for(let k=0;k<dl&&k<DECK_N;k++)g.deck.push(state[dp+1+k]);
+  g.over=st===3; g.specials=[state[o+O_SPECIALS],state[o+O_SPECIALS+1]]; g.seq=0; g.event="";
+  return g;
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+O_SCHEMA]!==SCHEMA){ state.fill(0,o,o+SLOT); continue; }
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }   // abandoned waiting rooms are reclaimed
+    rooms.set(codeAt(i),loadRoom(i));
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── connection / broadcast ── */
+let rooms=new Map();                 // code -> room
+const conns=new Map();               // conn.id -> {code, role, conn}
+function topic(code){ return "ch:"+code; }
+function snap(g){
+  const tr=g.trick;
+  return {
+    code:g.code, status:g.status, phase:g.phase, round:g.round,
+    turn:g.turn, leader:g.leader,
+    bidLocked:[g.bidLocked[0]?1:0,g.bidLocked[1]?1:0],
+    bids:g.phase===0?null:[g.bids[0],g.bids[1]],
+    totals:g.totals.slice(), roundScores:g.roundScores,
+    tricksTaken:g.tricksTaken.slice(), tricksPlayed:g.tricksPlayed,
+    trick:{plays:tr.plays.map(function(pl){return {p:pl.p,card:pl.card,role:pl.role};}), ledSuit:tr.ledSuit, leadPlayer:tr.leadPlayer},
+    handsLen:[g.hands[0].length,g.hands[1].length],
+    deckCount:g.deck.length,
+    hostIn:g.hostId!==-1, guestIn:g.guestId!==-1,
+    over:g.status===3, winner:g.winner, reason:g.reason,
+    seq:g.seq, event:g.event||""
+  };
+}
+function broadcast(g){ try{ pubsub.publish(topic(g.code), JSON.stringify({t:"snap",snap:snap(g)})); }catch(e){} }
+function sendHands(g){
+  const targets=[[g.hostId,0],[g.guestId,1]];
+  for(const pair of targets){
+    if(pair[0]===-1)continue;
+    const info=conns.get(pair[0]);
+    if(!info)continue;
+    try{ info.conn.send(JSON.stringify({t:"hand",hand:g.hands[pair[1]].slice()})); }catch(e){}
+  }
+}
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function saveBroadcast(g){ saveRoom(g); broadcast(g); sendHands(g); }
+function idxOfRole(role){ return role==="host"?0:1; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const g=newRoom();
+    g.slot=slot; g.code=code; g.status=1; g.hostId=conn.id; g.guestId=-1; g.lastAct=nowSec();
+    rooms.set(code,g);
+    saveRoom(g);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host",conn});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(g)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const g=rooms.get(code);
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(g.hostId===-1)role="host";
+    else if(g.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(g.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")g.hostId=conn.id; else g.guestId=conn.id;
+    let started=false;
+    if(g.status===1&&g.hostId!==-1&&g.guestId!==-1){
+      g.status=2; startRound(g); g.seq++;
+      started=true;
+    }
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role,conn});
+    g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true,role,snap:snap(g)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const g=rooms.get(code);
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    sendHands(g);
+    return JSON.stringify({ok:true,snap:snap(g)});
+  },
+  setBid({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.phase!==0)return JSON.stringify({ok:false,err:"not_bidding"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    const idx=idxOfRole(role);
+    if(g.bidLocked[idx])return JSON.stringify({ok:false,err:"already_locked"});
+    const b=obj.bid;
+    if(typeof b!=="number"||isNaN(b)||b<0||b>g.round)return JSON.stringify({ok:false,err:"bad_bid"});
+    g.bids[idx]=b; g.bidLocked[idx]=true;
+    g.seq++; g.lastAct=nowSec();
+    if(g.bidLocked[0]&&g.bidLocked[1]){
+      g.phase=1; g.turn=g.leader; g.trick={plays:[],ledSuit:-1,leadPlayer:g.leader};
+      g.event="Bids revealed: Host "+g.bids[0]+" — Guest "+g.bids[1]+". "+pName(g.leader)+" leads.";
+    }else{
+      g.event=pName(idx)+" has locked their bid — waiting for the other.";
+    }
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  play({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    const idx=idxOfRole(role);
+    if(g.phase!==1)return JSON.stringify({ok:false,err:"not_playing"});
+    if(g.turn!==idx)return JSON.stringify({ok:false,err:"not_your_turn"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    const ci=obj.card;
+    if(typeof ci!=="number"||ci<0||ci>=g.hands[idx].length)return JSON.stringify({ok:false,err:"bad_card"});
+    const id=g.hands[idx][ci];
+    const t=cardType(id);
+    if(t.k==="tigress"&&obj.role!=="pirate"&&obj.role!=="escape")return JSON.stringify({ok:false,err:"bad_role"});
+    const legal=legalPlays(g.hands[idx],g.trick.ledSuit);
+    let found=false;
+    for(let k=0;k<legal.length;k++){ if(legal[k]===ci){ found=true; break; } }
+    if(!found)return JSON.stringify({ok:false,err:"illegal"});
+    handlePlay(g,idx,ci,obj.role);
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  nextRound({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    if(g.phase!==2)return JSON.stringify({ok:false,err:"not_scored"});
+    if(obj.evt!==g.seq)return JSON.stringify({ok:false,err:"stale"});
+    g.round++;
+    startRound(g);
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status===2){
+      const idx=idxOfRole(roleOf(conn));
+      g.status=3; g.over=true; g.winner=1-idx; g.reason="resign"; g.seq++;
+      g.event=pName(1-idx)+" wins — "+pName(idx)+" resigned.";
+      g.lastAct=nowSec(); saveBroadcast(g);
+    }
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const idx=idxOfRole(roleOf(conn));
+    const oppPresent=idx===0?g.guestId!==-1:g.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    g.status=3; g.over=true; g.winner=idx; g.reason="forfeit"; g.seq++;
+    g.event=pName(idx)+" wins — the opponent disconnected.";
+    g.lastAct=nowSec(); saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const g=roomOf(conn);
+    if(!g)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(g.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const idx=idxOfRole(roleOf(conn));
+    const oppPresent=idx===0?g.guestId!==-1:g.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    g.status=2; g.over=false; g.winner=null; g.reason="";
+    g.round=1; g.totals=[0,0];
+    startRound(g);
+    g.event="Rematch! Round 1 — bid in secret.";
+    g.seq++; g.lastAct=nowSec();
+    saveBroadcast(g);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const g=roomOf(conn);
+    if(g&&g.status===2){
+      const idx=idxOfRole(roleOf(conn));
+      g.status=3; g.over=true; g.winner=1-idx; g.reason="forfeit"; g.seq++;
+      g.event=pName(1-idx)+" wins — "+pName(idx)+" left.";
+      g.lastAct=nowSec(); saveBroadcast(g);
+    }
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  if(!info)return;
+  conns.delete(conn.id);
+  const g=rooms.get(info.code);
+  if(!g)return;
+  if(info.role==="host")g.hostId=-1; else g.guestId=-1;
+  g.lastAct=nowSec();
+  saveRoom(g);
+  broadcast(g);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Bid exactly how many tricks you'll take — not one more, not one fewer. Ten rounds, growing hands, and only the Mermaid can capture the Skull King.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Hotseat</span>
+        <span class="bgn-mode-sub">Two to four players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">vs the Crew</span>
+        <span class="bgn-mode-sub">You against up to three pirates</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online</span>
+        <span class="bgn-mode-sub">Live duel, sealed bids, hidden hands</span>
+      </button>
+    </div>
+
+    <div class="panel" id="countPanel" style="margin-top:26px; padding:20px 24px; display:none">
+      <div class="sec-eyebrow" style="text-align:center">Players at the table</div>
+      <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px">
+        <button class="chip" data-count="2">2 players</button>
+        <button class="chip" data-count="3">3 players</button>
+        <button class="chip" data-count="4">4 players</button>
+      </div>
+      <div class="muted small center" id="countHintEl" style="margin-top:12px"></div>
+      <div style="display:flex; justify-content:center; margin-top:16px">
+        <button class="btn btn-gold" id="countGoBtn">Shuffle &amp; deal →</button>
+      </div>
+    </div>
+
+    <div class="panel" id="onlinePanel" hidden style="margin-top:26px; padding:20px 24px; max-width:520px; margin-left:auto; margin-right:auto">
+      <div class="sec-eyebrow" style="text-align:center">Online duel</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; justify-content:center">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+      </div>
+      <div style="display:flex; gap:10px; margin-top:14px; justify-content:center">
+        <input class="field" id="joinCodeInput" placeholder="ROOM CODE" style="max-width:190px; text-align:center; letter-spacing:4px" autocomplete="off"/>
+        <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+      </div>
+      <div class="muted small center" id="onlineMsg" style="margin-top:12px"></div>
+    </div>
+
+    <div class="panel" style="margin-top:26px; padding:20px 24px;">
+      <div class="sec-eyebrow" style="text-align:center">How to play</div>
+      <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:14px;">
+        <div class="muted small"><b class="goldtext">1 · Bid</b><br>Each round you secretly predict how many tricks you'll take.</div>
+        <div class="muted small"><b class="goldtext">2 · Trick</b><br>Follow suit if you can, or play a special card anytime. High card wins.</div>
+        <div class="muted small"><b class="goldtext">3 · Score</b><br>Bid exactly right: 20/trick + 10 bonus. Miss: −10 per trick off.</div>
+        <div class="muted small"><b class="goldtext">Special cards</b><br>Skull King (30) beats all but the Mermaid. Pirates (20), Tigress (20), tide cards (10) score bonus points to a player who hits their bid.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ GAME ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="sk-table">
+      <div class="sk-boardpanel panel">
+        <div class="sk-roundbar">
+          <span class="sk-round" id="roundEl">—</span>
+          <span class="sk-turn" id="turnEl">Loading…</span>
+        </div>
+
+        <div class="sk-seats" id="oppSeatsEl"></div>
+
+        <div class="sk-trickwrap">
+          <div class="sk-trick" id="trickAreaEl"></div>
+          <div id="lastTrickEl"></div>
+        </div>
+
+        <div class="sk-me" id="meRowEl"></div>
+
+        <div class="sk-handwrap">
+          <div class="sk-hand" id="handEl"></div>
+        </div>
+      </div>
+
+      <div class="bgn-side">
+        <div class="bgn-room" id="roomBox" hidden>
+          <div class="bgn-room-code">Room code <b id="roomCodeEl">—</b></div>
+          <div class="muted small" id="connEl">Connecting…</div>
+          <div class="sk-roombtns">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+          </div>
+        </div>
+
+        <div class="sk-actions">
+          <button class="btn btn-ghost" id="resignBtn" hidden>Resign</button>
+          <button class="btn btn-ghost" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+        </div>
+
+        <div class="sk-logwrap">
+          <div class="sec-eyebrow" style="margin-bottom:8px">Captain's log</div>
+          <div class="bgn-log" id="logEl"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ═══ MODALS ═══ -->
+<div class="promo" id="bidModal" hidden>
+  <div class="promo-title" id="bidTitleEl">How many tricks?</div>
+  <div class="bid-value" id="bidValueEl">0</div>
+  <div class="bid-picker" id="bidPickerEl"></div>
+  <button class="btn btn-gold" style="margin-top:12px" id="bidLockBtn">Lock bid 🔒</button>
+  <div class="muted small" style="margin-top:8px" id="bidHintEl"></div>
+</div>
+
+<div class="promo" id="tigModal" hidden>
+  <div class="promo-title">Play the Tigress as…</div>
+  <div style="font-size:2.4rem; margin:4px 0">🐅</div>
+  <div class="wild-picker" style="max-width:300px; margin:0 auto">
+    <button class="wp" id="tigPirateBtn"><span class="em">🏴☠️</span><span class="nm">Pirate</span></button>
+    <button class="wp" id="tigEscapeBtn"><span class="em">🎈</span><span class="nm">Escape (0)</span></button>
+  </div>
+</div>
+
+<div class="promo" id="passScreen" hidden>
+  <div class="promo-title" id="passTitleEl">Pass the device</div>
+  <div style="font-size:2.6rem; margin:6px 0 2px;">🤫</div>
+  <div class="promo-sub muted small" id="passSubEl"></div>
+  <button class="btn btn-gold" style="margin-top:14px" id="passGoBtn">It's my turn</button>
+</div>
+
+<div class="promo" id="roundModal" hidden>
+  <div class="promo-title" id="roundTitleEl">Round scored</div>
+  <div class="round-table" id="roundTableEl"></div>
+  <button class="btn btn-gold" style="margin-top:14px" id="nextRoundBtn">Next round →</button>
+</div>
+
+<div class="promo" id="overModal" hidden>
+  <div class="promo-title" id="overTitleEl">Game over</div>
+  <div class="over-banner" id="overBannerEl"></div>
+  <div class="over-scores" id="overScoresEl"></div>
+  <div class="muted small" id="overReasonEl"></div>
+  <div class="over-btns">
+    <button class="btn btn-gold" id="playAgainBtn">Play again</button>
+    <button class="btn btn-ghost" id="overMenuBtn">Main menu</button>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="ornament">☠</div>
+  <p>Skull King — bid your tricks, capture the Skull King, rule the sea.</p>
+  <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ SKULL KING ═══ */
+.bgn-lobby{ max-width:820px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+.sk-table{ grid-template-columns:minmax(0,1fr) 330px; max-width:1060px; margin:0 auto; }
+@media (max-width:900px){ .sk-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.sk-boardpanel{ text-align:center; padding:20px 18px 24px; }
+
+.sk-roundbar{ display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+.sk-round{ font-family:var(--bgn-serif); font-size:1.2rem; letter-spacing:.06em; color:#f6e6a4; }
+.sk-turn{ font-size:.85rem; color:var(--bgn-muted); letter-spacing:.02em; }
+.sk-turn.warn{ color:#ffb07a; }
+
+/* seats */
+.sk-seats{ display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-bottom:18px; }
+.sk-seat{ position:relative; border:1px solid rgba(255,255,255,.12); background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.012)); border-radius:12px; padding:10px 14px; min-width:132px; transition:border-color .15s, box-shadow .15s; }
+.sk-seat.act{ border-color:#f6e6a4; box-shadow:0 0 0 1px rgba(246,230,164,.35), 0 0 18px rgba(212,175,55,.25); }
+.sk-seat-top{ display:flex; align-items:center; gap:8px; justify-content:center; }
+.sk-avatar{ width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:1rem; background:radial-gradient(circle at 35% 30%, #7a5cff, #241840); flex:none; }
+.sk-seat.me .sk-avatar{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.sk-pname{ font-weight:800; font-size:.85rem; letter-spacing:.03em; }
+.sk-seat-total{ font-size:.7rem; opacity:.75; margin-top:3px; }
+.sk-seat-bid{ font-size:.72rem; margin-top:2px; min-height:16px; }
+.sk-seat-bid .bnum{ color:#f6e6a4; font-weight:800; }
+.sk-seat-bid .lockd{ color:var(--bgn-green); font-weight:700; letter-spacing:.08em; }
+.sk-tricks{ display:flex; gap:2px; justify-content:center; flex-wrap:wrap; margin-top:4px; min-height:16px; }
+.sk-trick-chip{ font-size:.72rem; color:#ffb0b0; }
+.sk-backs{ display:flex; gap:2px; justify-content:center; margin-top:5px; }
+.sk-back{ width:11px; height:15px; border-radius:2px; background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 4px); border:1px solid rgba(212,175,55,.4); }
+
+/* trick */
+.sk-trickwrap{ min-height:150px; display:flex; flex-direction:column; align-items:center; justify-content:center; margin:10px 0 8px; }
+.sk-trickrow{ display:flex; gap:14px; justify-content:center; align-items:flex-end; flex-wrap:wrap; }
+.sk-playcell{ display:flex; flex-direction:column; align-items:center; gap:6px; }
+.sk-playname{ font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; opacity:.75; }
+.sk-card.winning{ border-color:#7fe0b0; box-shadow:0 0 0 2px rgba(127,224,176,.5), 0 0 22px rgba(127,224,176,.35); }
+.sk-emptytrick{ color:rgba(255,255,255,.3); font-size:.8rem; letter-spacing:.08em; }
+#lastTrickEl{ min-height:18px; margin-top:8px; color:var(--bgn-muted); font-size:.72rem; }
+
+/* me row */
+.sk-me{ display:flex; align-items:center; gap:10px; justify-content:center; margin:6px 0 4px; flex-wrap:wrap; }
+.sk-me .sk-seat-total{ margin-top:0; }
+
+/* hand */
+.sk-handwrap{ margin-top:12px; }
+.sk-hand{ display:flex; justify-content:center; gap:8px; flex-wrap:wrap; min-height:138px; padding:10px 4px; align-items:flex-end; }
+@media (min-width:640px){ .sk-hand{ flex-wrap:nowrap; overflow-x:auto; justify-content:flex-start; padding-bottom:6px; } }
+
+/* cards */
+.sk-card{ width:clamp(64px,9vw,84px); aspect-ratio:2/3; border-radius:11px; position:relative; flex:none; cursor:default; border:2px solid rgba(255,255,255,.25); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.3); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; padding:8px 4px; transition:transform .12s, box-shadow .12s, border-color .12s; user-select:none; }
+.sk-card.playable{ cursor:pointer; border-color:rgba(212,175,55,.7); }
+.sk-card.playable:hover{ transform:translateY(-8px); border-color:#f6e6a4; box-shadow:0 0 0 1px rgba(246,230,164,.4), 0 0 20px rgba(212,175,55,.3); }
+.sk-card.selected{ transform:translateY(-12px); border-color:#f6e6a4; box-shadow:0 0 0 2px rgba(212,175,55,.55), 0 14px 26px rgba(0,0,0,.55); }
+.sk-card .sk-emo{ font-size:clamp(1.6rem,4vw,2.2rem); line-height:1; filter:drop-shadow(0 3px 5px rgba(0,0,0,.45)); }
+.sk-card .sk-num{ font-family:var(--bgn-serif); font-size:clamp(1.5rem,3.5vw,2rem); font-weight:700; line-height:1; color:#fff; text-shadow:0 2px 4px rgba(0,0,0,.5); }
+.sk-card .sk-suit{ font-size:.5rem; letter-spacing:.08em; text-transform:uppercase; opacity:.85; }
+.sk-card .sk-nm{ font-size:.56rem; letter-spacing:.04em; text-transform:uppercase; opacity:.95; font-weight:700; }
+.sk-card .sk-val{ position:absolute; top:5px; right:6px; font-size:.64rem; font-weight:800; color:#221803; background:linear-gradient(180deg,#f6e6a4,#d4af37); border-radius:999px; padding:0 5px; line-height:1.5; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+
+/* suit tints */
+.sk-card.cs0{ background:linear-gradient(160deg,#f2a08c,#b03a2a 55%,#6e1f16); }
+.sk-card.cs1{ background:linear-gradient(160deg,#f2dc8b,#c9993a 55%,#7a5a00); }
+.sk-card.cs2{ background:linear-gradient(160deg,#8fe3b0,#2f9e63 55%,#17573b); }
+.sk-card.cs3{ background:linear-gradient(160deg,#9fd7f0,#3a7fb0 55%,#1f4a6e); }
+.sk-card.cs4{ background:linear-gradient(160deg,#d2a8f0,#7a4fb0 55%,#45286e); }
+/* specials */
+.sk-card.s-mermaid{ background:linear-gradient(160deg,#ff9de2,#c65a9e 55%,#7d2f63); }
+.sk-card.s-pirate{ background:linear-gradient(160deg,#a84a3a,#6e2218 55%,#3f120c); }
+.sk-card.s-skullKing{ background:linear-gradient(160deg,#3a2c2c,#1c1212 55%,#0a0606); border-color:rgba(255,90,70,.55); }
+.sk-card.s-tigress{ background:linear-gradient(160deg,#f0a860,#c26a24 55%,#7d3f12); }
+.sk-card.s-tide{ background:linear-gradient(160deg,#c9c2b4,#8d8678 55%,#57534a); }
+
+/* bid modal */
+.bid-value{ font-family:var(--bgn-serif); font-size:3rem; font-weight:700; color:#f6e6a4; line-height:1; margin:2px 0 10px; }
+.bid-picker{ display:grid; grid-template-columns:repeat(5,1fr); gap:8px; max-width:360px; margin:0 auto; }
+.bid-picker .bp{ border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:10px 4px; background:rgba(255,255,255,.05); color:inherit; font:inherit; font-family:var(--bgn-serif); font-size:1.1rem; cursor:pointer; transition:border-color .1s, background .1s; }
+.bid-picker .bp:hover{ border-color:#f6e6a4; }
+.bid-picker .bp.on{ background:linear-gradient(180deg,#f6e6a4,#d4af37); color:#221803; border-color:transparent; font-weight:800; }
+
+/* round table */
+.round-table{ margin:6px auto 4px; width:100%; max-width:380px; font-size:.82rem; }
+.round-table .rt-row{ display:grid; grid-template-columns:1fr 44px 44px 60px 60px; gap:6px; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.07); align-items:center; }
+.round-table .rt-row:last-child{ border-bottom:none; }
+.round-table .rt-head{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.55; }
+.round-table .rt-name{ text-align:left; font-weight:700; }
+.round-table .rt-pts{ font-weight:800; color:var(--bgn-accent2); }
+.round-table .rt-total{ font-weight:800; color:#7fe0b0; }
+.round-table .rt-pos{ color:#7fe0b0; }
+.round-table .rt-neg{ color:#ff9d9d; }
+
+/* actions / log */
+.sk-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.sk-actions .btn{ padding:12px 18px; font-size:.72rem; }
+.sk-roombtns{ display:flex; gap:8px; justify-content:center; margin-top:8px; }
+.sk-logwrap{ margin-top:18px; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:6px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.bgn-log{ max-height:300px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item .ev{ color:var(--bgn-accent2); }
+.log-item .st{ color:#ff9d9d; font-weight:700; }
+
+/* modals */
+.promo{ position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:50; background:rgba(12,9,5,.97); border:1px solid var(--bgn-gold2,#d4af37); border-radius:12px; padding:18px 20px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,.65); max-width:92vw; }
+.promo-title{ font-size:.8rem; opacity:.85; margin-bottom:10px; letter-spacing:.5px; }
+.promo-sub{ margin-top:8px; }
+.wild-picker{ display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+.wild-picker .wp{ border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:12px 8px; background:rgba(255,255,255,.05); color:inherit; font:inherit; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; transition:transform .1s, border-color .1s; }
+.wild-picker .wp .em{ font-size:1.6rem; }
+.wild-picker .wp .nm{ font-size:.6rem; text-transform:uppercase; letter-spacing:.04em; opacity:.85; }
+.wild-picker .wp:hover{ transform:translateY(-2px); border-color:#f6e6a4; }
+.over-banner{ font-family:var(--bgn-serif); font-size:1.35rem; line-height:1.3; margin:2px 0 12px; color:#f6e6a4; }
+.over-scores{ display:flex; gap:30px; justify-content:center; margin:6px 0 10px; font-size:.9rem; align-items:flex-start; }
+.over-scores > div{ display:flex; flex-direction:column; align-items:center; gap:2px; min-width:96px; }
+.over-scores .muted{ white-space:nowrap; }
+.over-scores b{ font-family:var(--bgn-serif); font-size:1.6rem; color:var(--bgn-accent2); display:block; line-height:1.1; }
+.over-scores .pts-tag{ font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; opacity:.6; }
+.over-scores .win b{ color:#7fe0b0; }
+.win-tag{ font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:#7fe0b0; border:1px solid rgba(127,224,176,.4); border-radius:999px; padding:1px 8px; margin-top:3px; }
+.over-btns{ display:flex; gap:10px; justify-content:center; margin-top:14px; flex-wrap:wrap; }
+.over-btns .btn{ white-space:nowrap; padding:14px 22px; }
+@media (max-width:380px){
+  .over-scores{ flex-direction:column; gap:10px; }
+  .over-scores > div{ min-width:0; }
+  .over-banner{ font-size:1.15rem; }
+  .promo{ padding:14px 14px; }
+}
+</style>
+
+<script>
+(function(){
+"use strict";
+if(document.getElementById("rathjiBackBtn")) return;
+var style=document.createElement("style");
+style.textContent=[
+  '#rathjiBackBtn{position:fixed;left:90%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,0.82);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.18);box-shadow:0 6px 18px rgba(0,0,0,0.35);text-decoration:none;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff;box-sizing:border-box;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease;}',
+  '#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,0.65);box-shadow:0 10px 24px rgba(139,92,246,0.3);}',
+  '#rathjiBackBtn .rbb-badge{width:28px;height:28px;flex:none;border-radius:50%;background:linear-gradient(135deg,#8b5cf6,#d946ef);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;color:#fff;line-height:1;}',
+  '#rathjiBackBtn .rbb-label{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;}',
+  '#rathjiBackBtn .rbb-arrow{flex:none;width:14px;height:14px;opacity:.9;}',
+  '@media (max-width:480px){#rathjiBackBtn .rbb-label,#rathjiBackBtn .rbb-arrow{display:none;}}'
+].join("\n");
+document.head.appendChild(style);
+var a=document.createElement("a");
+a.id="rathjiBackBtn";
+a.href="https://perchance.org/rathjis-generators";
+a.target="_blank";
+a.rel="noopener";
+a.setAttribute("aria-label","Back to my projects");
+a.title="Back to my projects";
+a.innerHTML='<span class="rbb-badge">R</span><span class="rbb-label">My projects</span><svg class="rbb-arrow" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+document.body.appendChild(a);
+})();
+</script>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ rules engine (mirrors server — keep in sync) ══════════ */
+const MAXR=10, NSUITS=5, NUMC=13, DECK_N=87;
+const M0=65, P0=70, KING=72, TIG=73, TIDE0=74;
+const SUIT_NAMES=["Red","Yellow","Green","Blue","Purple"];
+const SUIT_EMO=["🔴","🟡","🟢","🔵","🟣"];
+const SPEC_EMO={mermaid:"🧜♀️",pirate:"🏴☠️",skullKing:"☠️",tigress:"🐅",tide:"💀"};
+const SPEC_NAMES={mermaid:"Mermaid",pirate:"Pirate",skullKing:"Skull King",tigress:"Tigress",tide:"Tide"};
+const AI_NAMES=["Blackbeard","One-Eye","Salty Sam","Capt. Fang"];
+const AV_EMO=["☠️","🦜","⚓","🗡️"];
+function cardType(id){ if(id<M0)return {k:"color",suit:Math.floor(id/13),num:id%13+1}; if(id<P0)return {k:"mermaid"}; if(id<KING)return {k:"pirate"}; if(id===KING)return {k:"skullKing"}; if(id===TIG)return {k:"tigress"}; return {k:"tide"}; }
+function isColor(id){ return id<M0; }
+function suitOf(id){ return id<M0?Math.floor(id/13):-1; }
+function numOf(id){ return id<M0?id%13+1:0; }
+function pVal(k){ return k==="skullKing"?30:(k==="pirate"||k==="mermaid"||k==="tigress"?20:10); }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+function buildDeck(){ const d=[]; for(let i=0;i<DECK_N;i++)d.push(i); return shuffle(d); }
+function trickPower(card,role,ledSuit,hasKing){
+  const t=cardType(card);
+  if(t.k==="mermaid")return hasKing?6:0;
+  if(t.k==="skullKing")return 5;
+  if(t.k==="tigress")return role==="pirate"?4:0;
+  if(t.k==="pirate")return 3;
+  if(t.k==="color")return t.suit===ledSuit?t.num:0;
+  return 0;
+}
+function resolveTrick(plays,ledSuit){
+  const hasKing=plays.some(function(pl){return cardType(pl.card).k==="skullKing";});
+  let wi=-1,wpow=-1;
+  for(let i=0;i<plays.length;i++){
+    const pow=trickPower(plays[i].card,plays[i].role,ledSuit,hasKing);
+    if(pow>wpow){ wpow=pow; wi=plays[i].p; }
+  }
+  return {winner:wi,power:wpow};
+}
+function legalPlays(hand,ledSuit){
+  if(ledSuit===-1){ const a=[]; for(let i=0;i<hand.length;i++)a.push(i); return a; }
+  let hasSuit=false;
+  for(let i=0;i<hand.length;i++){ if(isColor(hand[i])&&suitOf(hand[i])===ledSuit){ hasSuit=true; break; } }
+  const out=[];
+  for(let i=0;i<hand.length;i++){
+    const id=hand[i];
+    if(!isColor(id)){ out.push(i); continue; }
+    if(suitOf(id)===ledSuit)out.push(i);
+    else if(!hasSuit)out.push(i);
+  }
+  return out;
+}
+function specialPts(plays){ let s=0; for(const pl of plays){ const k=cardType(pl.card).k; if(k!=="color")s+=pVal(k); } return s; }
+function roundScore(round,bid,tricks,spec){
+  if(bid===0)return tricks===0?round*10:-round*10;
+  if(tricks===bid)return 20*tricks+10+spec;
+  return -10*Math.abs(tricks-bid);
+}
+function cardName(id,role){
+  const t=cardType(id);
+  if(t.k==="color")return SUIT_NAMES[t.suit]+" "+t.num;
+  let n=SPEC_NAMES[t.k];
+  if(t.k==="tigress")n+=role==="pirate"?" (Pirate)":" (Escape)";
+  return n;
+}
+
+/* ══════════ game state ══════════ */
+const game={ mode:null, n:2, view:0, g:null, hand:[], bidVal:0, pendingTigress:null,
+  aiThinking:false, locked:false, lastSeq:-1, logLines:[],
+  myPlayer:0, myRole:null, status:"idle", oppPresent:true, hostIn:false, guestIn:false,
+  socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null, openResolvers:[],
+  roundShown:false };
+
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const countPanel=document.getElementById("countPanel");
+const countHintEl=document.getElementById("countHintEl");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const oppSeatsEl=document.getElementById("oppSeatsEl");
+const meRowEl=document.getElementById("meRowEl");
+const handEl=document.getElementById("handEl");
+const trickAreaEl=document.getElementById("trickAreaEl");
+const lastTrickEl=document.getElementById("lastTrickEl");
+const roundEl=document.getElementById("roundEl");
+const turnEl=document.getElementById("turnEl");
+const logEl=document.getElementById("logEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const resignBtn=document.getElementById("resignBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const bidModal=document.getElementById("bidModal");
+const bidTitleEl=document.getElementById("bidTitleEl");
+const bidValueEl=document.getElementById("bidValueEl");
+const bidPickerEl=document.getElementById("bidPickerEl");
+const bidLockBtn=document.getElementById("bidLockBtn");
+const bidHintEl=document.getElementById("bidHintEl");
+const tigModal=document.getElementById("tigModal");
+const tigPirateBtn=document.getElementById("tigPirateBtn");
+const tigEscapeBtn=document.getElementById("tigEscapeBtn");
+const passScreen=document.getElementById("passScreen");
+const passTitleEl=document.getElementById("passTitleEl");
+const passSubEl=document.getElementById("passSubEl");
+const passGoBtn=document.getElementById("passGoBtn");
+const roundModal=document.getElementById("roundModal");
+const roundTitleEl=document.getElementById("roundTitleEl");
+const roundTableEl=document.getElementById("roundTableEl");
+const nextRoundBtn=document.getElementById("nextRoundBtn");
+const overModal=document.getElementById("overModal");
+const overTitleEl=document.getElementById("overTitleEl");
+const overBannerEl=document.getElementById("overBannerEl");
+const overScoresEl=document.getElementById("overScoresEl");
+const overReasonEl=document.getElementById("overReasonEl");
+const playAgainBtn=document.getElementById("playAgainBtn");
+const overMenuBtn=document.getElementById("overMenuBtn");
+
+/* ══════════ helpers ══════════ */
+function npName(p){
+  if(game.mode==="online")return p===game.myPlayer?"You":"Opponent";
+  if(game.mode==="ai")return p===0?"You":AI_NAMES[p-1];
+  return "Player "+(p+1);
+}
+function myIdx(){ return game.mode==="online"?game.myPlayer:(game.mode==="ai"?0:game.view); }
+function myHand(){ return game.mode==="online"?game.hand:game.g.hands[myIdx()]; }
+function isMyPlay(){
+  const g=game.g;
+  return g&&!g.over&&g.phase===1&&g.turn===myIdx()&&!game.locked&&!game.aiThinking&&!game.passShow;
+}
+function log(txt,steal){
+  game.logLines.push(steal?'<div class="log-item"><span class="st">'+txt+'</span></div>':'<div class="log-item"><span class="ev">'+txt+'</span></div>');
+  if(game.logLines.length>80)game.logLines.splice(0,game.logLines.length-80);
+  renderLog();
+}
+function renderLog(){
+  logEl.innerHTML=game.logLines.join("");
+  logEl.scrollTop=logEl.scrollHeight;
+}
+function backs(n){
+  let s="";
+  for(let i=0;i<Math.min(n,10);i++)s+='<div class="sk-back"></div>';
+  if(n>10)s+='<span class="muted small">+'+(n-10)+'</span>';
+  return s;
+}
+function tricksChips(n){
+  if(!n)return "";
+  let s="";
+  for(let i=0;i<n;i++)s+='<span class="sk-trick-chip">☠</span>';
+  return '<div class="sk-tricks">'+s+'</div>';
+}
+
+/* ══════════ local / AI game model ══════════ */
+function newLocalGame(n){
+  return { n, round:1, phase:0, deck:[], hands:[], bids:[], bidLocked:[], turn:-1, leader:0,
+    trick:{plays:[],ledSuit:-1,leadPlayer:-1}, lastTrick:null,
+    tricksTaken:[], tricksPlayed:0, specials:[], totals:[], roundScores:null,
+    over:false, winner:null, reason:"", seq:0 };
+}
+function initTotals(g){ g.totals=[]; for(let p=0;p<g.n;p++)g.totals.push(0); }
+function startLocalRound(g){
+  g.deck=buildDeck();
+  g.hands=[]; g.bids=[]; g.bidLocked=[];
+  for(let p=0;p<g.n;p++){
+    g.hands.push([]); g.bids.push(null); g.bidLocked.push(false);
+    for(let k=0;k<g.round;k++)g.hands[p].push(g.deck.pop());
+  }
+  g.phase=0; g.turn=-1; g.leader=(g.round-1)%g.n;
+  g.trick={plays:[],ledSuit:-1,leadPlayer:-1}; g.lastTrick=null;
+  g.tricksTaken=[]; g.tricksPlayed=0; g.specials=[]; g.roundScores=null;
+  for(let p=0;p<g.n;p++){ g.tricksTaken.push(0); g.specials.push(0); }
+}
+function applyLocalPlay(g,p,i,role){
+  if(g.trick.plays.length===0)g.lastTrick=null;
+  const id=g.hands[p][i];
+  g.hands[p].splice(i,1);
+  const t=cardType(id);
+  g.trick.plays.push({p:p,card:id,role:t.k==="tigress"?(role==="pirate"?"pirate":"escape"):null});
+  if(g.trick.ledSuit===-1&&isColor(id))g.trick.ledSuit=suitOf(id);
+  g.tricksPlayed++;
+  if(g.trick.plays.length<g.n){ g.turn=(p+1)%g.n; return; }
+  const r=resolveTrick(g.trick.plays,g.trick.ledSuit);
+  g.tricksTaken[r.winner]++;
+  g.specials[r.winner]+=specialPts(g.trick.plays);
+  g.lastTrick={plays:g.trick.plays.slice(),winner:r.winner};
+  log(npName(r.winner)+" takes the trick ("+g.tricksTaken[r.winner]+"/"+g.round+")!",true);
+  if(g.tricksPlayed>=g.round*g.n){ finishLocalRound(g); return; }
+  g.trick={plays:[],ledSuit:-1,leadPlayer:r.winner};
+  g.leader=r.winner; g.turn=r.winner;
+}
+function finishLocalRound(g){
+  g.phase=2; g.turn=-1;
+  const rs=[];
+  for(let p=0;p<g.n;p++){
+    const bid=g.bids[p]===null?0:g.bids[p];
+    const tk=g.tricksTaken[p];
+    const spec=(bid===tk&&bid>0)?g.specials[p]:0;
+    const sc=roundScore(g.round,bid,tk,spec);
+    rs.push(sc); g.totals[p]+=sc;
+  }
+  g.roundScores=rs;
+  log("Round "+g.round+" scored — "+g.n+" players, totals updated.");
+  if(g.round>=MAXR){
+    g.over=true; g.reason="gameOver";
+    const mx=Math.max.apply(null,g.totals);
+    const winners=g.totals.map(function(t,p){return t===mx?p:-1;}).filter(function(p){return p!==-1;});
+    g.winner=winners.length===1?winners[0]:"draw";
+    showOverModal();
+  }else{
+    showRoundModal();
+  }
+}
+
+/* ══════════ rendering ══════════ */
+function cardEl(id,opts){
+  opts=opts||{};
+  const d=document.createElement("div");
+  const t=cardType(id);
+  if(t.k==="color"){
+    d.className="sk-card col cs"+t.suit;
+    d.innerHTML='<div class="sk-num">'+t.num+'</div><div class="sk-emo">'+SUIT_EMO[t.suit]+'</div><div class="sk-suit">'+SUIT_NAMES[t.suit]+'</div>';
+  }else{
+    d.className="sk-card spec s-"+t.k;
+    d.innerHTML='<div class="sk-emo">'+SPEC_EMO[t.k]+'</div><div class="sk-nm">'+SPEC_NAMES[t.k]+'</div><div class="sk-val">'+pVal(t.k)+'</div>';
+  }
+  if(opts.selected)d.classList.add("selected");
+  if(opts.playable)d.classList.add("playable");
+  return d;
+}
+function seatEl(p){
+  const g=game.g;
+  const d=document.createElement("div");
+  const act=(g.phase===0&&!g.bidLocked[p])||(g.phase===1&&g.turn===p);
+  d.className="sk-seat"+(act?" act":"")+(p===myIdx()?" me":"");
+  const bidN=g.bids[p];
+  let bidHtml;
+  if(g.phase===0){
+    bidHtml='<div class="sk-seat-bid">'+((g.bidLocked[p])?'<span class="lockd">bid locked</span>':'<span class="muted">bid…</span>')+'</div>';
+  }else{
+    bidHtml='<div class="sk-seat-bid">bid: <span class="bnum">'+(bidN===null?"?":bidN)+'</span></div>';
+  }
+  d.innerHTML='<div class="sk-seat-top"><div class="sk-avatar">'+AV_EMO[p%4]+'</div><div><div class="sk-pname">'+npName(p)+'</div><div class="sk-seat-total">total '+g.totals[p]+'</div></div></div>'
+    +bidHtml+tricksChips(g.tricksTaken[p])
+    +'<div class="sk-backs">'+(game.mode==="online"?backs(g.handsLen?g.handsLen[p]:0):backs(g.hands[p].length))+'</div>';
+  return d;
+}
+function renderOpps(){
+  oppSeatsEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  const me=myIdx();
+  for(let p=0;p<g.n;p++){
+    if(p===me)continue;
+    oppSeatsEl.appendChild(seatEl(p));
+  }
+}
+function renderMe(){
+  const g=game.g; if(!g)return;
+  const p=myIdx();
+  meRowEl.innerHTML="";
+  const seat=seatEl(p);
+  seat.classList.add("me");
+  meRowEl.appendChild(seat);
+}
+function renderTrick(){
+  const g=game.g; if(!g)return;
+  const tr=g.trick;
+  trickAreaEl.innerHTML="";
+  if(!tr.plays.length){
+    if(g.phase===1&&g.turn>=0){
+      trickAreaEl.innerHTML='<div class="sk-emptytrick">'+npName(g.turn)+' leads the trick…</div>';
+    }else if(g.phase===0){
+      trickAreaEl.innerHTML='<div class="sk-emptytrick">Hands dealt — bid in secret!</div>';
+    }else if(g.phase===2){
+      trickAreaEl.innerHTML='<div class="sk-emptytrick">Round scored.</div>';
+    }
+    lastTrickEl.innerHTML="";
+    return;
+  }
+  const cur=resolveTrick(tr.plays,tr.ledSuit);
+  const wrap=document.createElement("div");
+  wrap.className="sk-trickrow";
+  for(let k=0;k<tr.plays.length;k++){
+    const pl=tr.plays[k];
+    const cell=document.createElement("div");
+    cell.className="sk-playcell";
+    const c=cardEl(pl.card);
+    if(cur&&cur.winner===pl.p)c.classList.add("winning");
+    cell.appendChild(c);
+    const nm=document.createElement("div");
+    nm.className="sk-playname";
+    nm.textContent=npName(pl.p);
+    cell.appendChild(nm);
+    wrap.appendChild(cell);
+  }
+  trickAreaEl.appendChild(wrap);
+  const lt=g.lastTrick;
+  if(lt&&game.mode!=="online"){
+    let s='Last trick — won by '+npName(lt.winner)+': ';
+    const names=[];
+    for(const pl of lt.plays)names.push(cardName(pl.card,pl.role));
+    lastTrickEl.textContent=s+names.join(", ")+".";
+  }else{
+    lastTrickEl.textContent="";
+  }
+}
+function renderRoundBar(){
+  const g=game.g; if(!g)return;
+  roundEl.textContent="Round "+g.round+" / "+MAXR;
+  let t="";
+  if(g.over){ t="Game over"; }
+  else if(g.phase===0){
+    if(game.mode==="online")t=game.bidLocked&&game.bidLocked[game.myPlayer]?"Waiting for the opponent's bid…":"Your bid — in secret.";
+    else if(game.mode==="local")t=game.g.bidLocked[game.view]?"Waiting…":"Your bid — in secret, "+npName(game.view)+".";
+    else t="Your bid — in secret.";
+  }
+  else if(g.phase===1){
+    if(g.turn===myIdx())t="Your turn — play a card.";
+    else t="Waiting for "+npName(g.turn)+"…";
+  }
+  else{ t="Round scored."; }
+  turnEl.textContent=t;
+}
+function renderHand(){
+  handEl.innerHTML="";
+  const g=game.g; if(!g)return;
+  const hand=myHand();
+  const can=isMyPlay();
+  const legal=can?legalPlays(hand,g.trick.ledSuit):[];
+  for(let i=0;i<hand.length;i++){
+    const el=cardEl(hand[i],{selected:false});
+    if(can&&legal.indexOf(i)!==-1){
+      el.classList.add("playable");
+      el.addEventListener("click",function(){ onHandClick(i); });
+    }
+    handEl.appendChild(el);
+  }
+  if(!hand.length&&game.mode!=="online"){
+    const em=document.createElement("div");
+    em.className="muted small";
+    em.style.padding="20px 0";
+    em.textContent="No cards in hand.";
+    handEl.appendChild(em);
+  }
+}
+function renderAll(){
+  if(!game.g)return;
+  renderOpps();
+  renderMe();
+  renderTrick();
+  renderRoundBar();
+  renderHand();
+  updateBidUI();
+  updateButtons();
+}
+
+/* ══════════ bidding UI ══════════ */
+function buildBidPicker(){
+  const g=game.g; if(!g)return;
+  bidTitleEl.textContent="Round "+g.round+" — how many tricks?";
+  bidHintEl.textContent="Bid exactly the tricks you'll take. Special cards score bonus points only if you nail the bid.";
+  bidValueEl.textContent=game.bidVal;
+  bidPickerEl.innerHTML="";
+  for(let b=0;b<=g.round;b++){
+    const btn=document.createElement("button");
+    btn.className="bp"+(b===game.bidVal?" on":"");
+    btn.textContent=b;
+    btn.addEventListener("click",function(){ game.bidVal=b; buildBidPicker(); });
+    bidPickerEl.appendChild(btn);
+  }
+}
+function updateBidUI(){
+  const g=game.g; if(!g)return;
+  const online=game.mode==="online";
+  const mine=online?game.myPlayer:0;
+  let shouldShow=false;
+  if(game.mode==="local")shouldShow=g.phase===0&&!g.bidLocked[game.view];
+  else shouldShow=g.phase===0&&!g.bidLocked[mine]&&(game.mode!=="online"||game.status===2);
+  if(shouldShow&&bidModal.hidden){ buildBidPicker(); bidModal.hidden=false; }
+  if(!shouldShow&&!bidModal.hidden)bidModal.hidden=true;
+}
+
+/* ══════════ interaction ══════════ */
+function onHandClick(i){
+  const g=game.g; if(!g)return;
+  if(g.phase!==1)return;
+  if(!isMyPlay())return;
+  const hand=myHand();
+  const legal=legalPlays(hand,g.trick.ledSuit);
+  if(legal.indexOf(i)===-1){ flashBanner("Can't play that — follow suit or play a special card."); return; }
+  const t=cardType(hand[i]);
+  if(t.k==="tigress"){ game.pendingTigress=i; tigModal.hidden=false; return; }
+  commitPlay(i,null);
+}
+function commitPlay(i,role){
+  if(game.mode==="online"){ sendPlay(i,role); return; }
+  const g=game.g, p=myIdx();
+  const nm=cardName(g.hands[p][i],role);
+  log(npName(p)+" plays "+nm+".");
+  applyLocalPlay(g,p,i,role);
+  if(g.phase===2){ renderAll(); return; }
+  renderAll();
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — play a card."); }
+  else if(game.mode==="ai"){ driveAI(); }
+}
+function lockBid(){
+  const g=game.g; if(!g)return;
+  if(g.phase!==0)return;
+  const mine=game.mode==="online"?game.myPlayer:(game.mode==="ai"?0:game.view);
+  if(g.bidLocked[mine])return;
+  if(game.mode==="online"){ sendSetBid(); return; }
+  g.bids[mine]=game.bidVal; g.bidLocked[mine]=true;
+  bidModal.hidden=true;
+  log(npName(mine)+" locked a bid ("+game.bidVal+").");
+  if(game.mode==="local"){
+    const next=g.bidLocked.findIndex(function(b){return !b;});
+    if(next===-1){ revealBids(); return; }
+    showPass(next,"Pass the device to "+npName(next)+" — keep your bid secret!");
+  }else{
+    driveAI();
+  }
+}
+function revealBids(){
+  const g=game.g;
+  g.phase=1; g.turn=g.leader;
+  g.trick={plays:[],ledSuit:-1,leadPlayer:g.leader}; g.lastTrick=null;
+  const parts=[];
+  for(let p=0;p<g.n;p++)parts.push(npName(p)+" "+g.bids[p]);
+  log("Bids revealed: "+parts.join(" · ")+" — "+npName(g.leader)+" leads!",true);
+  renderAll();
+  if(game.mode==="local"){ showPass(g.turn,"Pass the device to "+npName(g.turn)+" — they lead the first trick."); }
+  else if(game.mode==="ai"&&g.turn!==0){ driveAI(); }
+}
+
+/* ══════════ pass screen (hotseat) ══════════ */
+function showPass(next,msg){
+  game.nextView=next;
+  passTitleEl.textContent="Pass the device to "+npName(next);
+  passSubEl.textContent=msg;
+  passScreen.hidden=false;
+}
+passGoBtn.addEventListener("click",function(){
+  passScreen.hidden=true;
+  if(game.nextView!=null){ game.view=game.nextView; game.nextView=null; }
+  const g=game.g;
+  if(g&&g.phase===0&&game.mode==="local"&&!g.bidLocked[game.view]){ game.bidVal=0; }
+  renderAll();
+});
+
+/* ══════════ AI ══════════ */
+function aiBid(g,p){
+  const hand=g.hands[p], r=g.round;
+  let strength=0;
+  for(const c of hand){
+    const t=cardType(c);
+    if(t.k==="skullKing")strength+=2.1;
+    else if(t.k==="pirate")strength+=1.5;
+    else if(t.k==="tigress")strength+=1.0;
+    else if(t.k==="mermaid")strength+=0.7;
+    else if(t.k==="tide")strength+=0.05;
+    else if(t.num>=12)strength+=1.15;
+    else if(t.num>=10)strength+=0.85;
+    else if(t.num>=8)strength+=0.55;
+    else if(t.num>=6)strength+=0.3;
+    else strength+=0.1;
+  }
+  const b=Math.floor(strength*0.7+Math.random()*1.3);
+  return Math.max(0,Math.min(r,b));
+}
+function aiPlayLow(hand,legal){
+  let best=null,bscore=1e9;
+  for(const i of legal){
+    const t=cardType(hand[i]);
+    let s;
+    if(t.k==="tide")s=0;
+    else if(t.k==="mermaid")s=1;
+    else if(t.k==="color")s=2+t.num/20;
+    else if(t.k==="tigress")s=30;
+    else if(t.k==="pirate")s=40;
+    else s=50;
+    if(s<bscore){ bscore=s; best=i; }
+  }
+  return best;
+}
+function aiLeadStrong(hand,legal){
+  const colors=legal.filter(function(i){return isColor(hand[i]);}).map(function(i){return {i:i,n:numOf(hand[i])};});
+  if(colors.length){
+    colors.sort(function(a,b){return a.n-b.n;});
+    const idx=Math.min(colors.length-1,Math.floor(colors.length*0.5+Math.random()*2));
+    return colors[idx].i;
+  }
+  return legal[0];
+}
+function aiFindBeater(hand,legal,trick){
+  const cur=resolveTrick(trick.plays,trick.ledSuit);
+  const hasKing=trick.plays.some(function(pl){return cardType(pl.card).k==="skullKing";});
+  let best=null,bestNum=1e9;
+  for(const i of legal){
+    const pow=trickPower(hand[i],null,trick.ledSuit,hasKing);
+    if(pow>cur.power&&pow<bestNum){ bestNum=pow; best=i; }
+  }
+  return best;
+}
+function aiChooseCard(g,p){
+  const hand=g.hands[p], trick=g.trick;
+  const legal=legalPlays(hand,trick.ledSuit);
+  if(!legal.length)return null;
+  const targets=g.bids[p]-g.tricksTaken[p];
+  let i;
+  if(trick.plays.length===0){
+    i=targets>0?aiLeadStrong(hand,legal):aiPlayLow(hand,legal);
+  }else{
+    if(targets>0){ const b=aiFindBeater(hand,legal,trick); i=b!==null?b:aiPlayLow(hand,legal); }
+    else i=aiPlayLow(hand,legal);
+  }
+  if(i===null)i=legal[0];
+  const role=cardType(hand[i]).k==="tigress"?"pirate":null;
+  return {i:i,role:role};
+}
+function driveAI(){
+  const g=game.g;
+  if(game.mode!=="ai"||!g||g.over)return;
+  if(g.phase===0){
+    let pending=false;
+    for(let p=1;p<g.n;p++){ if(!g.bidLocked[p]){ pending=true; break; } }
+    if(!pending)return;
+    game.aiThinking=true;
+    setTimeout(function(){
+      if(game.mode!=="ai"||!game.g)return;
+      for(let p=1;p<g.n;p++){
+        if(!g.bidLocked[p]){ g.bids[p]=aiBid(g,p); g.bidLocked[p]=true; log(npName(p)+" locked a bid ("+g.bids[p]+")."); }
+      }
+      game.aiThinking=false;
+      if(g.bidLocked.every(function(b){return b;})){ revealBids(); }
+    },650);
+    return;
+  }
+  if(g.phase===1&&g.turn!==0){
+    game.aiThinking=true;
+    const p=g.turn;
+    setTimeout(function(){
+      if(game.mode!=="ai"||!game.g||game.g.over)return;
+      const sel=aiChooseCard(game.g,p);
+      if(sel!==null){
+        const nm=cardName(game.g.hands[p][sel.i],sel.role);
+        applyLocalPlay(game.g,p,sel.i,sel.role);
+        log(npName(p)+" plays "+nm+".");
+        game.aiThinking=false;
+        renderAll();
+        if(game.g.phase===2){ return; }
+        driveAI();
+      }else{
+        game.aiThinking=false;
+        driveAI();
+      }
+    },650+Math.random()*450);
+  }
+}
+
+/* ══════════ game flow (local / AI) ══════════ */
+function startLocalGame(){
+  const n=game.n;
+  const g=newLocalGame(n);
+  initTotals(g);
+  game.g=g; game.hand=[]; game.view=0; game.locked=false; game.passShow=false; game.aiThinking=false;
+  game.logLines=[];
+  startLocalRound(g);
+  log("Round 1 — 1 card each. Bid how many tricks you'll take!");
+  log("Only the Mermaid can capture the Skull King. Hit your bid to score big.");
+  renderAll();
+}
+function advanceLocalRound(){
+  const g=game.g;
+  if(g.round>=MAXR){ showOverModal(); return; }
+  g.round++;
+  startLocalRound(g);
+  game.bidVal=0;
+  log("Round "+g.round+" — "+g.round+" cards each. Bid in secret!");
+  renderAll();
+  if(game.mode==="local"){ showPass(0,"Round "+g.round+" — "+npName(0)+" bids first, in secret."); }
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  game.mode=mode;
+  game.myPlayer=0; game.myRole=null; game.over=false;
+  roomBox.hidden=true;
+  claimBtn.hidden=true;
+  resignBtn.style.display="none";
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  passScreen.hidden=true;
+  bidModal.hidden=true;
+  tigModal.hidden=true;
+  roundModal.hidden=true;
+  overModal.hidden=true;
+  startLocalGame();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
+    exitOnline(true);
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+  }
+}
+
+/* ══════════ round / game over ══════════ */
+function showRoundModal(){
+  const g=game.g; if(!g)return;
+  roundTitleEl.textContent="Round "+g.round+" — scored";
+  let h='<div class="rt-row rt-head"><span>Player</span><span>Bid</span><span>Tricks</span><span>Pts</span><span>Total</span></div>';
+  for(let p=0;p<g.n;p++){
+    const sc=g.roundScores[p];
+    const cls=sc>0?" rt-pos":(sc<0?" rt-neg":"");
+    h+='<div class="rt-row"><span class="rt-name">'+npName(p)+'</span><span>'+(g.bids[p]===null?"—":g.bids[p])+'</span><span>'+g.tricksTaken[p]+'</span><span class="rt-pts'+cls+'">'+(sc>0?"+":"")+sc+'</span><span class="rt-total">'+g.totals[p]+'</span></div>';
+  }
+  roundTableEl.innerHTML=h;
+  nextRoundBtn.textContent=g.round>=MAXR?"Final results":"Next round →";
+  roundModal.hidden=false;
+}
+nextRoundBtn.addEventListener("click",function(){
+  roundModal.hidden=true;
+  const g=game.g; if(!g)return;
+  if(game.mode==="online"){ sendNextRound(); return; }
+  advanceLocalRound();
+});
+function showOverModal(){
+  const g=game.g; if(!g)return;
+  overTitleEl.textContent="Game over";
+  let banner="";
+  if(g.winner==="draw")banner="⚖️ It's a tie!";
+  else{
+    const youWon=game.mode==="online"?g.winner===game.myPlayer:(game.mode==="ai"?g.winner===0:false);
+    banner=youWon?"☠️ You rule the sea!":"☠️ "+npName(g.winner)+" rules the sea!";
+  }
+  overBannerEl.textContent=banner;
+  const n=game.mode==="online"?2:g.n;
+  let s="";
+  for(let p=0;p<n;p++){
+    const name=game.mode==="online"?(p===game.myPlayer?"You":"Opponent"):npName(p);
+    const win=g.winner===p;
+    s+='<div class="'+(win?"win":"")+'"><span class="muted small">'+name+'</span><b>'+g.totals[p]+'</b><span class="pts-tag">pts</span>'+(win?'<span class="win-tag">★ winner</span>':"")+'</div>';
+  }
+  overScoresEl.innerHTML=s;
+  if(g.reason==="resign")overReasonEl.textContent="The game ended early.";
+  else if(g.reason==="forfeit")overReasonEl.textContent=game.mode==="online"?"One player left the match.":"The game ended early.";
+  else overReasonEl.textContent="After 10 rounds of tricks, bids and betrayal.";
+  playAgainBtn.textContent=game.mode==="online"?"Rematch":"Play again";
+  overModal.hidden=false;
+}
+playAgainBtn.addEventListener("click",function(){
+  overModal.hidden=true;
+  if(game.mode==="online"){ rpc("rematch",game.roomCode).catch(function(){}); return; }
+  startLocalGame();
+});
+overMenuBtn.addEventListener("click",function(){ overModal.hidden=true; exitToLobby(); });
+
+/* ══════════ buttons / banners ══════════ */
+function updateButtons(){
+  const g=game.g; if(!g)return;
+  const online=game.mode==="online";
+  if(online){
+    resignBtn.style.display=g.over?"none":"";
+    claimBtn.hidden=!(game.status===2&&!g.over&&!game.oppPresent);
+  }else{
+    resignBtn.style.display="none";
+    claimBtn.hidden=true;
+  }
+  newGameBtn.textContent=online?(g.over?"Rematch":"Match in progress"):"New game";
+}
+let bannerTimer=null;
+function flashBanner(msg){ turnEl.textContent=msg; turnEl.classList.add("warn"); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderRoundBar(); },2600); }
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true;
+    game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    renderRoundBar();
+  });
+  game.socket.addEventListener("message",function(ev){
+    if(game.mode==="online")onServerMsg(ev.data);
+  });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null;
+        connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){ connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — share the code to start the match":"Connecting…"); }
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="hand"){ game.hand=msg.hand.slice(); if(game.g&&game.mode==="online")game.g.hands[game.myPlayer]=game.hand; renderAll(); }
+}
+function applyServerSnap(s){
+  if(!game.g){ game.g=newLocalGame(2); initTotals(game.g); }
+  const g=game.g;
+  g.phase=s.phase; g.round=s.round; g.turn=s.turn; g.leader=s.leader;
+  g.bidLocked=[!!s.bidLocked[0],!!s.bidLocked[1]];
+  g.bids=s.bids?s.bids.slice():[null,null];
+  g.totals=s.totals.slice();
+  g.roundScores=s.roundScores?s.roundScores.slice():null;
+  g.tricksTaken=s.tricksTaken.slice(); g.tricksPlayed=s.tricksPlayed;
+  g.trick={plays:s.trick.plays.map(function(pl){return {p:pl.p,card:pl.card,role:pl.role};}),ledSuit:s.trick.ledSuit,leadPlayer:s.trick.leadPlayer};
+  g.handsLen=s.handsLen; g.deckCount=s.deckCount;
+  g.over=s.over; g.winner=s.winner; g.reason=s.reason;
+  game.status=s.status;
+  game.hostIn=!!s.hostIn; game.guestIn=!!s.guestIn;
+  game.oppPresent=(game.myPlayer===0)?game.guestIn:game.hostIn;
+  game.locked=false;
+  if(game.myPlayer>=0)g.hands[game.myPlayer]=game.hand;
+  if(s.event&&s.seq!==game.lastSeq){ log(s.event.replace(/Host/g,npName(0)).replace(/Guest/g,npName(1)),/wins|takes the trick|Bids revealed/.test(s.event)); }
+  game.lastSeq=s.seq;
+  renderAll();
+  if(g.over&&game.mode==="online"){ showOverModal(); }
+  else if(g.phase===2&&g.roundScores&&game.mode==="online"){ showRoundModal(); }
+  else{ roundModal.hidden=true; }
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  roomBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  game.locked=false;
+  renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom","");
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=0;
+    game.roomCode=r.code;
+    game.logLines=[];
+    log("Room created — code "+r.code+". Share it with a friend to start.");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    game.mode="online";
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    game.roomCode=code;
+    game.logLines=[];
+    log("Joined room "+code+".");
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+function sendSetBid(){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.seq;
+  rpc("setBid",JSON.stringify({code:game.roomCode,evt:evt,bid:game.bidVal})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Bid rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendPlay(i,role){
+  game.locked=true;
+  updateButtons();
+  const evt=game.g.seq;
+  rpc("play",JSON.stringify({code:game.roomCode,evt:evt,card:i,role:role})).then(function(r){
+    if(!r||!r.ok){
+      game.locked=false;
+      flashBanner("Play rejected ("+(r&&r.err?r.err:"error")+")");
+      return rpc("getRoom",game.roomCode).then(function(s){ if(s&&s.snap)applyServerSnap(s.snap); });
+    }
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function sendNextRound(){
+  game.locked=true;
+  const evt=game.g.seq;
+  rpc("nextRound",JSON.stringify({code:game.roomCode,evt:evt})).then(function(r){
+    game.locked=false;
+    if(!r.ok)flashBanner("Can't advance yet ("+r.err+").");
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+
+/* ══════════ wire up UI ══════════ */
+let pendingMode=null;
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){
+      pendingMode=null; countPanel.style.display="none";
+      onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus();
+      return;
+    }
+    onlinePanel.hidden=true;
+    countPanel.style.display="";
+    countHintEl.textContent=m==="local"?"Pass the device between players. Hands and bids stay secret.":"You against "+(game.n-1)+" AI pirate"+(game.n>2?"s":"")+" — sealed bids, honest tricks.";
+    pendingMode=m;
+  });
+});
+document.querySelectorAll("#countPanel .chip").forEach(function(chip){
+  chip.addEventListener("click",function(){
+    const n=parseInt(chip.dataset.count,10);
+    game.n=n;
+    document.querySelectorAll("#countPanel .chip").forEach(function(c){ c.classList.remove("on"); });
+    chip.classList.add("on");
+    countHintEl.textContent=pendingMode==="local"?"Pass the device between "+n+" players.":"You against "+(n-1)+" AI pirates.";
+  });
+});
+document.querySelectorAll("#countPanel .chip")[0].classList.add("on");
+document.getElementById("countGoBtn").addEventListener("click",function(){
+  if(!pendingMode)return;
+  startMode(pendingMode);
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true;
+  connectSocket();
+  doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true;
+  connectSocket();
+  doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+resignBtn.addEventListener("click",function(){
+  if(!game.over&&game.mode==="online"){ rpc("resign",game.roomCode).catch(function(){}); }
+});
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.g&&game.g.over)rpc("rematch",game.roomCode).catch(function(){});
+    return;
+  }
+  startLocalGame();
+});
+claimBtn.addEventListener("click",function(){
+  if(game.g&&game.g.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+bidLockBtn.addEventListener("click",function(){ lockBid(); });
+tigPirateBtn.addEventListener("click",function(){
+  tigModal.hidden=true;
+  if(game.pendingTigress!==null){ const i=game.pendingTigress; game.pendingTigress=null; commitPlay(i,"pirate"); }
+});
+tigEscapeBtn.addEventListener("click",function(){
+  tigModal.hidden=true;
+  if(game.pendingTigress!==null){ const i=game.pendingTigress; game.pendingTigress=null; commitPlay(i,"escape"); }
+});
+
+/* debug/testing handle for browser_eval */
+window.__sk={ game, newLocalGame, startLocalRound, initTotals, applyLocalPlay, finishLocalRound,
+  resolveTrick, legalPlays, trickPower, roundScore, cardType, cardName, buildDeck, pVal,
+  aiBid, aiChooseCard, startLocalGame, startMode, revealBids, advanceLocalRound,
+  SUIT_NAMES, SUIT_EMO, SPEC_NAMES, SPEC_EMO, MAXR, DECK_N, isColor, suitOf, numOf, npName };
+renderAll();
+})();
+</script>

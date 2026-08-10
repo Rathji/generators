@@ -1,0 +1,1435 @@
+<!-- ════════════════════════════════════════════════════════════════
+     TIC-TAC-TOE — built on the BGN Pen & Paper template shell
+     (difficulty tabs, timer, hints, win screen, shared
+     leaderboard, autosave, JSON export/import, screenshots).
+
+     STRUCTURE OF THE SCRIPT BELOW
+     §1 Config loader (reads main.pjs)
+     §2 THE FRAMEWORK — generic shell, timer, win screen, leaderboard
+     §3 THE GAME CONTRACT — what your game must implement
+     §4 THE GAME — a tic-tac-toe implementation
+     §5 DOM refs, shell building, boot
+     ════════════════════════════════════════════════════════════════ -->
+
+<style>
+*{box-sizing:border-box}
+:root{
+  --gold:#d4af37; --gold2:#f6e6a4; --gold3:#8f721d;
+  --bg:#0a0912; --panel:#15121f; --line:rgba(255,255,255,.09);
+  --txt:#eae6d8; --mut:#8b87a0; --err:#ff5c5c;
+  --paper:#f4efdd; --paper2:#ece0ba;
+}
+html,body{margin:0;padding:0}
+body{
+  background:radial-gradient(1100px 640px at 50% -12%, #1b1730 0%, var(--bg) 62%);
+  color:var(--txt); text-align:left;
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  min-height:100vh;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 18px 60px}
+
+/* ── nav ── */
+.nav{border-bottom:1px solid var(--line);background:rgba(10,9,18,.6);backdrop-filter:blur(6px)}
+.nav-inner{max-width:1180px;margin:0 auto;padding:12px 18px;display:flex;align-items:center;gap:10px}
+.nav-brand{font-weight:800;letter-spacing:1px;color:var(--gold2)}
+.nav-tag{font-size:.72rem;opacity:.6;letter-spacing:2px;text-transform:uppercase}
+
+/* ── hero ── */
+.hero{text-align:center;padding:38px 18px 10px}
+.hero-title{
+  margin:0;font-family:Georgia,"Times New Roman",serif;font-size:clamp(2.2rem,6vw,3.4rem);
+  background:linear-gradient(180deg,#f6e6a4,#d4af37 55%,#8f721d);-webkit-background-clip:text;background-clip:text;color:transparent;
+  letter-spacing:6px;
+}
+.hero-sub{max-width:640px;margin:10px auto 0;color:var(--mut);font-size:.95rem;line-height:1.5}
+.demo-note{
+  margin:16px auto 0;max-width:600px;color:var(--mut);font-size:.78rem;line-height:1.55;
+  background:rgba(212,175,55,.07);border:1px dashed rgba(212,175,55,.35);border-radius:10px;padding:8px 14px;
+}
+.demo-note b{color:var(--gold2)}
+.diffs{display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.diff-tab{
+  background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:8px 18px;border-radius:999px;font:inherit;font-weight:700;font-size:.85rem;letter-spacing:.5px;transition:all .12s;
+}
+.diff-tab:hover{border-color:var(--gold3);color:var(--txt)}
+.diff-tab.active{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+
+/* ── layout ── */
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:22px;align-items:start;margin-top:26px}
+@media (max-width:920px){ main{grid-template-columns:minmax(0,1fr)} .side{order:2} }
+.game-col{min-width:0;max-width:640px;margin:0 auto;width:100%}
+.side{display:flex;flex-direction:column;gap:16px}
+
+/* ── hud ── */
+.hud{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.hud-chip{
+  background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;
+  padding:6px 14px;font-variant-numeric:tabular-nums;font-weight:700;font-size:.95rem;white-space:nowrap;
+}
+
+/* ── board ── */
+.board{
+  display:grid;gap:0;
+  border:2px solid var(--gold);background:#0e0c18;border-radius:8px;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(212,175,55,.2);
+}
+.board.paused{opacity:.45;pointer-events:none}
+.black{background:#16131f;border:1px solid rgba(0,0,0,.5);aspect-ratio:1}
+.cell{
+  background:var(--paper);border:1px solid rgba(30,24,10,.14);position:relative;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .06s;
+}
+.cell:hover{filter:brightness(1.04)}
+.cell.givencell{background:var(--paper2)}
+.cell.inword{background:#ffe9a8}
+.cell.sel{background:#ffd34d;box-shadow:inset 0 0 0 2px var(--gold)}
+.cell.err{background:#ffd9d9}
+.num{position:absolute;top:1px;left:3px;font-size:calc(var(--cellpx,40px)*0.26);font-weight:800;color:var(--gold3);line-height:1;pointer-events:none}
+.letter{font-size:calc(var(--cellpx,40px)*0.5);font-weight:800;color:#241d3a;text-transform:uppercase;pointer-events:none}
+.letter.given{color:var(--gold3)}
+.letter.err{color:#c0392b}
+
+/* ── tic-tac-toe board ── */
+.board.ttt{
+  grid-template-columns:repeat(3,1fr);gap:10px;background:transparent;border:none;
+  box-shadow:none;max-width:460px;margin:0 auto;
+}
+.ttt-cell{
+  aspect-ratio:1;border-radius:14px;cursor:pointer;user-select:none;-webkit-user-select:none;
+  display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(160deg,var(--paper),var(--paper2));
+  box-shadow:0 8px 22px rgba(0,0,0,.4),inset 0 0 0 1px rgba(30,24,10,.12);
+  transition:transform .08s,box-shadow .08s;
+}
+.ttt-cell:hover{transform:translateY(-2px);box-shadow:0 12px 26px rgba(0,0,0,.5),inset 0 0 0 1px rgba(30,24,10,.12)}
+.ttt-cell.played{cursor:default}
+.ttt-cell.played:hover{transform:none}
+.ttt-cell.win{box-shadow:0 0 0 3px #2fae8c,0 10px 26px rgba(47,174,140,.5)}
+.ttt-cell.sugg{animation:pulse 1.1s ease-in-out infinite}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+.ttt-mark{font-weight:900;font-size:clamp(2rem,8vw,3rem);line-height:1;pointer-events:none}
+.ttt-mark.x{color:#241d3a}
+.ttt-mark.o{color:#9a7b22}
+.ttt-suggest{color:var(--gold3);opacity:.9;font-size:clamp(1.5rem,6vw,2.2rem)}
+
+/* ── pad ── */
+.pad{display:grid;grid-template-columns:repeat(9,1fr);gap:6px;margin-top:12px}
+@media (max-width:560px){ .pad{grid-template-columns:repeat(9,1fr)} }
+.pad-btn{
+  aspect-ratio:1.5;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:8px;
+  color:var(--gold2);font:inherit;font-weight:800;font-size:.95rem;cursor:pointer;transition:all .1s;
+}
+.pad-btn:hover{background:rgba(212,175,55,.16);border-color:var(--gold3)}
+.pad-btn:active{transform:scale(.94)}
+.pad-erase{color:var(--mut);font-size:.85rem}
+
+/* ── side panels ── */
+.panel{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:14px;padding:16px}
+.panel-head{font-size:.72rem;letter-spacing:2px;text-transform:uppercase;color:var(--gold2);font-weight:800;margin-bottom:12px}
+.btn-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.btn{
+  flex:1;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--txt);cursor:pointer;
+  padding:10px 8px;border-radius:10px;font:inherit;font-weight:700;font-size:.85rem;white-space:nowrap;transition:all .1s;
+}
+.btn:hover{background:rgba(255,255,255,.12)}
+.btn:active{transform:scale(.97)}
+.btn-gold{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+.btn-gold:hover{filter:brightness(1.08);background:linear-gradient(180deg,var(--gold2),var(--gold))}
+.btn-subtle{background:transparent;border-color:transparent;color:var(--mut);font-size:.72rem;letter-spacing:1px}
+.btn-subtle:hover{color:var(--gold2);background:transparent}
+.status{min-height:20px;margin-top:4px;color:var(--gold2);font-size:.85rem;font-weight:600}
+.hintline{color:var(--mut);font-size:.75rem;margin:10px 0 0;line-height:1.5}
+
+/* ── share / export ── */
+.share-row{display:flex;gap:8px;flex-wrap:wrap}
+.share-row .btn{flex:1;min-width:0}
+.share-note{color:var(--mut);font-size:.72rem;margin:8px 0 0;line-height:1.5}
+.import-input{
+  width:100%;min-height:110px;resize:vertical;background:rgba(0,0,0,.4);border:1px solid var(--line);
+  border-radius:10px;color:var(--txt);font:inherit;font-size:.78rem;padding:10px 12px;outline:none;
+}
+.import-input:focus{border-color:var(--gold3)}
+.file-link{background:none;border:none;color:var(--gold2);cursor:pointer;font:inherit;font-size:.75rem;text-decoration:underline;padding:0}
+
+/* ── clues ── */
+.clue-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:560px){ .clue-cols{grid-template-columns:1fr} }
+.clue-col-head{font-size:.68rem;letter-spacing:2px;text-transform:uppercase;color:var(--gold3);font-weight:800;margin-bottom:8px}
+.clue-list{display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;padding-right:4px}
+.clue-row{display:flex;gap:8px;padding:5px 6px;border-radius:8px;cursor:pointer;font-size:.82rem;line-height:1.35;align-items:baseline;transition:background .08s}
+.clue-row:hover{background:rgba(255,255,255,.05)}
+.clue-row.active{background:rgba(212,175,55,.18);color:var(--gold2)}
+.clue-num{font-weight:800;color:var(--gold);min-width:20px;font-variant-numeric:tabular-nums}
+.clue-text{color:var(--txt);font-weight:500}
+.clue-row.active .clue-text{color:var(--gold2)}
+
+/* ── leaderboard ── */
+.lb-tabs{display:flex;gap:6px;margin-bottom:12px}
+.lb-tab{
+  flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:7px 0;border-radius:8px;font:inherit;font-size:.75rem;font-weight:700;transition:all .1s;
+}
+.lb-tab.active{background:rgba(212,175,55,.18);border-color:var(--gold3);color:var(--gold2)}
+.lb-list{display:flex;flex-direction:column;gap:4px}
+.lb-row{display:grid;grid-template-columns:26px 1fr auto auto;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.03);font-size:.85rem}
+.lb-row.first{background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.35)}
+.lb-rank{color:var(--mut);font-weight:800;font-variant-numeric:tabular-nums}
+.lb-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-time{font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.lb-date{color:var(--mut);font-size:.72rem;font-variant-numeric:tabular-nums}
+.lb-msg{color:var(--mut);font-size:.85rem;text-align:center;padding:18px 0;margin:0}
+
+/* ── overlays ── */
+.overlay{
+  position:fixed;inset:0;background:rgba(5,4,10,.82);backdrop-filter:blur(4px);
+  display:flex;align-items:center;justify-content:center;z-index:50;padding:18px;
+}
+.modal{
+  background:linear-gradient(180deg,#1a1730,#0f0d1a);border:1px solid rgba(212,175,55,.45);border-radius:18px;
+  padding:30px;max-width:430px;width:100%;text-align:center;box-shadow:0 40px 90px rgba(0,0,0,.6);
+}
+.modal-kicker{font-size:.72rem;letter-spacing:3px;text-transform:uppercase;color:var(--gold3);font-weight:800}
+.modal h2{margin:8px 0 16px;font-family:Georgia,serif;font-size:1.7rem;color:var(--gold2)}
+.win-stats{display:flex;justify-content:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.stat{flex:1;min-width:70px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:12px;padding:12px 6px}
+.stat span{display:block;font-size:1.5rem;font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.stat small{color:var(--mut);font-size:.68rem;letter-spacing:1px;text-transform:uppercase}
+.modal-line{color:var(--mut);font-size:.9rem;margin:6px 0}
+.modal-line.small{font-size:.78rem}
+.submit-row{display:flex;gap:8px;margin:10px 0 4px}
+.submit-row input{
+  flex:1;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  padding:10px 12px;font:inherit;outline:none;
+}
+.submit-row input:focus{border-color:var(--gold3)}
+.modal-actions{display:flex;gap:10px;margin-top:18px}
+
+/* ── footer ── */
+.footer{text-align:center;color:var(--mut);font-size:.8rem;padding:26px 0 40px}
+.footer b{color:var(--gold3)}
+</style>
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/c59339d9788a635635c75c0a9d397611.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+
+<!-- help modal styles -->
+<style>
+.help-modal{max-width:520px;text-align:left}
+.help-modal h3{color:var(--gold2);margin:16px 0 6px;font-family:Georgia,serif;font-size:1.05rem}
+.help-modal p,.help-modal li{color:var(--mut);font-size:.85rem;line-height:1.6;margin:4px 0}
+.help-modal ul{margin:6px 0 0;padding-left:20px}
+.nav-help{flex:0 0 auto;padding:7px 12px;font-size:.74rem}
+.help-actions{display:flex;justify-content:center;gap:10px;margin-top:18px}
+</style>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand" id="brandEl"></span>
+    <span class="nav-tag" id="navTagEl"></span>
+    <span style="flex:1"></span>
+    <button class="btn nav-help" id="helpBtn" title="How it works">❓ How it works</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <h1 class="hero-title" id="titleEl"></h1>
+  <p class="hero-sub" id="subEl"></p>
+  <div class="diffs" id="diffTabsEl"></div>
+  <p class="demo-note" id="demoEl"></p>
+</header>
+
+<main class="wrap" id="gameWrap">
+  <section class="game-col">
+    <div class="hud">
+      <span class="hud-chip" id="timerEl">0:00</span>
+      <span class="hud-chip" id="progressEl"></span>
+      <span class="hud-chip" id="hintsEl">✎ 0</span>
+    </div>
+    <div class="board" id="boardEl"></div>
+    <div class="pad" id="padEl"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <div class="panel-head">Controls</div>
+      <div id="controlsCtn"></div>
+      <div class="status" id="statusEl">Puzzle ready.</div>
+      <p class="hintline" id="tipEl"></p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Share / export</div>
+      <div class="share-row">
+        <button class="btn" id="exportJsonBtn" title="Save this game (puzzle + your progress) as a .json file">⬇ JSON</button>
+        <button class="btn" id="importJsonBtn" title="Restore a game from an exported .json file">⬆ JSON</button>
+        <button class="btn" id="screenshotBtn" title="Save a printable picture of the board">📷 PNG</button>
+      </div>
+      <p class="share-note">Screenshot = shareable image of the board. JSON = the exact game, restored anytime.</p>
+    </div>
+
+    <div class="panel" id="cluesPanelEl">
+      <div class="panel-head">Clues</div>
+      <div class="clue-cols">
+        <div>
+          <div class="clue-col-head">Across</div>
+          <div class="clue-list" id="acrossEl"></div>
+        </div>
+        <div>
+          <div class="clue-col-head">Down</div>
+          <div class="clue-list" id="downEl"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="lbPanelEl">
+      <div class="panel-head">Leaderboard</div>
+      <div class="lb-tabs" id="lbTabsEl"></div>
+      <div class="lb-list" id="lbListEl"></div>
+      <p class="lb-msg" id="lbMsgEl">Loading…</p>
+    </div>
+  </aside>
+</main>
+
+<div class="overlay" id="winOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker" id="winKickerEl">Game solved</div>
+    <h2 id="winHeadEl">🎉 Finished!</h2>
+    <div class="win-stats" id="winStatsEl"></div>
+    <div id="winSubmitBox">
+      <p class="modal-line" id="winQualifyEl"></p>
+      <div class="submit-row">
+        <input id="winNameInput" maxlength="20" autocomplete="off" spellcheck="false" placeholder="Your name" />
+        <button class="btn btn-gold" id="winSubmitBtn">Publish</button>
+      </div>
+      <p class="modal-line small" id="winMsgEl"></p>
+    </div>
+    <p class="modal-line small" id="winPersonalEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="winPlayAgainBtn">Play again</button>
+      <button class="btn" id="winCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="importOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker">Restore a game</div>
+    <h2>⬆ Import</h2>
+    <p class="modal-line" style="margin-bottom:10px">Paste an exported game's JSON below, or load a .json file. It must come from the same game (same template copy).</p>
+    <textarea class="import-input" id="importInput" placeholder='\{ "tpl": "bgn-paper-template", "game": … \}'></textarea>
+    <p class="modal-line" style="text-align:left;margin:8px 0 0"><button class="file-link" id="importFileBtn">or choose a .json file…</button></p>
+    <input type="file" id="importFileInput" accept=".json,application/json" hidden />
+    <p class="modal-line small" id="importMsgEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="importOkBtn">Import</button>
+      <button class="btn" id="importCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<footer class="footer wrap">
+  <p>No downloads, no sign-up — just good old noughts &amp; crosses.</p>
+  <p><b id="footerBrandEl">▦</b> Pen &amp; paper template on <a href="https://perchance.org" target="_blank" rel="noopener" style="color:var(--gold3)">Perchance</a></p>
+</footer>
+
+<div class="overlay" id="helpOverlay" hidden>
+  <div class="modal help-modal">
+    <div class="modal-kicker">How it works</div>
+    <h2>Pen &amp; Paper template</h2>
+    <p>Classic noughts and crosses, rebuilt on the Pen &amp; Paper template shell. You are <b>X</b>; the computer (or a friend) is <b>O</b>.</p>
+    <h3>Playing</h3>
+    <ul>
+      <li><b>Click a square</b> to place your X — or press the number keys <b>1–9</b>.</li>
+      <li><b>✎ Hint</b> marks your best square (+30s to your finish time).</li>
+      <li><b>⌫</b> undoes your last move — and the computer's reply.</li>
+    </ul>
+    <h3>Difficulties</h3>
+    <ul>
+      <li><b>Easy</b> plays sloppily · <b>Medium</b> blocks you · <b>Hard</b> is unbeatable — a draw is the best you can do.</li>
+      <li><b>👥 2 Players</b> lets a friend join on the same screen; those rounds don't post to the leaderboard.</li>
+    </ul>
+    <h3>Scoring</h3>
+    <ul>
+      <li>Beat the computer fast enough to make the <b>shared leaderboard</b>; personal bests are saved on your device.</li>
+      <li>Your game <b>auto-saves</b> after every move and resumes next visit.</li>
+    </ul>
+    <h3>Share / export</h3>
+    <ul>
+      <li><b>⬇ JSON</b> downloads the exact game — restore it anytime with <b>⬆ JSON</b>.</li>
+      <li><b>📷 PNG</b> saves a picture of the board.</li>
+    </ul>
+    <div class="help-actions"><button class="btn btn-gold" id="helpDoneBtn">Got it</button></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════════════════════════════════════════════════════
+   §1 CONFIG LOADER — reads values from main.pjs (via `root`)
+   ══════════════════════════════════════════════════════════ */
+var rootRef=window.root||{};
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+function cfg(name,dflt){
+  var v=rootRef[name];
+  if(v==null)return dflt;
+  try{ if(typeof v.evaluateItem==="function")v=v.evaluateItem(); }catch(e){}
+  if(v==null||String(v).trim()==="")return dflt;
+  var s=String(v).trim();
+  if(s.length>=2&&s.charAt(0)==='"'&&s.charAt(s.length-1)==='"')s=s.slice(1,-1);
+  var n=Number(s);
+  if(s!==""&&!isNaN(n))return n;
+  return s;
+}
+function val(x){
+  if(x==null)return x;
+  if(typeof x==="function")x=x();
+  if(x&&typeof x.evaluateItem==="function")x=x.evaluateItem();
+  return x;
+}
+function arrOf(x){
+  if(x==null)return [];
+  if(typeof x==="function")x=x();
+  if(x&&typeof x.selectAll!=="undefined")x=(typeof x.selectAll==="function")?x.selectAll():x.selectAll;
+  if(x&&typeof x.evaluateItem==="function")x=x.evaluateItem();
+  return Array.isArray(x)?x:[];
+}
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+/* ══════════════════════════════════════════════════════════
+   §2 THE FRAMEWORK
+   Generic, game-agnostic shell: HUD + timer + pause, difficulty
+   tabs, win screen, optional time-based leaderboard, autosave,
+   and input routing. It knows NOTHING about the game itself —
+   everything game-specific happens through the `game` object
+   that you define in §4.
+
+   `app.meta` below is the only per-game config in this section.
+   ══════════════════════════════════════════════════════════ */
+var HINT_PENALTY=cfg("hintPenaltySeconds",30)*1000;
+
+var app={};
+app.meta={
+  // ── identity ──
+  name:"Tic-Tac-Toe",           // shown in the nav, hero and page title
+  reference:"Tic-Tac-Toe",      // the game this copy demonstrates
+  icon:"✕",
+  tagline:"noughts & crosses",  // small text next to the brand
+  kicker:"You beat the computer",// label above the win-screen heading
+  desc:"Classic noughts and crosses. Play the computer — Easy is sloppy, Medium blocks, Hard plays a perfect game — or switch to 2 Players and share the screen. Race the clock, spend hints, and claim a spot on the shared leaderboard.",
+  tip:"Click a square, or press 1–9 · ✎ Hint marks your best move (+30s) · ⌫ undoes your last move",
+  demoNote:"Easy is sloppy, Medium blocks, Hard is unbeatable — against it, a draw is the best you can do. The 👥 button switches to 2 Players.",
+
+  // ── pad buttons under the board ──
+  // "" hides the pad — tic-tac-toe is played by clicking (or keys 1–9).
+  pad:"",
+
+  // ── Controls panel ──
+  // Rows of buttons. Actions: check | clear | hint1 | hint2 | reveal |
+  // pause | newGame | mode. Buttons whose handler the game doesn't
+  // provide are skipped automatically.
+  controls:[
+    ["mode","hint1","pause"],
+    ["newGame"]
+  ],
+  buttons:{
+    mode:   {label:"👥 2 Players", title:"Switch between vs Computer and 2 Players (restarts the round)"},
+    hint1:  {label:"✎ Hint", title:"Suggest your best move (+30s)"},
+    pause:  {label:"⏸ Pause",  title:"Pause the timer"},
+    newGame:{label:"New game", title:"Start a fresh round",cls:"btn btn-gold"}
+  },
+
+  // hint time penalties (added to your finish time)
+  hint1Cost:HINT_PENALTY,
+  hint2Cost:HINT_PENALTY*2,
+
+  // ── shared time-based leaderboard ──
+  // Set leaderboardFile:"" to hide the leaderboard panel entirely.
+  leaderboardFile:cfg("leaderboardFileName",""),
+  leaderboardEditKey:cfg("leaderboardEditKey",""),
+
+  // optional side panels. Set a flag to false to hide that panel.
+  panels:{clues:false},
+
+  // localStorage prefix for autosave, personal bests and remembered name
+  saveKey:"bgnpp"
+};
+/* name of the actual game this copy is demonstrating — used on the
+   screenshot and for export/import validation */
+app.gameName=function(){ return app.meta.reference||app.meta.name; };
+
+/* ── framework state ── */
+app.diff=""; app.hints=0; app.hintPenaltyMs=0;
+app.elapsed=0; app.timer=null; app.startTs=0;
+app.status="idle";              // idle | playing | paused | won
+app.winTimeMs=0; app.pauseBtn=null; app.modeBtn=null;
+
+/* ── timer ── */
+app.displayMs=function(){ return app.elapsed*1000+app.hintPenaltyMs; };
+app.fmtTime=function(ms){
+  var t=Math.max(0,Math.round(ms/1000));
+  var m=Math.floor(t/60),s=t%60;
+  return m+":"+String(s).padStart(2,"0");
+};
+app.tick=function(){ if(app.status!=="playing")return; app.elapsed=Math.floor((Date.now()-app.startTs)/1000); app.renderHud(); };
+app.startTimer=function(){ if(app.timer)clearInterval(app.timer); app.timer=setInterval(app.tick,250); app.tick(); };
+app.stopTimer=function(){ if(app.timer)clearInterval(app.timer); app.timer=null; };
+app.setStatus=function(t){ statusEl.textContent=t||""; };
+
+/* ── HUD ── */
+app.renderHud=function(){
+  timerEl.textContent=app.fmtTime(app.displayMs());
+  hintsEl.textContent="✎ "+app.hints;
+  if(typeof game.renderHud==="function")game.renderHud();
+};
+app.renderControls=function(){
+  for(var i=0;i<diffBtns.length;i++)diffBtns[i].classList.toggle("active",diffBtns[i].dataset.diff===app.diff);
+  if(app.pauseBtn)app.pauseBtn.textContent=app.status==="paused"?"▶ Resume":"⏸ Pause";
+  if(app.modeBtn&&typeof game.modeLabel==="function")app.modeBtn.textContent=game.modeLabel();
+};
+
+/* ── hints (games call this to spend a hint) ── */
+app.addHint=function(cost){ app.hints++; app.hintPenaltyMs+=cost; app.renderHud(); };
+
+/* ── input routing ── */
+app.input=function(ch){
+  if(app.status!=="playing"||typeof game.input!=="function")return;
+  game.input(ch);
+  app.save();
+  app.completeIfWon();
+};
+app.erase=function(){
+  if(app.status!=="playing"||typeof game.erase!=="function")return;
+  sfx("discard");
+  game.erase();
+  app.save();
+  app.completeIfWon();
+};
+var ACTION_METHODS={check:"check",clear:"clearAll",hint1:"hint1",hint2:"hint2",reveal:"revealAll"};
+app.action=function(name){
+  if(app.status!=="playing")return;
+  var m=ACTION_METHODS[name];
+  if(!m||typeof game[m]!=="function")return;
+  game[m]();
+  if(name==="hint1"||name==="hint2")sfx("hint");
+  if(name==="clear")sfx("discard");
+  app.save();
+  app.completeIfWon();
+};
+
+/* ── pause ── */
+app.togglePause=function(){
+  if(app.status==="playing"){
+    app.stopTimer();
+    app.elapsed=Math.floor((Date.now()-app.startTs)/1000);
+    app.status="paused";
+    boardEl.classList.add("paused");
+    app.setStatus("Paused.");
+  }else if(app.status==="paused"){
+    app.status="playing";
+    app.startTs=Date.now()-app.elapsed*1000;
+    app.startTimer();
+    boardEl.classList.remove("paused");
+    app.setStatus("");
+  }
+  app.renderHud(); app.renderControls();
+};
+
+/* ── win ── */
+app.completeIfWon=function(){
+  if(app.status!=="playing")return;
+  if(typeof game.isComplete==="function"&&game.isComplete())app.win();
+};
+app.qualifies=function(diff,t){
+  var list=boards[diff]||[];
+  if(list.length<10)return true;
+  return t<list[list.length-1].t;
+};
+app.win=function(){
+  sfx("win");
+  app.stopTimer();
+  app.elapsed=Math.floor((Date.now()-app.startTs)/1000);
+  app.status="won";
+  app.winTimeMs=app.displayMs();
+  localStorage.removeItem(app.meta.saveKey);
+  var wd=(typeof game.winData==="function")?(game.winData()||{}):{};
+  var submit=wd.submit!==false;
+  var winHeadEl=document.getElementById("winHeadEl");
+  if(winHeadEl)winHeadEl.textContent=wd.heading||"🎉 Finished!";
+  winKickerEl.textContent=wd.kicker||app.meta.kicker||"Game solved";
+  if(submit){
+    var bestKey=app.meta.saveKey+"-best-"+app.diff;
+    var prev=Number(localStorage.getItem(bestKey)||0);
+    if(!prev||app.winTimeMs<prev)localStorage.setItem(bestKey,String(app.winTimeMs));
+    var pb=Math.min(prev||Infinity,app.winTimeMs);
+    winPersonalEl.textContent=pb<Infinity?("Personal best ("+(DIFFS[app.diff]?DIFFS[app.diff].label:app.diff)+"): "+app.fmtTime(pb)):"First finish on this difficulty!";
+  }else{
+    winPersonalEl.textContent="";
+  }
+  winStatsEl.innerHTML="";
+  function card(v,label){
+    var d=document.createElement("div"); d.className="stat";
+    var s=document.createElement("span"); s.textContent=v;
+    var l=document.createElement("small"); l.textContent=label;
+    d.appendChild(s); d.appendChild(l);
+    return d;
+  }
+  winStatsEl.appendChild(card(app.fmtTime(app.winTimeMs),"time"));
+  winStatsEl.appendChild(card(app.hints,"hints"));
+  var extras=(typeof game.winStats==="function")?(game.winStats()||[]):[];
+  for(var i=0;i<extras.length;i++)winStatsEl.appendChild(card(extras[i].value,extras[i].label));
+  var q=app.qualifies(app.diff,app.winTimeMs);
+  winSubmitBox.hidden=!(submit&&q);
+  if(!submit){
+    winQualifyEl.textContent="";
+  }else if(q)winQualifyEl.textContent="You made the board — publish your time:";
+  else{
+    var list=boards[app.diff]||[];
+    winQualifyEl.textContent=list.length>=10?("No entry this time — #10 is "+app.fmtTime(list[9].t)+"."):"No entry this time — try again!";
+  }
+  winNameInput.value=localStorage.getItem(app.meta.saveKey+"-name")||"";
+  winMsgEl.textContent="";
+  winOverlay.hidden=false;
+  app.renderHud();
+  if(typeof game.render==="function")game.render();
+};
+app.hideOverlays=function(){ winOverlay.hidden=true; };
+
+/* ── autosave ── */
+app.save=function(){
+  if(app.status==="won")return;
+  if(typeof game.serialize!=="function")return;
+  try{
+    localStorage.setItem(app.meta.saveKey,JSON.stringify({
+      diff:app.diff,hints:app.hints,hp:app.hintPenaltyMs,
+      e:app.status==="playing"?Math.floor((Date.now()-app.startTs)/1000):app.elapsed,
+      game:game.serialize()
+    }));
+  }catch(e){}
+};
+app.restore=function(){
+  try{
+    var raw=localStorage.getItem(app.meta.saveKey);
+    if(!raw)return false;
+    return app.applySave(JSON.parse(raw));
+  }catch(e){ return false; }
+};
+app.applySave=function(d){
+  if(!d||!d.game||typeof game.deserialize!=="function")return false;
+  if(!game.deserialize(d.game))return false;
+  app.diff=DIFFS[d.diff]?d.diff:Object.keys(DIFFS)[0];
+  app.hints=d.hints||0; app.hintPenaltyMs=d.hp||0;
+  app.elapsed=d.e||0;
+  app.status="playing";
+  app.startTs=Date.now()-app.elapsed*1000;
+  app.renderControls();
+  return true;
+};
+
+/* ── new game ── */
+app.newGame=function(diff){
+  sfx("deal");
+  if(diff)app.diff=diff;
+  app.hints=0; app.hintPenaltyMs=0; app.elapsed=0;
+  app.status="playing";
+  app.hideOverlays();
+  var msg=(typeof game.newGame==="function")?game.newGame(app.diff):"";
+  app.startTs=Date.now();
+  app.startTimer();
+  app.setStatus(msg||"Good luck!");
+  app.renderControls();
+  app.save();
+};
+
+/* ── game-mode toggle (restarts the round in the new mode) ── */
+app.toggleMode=function(){
+  if(typeof game.toggleMode!=="function")return;
+  game.toggleMode();
+  app.newGame(app.diff);
+};
+
+/* ── export / import JSON ── */
+app.exportData=function(){
+  if(typeof game.serialize!=="function")return null;
+  return {
+    tpl:"bgn-paper-template", ver:1,
+    gameName:app.gameName(),
+    date:new Date().toISOString(),
+    diff:app.diff, diffLabel:(DIFFS[app.diff]?DIFFS[app.diff].label:app.diff),
+    hints:app.hints, hp:app.hintPenaltyMs,
+    e:app.status==="playing"?Math.floor((Date.now()-app.startTs)/1000):app.elapsed,
+    game:game.serialize()
+  };
+};
+app.exportJSON=function(){
+  var data=app.exportData();
+  if(!data){ app.setStatus("This game doesn't support JSON export."); return; }
+  var base=app.gameName().toLowerCase().replace(/[^a-z0-9]+/g,"-")+"-"+app.diff+"-"+new Date().toISOString().slice(0,10);
+  downloadBlob(base+".json","application/json",new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+  app.setStatus("Exported a "+data.diffLabel+" game to JSON.");
+};
+app.importJSON=function(str){
+  var d;
+  try{ d=JSON.parse(str); }catch(e){ return "That doesn't look like valid JSON."; }
+  if(!d||typeof d!=="object"||Array.isArray(d))return "That doesn't look like a game export.";
+  if(d.tpl&&d.tpl!=="bgn-paper-template")return "That export was made by a different template ("+d.tpl+").";
+  if(d.gameName&&d.gameName!==app.gameName())return "That save is from "+d.gameName+", not "+app.gameName()+". Games can't be swapped between copies.";
+  if(!app.applySave(d))return "That JSON isn't a valid "+app.gameName()+" game.";
+  app.hideOverlays();
+  app.startTimer();
+  app.setStatus("Imported a "+(d.diffLabel||DIFFS[app.diff].label)+" game.");
+  app.save();
+  return null;
+};
+
+/* ── screenshot ── */
+function cloneWithStyles(src){
+  var clone=src.cloneNode(true);
+  clone.setAttribute("xmlns","http://www.w3.org/1999/xhtml");
+  var PROPS=["display","position","top","left","width","height","min-width","min-height","aspect-ratio","box-sizing",
+    "padding-top","padding-right","padding-bottom","padding-left","margin-top","margin-right","margin-bottom","margin-left",
+    "grid-template-columns","grid-template-rows","gap","grid-gap","align-items","justify-content","justify-items","align-content","flex-direction","flex-wrap",
+    "background-color","background-image","background-size","background-position","background-repeat",
+    "border-radius",
+    "border-top-width","border-top-style","border-top-color","border-right-width","border-right-style","border-right-color",
+    "border-bottom-width","border-bottom-style","border-bottom-color","border-left-width","border-left-style","border-left-color",
+    "color","font-family","font-size","font-weight","font-style","line-height","letter-spacing","text-transform","text-align",
+    "box-shadow","opacity","overflow","cursor","user-select","text-shadow","outline"];
+  function walk(el,c){
+    if(!el||!c)return;
+    var cs=window.getComputedStyle(el),style="";
+    for(var i=0;i<PROPS.length;i++){
+      var v=cs.getPropertyValue(PROPS[i]);
+      if(v)style+=PROPS[i]+":"+v+";";
+    }
+    c.setAttribute("style",style);
+    for(var k=0;k<el.children.length;k++)walk(el.children[k],c.children[k]);
+  }
+  walk(src,clone);
+  return clone;
+}
+app.renderBoardImage=function(){
+  var el=(typeof game.captureTarget==="function")?game.captureTarget():boardEl;
+  var w=el.offsetWidth,h=el.offsetHeight;
+  if(!w||!h)return Promise.resolve(null);
+  var scale=3;
+  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'+
+    '<foreignObject width="100%" height="100%">'+new XMLSerializer().serializeToString(cloneWithStyles(el))+'</foreignObject></svg>';
+  return new Promise(function(resolve){
+    var img=new Image();
+    img.onload=function(){
+      var c=document.createElement("canvas");
+      c.width=Math.round(w*scale); c.height=Math.round(h*scale);
+      var ctx=c.getContext("2d");
+      ctx.scale(scale,scale);
+      ctx.drawImage(img,0,0);
+      resolve(c);
+    };
+    img.onerror=function(){ resolve(null); };
+    img.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+  });
+};
+app.renderFramedImage=function(){
+  return app.renderBoardImage().then(function(boardCanvas){
+    if(!boardCanvas)return null;
+    var s=3; /* supersample factor — matches the board canvas */
+    var bw=boardCanvas.width/s, bh=boardCanvas.height/s;
+    var side=48, top=84, bottom=64;
+    var W=bw+side*2, H=bh+top+bottom;
+    var c=document.createElement("canvas");
+    c.width=Math.round(W*s); c.height=Math.round(H*s);
+    var ctx=c.getContext("2d");
+    function rr(x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+    }
+    /* background — matches the page's dark radial theme */
+    var g=ctx.createRadialGradient(W/2*s,0,0,W/2*s,0,Math.max(W,H)*s);
+    g.addColorStop(0,"#1b1730"); g.addColorStop(1,"#0a0912");
+    ctx.fillStyle=g; ctx.fillRect(0,0,W*s,H*s);
+    /* the board itself (blitted at native resolution) */
+    ctx.drawImage(boardCanvas,side*s,top*s);
+    /* gold frame */
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=3*s;
+    rr((side-14)*s,(top-14)*s,(bw+28)*s,(bh+28)*s,10*s); ctx.stroke();
+    ctx.strokeStyle="rgba(212,175,55,.3)"; ctx.lineWidth=1*s;
+    rr((side-22)*s,(top-22)*s,(bw+44)*s,(bh+44)*s,14*s); ctx.stroke();
+    /* title + subtitle */
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="600 "+Math.round(30*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(app.gameName().toUpperCase(),W/2*s,(top/2-10)*s);
+    ctx.fillStyle="#8f721d";
+    ctx.font="700 "+Math.round(12*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText(((DIFFS[app.diff]?DIFFS[app.diff].label:app.diff)+" · "+new Date().toISOString().slice(0,10)).toUpperCase(),W/2*s,(top/2+11)*s);
+    /* footer strip */
+    ctx.strokeStyle="rgba(212,175,55,.35)"; ctx.lineWidth=1*s;
+    ctx.beginPath(); ctx.moveTo(side*s,(H-bottom)*s); ctx.lineTo((W-side)*s,(H-bottom)*s); ctx.stroke();
+    /* URL (bottom-left) */
+    ctx.fillStyle="#8b87a0";
+    ctx.font="600 "+Math.round(14*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign="left"; ctx.textBaseline="middle";
+    var url="https://perchance.org/"+(window.generatorName||"");
+    var fy=((H-bottom)+(bottom/2))*s;
+    var badgeW=96,badgeGap=24;
+    var avail=(W-side-8)-(side+8)-badgeW-badgeGap;
+    var urlW=ctx.measureText(url).width;
+    if(urlW>avail){
+      var f=Math.max(9,Math.floor(14*avail/urlW));
+      ctx.font="600 "+Math.round(f*s)+"px ui-sans-serif, system-ui, sans-serif";
+    }
+    ctx.fillText(url,(side+8)*s,fy);
+    /* BGN badge (bottom-right) */
+    var bh2=36,bx=W-side-badgeW-10,by=H-bottom+((bottom-bh2)/2);
+    ctx.fillStyle="rgba(212,175,55,.12)";
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.fill();
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=1.5*s;
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.stroke();
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="800 "+Math.round(19*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("BGN",(bx+badgeW/2)*s,(by+bh2/2+1)*s);
+    return c;
+  });
+};
+app.screenshot=function(){
+  app.setStatus("Rendering screenshot…");
+  app.renderFramedImage().then(function(c){
+    if(!c){ app.setStatus("Couldn't render a screenshot."); return; }
+    var base=app.gameName().toLowerCase().replace(/[^a-z0-9]+/g,"-")+"-"+app.diff+"-"+new Date().toISOString().slice(0,10);
+    c.toBlob(function(blob){
+      if(blob)downloadBlob(base+".png","image/png",blob);
+      app.setStatus("Screenshot saved ("+base+".png).");
+    },"image/png");
+  });
+};
+function downloadBlob(name,mime,blob){
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download=name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },100);
+}
+
+/* ── leaderboard ── */
+var lbLoaded=false,lbTab="";
+app.loadLeaderboard=function(){
+  if(!app.meta.leaderboardFile){ lbPanelEl.hidden=true; return; }
+  if(!rootRef.uploadPlugin){ lbMsgEl.textContent="Leaderboard unavailable on this page."; lbLoaded=true; app.renderLeaderboard(); return; }
+  lbMsgEl.textContent="Loading…";
+  rootRef.uploadPlugin.editable.get(app.meta.leaderboardFile).then(function(t){
+    if(t){
+      try{ var b=JSON.parse(t); for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10); }catch(e){}
+    }
+    lbLoaded=true;
+    app.renderLeaderboard();
+  }).catch(function(){
+    lbLoaded=true;
+    lbMsgEl.textContent="Couldn't reach the leaderboard right now.";
+    app.renderLeaderboard();
+  });
+};
+app.renderLeaderboard=function(){
+  var tabs=lbTabsEl.querySelectorAll(".lb-tab");
+  for(var i=0;i<tabs.length;i++)tabs[i].classList.toggle("active",tabs[i].dataset.diff===lbTab);
+  lbListEl.innerHTML="";
+  if(!lbLoaded){ lbMsgEl.hidden=false; lbMsgEl.textContent="Loading…"; return; }
+  var list=boards[lbTab]||[];
+  if(!list.length){ lbMsgEl.hidden=false; lbMsgEl.textContent="No times yet — be the first!"; return; }
+  lbMsgEl.hidden=true;
+  var medals=["🥇","🥈","🥉"];
+  for(var i2=0;i2<list.length;i2++){
+    var e=list[i2];
+    var row=document.createElement("div"); row.className="lb-row"+(i2===0?" first":"");
+    var rank=document.createElement("span"); rank.className="lb-rank"; rank.textContent=i2+1;
+    var nm=document.createElement("span"); nm.className="lb-name"; nm.textContent=(medals[i2]?medals[i2]+" ":"")+esc(e.n||"Anonymous");
+    var tt=document.createElement("span"); tt.className="lb-time"; tt.textContent=app.fmtTime(e.t)+(e.h>0?" ✎"+e.h:"");
+    var dt=document.createElement("span"); dt.className="lb-date"; dt.textContent=(e.d||"").slice(5);
+    row.appendChild(rank); row.appendChild(nm); row.appendChild(tt); row.appendChild(dt);
+    lbListEl.appendChild(row);
+  }
+};
+app.submitScore=function(){
+  if(app.winTimeMs<3000){ winMsgEl.textContent="That was too fast to count — solve it for real!"; return; }
+  var name=(winNameInput.value||"").trim().slice(0,20)||"Anonymous";
+  localStorage.setItem(app.meta.saveKey+"-name",name);
+  var entry={n:name,t:app.winTimeMs,d:new Date().toISOString().slice(0,10),h:app.hints};
+  winMsgEl.textContent="Publishing…";
+  Promise.resolve().then(function(){
+    if(rootRef.uploadPlugin&&app.meta.leaderboardFile)return rootRef.uploadPlugin.editable.get(app.meta.leaderboardFile);
+    return null;
+  }).then(function(fresh){
+    if(fresh){
+      try{
+        var b=JSON.parse(fresh);
+        for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10);
+      }catch(e){}
+    }
+    var list=(boards[app.diff]||[]).concat(entry).sort(function(a,b){return a.t-b.t;}).slice(0,10);
+    boards[app.diff]=list;
+    app.renderLeaderboard();
+    if(!rootRef.uploadPlugin||!app.meta.leaderboardFile){ winMsgEl.textContent="Score saved locally."; return; }
+    var knownKey=localStorage.getItem(app.meta.saveKey+"-lbKey")||app.meta.leaderboardEditKey;
+    var data=JSON.stringify(boards);
+    function createFresh(){
+      return rootRef.uploadPlugin.editable.set(app.meta.leaderboardFile,data).then(function(created){
+        if(created&&created.editKey){
+          localStorage.setItem(app.meta.saveKey+"-lbKey",created.editKey);
+          winMsgEl.textContent="Published! For a board every player can update, paste this editKey into main.pjs: "+created.editKey;
+        }else if(created&&created.error){
+          winMsgEl.textContent="Couldn't publish to the shared board ("+created.error+") — score kept locally.";
+        }else{
+          winMsgEl.textContent="Couldn't publish to the shared board — score kept locally.";
+        }
+      });
+    }
+    var p=knownKey?rootRef.uploadPlugin.editable.set(app.meta.leaderboardFile,data,{editKey:knownKey}):createFresh();
+    p.then(function(res){
+      if(!res)return;
+      if(res&&res.editKey){
+        localStorage.setItem(app.meta.saveKey+"-lbKey",res.editKey);
+        winMsgEl.textContent="Published to the leaderboard!";
+        return;
+      }
+      if(res&&res.error==="invalid_edit_key")return createFresh();
+      if(res&&res.error)winMsgEl.textContent="Couldn't publish to the shared board ("+res.error+") — score kept locally.";
+      else winMsgEl.textContent="Published to the leaderboard!";
+    }).catch(function(){
+      winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+    });
+  }).catch(function(){
+    winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+  });
+};
+
+/* ── shell building ── */
+function buildPad(){
+  padEl.innerHTML="";
+  var pad=app.meta.pad;
+  if(!pad||!String(pad).length){ padEl.hidden=true; return; }
+  padEl.hidden=false;
+  String(pad).split("").forEach(function(ch){
+    var b=document.createElement("button");
+    b.className="pad-btn"; b.textContent=ch;
+    b.addEventListener("click",function(){ app.input(ch); });
+    padEl.appendChild(b);
+  });
+  var e=document.createElement("button");
+  e.className="pad-btn pad-erase"; e.textContent="⌫";
+  e.addEventListener("click",app.erase);
+  padEl.appendChild(e);
+}
+function buildShell(){
+  brandEl.textContent=app.meta.icon+" "+app.meta.name.toUpperCase();
+  footerBrandEl.textContent=app.meta.icon;
+  navTagEl.textContent=app.meta.tagline;
+  titleEl.textContent=app.meta.name.toUpperCase();
+  subEl.textContent=app.meta.desc;
+  demoEl.textContent=app.meta.demoNote||("This template ships with a working "+app.meta.reference+" game. Duplicate this generator, then swap in your own game (word search, sudoku, boggle…) by replacing the reference-game section in index.html.");
+  document.title=app.meta.name;
+  if(app.meta.panels&&app.meta.panels.clues===false)cluesPanelEl.hidden=true;
+  diffTabsEl.innerHTML="";
+  for(var diffId in DIFFS){
+    (function(id){
+      var b=document.createElement("button");
+      b.className="diff-tab"; b.textContent=DIFFS[id].label; b.dataset.diff=id;
+      b.addEventListener("click",function(){ app.newGame(id); });
+      diffTabsEl.appendChild(b);
+    })(diffId);
+  }
+  diffBtns=diffTabsEl.querySelectorAll(".diff-tab");
+  controlsCtn.innerHTML="";
+  app.meta.controls.forEach(function(row){
+    var rd=document.createElement("div"); rd.className="btn-row";
+    row.forEach(function(action){
+      var def=app.meta.buttons[action];
+      var fn=null;
+      if(action==="pause")fn=app.togglePause;
+      else if(action==="mode")fn=app.toggleMode;
+      else if(action==="newGame")fn=function(){ app.newGame(app.diff); };
+      else if(ACTION_METHODS[action]){ var m=ACTION_METHODS[action]; if(typeof game[m]==="function")fn=function(){ app.action(action); }; }
+      if(!def||typeof fn!=="function")return;
+      var b=document.createElement("button");
+      b.className=def.cls||"btn"; b.textContent=def.label||action;
+      if(def.title)b.title=def.title;
+      b.addEventListener("click",fn);
+      if(action==="pause")app.pauseBtn=b;
+      else if(action==="mode")app.modeBtn=b;
+      rd.appendChild(b);
+    });
+    if(rd.children.length)controlsCtn.appendChild(rd);
+  });
+  tipEl.textContent=app.meta.tip||"";
+  if(typeof game.renderHud!=="function")progressEl.hidden=true;
+  buildPad();
+  lbTabsEl.innerHTML="";
+  for(var id2 in DIFFS){
+    (function(id){
+      var b=document.createElement("button");
+      b.className="lb-tab"; b.textContent=DIFFS[id].label; b.dataset.diff=id;
+      b.addEventListener("click",function(){ lbTab=id; app.renderLeaderboard(); });
+      lbTabsEl.appendChild(b);
+    })(id2);
+  }
+  lbTab=Object.keys(DIFFS)[0];
+}
+
+/* ══════════════════════════════════════════════════════════
+   §3 THE GAME CONTRACT
+   The framework below talks to your game ONLY through the
+   `game` object. Implement these members:
+
+   game.newGame(diff)   build a fresh game, render it, and return
+                        a status message string (or "").
+   game.render()        redraw the board (also called on resize).
+   game.renderHud()     optional — update the progress chip (#progressEl).
+   game.input(ch)       handle one character (letter or digit).
+   game.erase()         handle backspace / the pad erase button.
+   game.check()         optional — validate the current board.
+   game.clearAll()      optional — wipe the board.
+   game.hint1()         optional — first hint action.
+   game.hint2()         optional — second hint action.
+   game.revealAll()     optional — reveal the whole solution.
+   game.isComplete()    return true when the game is solved; the
+                        framework shows the win screen automatically.
+   game.winStats()      optional — [{value,label}] extra stat cards.
+   game.serialize()     optional — return plain state for autosave + JSON export.
+   game.deserialize(d)  optional — restore that state + render;
+                        return true on success.
+   game.keydown(e)      optional — extra keys (arrows etc); return
+                        true if you consumed the event.
+   game.captureTarget() optional — return the element the screenshot
+                        button should capture (default: #boardEl).
+
+   The framework auto-saves after every action, resumes from the
+   save on load, and detects wins via isComplete().
+   ══════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════
+   §4 THE GAME — TIC-TAC-TOE
+   X is yours, O belongs to the computer (or to a
+   second player). The difficulty tabs set how the
+   computer plays: Easy picks at random, Medium
+   blocks and grabs the center, Hard runs a perfect
+   minimax — against it a draw is the best result.
+   Hints mark your best square (+30s). In 2-Players
+   mode two people share the screen; those rounds
+   don't post to the leaderboard.
+   ══════════════════════════════════════════════════════════ */
+
+/* ── difficulties: label + computer strength ── */
+var DIFFS={
+  easy:{label:"Easy",  ai:"random", delay:cfg("aiDelayMs",420)},
+  medium:{label:"Medium",ai:"block", delay:cfg("aiDelayMs",420)},
+  hard:{label:"Hard",  ai:"perfect",delay:cfg("aiDelayMs",420)}
+};
+var boards={};
+for(var diffKey in DIFFS)boards[diffKey]=null;
+
+/* ── board + rules ── */
+var LINES=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+function winnerOf(cells){
+  for(var i=0;i<LINES.length;i++){
+    var a=LINES[i][0],b=LINES[i][1],c=LINES[i][2];
+    if(cells[a]&&cells[a]===cells[b]&&cells[a]===cells[c])return cells[a];
+  }
+  return null;
+}
+function lineOf(cells){
+  for(var i=0;i<LINES.length;i++){
+    var a=LINES[i][0],b=LINES[i][1],c=LINES[i][2];
+    if(cells[a]&&cells[a]===cells[b]&&cells[a]===cells[c])return LINES[i];
+  }
+  return null;
+}
+function emptyCells(cells){
+  var e=[];
+  for(var i=0;i<cells.length;i++)if(!cells[i])e.push(i);
+  return e;
+}
+
+/* ── minimax: O (computer) maximizes, X minimizes ── */
+function minimax(cells,turn){
+  var w=winnerOf(cells);
+  if(w==="O")return 1;
+  if(w==="X")return -1;
+  var e=emptyCells(cells);
+  if(!e.length)return 0;
+  var scores=[];
+  for(var i=0;i<e.length;i++){
+    var c=cells.slice(); c[e[i]]=turn;
+    scores.push(minimax(c,turn==="X"?"O":"X"));
+  }
+  return turn==="O"?Math.max.apply(null,scores):Math.min.apply(null,scores);
+}
+
+/* ── computer's move ── */
+function chooseMove(){
+  var level=DIFFS[app.diff]?DIFFS[app.diff].ai:"block";
+  var e=emptyCells(S.cells);
+  if(!e.length)return -1;
+  if(level==="random")return e[Math.floor(Math.random()*e.length)];
+  if(level==="block"){
+    var i;
+    for(i=0;i<e.length;i++){ var t=S.cells.slice(); t[e[i]]="O"; if(winnerOf(t)==="O")return e[i]; }
+    for(i=0;i<e.length;i++){ var t2=S.cells.slice(); t2[e[i]]="X"; if(winnerOf(t2)==="X")return e[i]; }
+    if(!S.cells[4])return 4;
+    var corners=[0,2,6,8].filter(function(n){return !S.cells[n];});
+    if(corners.length)return corners[Math.floor(Math.random()*corners.length)];
+    return e[Math.floor(Math.random()*e.length)];
+  }
+  var best=-1,bestScore=-Infinity;
+  for(var j=0;j<e.length;j++){
+    var t3=S.cells.slice(); t3[e[j]]="O";
+    var sc=minimax(t3,"X");
+    if(sc>bestScore){ bestScore=sc; best=e[j]; }
+  }
+  return best;
+}
+
+/* ── state ── */
+var S={cells:null,turn:"X",mode:"ai",over:false,result:null,line:null,moves:0,history:[],suggestion:null,aiTimer:null};
+function resetState(){
+  S.cells=["","","","","","","","",""];
+  S.turn="X"; S.over=false; S.result=null; S.line=null; S.moves=0;
+  S.history=[]; S.suggestion=null;
+  clearTimeout(S.aiTimer); S.aiTimer=null;
+}
+function scheduleAI(){
+  if(S.mode!=="ai"||S.over||S.turn!=="O")return;
+  clearTimeout(S.aiTimer);
+  app.setStatus("Computer is thinking…");
+  var d=DIFFS[app.diff]?DIFFS[app.diff].delay:cfg("aiDelayMs",420);
+  S.aiTimer=setTimeout(function(){
+    if(app.status!=="playing"){ scheduleAI(); return; }
+    if(S.over||S.mode!=="ai"||S.turn!=="O"){ if(!S.over)app.setStatus("Your turn."); return; }
+    var m=chooseMove();
+    if(m<0){ app.setStatus("Computer is stuck — your turn."); return; }
+    doMove(m);
+    app.save();
+    app.completeIfWon();
+    if(!S.over)app.setStatus("Your turn.");
+  },d);
+}
+function doMove(i){
+  if(!S.cells||S.over||S.cells[i])return false;
+  S.cells[i]=S.turn;
+  S.history.push(i);
+  S.moves++;
+  S.suggestion=null;
+  var w=winnerOf(S.cells);
+  if(w){ S.over=true; S.result=w; S.line=lineOf(S.cells); app.setStatus(w+" wins!"); }
+  else if(emptyCells(S.cells).length===0){ S.over=true; S.result="draw"; S.line=null; app.setStatus("It's a draw!"); }
+  else{
+    S.turn=S.turn==="X"?"O":"X";
+    if(S.mode==="2p")app.setStatus(S.turn+" to move.");
+  }
+  renderBoard(); renderHud();
+  return true;
+}
+
+/* ── rendering ── */
+function renderBoard(){
+  if(!S.cells)return;
+  if(!boardEl.classList.contains("ttt"))boardEl.classList.add("ttt");
+  boardEl.style.gridTemplateColumns="repeat(3,1fr)";
+  boardEl.innerHTML="";
+  for(var i=0;i<9;i++){
+    var d=document.createElement("div");
+    var cls="ttt-cell";
+    if(S.cells[i])cls+=" played";
+    else if(i===S.suggestion)cls+=" sugg";
+    if(S.line&&S.line.indexOf(i)!==-1)cls+=" win";
+    d.className=cls;
+    if(S.cells[i]){
+      var sp=document.createElement("span");
+      sp.className="ttt-mark "+(S.cells[i]==="X"?"x":"o");
+      sp.textContent=S.cells[i]==="X"?"✕":"◯";
+      d.appendChild(sp);
+    }else if(i===S.suggestion){
+      var h=document.createElement("span");
+      h.className="ttt-mark ttt-suggest"; h.textContent="✦";
+      d.appendChild(h);
+    }
+    (function(idx){ d.addEventListener("click",function(){ app.input(String(idx+1)); }); })(i);
+    boardEl.appendChild(d);
+  }
+}
+function renderHud(){
+  if(!S.cells){ progressEl.textContent=""; return; }
+  var t;
+  if(S.over)t=S.result==="draw"?"Draw":(S.result+" won");
+  else if(S.mode==="ai")t=S.turn==="X"?"Your move":"Computer";
+  else t=S.turn+" to move";
+  progressEl.textContent="M"+S.moves+" · "+t;
+}
+
+/* ── hint: mark the player's best square ── */
+function suggestMove(){
+  var e=emptyCells(S.cells);
+  var best=-1,bestScore=Infinity;
+  for(var i=0;i<e.length;i++){
+    var c=S.cells.slice(); c[e[i]]="X";
+    var sc=minimax(c,"O");
+    if(sc<bestScore){ bestScore=sc; best=e[i]; }
+  }
+  return best;
+}
+function revealHintFn(){
+  if(app.status!=="playing")return;
+  if(S.mode==="2p"){ app.setStatus("Hints are for computer games only."); return; }
+  if(S.over){ app.setStatus("This game is already over."); return; }
+  if(S.turn!=="X"){ app.setStatus("It's not your turn."); return; }
+  var i=suggestMove();
+  if(i<0)return;
+  S.suggestion=i;
+  app.addHint(app.meta.hint1Cost);
+  renderBoard();
+  app.setStatus("Hint: play the ✦ square (+"+Math.round(app.meta.hint1Cost/1000)+"s).");
+  var t=setTimeout(function(){ if(S.suggestion===i){ S.suggestion=null; renderBoard(); } },3000);
+}
+
+/* ── undo last move (⌫ / erase) ── */
+function undoFn(){
+  if(app.status!=="playing")return;
+  if(!S.history.length){ app.setStatus("Nothing to undo."); return; }
+  clearTimeout(S.aiTimer); S.aiTimer=null;
+  S.history.pop();
+  if(S.mode==="ai"&&S.history.length&&S.cells[S.history[S.history.length-1]]==="O")S.history.pop();
+  S.cells=["","","","","","","","",""];
+  for(var i=0;i<S.history.length;i++)S.cells[S.history[i]]=i%2===0?"X":"O";
+  S.moves=S.history.length;
+  S.turn=S.history.length%2===0?"X":"O";
+  S.over=false; S.result=null; S.line=null; S.suggestion=null;
+  renderBoard(); renderHud();
+  app.setStatus("Move undone.");
+  if(S.mode==="ai"&&S.turn==="O")scheduleAI();
+}
+
+/* ── the `game` object this template is built around ── */
+var game={
+  newGame:function(diff){
+    resetState();
+    renderBoard(); renderHud();
+    return S.mode==="ai"?"You're X — make the first move.":"X starts — make the first move.";
+  },
+  render:function(){ renderBoard(); renderHud(); },
+  renderHud:renderHud,
+  input:function(ch){
+    if(!S.cells||S.over)return;
+    if(S.mode==="ai"&&S.turn!=="X")return;
+    var i=parseInt(ch,10);
+    if(!isFinite(i)||i<1||i>9)return;
+    var idx=i-1;
+    if(!doMove(idx))return;
+    sfx("turn");
+    if(S.over)return;
+    if(S.mode==="ai")scheduleAI();
+  },
+  erase:undoFn,
+  hint1:revealHintFn,
+  toggleMode:function(){ S.mode=S.mode==="ai"?"2p":"ai"; },
+  modeLabel:function(){ return S.mode==="ai"?"👥 2 Players":"🤖 vs Computer"; },
+  isComplete:function(){ return S.over; },
+  winStats:function(){
+    if(!S.over)return [];
+    var moves={value:S.moves,label:"moves"};
+    if(S.result==="draw")return [moves];
+    if(S.mode==="2p")return [{value:S.result,label:"won"},moves];
+    return [{value:S.result==="X"?"You":"Computer",label:"won"},moves];
+  },
+  winData:function(){
+    if(S.mode==="2p"){
+      if(S.result==="draw")return {kicker:"Nobody wins",heading:"🤝 It's a draw!",submit:false};
+      return {kicker:S.result+" takes the game",heading:"🏆 "+S.result+" wins!",submit:false};
+    }
+    if(S.result==="draw")return {kicker:"Perfect play",heading:"🤝 It's a draw!",submit:false};
+    if(S.result==="O")return {kicker:"The computer got you",heading:"🤖 Computer wins!",submit:false};
+    return {kicker:app.meta.kicker,heading:"🎉 You win!",submit:true};
+  },
+  serialize:function(){
+    return {cells:S.cells,turn:S.turn,mode:S.mode,moves:S.moves,history:S.history};
+  },
+  deserialize:function(d){
+    if(!d||!d.cells||!Array.isArray(d.cells)||d.cells.length!==9)return false;
+    clearTimeout(S.aiTimer); S.aiTimer=null;
+    S.cells=d.cells.slice();
+    S.turn=d.turn==="O"?"O":"X";
+    S.mode=(d.mode==="2p")?"2p":"ai";
+    S.moves=d.moves||0;
+    S.suggestion=null;
+    S.history=(Array.isArray(d.history)?d.history.slice():[]);
+    var w=winnerOf(S.cells);
+    if(w){ S.over=true; S.result=w; S.line=lineOf(S.cells); }
+    else if(emptyCells(S.cells).length===0){ S.over=true; S.result="draw"; S.line=null; }
+    else{ S.over=false; S.result=null; S.line=null; }
+    renderBoard(); renderHud();
+    setTimeout(function(){
+      if(S.over&&app.status==="playing")app.completeIfWon();
+      else if(!S.over&&S.mode==="ai"&&S.turn==="O")scheduleAI();
+    },0);
+    return true;
+  }
+};
+/* ══════════════════════════════════════════════════════════
+   §5 DOM REFS, SHELL BUILDING AND BOOT
+   ══════════════════════════════════════════════════════════ */
+var boardEl=document.getElementById("boardEl"),padEl=document.getElementById("padEl");
+var timerEl=document.getElementById("timerEl"),progressEl=document.getElementById("progressEl"),hintsEl=document.getElementById("hintsEl");
+var statusEl=document.getElementById("statusEl"),tipEl=document.getElementById("tipEl");
+var brandEl=document.getElementById("brandEl"),navTagEl=document.getElementById("navTagEl");
+var titleEl=document.getElementById("titleEl"),subEl=document.getElementById("subEl");
+var diffTabsEl=document.getElementById("diffTabsEl");
+var controlsCtn=document.getElementById("controlsCtn");
+var acrossEl=document.getElementById("acrossEl"),downEl=document.getElementById("downEl");
+var cluesPanelEl=document.getElementById("cluesPanelEl");
+var winOverlay=document.getElementById("winOverlay"),winKickerEl=document.getElementById("winKickerEl");
+var winStatsEl=document.getElementById("winStatsEl");
+var winSubmitBox=document.getElementById("winSubmitBox"),winQualifyEl=document.getElementById("winQualifyEl");
+var winNameInput=document.getElementById("winNameInput"),winMsgEl=document.getElementById("winMsgEl"),winPersonalEl=document.getElementById("winPersonalEl");
+var lbPanelEl=document.getElementById("lbPanelEl"),lbListEl=document.getElementById("lbListEl"),lbMsgEl=document.getElementById("lbMsgEl"),lbTabsEl=document.getElementById("lbTabsEl");
+var footerBrandEl=document.getElementById("footerBrandEl");
+var diffBtns=[];
+
+document.getElementById("winPlayAgainBtn").addEventListener("click",function(){ app.newGame(app.diff); });
+document.getElementById("winCloseBtn").addEventListener("click",function(){ winOverlay.hidden=true; });
+document.getElementById("winSubmitBtn").addEventListener("click",app.submitScore);
+
+var exportJsonBtn=document.getElementById("exportJsonBtn"),importJsonBtn=document.getElementById("importJsonBtn"),screenshotBtn=document.getElementById("screenshotBtn");
+var importOverlay=document.getElementById("importOverlay"),importInput=document.getElementById("importInput"),importMsgEl=document.getElementById("importMsgEl");
+var importFileBtn=document.getElementById("importFileBtn"),importFileInput=document.getElementById("importFileInput");
+exportJsonBtn.addEventListener("click",app.exportJSON);
+importJsonBtn.addEventListener("click",function(){ importMsgEl.textContent=""; importInput.value=""; importOverlay.hidden=false; importInput.focus(); });
+screenshotBtn.addEventListener("click",app.screenshot);
+document.getElementById("importOkBtn").addEventListener("click",function(){
+  var msg=app.importJSON(importInput.value);
+  if(msg)importMsgEl.textContent=msg;
+  else importOverlay.hidden=true;
+});
+document.getElementById("importCancelBtn").addEventListener("click",function(){ importOverlay.hidden=true; });
+importFileBtn.addEventListener("click",function(){ importFileInput.click(); });
+importFileInput.addEventListener("change",function(){
+  var f=importFileInput.files&&importFileInput.files[0];
+  if(!f)return;
+  var reader=new FileReader();
+  reader.onload=function(){ importInput.value=reader.result; importMsgEl.textContent="File loaded — press Import."; };
+  reader.readAsText(f);
+  importFileInput.value="";
+});
+
+/* ── help modal ── */
+var helpBtn=document.getElementById("helpBtn"),helpOverlay=document.getElementById("helpOverlay");
+function openHelp(){ if(helpOverlay)helpOverlay.hidden=false; }
+function closeHelp(){ if(helpOverlay)helpOverlay.hidden=true; }
+if(helpBtn)helpBtn.addEventListener("click",openHelp);
+document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+if(helpOverlay)helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key!=="Escape")return;
+  if(helpOverlay&&!helpOverlay.hidden){ helpOverlay.hidden=true; return; }
+  if(importOverlay&&!importOverlay.hidden)importOverlay.hidden=true;
+});
+
+document.addEventListener("keydown",function(e){
+  if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
+  if(app.status==="won"){ if(e.key==="Enter")app.hideOverlays(); return; }
+  if(app.status!=="playing"){ if(e.key==="Enter")app.hideOverlays(); return; }
+  if(/^[a-zA-Z0-9]$/.test(e.key)&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+    e.preventDefault();
+    app.input(e.key.toUpperCase());
+    return;
+  }
+  if(e.key==="Backspace"||e.key==="Delete"){ e.preventDefault(); app.erase(); return; }
+  if(typeof game.keydown==="function"){
+    if(game.keydown(e))e.preventDefault();
+  }
+});
+
+window.addEventListener("resize",function(){ if(S.cells)game.render(); });
+
+/* ── boot ── */
+buildShell();
+app.loadLeaderboard();
+if(app.restore()){
+  app.startTimer();
+  app.hideOverlays();
+  app.setStatus("Resumed your "+DIFFS[app.diff].label+" game.");
+}else{
+  app.newGame("easy");
+}
+
+window.__tpl={app:app,game:game,S:S,DIFFS:DIFFS,boards:boards};
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<script>
+/* Floating "back to hub" button → rathji's projects page. */
+(function(){
+  if(document.getElementById("rathjiBackBtn"))return;
+  var s=document.createElement("style");
+  s.textContent=
+"#rathjiBackBtn{position:fixed;left:25%;bottom:18px;transform:translateX(-50%);z-index:2147483000;display:inline-flex;align-items:center;gap:10px;padding:8px 16px 8px 8px;border-radius:999px;background:rgba(13,15,21,0.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.18);box-shadow:0 8px 24px rgba(0,0,0,0.35);color:#fff;text-decoration:none;font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease;-webkit-tap-highlight-color:transparent}"+
+"#rathjiBackBtn .rathji-badge{width:28px;height:28px;border-radius:50%;flex:0 0 auto;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;font-size:15px;font-weight:700;line-height:1;user-select:none}"+
+"#rathjiBackBtn .rathji-label{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;user-select:none}"+
+"#rathjiBackBtn .rathji-arrow{width:12px;height:12px;flex:0 0 auto;opacity:.85}"+
+"#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,0.65);box-shadow:0 10px 26px rgba(0,0,0,0.4),0 6px 18px rgba(167,139,250,0.25)}"+
+"@media (max-width:480px){#rathjiBackBtn{padding:8px}#rathjiBackBtn .rathji-label,#rathjiBackBtn .rathji-arrow{display:none}}";
+  document.head.appendChild(s);
+  var a=document.createElement("a");
+  a.id="rathjiBackBtn";
+  a.href="https://perchance.org/rathjis-generators";
+  a.target="_blank";
+  a.rel="noopener";
+  a.setAttribute("aria-label","Back to my projects");
+  a.title="Back to my projects";
+  var b=document.createElement("span");
+  b.className="rathji-badge"; b.textContent="R";
+  a.appendChild(b);
+  var l=document.createElement("span");
+  l.className="rathji-label"; l.textContent="My projects";
+  a.appendChild(l);
+  a.insertAdjacentHTML("beforeend",'<svg class="rathji-arrow" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 12L12 4M12 4H6M12 4V10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+  document.body.appendChild(a);
+})();
+</script>
