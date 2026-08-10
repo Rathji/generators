@@ -1,0 +1,3416 @@
+import * as THREE from 'https://esm.sh/three@0.160.0'; 
+
+/* ============================================================
+   HOPHAVOC — a three.js "poor man's version" of the GDevelop arena
+   roguelite Bullet Bunny. Twin-stick shooter: survive 500s, kill
+   waves, collect XP, pick 1-of-3 upgrades, master supers. All tuning
+   mirrors the original (enemy HP/speeds, gun stats, perk values,
+   spawn schedules, difficulty boss timings).
+   ============================================================ */
+
+// ---------------- TUNING (mirrors original) ----------------
+const WIN_TIME = 500;
+const HERO_BASE = { hp:60, speed:75, hitInvince:2, dodge:0, armor:0, shield:0, crit:0 };
+const HERO_R = 12;
+const HERO_HIT_DMG = 20;
+const BULLET_SPEED = 500;
+const EXPM = (lvl) => 10 + lvl;                       // XP threshold (orig: explevel starts 10, +1 per level: 10,11,12,13…)
+const ARENA = { w:480, h:270 };                       // world "area" in units² (480×270) — the camera shows exactly this much world
+const VIEW = { halfW:240, halfH:135 };                // camera half-extents, recomputed to keep the world area constant at any aspect
+const PIXEL_CRUNCH = 3; // render at 1/3 res, CSS-upscale = pixel-art crunch
+
+function recomputeView(){
+  const area = ARENA.w*ARENA.h;                       // 129600 units² of world is always visible
+  const a = innerWidth/innerHeight;
+  VIEW.halfW = Math.sqrt(area*a)/2;
+  VIEW.halfH = Math.sqrt(area/a)/2;
+  // The tilted camera (CAM_OFF y/z) foreshortens vertical world-z by sin(tilt)≈0.81, so it
+  // shows more floor than the frustum — extend the walkable arena to the visible floor edges.
+  const tl = Math.hypot(CAM_OFF.y, CAM_OFF.z);
+  const sinT = CAM_OFF.y/tl, cosT = CAM_OFF.z/tl;
+  VIEW.visW = VIEW.halfW*1.02;              // visible floor half-extent, x
+  VIEW.visH = VIEW.halfH*1.02/sinT;         // visible floor half-extent, z
+  VIEW.walkShift = (cosT/sinT)*9;           // z-shift of the walkable range at the hero's body height
+}
+
+const GUNS = [
+  { id:'arcritter', name:'AR-CRITTER',    dmg:24, ammo:12, fire:0.4,  proj:1, reload:1.5,  range:0.6, crit:30, arc:0,   kb:75, speed:500, special:['long','bounce'],         color:0x6aa3ff, desc:'Precision rifle. 30% crit chance, long reach.' },
+  { id:'blastersg', name:'BLASTER-SG12',  dmg:12, ammo:4,  fire:0.5,  proj:5, reload:1.5,  range:0.4, crit:0,  arc:75,  kb:35, speed:225, special:['spread','short'],       color:0x8f9ba8, desc:'5-shell shotgun spread. Devastating up close.' },
+  { id:'scrapper',  name:'SCRAPPER',      dmg:10, ammo:40, fire:0.4,  proj:1, reload:1.5,  range:0.6, crit:0,  arc:0,   kb:75, speed:400, special:['long','bounce','dblshot'], color:0xc9a86a, desc:'Fast double-shot. Big mag, long reach.' },
+  { id:'rustyp',    name:'RUSTY-P',       dmg:20, ammo:6,  fire:0.3,  proj:1, reload:1.0,  range:0.2, crit:10, arc:0,   kb:75, speed:500, special:['short','bounce'],       color:0xa0713f, desc:'Sawed-off brute. Massive damage, point-blank range, 10% crit.' },
+  { id:'boom',      name:'BOOM BLASTER',  dmg:50, ammo:6,  fire:1.75, proj:1, reload:2,    range:0.1, crit:0,  arc:0,   kb:75, speed:150, special:['explode','long','bounce'], color:0xff7a3d, desc:'Explosive shells. Big splash damage.' },
+  { id:'taipan',    name:'TAIPAN',        dmg:14, ammo:16, fire:0.5,  proj:1, reload:1,    range:0.5, crit:0,  arc:0,   kb:75, speed:350, special:['poison','long'],          color:0x7ce04f, desc:'Venom darts. Leave poison on everything they hit.' },
+  { id:'mg',        name:'MG-ECLIPSE',    dmg:10, ammo:140,fire:1.5,  proj:1, reload:2,    range:0.6, crit:20, arc:0,   kb:75, speed:500, special:['long','bounce'],         color:0x8b7dff, desc:'Machine gun. 20% crit, huge magazine.' },
+  { id:'r6',        name:'R6-BOUNCER',    dmg:15, ammo:50, fire:0.7,  proj:1, reload:1.75, range:2.5, crit:10, arc:0,   kb:75, speed:500, special:['bounce','long'],        color:0xffd166, desc:'Bullets ricochet off walls for 2.5s. 10% crit.' },
+  { id:'toxic',     name:'TOXIC BLASTER', dmg:20, ammo:25, fire:1,    proj:1, reload:1.25, range:0.8, crit:0,  arc:0,   kb:75, speed:800, special:['poison','long'],        color:0x49c23f, desc:'Chunky poison globs. Venomous damage-over-time.' },
+  { id:'splitter',  name:'SPLITTER',      dmg:13, ammo:15, fire:0.4,  proj:3, reload:0.75, range:0.6, crit:0,  arc:180, kb:75, speed:500, special:['spread','slow','mid','bounce'], color:0x7fd4ff, desc:'Triple spread that slows whatever it hits.' },
+  { id:'void',      name:'VOID RIFLE',    dmg:30, ammo:4,  fire:0.4,  proj:1, reload:1.75, range:0.6, crit:0,  arc:0,   kb:75, speed:800, special:['void','long','bounce'], color:0x23283a, desc:'Black-hole rounds. 50% chance to refund 1-2 ammo.' },
+  // Free guns (orig Bullet Bunny's remaining arsenal: ZNEEKE, BUGSY'S ZAPPER, BB-NOZIA, BONE BARREL, SALAMANDRO)
+  { id:'zneeke',     name:'ZNEEKE',        dmg:6,  ammo:60, fire:0.6,  proj:1, reload:0.5,  range:0.2, crit:0,  arc:12,  kb:30, speed:500, special:['spread','short'],         color:0x9fd8ff, desc:'Rapid plasma pistol. Fast reload, huge mag, slight spread.' },
+  { id:'zapper',     name:"BUGSY'S ZAPPER",dmg:13, ammo:25, fire:0.5,  proj:1, reload:1.2,  range:0.5, crit:0,  arc:0,   kb:30, speed:0,   special:['beam','mid'],            color:0x5be3ff, desc:'Short electric beam that zaps everything it crosses.' },
+  { id:'bouncecannon',name:'BB-NOZIA',     dmg:8,  ammo:12, fire:0.5,  proj:1, reload:1.5,  range:0.5, crit:0,  arc:0,   kb:30, speed:700, special:['bounce','explode'],      color:0x5b8dff, desc:'Bouncing shells that explode. Hold fire to charge the projectile.' },
+  { id:'bonebarrel', name:'BONE BARREL',   dmg:18, ammo:80, fire:0.6,  proj:1, reload:1,    range:0.4, crit:0,  arc:12,  kb:100,speed:400, special:['bone','pierce','long'],  color:0xe8e0d0, desc:'Piercing bone rounds. Can summon a bone-dog companion.' },
+  { id:'salamandro', name:'SALAMANDRO',    dmg:5,  ammo:8,  fire:0.9,  proj:4, reload:1.3,  range:0.2, crit:0,  arc:18,  kb:45, speed:400, special:['spread','short'],        color:0xff8a3d, desc:'4-pellet fire-blast. Melts crowds up close.' },
+];
+
+const ENEMIES = {
+  goblingreen:{ hp:30,  speed:35, kb:0,   r:9,  color:0x46662e, kind:'chase', hop:4.5 },
+  egger:      { hp:50,  speed:35, kb:0,   r:12, color:0xd3c6a2, kind:'chase', hop:4 },
+  shooter:    { hp:75,  speed:35, kb:30,  r:12, color:0x7786d8, kind:'shooter' },
+  goblinred:  { hp:100, speed:23, kb:0,   r:11, color:0xae4634, kind:'chase', hop:4.5 },
+  steelcrab:  { hp:6500,speed:35, kb:0,   r:22, color:0x4a4f57, kind:'chase' },
+  goblinblue: { hp:150, speed:39, kb:0,   r:11, color:0x3f7ab8, kind:'chase', hop:4.5 },
+  troll:      { hp:200, speed:5,  kb:0,   r:20, color:0x4c7a3a, kind:'chase' },
+  laserdude:  { hp:1600,speed:20, kb:0,   r:15, color:0x2b2f3a, kind:'laser',  elite:true, brain:true },
+  pigsassin:  { hp:80,  speed:48, kb:0,   r:11, color:0xf29bb8, kind:'chase', hop:5 },
+  absorber:   { hp:2500,speed:25, kb:0,   r:28, color:0x3a2e4f, kind:'absorber', elite:true, brain:true, shielded:true },
+  shielder:   { hp:10000,speed:0, kb:0,   r:36, color:0x5b8dff, kind:'shield', dead:false },
+  dummy:      { hp:5000,speed:0,  kb:0,   r:14, color:0x9a7442, kind:'stationary' },
+  box3:       { hp:10,  speed:35, kb:0,   r:5.5, color:0xff9540, kind:'chase', hop:3, float:true },
+  boss1:      { hp:10000,speed:14, kb:150, r:32, color:0x8a1f2d, kind:'boss', boss:true, bossColor:0xff5a5a },
+  boss2:      { hp:5000, speed:16, kb:150, r:28, color:0x6a2fa8, kind:'boss', boss:true, bossColor:0xcf7dff },
+  boss3:      { hp:2500, speed:20, kb:150, r:24, color:0x1d1f2e, kind:'boss', boss:true, bossColor:0x7dd8ff },
+};
+
+const SPAWNS = [
+  { type:'goblingreen', at:0,   interval:6.5, count:4, side:'all',     sb:true,  sideOff:'goblin' },
+  { type:'troll',       at:15,  interval:15,  count:4, side:'all',     sb:true,  sideOff:'big' },
+  { type:'box3',        at:75,  interval:11,  count:7, side:'random',  sb:true,  sideOff:'big' },
+  { type:'egger',       at:100, interval:8,   count:1, side:'random',  sb:true,  sideOff:'big' },
+  { type:'goblingreen', at:175, interval:2,   count:2, side:'lr',      sb:false, sideOff:'goblin' },
+  { type:'goblinblue',  at:200, interval:11,  count:2, side:'tb',      sb:true,  sideOff:'goblin' },
+  { type:'goblinblue',  at:275, interval:11,  count:2, side:'lr',      sb:true,  sideOff:'goblin' },
+  { type:'shooter',     at:225, interval:6.5, count:1, side:'random',  sb:true,  sideOff:'big' },
+  { type:'goblinred',   at:325, interval:3,   count:2, side:'lr',      sb:false, sideOff:'goblin' },
+  { type:'goblinred',   at:350, interval:3,   count:2, side:'tb',      sb:false, sideOff:'goblin' },
+  { type:'goblinred',   at:150, interval:13,  count:4, side:'all',     sb:true,  sideOff:'goblin', only:['Normal'] },
+  { type:'pigsassin',   at:50,  interval:16,  count:1, side:'random',  sb:true,  sideOff:'big', only:['Hard'] },
+  { type:'goblinred',   at:175, interval:6.5, count:2, side:'lr',      sb:true,  sideOff:'goblin', only:['Hard'] },
+  { type:'pigsassin',   at:1,   interval:8,   count:1, side:'random',  sb:true,  sideOff:'big', only:['Insane'] },
+  { type:'goblinblue',  at:400, interval:3,   count:4, side:'all',     sb:false, sideOff:'goblin', only:['Insane'] },
+];
+
+// Elite HP matches the orig spawn events exactly: absorbers get +3000 (Normal), +5000 (Hard/Insane late)
+// or -1300 (Insane 50s) on top of base 2500; laserdudes get +5000 (Hard 415s / Insane 400s) or -500
+// (Insane 110s) on top of base 1600. boss1 gets +5000 (15000) on Hard/Insane; boss2 +3000 (8000) on Insane.
+const BOSS_SPAWNS = {
+  Normal: [
+    { t:250, e:'absorber',  hp:5500 },
+    { t:325, e:'absorber',  hp:5500 },
+    { t:375, e:'boss1',     hp:10000 },
+  ],
+  Hard: [
+    { t:140, e:'absorber',  hp:2500 },
+    { t:215, e:'boss2',     hp:5000 },
+    { t:300, e:'absorber',  hp:7500 },
+    { t:375, e:'boss1',     hp:15000 },
+    { t:415, e:'laserdude', hp:6600, x:460, y:300 },
+    { t:415, e:'laserdude', hp:6600, x:0, y:-5 },
+    { t:430, e:'absorber',  hp:7500 },
+  ],
+  Insane: [
+    { t:50,  e:'absorber',  hp:1200 },
+    { t:110, e:'laserdude', hp:1100 },
+    { t:150, e:'boss3',     hp:2500 },
+    { t:225, e:'absorber',  hp:7500 },
+    { t:275, e:'boss2',     hp:8000 },
+    { t:315, e:'laserdude', hp:1600, x:0, y:-5 },
+    { t:315, e:'laserdude', hp:1600, x:460, y:300 },
+    { t:375, e:'boss1',     hp:15000, bh:true },
+    { t:400, e:'laserdude', hp:1600, x:0, y:-5 },
+    { t:400, e:'laserdude', hp:6600, x:460, y:300 },
+    { t:450, e:'absorber',  hp:7500 },
+  ],
+};
+
+// NOTE (balance parity): the original game's level-up pool is exactly 45 pre-placed
+// 'upgrade1' scene objects in its Arena layout, each pinned to a perk via animation index.
+// 'mindpopper' and 'expdub' are NOT in that pool and are never granted in-game — they're
+// dead content (the original only references them in display/pick handlers). DO NOT add
+// them back. Our pool intentionally mirrors the original: 45 base perks + conditional
+// unlocks (e.g. bulletbully only after doublebullet) + 7 king perks = 65 total.
+const PERKS = [
+  { id:'criticalhit',    name:'Critical Hit',  desc:'Increases Critical Hit Chance by 10%',                          mastery:'Critical', apply:g=>{g.hero.mods.crit+=0.10;}, },
+  { id:'magnet',         name:'Magnet',        desc:'Increases XP Attraction radius & critical Hit Chance by 5%',    mastery:'Critical', apply:g=>{g.hero.mods.magnet+=20; g.hero.mods.crit+=0.05;}, },
+  { id:'criticalsight',  name:'Critical Sight',desc:'Increases the distance your bullets travel & Critical Hit Chance by 5%', mastery:'Critical', apply:g=>{g.hero.mods.range+=0.3; g.hero.mods.crit+=0.05;}, },
+  { id:'exsplosivecrits',name:'Explosive Crits',desc:'Critical hits are now explosive',                             king:'Critical', apply:g=>{g.hero.explosiveCrits=true;}, },
+  { id:'hpfordamage',    name:'HP for Damage', desc:'Heal 60 HP, - 25% Damage',                                     apply:g=>{healHero(60); g.hero.mods.dmg*=0.75;}, },
+  { id:'heart',          name:'Heart',         desc:'+ 20 Max HP',                                                 apply:g=>{g.hero.maxHp+=20; healHero(20);}, },
+  { id:'regen',          name:'Regen',         desc:'Hero regenerates 10 HP every 30 seconds',                      apply:g=>{g.hero.regen=true;}, },
+  { id:'poisondodge',    name:'Poison Dodge',  desc:'Poison Damage +50% Speed +33% Dodge Chance +5%',               mastery:'Dodge', apply:g=>{g.hero.mods.poison*=1.5; g.hero.mods.speed*=1.33; g.hero.mods.dodge+=0.05;}, },
+  { id:'stinkbug',       name:'Stink Bug',     desc:'Every 4 (s) summon a stink bug that explodes & poisons',       apply:g=>{g.hero.stinkbug=true;}, },
+  { id:'bulletspikes',   name:'Bullet Spikes', desc:'Shoot 12 Spikes that slow and damage every 3 seconds',         apply:g=>{g.hero.bulletspikes=true;}, },
+  { id:'slowdown',       name:'Slowdown',      desc:'Bullets Slow Enemies',                                        apply:g=>{g.hero.slowBullets=true;}, },
+  { id:'slowinglight',   name:'Slowing Light', desc:'The light surrounding the hero is larger & slows down enemies', mastery:'Pyro', apply:g=>{g.hero.mods.light+=15; g.hero.slowingLight=true;}, },
+  { id:'spikebuff',      name:'Spike Buff',    desc:'+15 Spike Damage, Spikes also deal extra fire damage.',        requires:'penburst', apply:g=>{g.hero.spikeDmg+=15; g.hero.spikeFire=true;}, },
+  { id:'slowspikes',     name:'Slow Spikes',   desc:'Drop a spike trap that slows and deals 15 Spike damage',       apply:g=>{g.hero.slowspikes=true;}, },
+  { id:'stablefocus',    name:'Stable Focus',  desc:'20% Chance to gain an ammo when collecting XP orbs.',          apply:g=>{g.hero.stablefocus=true;}, },
+  { id:'xpbuff',         name:'XP Buff',       desc:'Damage Scales with current XP',                                apply:g=>{g.hero.xpbuff=true;}, },
+  { id:'bruiser',        name:'Bruiser',       desc:'+8% DMG Reduction. When hit gain 6 ammo', mastery:'Armor',   apply:g=>{g.hero.mods.armor+=0.08; g.hero.bruiser=true;}, },
+  { id:'shieldregen',    name:'Shield Regen',  desc:'Gain a shield that slowly regenerates', mastery:'Armor',     apply:g=>{g.hero.maxShield=20; g.hero.shield=20; g.hero.shieldRegen=true;}, },
+  // NOTE (balance parity): the original's armor desc says "-15% Speed" but no code
+  // ever applies it — the pick only grants +0.12 DR + 1 Armor mastery. We match that.
+  { id:'armor',          name:'Armor',         desc:'+12% DMG Reduction -15% Speed', mastery:'Armor',            apply:g=>{g.hero.mods.armor+=0.12;}, },
+  { id:'armorking',      name:'Armor King',    desc:'+10% DMG Reduction. + 1 DMG per active shield point', king:'Armor', apply:g=>{g.hero.mods.armor+=0.10; g.hero.armorKing=true;}, },
+  { id:'rager',          name:'Rager',         desc:'Damage Increases the lower the HP',                           apply:g=>{g.hero.rager=true;}, },
+  { id:'enragedammo',    name:'Enraged Ammo',  desc:'25% chance to gain 2 ammo every kill when raged',             requires:'rager', apply:g=>{g.hero.enragedammo=true;}, },
+  // NOTE (balance parity): orig uses Health.Hit(hp/2) — the loss is dodgeable, shield
+  // absorbs first, and armor %DR reduces it (so dodge/armor builds pay less than half HP).
+  { id:'tradeoff',       name:'Trade Off',     desc:'Trade Half of your HP for +20% DMG',                          apply:g=>{const h=g.hero;
+    if(!(Math.random()<h.mods.dodge)){
+      let loss=h.hp/2;
+      if(h.shield>0){ const ab=Math.min(h.shield, loss); h.shield-=ab; loss-=ab; }
+      loss*=(1-Math.min(0.6,h.mods.armor));
+      h.hp=Math.max(0.5,h.hp-loss);
+    }
+    h.mods.dmg*=1.2;}, },
+  { id:'quickhands',     name:'Quick Hands',   desc:'Increases Reload speed by 15% & Firerate by 15%', mastery:'Reload', apply:g=>{g.hero.mods.reload*=5/6; g.hero.mods.fire*=1-1/6.6;}, },
+  { id:'reloadbomb',     name:'Reload Bomb',   desc:'Drop a bomb when you reload', mastery:'Reload',              apply:g=>{g.hero.reloadbomb=true;}, },
+  { id:'reloadking',     name:'Reload King',   desc:'Increases Reload Speed by 50%', mastery:'Reload',             apply:g=>{g.hero.mods.reload*=0.5;}, },
+  { id:'reloadreckoner', name:'Reload Reckoner',desc:'5% chance to heal 7 hp when you reload. Reload Speed increased by 50%', king:'Reload', apply:g=>{g.hero.mods.reload*=0.5; g.hero.reloadreckoner=true;}, },
+  { id:'burninglight',   name:'Burning Light', desc:'The light surrounding the hero is larger and now inflicts burn damage', mastery:'Pyro', apply:g=>{g.hero.burningLight=true;}, },
+  { id:'burner',         name:'Burner',        desc:'Increases Fire Damage by 50%',                                mastery:'Pyro', requires:'burninglight', apply:g=>{g.hero.mods.fire*=1.5;}, },
+  { id:'lordofthelight', name:'Lord Of The Light', desc:'Increase fire damage by 100%. Every enemy hit has a 10% chance to gain ammo', king:'Pyro', apply:g=>{g.hero.mods.fire*=2; g.hero.lordAmmo=true;}, },
+  { id:'airdamage',      name:'Air Damage',    desc:'+ 15 Stationary DMG',                                        mastery:'Rooted', apply:g=>{g.hero.mods.stationary+=15;}, },
+  { id:'stationarylight',name:'Stationary Light',desc:'Hero Light is larger while stationary. Heal 20 HP',         mastery:'Rooted', apply:g=>{healHero(20); g.hero.stationLight=true;}, },
+  { id:'rootedfire',     name:'Rooted Fire',   desc:'Doubles Fire DMG while stationary',                           mastery:'Rooted', apply:g=>{g.hero.rootedfire=true;}, },
+  { id:'rootedking',     name:'Rooted King',   desc:'Gain 0.5 Hp per/s while stationary. + 100% Stationary DMG',   king:'Rooted', apply:g=>{g.hero.rootedking=true; g.hero.mods.stationaryMult+=1.0;}, },
+  { id:'turret',         name:'Turret',        desc:'Summon A Turret that fires at the closest target', mastery:'Summon', apply:g=>{addTurret();}, },
+  { id:'buffturret',     name:'Buff Turret',   desc:'+ 5 Turret Damage + 100% Turret Shooting Speed', requires:'turret', apply:g=>{g.hero.turretDmg*=1.5; g.hero.turretRateBuff+=0.5;}, },
+  { id:'twoturrets',     name:'Two Turrets',   desc:'Summon a second turret', requires:'turret',                  apply:g=>{addTurret();}, },
+  { id:'doggo',          name:'Doggo',         desc:'Summon a dog that deals 12 damage', mastery:'Summon',        apply:g=>{addDog(false);}, },
+  { id:'buffdoggo',      name:'Buff Doggo',    desc:"Increase doggo's damage by 50%", requires:'doggo',           apply:g=>{g.hero.dogMult*=1.5; g.hero.dogSpeed+=25;}, },
+  { id:'summonbuff',     name:'Summon Buff',   desc:'Increases Summon Damage by 50%',                              apply:g=>{g.hero.mods.summon*=1.5;}, },
+  { id:'spinner',        name:'Spinner',       desc:'Summon a Orb that spins around you dealing 30 damage', mastery:'Summon', apply:g=>{g.hero.spinners=(g.hero.spinners||0)+1;}, },
+  { id:'spinner2',       name:'Spinner II',    desc:'Summon a second Orb', requires:'spinner',                      apply:g=>{g.hero.spinners=(g.hero.spinners||0)+1;}, },
+  { id:'summonking',     name:'Summon King',   desc:'Increases summon damage by 100%', king:'Summon',           apply:g=>{g.hero.mods.summon*=2;}, },
+  { id:'speeddemon',     name:'Speed Demon',   desc:'Increase speed, firerate, and reload speed',                  mastery:'Dodge', apply:g=>{g.hero.mods.speed*=7/6; g.hero.mods.fire*=0.8; g.hero.mods.reload*=5/6;}, },
+  { id:'dodgebuff',      name:'Dodge Buff',    desc:'Poison Damage +50% Dodge Chance + 10%',                       mastery:'Dodge', apply:g=>{g.hero.mods.poison*=1.5; g.hero.mods.dodge+=0.10;}, },
+  { id:'dodgeking',      name:'Dodge King',    desc:'Dodge Chance + 15% Gain 10 Shield Points every successful dodge', king:'Dodge', apply:g=>{g.hero.mods.dodge+=0.15; g.hero.dodgeKing=true;}, },
+  { id:'bulletbully',    name:'Bullet Bully',  desc:'+1 Projectile -20% Bullet Damage -33% Speed', requires:'doublebullet', apply:g=>{g.hero.mods.proj+=1; g.hero.mods.dmg*=0.8; g.hero.mods.speed*=0.667; if(g.gun.id!=='blastersg'&&g.gun.id!=='splitter') g.hero.mods.spread+=35;}, },
+  { id:'doublebullet',   name:'Double Bullet', desc:'+1 Projectile -20% Bullet Damage',                            apply:g=>{g.hero.mods.proj+=1; g.hero.mods.dmg*=0.8; if(g.gun.id!=='blastersg'&&g.gun.id!=='splitter') g.hero.mods.spread+=20;}, },
+  { id:'knockback',      name:'Knockback',     desc:'Increased knockback + 10% Bullet Damage',                      mastery:'Knockback', apply:g=>{g.hero.mods.kb*=1.1; g.hero.mods.dmg*=1.1;}, },
+  { id:'hitinvince',     name:'Hit Invince',   desc:'Increases Bullet Damage by 15%. Longer Invincibility after getting hit', mastery:'Knockback', apply:g=>{g.hero.mods.dmg*=1.15; g.hero.invinceFlat+=3;}, },
+  { id:'damageknockback',name:'Damage Knockback',desc:'+3 Bullet Damage and Increased Knockback',                  mastery:'Knockback', apply:g=>{g.hero.flatDmg+=3; g.hero.mods.kb*=1.1;}, },
+  { id:'knockbackking',  name:'Knockback King',desc:'Every 4 Seconds push back all surrounding enemies',            king:'Knockback', apply:g=>{g.hero.knockbackKing=true;}, },
+  { id:'ammo',           name:'Ammo',          desc:'+10 Ammo. Poison Damage now scales with max ammo.',           apply:g=>{g.hero.maxAmmo+=10; g.hero.ammo=Math.min(g.hero.maxAmmo,g.hero.ammo+10); g.hero.poisonScalesAmmo=true;}, },
+  { id:'manipulator',    name:'Manipulator',   desc:'Doubles Ammo at the cost of speed',
+    // NOTE (balance parity): original doubles CURRENT ammo and adds it onto max ammo
+    // (max grows to ~3× base), plus flat −20 max speed. Order matters — ammo first.
+    apply:g=>{g.hero.ammo*=2; g.hero.maxAmmo+=g.hero.ammo; g.hero.mods.speed*=(75-20)/75;}, },
+  { id:'doublejump',     name:'Double Jump',   desc:'Increased Magnet, +6 ammo, heal 20 Hp',                       apply:g=>{g.hero.mods.magnet+=5; g.hero.maxAmmo+=6; g.hero.ammo=Math.min(g.hero.maxAmmo,g.hero.ammo+6); healHero(20);}, },
+  { id:'buff',           name:'Buff',          desc:'Increases Damage by 30%',                                     apply:g=>{g.hero.mods.dmg*=1.3;}, },
+  { id:'ranger',         name:'Ranger',        desc:'Damage Increases based on distance, - 5 base damage)',         apply:g=>{g.hero.ranger=true;}, },
+  { id:'radius',         name:'Radius',        desc:'Increases Hero Light Radius',                                 requires:'stinkbug', apply:g=>{g.hero.mods.light+=25;}, },
+  { id:'explode',        name:'Explode',       desc:'10% Chance enemies explode upon death, dealing 100% of your bullet DMG', apply:g=>{g.hero.explodeDeath=true;}, },
+  { id:'explodebones',   name:'Explode Bones', desc:'When enemies explode upon death. They shoot out 12 bone bullets which have a chance to summon a doggo', requires:'explode', apply:g=>{g.hero.explodeDeath=true; g.hero.explodeBones=true;}, },
+  { id:'backbone',       name:'Backbone',      desc:'Shoot 3 Bone Bullets behind you with a chance to summon a doggo on impact', apply:g=>{g.hero.backbone=true;}, },
+  { id:'penquinpal',     name:'Penquin Pal',   desc:'Summon a penquin pal that collects nearby xp', mastery:'Summon', apply:g=>{g.hero.penguin=true;}, },
+  { id:'penburst',       name:'Pen Burst',     desc:'Penquin Pal now slams the ground every 5 seconds dealing 50 damage', mastery:'Summon', requires:'penquinpal', apply:g=>{g.hero.penburst=true;}, },
+  { id:'burningroots',   name:'Burning Roots', desc:'Every 4 seconds, enemies in your light are set ablaze.',       king:'burningroots', apply:g=>{g.hero.burningroots=true;}, },
+  { id:'superplus',      name:'Super Plus',    desc:'Gain 1 extra super use',                                      apply:g=>{g.hero.super.maxUses+=1; g.hero.super.uses+=1;}, },
+];
+
+// perk icon sprite sheet — procedural 32px cells (8 cols × 9 rows), chunky pixel-art
+const ICON_URL = 'https://user.uploads.dev/file/3d415b9d1fe6ecae3e900da31244ed7b.png';
+const PERK_ICONS = {
+  criticalhit:[0,0], magnet:[1,0], criticalsight:[2,0], exsplosivecrits:[3,0], hpfordamage:[4,0], heart:[5,0], regen:[6,0], poisondodge:[7,0],
+  mindpopper:[0,1], stinkbug:[1,1], bulletspikes:[2,1], slowdown:[3,1], slowinglight:[4,1], spikebuff:[5,1], slowspikes:[6,1], stablefocus:[7,1],
+  xpbuff:[0,2], expdub:[1,2], bruiser:[2,2], shieldregen:[3,2], armor:[4,2], armorking:[5,2], rager:[6,2], enragedammo:[7,2],
+  tradeoff:[0,3], quickhands:[1,3], reloadbomb:[2,3], reloadking:[3,3], reloadreckoner:[4,3], burninglight:[5,3], burner:[6,3], lordofthelight:[7,3],
+  airdamage:[0,4], stationarylight:[1,4], rootedfire:[2,4], rootedking:[3,4], turret:[4,4], buffturret:[5,4], twoturrets:[6,4], doggo:[7,4],
+  buffdoggo:[0,5], summonbuff:[1,5], spinner:[2,5], spinner2:[3,5], summonking:[4,5], speeddemon:[5,5], dodgebuff:[6,5], dodgeking:[7,5],
+  bulletbully:[0,6], doublebullet:[1,6], knockback:[2,6], hitinvince:[3,6], damageknockback:[4,6], knockbackking:[5,6], ammo:[6,6], manipulator:[7,6],
+  doublejump:[0,7], buff:[1,7], ranger:[2,7], radius:[3,7], explode:[4,7], explodebones:[5,7], backbone:[6,7], penquinpal:[7,7],
+  penburst:[0,8], burningroots:[1,8], superplus:[2,8],
+};
+
+const GEMS = [
+  { id:'green',  name:'GREEN GEM',  color:0x3fbf5f, desc:'+10% DMG Reduction',            apply:g=>{g.hero.mods.armor+=0.10;}, },
+  { id:'blue',   name:'BLUE GEM',   color:0x4f7dff, desc:'+50% Summon DMG',               apply:g=>{g.hero.mods.summon*=1.5;}, },
+  { id:'purple', name:'PURPLE GEM', color:0x9f4fff, desc:'+20% Speed, +10% Dodge',        apply:g=>{g.hero.mods.dodge+=0.10;}, },
+  { id:'red',    name:'RED GEM',    color:0xff4f4f, desc:'+25% Bullet DMG',               apply:g=>{g.hero.mods.dmg*=1.25;}, },
+  { id:'black',  name:'BLACK GEM',  color:0x3a3a3a, desc:'+25% Reload Speed, +25% Fire Rate', apply:g=>{g.hero.mods.reload*=0.85; g.hero.mods.fire*=0.85;}, },
+  { id:'yellow', name:'YELLOW GEM', color:0xffd166, desc:'+6 Max Ammo',
+    // NOTE (balance parity): original text says "+6 Max Ammo", but the original's
+    // mechanics actually double current+max ammo and cut move speed by 25%. We match
+    // the mechanics (like purple/black) while keeping the original's (wrong) text.
+    apply:g=>{g.hero.maxAmmo*=2; g.hero.ammo*=2; g.hero.mods.speed*=0.75;}, },
+  { id:'poison', name:'POISON GEM', color:0x6fbf4f, desc:'+25% Poison DMG',               apply:g=>{g.hero.mods.poison*=1.25;}, },
+  { id:'crit',   name:'CRIT GEM',   color:0xff8f4f, desc:'+10% Crit, +1 Crit Mastery',    apply:g=>{g.hero.mods.crit+=0.10;}, },
+];
+
+const CHARACTERS = [
+  { id:'pulse', name:'PULSE', color:0x7fd4ff, passive:'Balanced', passiveDesc:'Evenly rounded bunny, no weaknesses.', superUses:12, superCharge:12,
+    superName:'PULSE', superDesc:'Knock all enemies away and heal 7 HP.' },
+  { id:'mag', name:'MAG', color:0xff9a3d, passive:'+5 Fire DMG', passiveDesc:'Every bullet deals +5 bonus fire damage.', superUses:12, superCharge:12,
+    superName:'BURNING MAGNET', superDesc:'A burning magnet draws enemies in and burns them for 6s.' },
+  { id:'bones', name:'BONES', color:0xe8e8e0, passive:'+50% Summon DMG', passiveDesc:'All summons hit 50% harder.', superUses:12, superCharge:20,
+    superName:'PACK', superDesc:'Summon 4 dogs for 8 seconds.' },
+  { id:'porter', name:'PORTER', color:0x8f6bff, passive:'+10% Dodge · Fast', passiveDesc:'Quick on their feet and slippery.', superUses:12, superCharge:20,
+    superName:'WARP', superDesc:'Teleport to your cursor and fire 12 bouncy bullets.' },
+  { id:'payne', name:'PAYNE', color:0xff4f4f, passive:'Rage', passiveDesc:'Deals more damage the lower their HP.', superUses:12, superCharge:20,
+    superName:'PAYBACK', superDesc:'Sacrifice half HP to deal 100 DMG everywhere. Heal 1 per enemy hit.' },
+  { id:'haze', name:'HAZE', color:0x4fbf4f, passive:'+50% Poison DMG', passiveDesc:'Venom and toxins work 50% better.', superUses:12, superCharge:6,
+    superName:'TOXIC BURST', superDesc:'Explode every XP orb into a toxic cloud.' },
+  { id:'mo', name:'MO', color:0xffd166, passive:'Double Ammo · Slow', passiveDesc:'Double the magazine, half the hustle.', superUses:30, superCharge:4,
+    superName:'AMMO BOMB', superDesc:'Detonate a bomb dealing damage equal to your max ammo.' },
+  { id:'nikki', name:'NIKKI', color:0xff9ad5, passive:'Balanced', passiveDesc:'A steady bunny with a dependable arsenal.', superUses:10, superCharge:24,
+    superName:'OVERDRIVE', superDesc:'Repair all turrets: +DMG and +fire rate for 5s.' },
+  { id:'blink', name:'BLINK', color:0x7d5bff, passive:'Fast', passiveDesc:'Fastest bunny on four feet.', superUses:40, superCharge:1,
+    superName:'PHASE', superDesc:'Phase shift: invincible and faster for 3 seconds.' },
+  { id:'rooty', name:'ROOTY', color:0x3f9e4f, passive:'Slow', passiveDesc:'Grounded and heavy — moves 30% slower.', superUses:8, superCharge:18,
+    superName:'BRAMBLES', superDesc:'Grow a ring of brambles that damage and slow enemies.' },
+];
+
+const DIFFS = {
+  Normal: { label:'NORMAL', sb:0,    hpMult:1,   desc:'The intended experience. Balanced waves and a fair boss schedule.' },
+  Hard:   { label:'HARD',   sb:0.03, hpMult:1.1, desc:'Elites arrive sooner. Extra stalkers from 175s. Enemies have +10% HP.' },
+  Insane: { label:'INSANE', sb:0.06, hpMult:1.3, desc:'Bosses from 50 seconds. Enemies have +30% HP. Do you really want this?' },
+};
+
+// ---------------- Globals ----------------
+const G = {
+  state:'menu', stage:'char', sel:{ char:null, gun:null, gem:null, diff:null },
+  scene:null, camera:null, renderer:null, raycaster:null, clock:null,
+  hero:null, gun:null, enemies:[], bullets:[], ebullets:[], orbs:[], summons:[], effects:[], clouds:[],
+  time:0, score:0, gold:0, kills:0, exp:0, level:0, mult:1,
+  spawners:[], bossIdx:0, mIdx:0, mGoldIdx:0,
+  keys:{}, mouse:{x:0,y:0,down:false,touchMode:false}, aimWorld:new THREE.Vector3(), aimDir:new THREE.Vector3(0,0,1),
+  shake:0, simPaused:false, perks:[], unlockedKings:[], masteryBonus:{},
+  lastHpBar:null, levelPaused:false,
+};
+
+const $ = s => document.querySelector(s);
+
+function toWorld(gdx,gdy){ return new THREE.Vector3(gdx-ARENA.w/2, 0, ARENA.h/2-gdy); }
+function toGD(v){ return { x:v.x+ARENA.w/2, y:ARENA.h/2-v.z }; }
+function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
+function dist2(ax,az,bx,bz){ const dx=ax-bx, dz=az-bz; return dx*dx+dz*dz; }
+
+// ---------------- Audio (synthesized WebAudio) ----------------
+const AUD = {
+  ctx:null, master:null, muted:false, bgmOn:false, _timer:null, _step:0, _next:0, _track:null, _musicEl:null, _cache:{},
+  init(){
+    if(this.ctx) return;
+    try{
+      const C = window.AudioContext || window.webkitAudioContext;
+      if(!C) return;
+      this.ctx = new C();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = 0.6;
+      this.master.connect(this.ctx.destination);
+    }catch(e){ this.ctx = null; }
+  },
+  resume(){ if(this.ctx && this.ctx.state==='suspended') this.ctx.resume(); },
+  setMuted(m){ this.muted=m; if(this.master) this.master.gain.value = m?0:0.6; if(this._musicEl) this._musicEl.volume = m?0:0.45; },
+  tone(freq, dur, type, vol, slide, delay){
+    if(!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime + (delay||0);
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type||'square';
+    o.frequency.setValueAtTime(freq, t);
+    if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq+slide), t+dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+dur+0.03);
+  },
+  noise(dur, vol, freq, q, delay){
+    if(!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime + (delay||0);
+    const n = Math.max(1, Math.floor(this.ctx.sampleRate*dur));
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i] = (Math.random()*2-1)*(1-i/n);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const f = this.ctx.createBiquadFilter(); f.type='bandpass'; f.frequency.value=freq||2000; f.Q.value=q||1;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t);
+  },
+  shoot(){ this.noise(0.05, 0.16, 2600, 1.4); this.tone(190, 0.06, 'square', 0.05, -120); },
+  empty(){ this.noise(0.028, 0.3, 950, 3); },
+  kill(){ this.noise(0.07, 0.12, 700, 1.2); },
+  xp(){ this.tone(700, 0.09, 'sine', 0.11); this.tone(1050, 0.12, 'sine', 0.11, 0, 0.06); },
+  hurt(){ this.noise(0.28, 0.4, 320, 0.7); this.tone(120, 0.22, 'sawtooth', 0.16, -60); },
+  perk(){ [540,810,1080].forEach((f,i)=>this.tone(f, 0.12, 'square', 0.11, 0, i*0.07)); },
+  levelup(){ [440,554,660,880].forEach((f,i)=>this.tone(f, 0.18, 'triangle', 0.13, 0, i*0.09)); },
+  boom(){ this.noise(0.35, 0.35, 380, 0.6); this.tone(75, 0.3, 'sine', 0.28, -35); },
+  super(){ [440,587,740,1108].forEach((f,i)=>this.tone(f, 0.2, 'sawtooth', 0.09, 0, i*0.07)); this.noise(0.4, 0.18, 1200, 1); },
+  boss(){ this.tone(95, 0.45, 'sawtooth', 0.2, -20); this.tone(72, 0.6, 'sawtooth', 0.2, -15, 0.22); },
+  ui(){ this.tone(880, 0.05, 'square', 0.06); },
+  tick(sec){
+    const urgent = sec<=5;
+    this.tone(urgent?1400:1000, 0.05, 'square', urgent?0.14:0.09);
+    if(urgent) this.tone(1600, 0.06, 'square', 0.1, 0, 0.06);
+  },
+  win(){
+    const seq = [523,659,784,1047,1319,1568];
+    seq.forEach((f,i)=>this.tone(f, 0.25, 'square', 0.11, 0, i*0.11));
+    this.tone(2093, 0.55, 'square', 0.12, 0, 0.72);
+    [1047,1319,1568].forEach((f,i)=>this.tone(f, 0.18, 'triangle', 0.08, 0, 0.78+i*0.13));
+  },
+  lose(){
+    this.tone(220, 0.5, 'sawtooth', 0.16, -30);
+    this.tone(185, 0.55, 'sawtooth', 0.16, -25, 0.35);
+    this.tone(147, 0.65, 'sawtooth', 0.16, -20, 0.7);
+    this.tone(110, 1.1, 'sawtooth', 0.15, -15, 1.05);
+    this.tone(73, 1.4, 'sine', 0.18, -10, 1.5);
+  },
+  startBGM(){
+    this.init();
+    if(!this.ctx || this.bgmOn) return;
+    this.bgmOn = true;
+    this._step = 0;
+    this._next = this.ctx.currentTime + 0.08;
+    this._timer = setInterval(()=>this._schedule(), 30);
+  },
+  stopBGM(){
+    this.bgmOn = false;
+    if(this._timer){ clearInterval(this._timer); this._timer = null; }
+    if(this._musicEl){ try{ this._musicEl.pause(); }catch(e){} this._musicEl = null; }
+    this._track = null;
+  },
+  playTrack(id){
+    this.init();
+    if(this._track === id){
+      if(id==='synth' && !this.bgmOn) this.startBGM();
+      return;
+    }
+    if(this.bgmOn) this.stopBGM();
+    if(this._musicEl){ try{ this._musicEl.pause(); }catch(e){} this._musicEl = null; }
+    this._track = id;
+    if(id==='synth'){ this.startBGM(); return; }
+    const t = MUSIC.find(m=>m.id===id);
+    if(!t || !t.url){ this._track = null; return; }
+    let el = this._cache[id];
+    if(!el){ el = this._cache[id] = new Audio(t.url); el.loop = true; el.preload = 'auto'; }
+    el.volume = this.muted ? 0 : 0.45;
+    el.currentTime = 0;
+    this._musicEl = el;
+    const p = el.play();
+    if(p && p.catch) p.catch(()=>{});
+  },
+  _schedule(){
+    if(!this.ctx || !this.bgmOn) return;
+    const spb = 60/148/4;
+    while(this._next < this.ctx.currentTime + 0.12){
+      this._playStep(this._step, this._next);
+      this._next += spb;
+      this._step = (this._step+1)%64;
+    }
+  },
+  _playStep(s, t){
+    if(!this.ctx || this.muted) return;
+    if(s%4===0) this._kick(t);
+    if(s%16===8) this.noise(0.09, 0.16, 1700, 0.8, t-this.ctx.currentTime);
+    if(s%2===1) this.noise(0.02, 0.05, 8000, 1, t-this.ctx.currentTime);
+    const bass = [55,55,65.4,55,55,82.4,73.4,65.4,49,49,58.3,49,49,65.4,58.3,55,
+                  55,55,65.4,55,55,82.4,73.4,65.4,55,55,65.4,82.4,87.3,82.4,73.4,65.4];
+    if(s%2===0) this._bass(bass[s%32], t);
+    if(s===20 || s===52) this.tone(220, 0.4, 'sawtooth', 0.04, -60, t-this.ctx.currentTime);
+    if(s===24 || s===56) this.tone(233, 0.4, 'sawtooth', 0.04, -60, t-this.ctx.currentTime);
+  },
+  _kick(t){
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type='sine';
+    o.frequency.setValueAtTime(140, t);
+    o.frequency.exponentialRampToValueAtTime(38, t+0.12);
+    g.gain.setValueAtTime(0.4, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t+0.15);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.17);
+  },
+  _bass(freq, t){
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type='square'; o.frequency.value = freq;
+    g.gain.setValueAtTime(0.12, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t+0.22);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.24);
+  },
+};
+
+// ---------------- Damage feedback / status helpers ----------------
+function dmgVignette(){
+  const el = $('#dmgVignette');
+  el.style.transition = 'none';
+  el.style.opacity = 0.95;
+  requestAnimationFrame(()=>{
+    el.style.transition = 'opacity .8s ease-out';
+    el.style.opacity = 0;
+  });
+  const ctn = $('#splatCtn');
+  for(let i=0;i<4;i++){
+    const s = document.createElement('div');
+    s.className = 'splat';
+    s.style.left = (8+Math.random()*84)+'%';
+    s.style.top = (8+Math.random()*84)+'%';
+    const size = 20+Math.random()*36;
+    s.style.width = size+'px'; s.style.height = size+'px';
+    ctn.appendChild(s);
+    setTimeout(()=>s.remove(), 800);
+  }
+}
+
+function applyStatusTint(e){
+  let col = null;
+  if(e.poison && e.burn) col = new THREE.Color(0x8a6a3a);
+  else if(e.poison) col = new THREE.Color(0x6fbf4f);
+  else if(e.burn) col = new THREE.Color(0xff7a3d);
+  e.mesh.traverse(o=>{
+    if(o.isMesh && o.material && o.material.isMeshStandardMaterial && o.userData.baseColor){
+      o.material.color.copy(o.userData.baseColor);
+      if(col) o.material.color.lerp(col, 0.55);
+    }
+  });
+}
+
+function clearArena(){
+  for(const e of G.enemies) sceneRemove(e.mesh);
+  for(const b of G.bullets) sceneRemove(b.mesh);
+  for(const b of G.ebullets) sceneRemove(b.mesh);
+  for(const o of G.orbs){ sceneRemove(o.mesh); sceneRemove(o.glow); }
+  for(const s of G.summons) sceneRemove(s.mesh);
+  for(const f of G.effects) if(f.mesh) sceneRemove(f.mesh);
+  for(const c of G.clouds) sceneRemove(c.mesh);
+  if(G.heroMesh) sceneRemove(G.heroMesh);
+  document.querySelectorAll('#floaters .floater').forEach(el=>el.remove());
+  $('#bossbarWrap').hidden = true;
+  G.hero = null;
+  G.heroMesh = null;
+}
+
+// ---------------- Scene setup ----------------
+const HX = 175, HY = 195;
+const CAM_OFF = new THREE.Vector3(0, 300, 215);
+
+function initScene(){
+  const renderer = new THREE.WebGLRenderer({ antialias:false, preserveDrawingBuffer:true });
+  renderer.setPixelRatio(1/PIXEL_CRUNCH);
+  renderer.setSize(innerWidth, innerHeight, false);
+  renderer.useLegacyLights = true;
+  $('#gameCtn').appendChild(renderer.domElement);
+  G.renderer = renderer;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x04060a);
+  G.scene = scene;
+
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2500);
+  camera.up.set(0,1,0);
+  G.camera = camera;
+  function fitCamera(){
+    recomputeView();
+    const m = 1.02;
+    camera.left = -VIEW.halfW*m; camera.right = VIEW.halfW*m;
+    camera.top = VIEW.halfH*m; camera.bottom = -VIEW.halfH*m;
+    camera.updateProjectionMatrix();
+  }
+  fitCamera();
+  camera.position.set(0, CAM_OFF.y, CAM_OFF.z);
+  camera.lookAt(0,0,0);
+  window.addEventListener('resize', ()=>{ renderer.setSize(innerWidth, innerHeight, false); fitCamera(); });
+
+  G.raycaster = new THREE.Raycaster();
+
+  // lights
+  scene.add(new THREE.AmbientLight(0x4a5a6e, 0.5));
+  scene.add(new THREE.HemisphereLight(0x6b7f94, 0x020305, 0.34));
+  const rim = new THREE.DirectionalLight(0x9fc0de, 0.72);
+  rim.position.set(-300, 240, -180);
+  scene.add(rim);
+  const rim2 = new THREE.DirectionalLight(0x5a6480, 0.24);
+  rim2.position.set(260, 170, 260);
+  scene.add(rim2);
+  G.heroLight = new THREE.PointLight(0xffedc4, 0.4, 120, 1.8);
+  scene.add(G.heroLight);
+  G.charLight = new THREE.PointLight(0xffffff, 0.35, 120, 1.4);
+  scene.add(G.charLight);
+
+  // floor (oversized so it always covers the adaptive view at any aspect)
+  const ft = floorTexture();
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600), new THREE.MeshStandardMaterial({ map:ft, roughness:0.95, metalness:0 }));
+  floor.rotation.x = -Math.PI/2;
+  floor.position.set(0,0,0);
+  scene.add(floor);
+
+  // scatter decor (non-colliding rocks / grass) spread across the open world
+  for(let i=0;i<110;i++){
+    const a = Math.random()*Math.PI*2;
+    const r = 30 + Math.random()*640;
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    const rock = Math.random()<0.5;
+    const d = new THREE.Mesh(
+      rock ? new THREE.DodecahedronGeometry(2.2+Math.random()*2,0) : new THREE.ConeGeometry(1.6+Math.random(), 3, 5),
+      new THREE.MeshStandardMaterial({ color: rock?0x353b44:0x2f4a2f, roughness:1 })
+    );
+    d.position.set(x, 1, z);
+    d.rotation.y = Math.random()*Math.PI;
+    scene.add(d);
+  }
+
+  // a few dead pine silhouettes spread around the open world (decor)
+  for(let i=0;i<20;i++){
+    const a = Math.random()*Math.PI*2;
+    const r = 50 + Math.random()*600;
+    const x = Math.cos(a)*r, z = Math.sin(a)*r;
+    const h = 13 + Math.random()*17;
+    const shade = [0x080d16,0x0a1120,0x0c1424,0x09101a][(Math.random()*4)|0];
+    const tree = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.9,1.6,h*0.28,5), new THREE.MeshBasicMaterial({color:shade}));
+    trunk.position.y = h*0.14;
+    const fol = new THREE.Mesh(new THREE.ConeGeometry(h*0.32+Math.random()*1.5, h*0.74, 5), new THREE.MeshBasicMaterial({color:shade}));
+    fol.position.y = h*0.55;
+    tree.add(trunk, fol);
+    tree.position.set(x, 0, z);
+    scene.add(tree);
+  }
+
+  // vignette overlay
+  const vig = document.createElement('div');
+  vig.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5;background:radial-gradient(ellipse at center, transparent 44%, rgba(2,3,6,.68) 100%);';
+  document.body.appendChild(vig);
+
+  G.radialTex = radialTexture();
+  G.orbGlowTex = radialTexture('rgba(190,255,120,1)','rgba(190,255,120,.35)','rgba(190,255,120,0)');
+
+  // particle system
+  const MAXP = 900;
+  const pGeo = new THREE.BufferGeometry();
+  G.pPos = new Float32Array(MAXP*3);
+  G.pCol = new Float32Array(MAXP*3);
+  G.pLife = new Float32Array(MAXP);
+  G.pV = new Float32Array(MAXP*3);
+  G.pAge = new Float32Array(MAXP);
+  pGeo.setAttribute('position', new THREE.BufferAttribute(G.pPos, 3));
+  pGeo.setAttribute('color', new THREE.BufferAttribute(G.pCol, 3));
+  const pMat = new THREE.PointsMaterial({ size:3, vertexColors:true, transparent:true, opacity:0.9, depthWrite:false });
+  G.parts = new THREE.Points(pGeo, pMat);
+  G.parts.frustumCulled = false;
+  scene.add(G.parts);
+  G.pCursor = 0;
+  for(let i=0;i<MAXP;i++) G.pLife[i] = -1;
+
+  G.clock = new THREE.Clock();
+
+}
+
+function floorTexture(){
+  const c = document.createElement('canvas'); c.width=c.height=256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#141d2c'; ctx.fillRect(0,0,256,256);
+  for(let i=0;i<340;i++){
+    const x=Math.random()*256, y=Math.random()*256;
+    ctx.fillStyle = 'rgba(66,84,108,'+(0.07+Math.random()*0.11)+')';
+    ctx.fillRect(x,y,6+Math.random()*10, 4+Math.random()*8);
+  }
+  for(let i=0;i<5200;i++){
+    const x=Math.random()*256, y=Math.random()*256, r=Math.random();
+    ctx.fillStyle = r<0.5 ? 'rgba(66,84,108,'+(0.15+Math.random()*0.30)+')' : 'rgba(3,5,8,'+(0.2+Math.random()*0.32)+')';
+    ctx.fillRect(x,y,1.8,1.8);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(12, 12);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function radialTexture(inner='rgba(255,244,200,1)', mid='rgba(255,244,200,.5)', outer='rgba(255,244,200,0)'){
+  const c = document.createElement('canvas'); c.width=c.height=128;
+  const ctx = c.getContext('2d');
+  const gr = ctx.createRadialGradient(64,64,2,64,64,62);
+  gr.addColorStop(0, inner); gr.addColorStop(0.4, mid); gr.addColorStop(1, outer);
+  ctx.fillStyle = gr; ctx.fillRect(0,0,128,128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function glowSprite(tex, scale, opacity=1){
+  const m = new THREE.SpriteMaterial({ map:tex, transparent:true, opacity, depthWrite:false, depthTest:false, blending:THREE.AdditiveBlending });
+  const s = new THREE.Sprite(m); s.scale.set(scale, scale, 1);
+  return s;
+}
+
+function stdMat(color, opts={}){
+  return new THREE.MeshStandardMaterial({ color, roughness:opts.roughness??0.75, metalness:opts.metalness??0.08, emissive:opts.emissive??0x000000, emissiveIntensity:opts.emissiveIntensity??1 });
+}
+
+// ---------------- Hero ----------------
+function buildHeroMesh(){
+  const g = new THREE.Group();
+  const white = stdMat(0xf6f2ea, {emissive:0xf6f2ea, emissiveIntensity:0.42}), pink = stdMat(0xffb3c1, {emissive:0xffb3c1, emissiveIntensity:0.42}), dark = stdMat(0x2a2a2e, {emissive:0x2a2a2e, emissiveIntensity:0.3}), gunGrey = stdMat(0x555b66, {metalness:0.5, roughness:0.4});
+  const body = new THREE.Mesh(new THREE.SphereGeometry(7.2, 16, 12), white);
+  body.scale.set(1, 1.18, 1.12); body.position.y = 8.5;
+  g.add(body);
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(5, 12, 10), pink);
+  belly.scale.set(1.05, 1.0, 0.95); belly.position.set(0, 7.6, 1.6);
+  g.add(belly);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(5.6, 14, 12), white);
+  head.position.set(0, 18, 0); g.add(head);
+  for(const s of [-1,1]){
+    const ear = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 2.4, 9, 8), pink);
+    ear.position.set(2.6*s, 25, 0); ear.rotation.z = 0.25*s;
+    g.add(ear);
+  }
+  for(const s of [-1,1]){
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(1.5, 8, 8), dark);
+    eye.position.set(2.3*s, 18.6, 4.4); g.add(eye);
+  }
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(1.1, 8, 8), new THREE.MeshStandardMaterial({color:0xe8647a}));
+  nose.position.set(0, 16.8, 5.6); g.add(nose);
+  // feet
+  const feet = [];
+  for(const s of [-1,1]){
+    const f = new THREE.Mesh(new THREE.SphereGeometry(2.6, 10, 8), white);
+    f.scale.set(1.2,0.7,1.5); f.position.set(3.4*s, 2, 0.8); g.add(f);
+    feet.push(f);
+  }
+  g.userData.feet = feet;
+  // gun
+  const gun = new THREE.Group();
+  const rec = new THREE.Mesh(new THREE.BoxGeometry(2.6, 3, 8), gunGrey); gun.add(rec);
+  const bar = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 1.1, 7, 8), gunGrey); bar.rotation.x = Math.PI/2; bar.position.z = 7; gun.add(bar);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(1.8, 4, 2), gunGrey); grip.position.set(0,-3.2,2); gun.add(grip);
+  gun.position.set(4.6, 11.5, 6);
+  g.add(gun);
+  g.userData.gun = gun;
+  // blob shadow
+  const sh = new THREE.Mesh(new THREE.CircleGeometry(7, 20), new THREE.MeshBasicMaterial({ color:0x000000, transparent:true, opacity:0.35, depthWrite:false }));
+  sh.rotation.x = -Math.PI/2; sh.position.y = 0.15;
+  g.add(sh);
+  g.userData.shadow = sh;
+  sceneAdd(g);
+  return g;
+}
+
+// ---------------- Enemy meshes ----------------
+function buildEnemyMesh(type){
+  const g = new THREE.Group();
+  const c = ENEMIES[type];
+  const mat = stdMat(c.color, { emissive: c.color, emissiveIntensity: c.boss?0.32:0.14 });
+  const dk = stdMat(Math.max(0, (c.color>>16)*0.5), {}); // darker accent (approx)
+  dk.color.multiplyScalar(0.55);
+
+  const eyeMat = new THREE.MeshBasicMaterial({ color: c.boss?0xff3030 : 0xffd0d0 });
+
+  if(type==='goblingreen' || type==='goblinred' || type==='goblinblue'){
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 9), mat); body.scale.set(1.1,1.15,1.05); body.position.y=0.9; g.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.62, 8, 7), mat); head.position.y=2.1; g.add(head);
+    for(const s of [-1,1]){
+      const e = new THREE.Mesh(new THREE.SphereGeometry(0.13,6,6), eyeMat); e.position.set(0.32*s,2.2,0.5); g.add(e);
+      const er = new THREE.Mesh(new THREE.ConeGeometry(0.26,0.9,5), mat); er.position.set(0.3*s,2.85,0); g.add(er);
+    }
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='egger'){
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 9), mat); body.scale.set(0.85,1.25,0.85); body.position.y=1.1; g.add(body);
+    const beak = new THREE.Mesh(new THREE.ConeGeometry(0.18,0.4,5), stdMat(0xffa94d)); beak.rotation.x=Math.PI/2; beak.position.set(0,1.0,0.9); g.add(beak);
+    for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.12,6,6), eyeMat); e.position.set(0.3*s,1.6,0.7); g.add(e); }
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='shooter'){
+    const body = new THREE.Mesh(new THREE.ConeGeometry(1,1.9,7), mat); body.position.y=1.1; g.add(body);
+    const visor = new THREE.Mesh(new THREE.CylinderGeometry(0.75,0.75,0.28,7), new THREE.MeshBasicMaterial({color:0x0a0c10})); visor.position.y=1.5; visor.position.z=0.25; g.add(visor);
+    for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.15,6,6), eyeMat); e.position.set(0.28*s,1.5,0.62); g.add(e); }
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='steelcrab'){
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.9,0.9,1.5), stdMat(c.color,{metalness:0.6,roughness:0.35,emissive:c.color,emissiveIntensity:0.15})); body.position.y=0.8; g.add(body);
+    for(const s of [-1,1]) for(const z of [-1,1]){
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18,0.18,0.9), stdMat(0x5c626c,{metalness:0.5})); leg.position.set(1.05*s,0.45,0.7*z); leg.rotation.z=0.45*s; g.add(leg);
+    }
+    for(const s of [-1,1]){ const claw=new THREE.Mesh(new THREE.SphereGeometry(0.34,7,7), stdMat(0x8a2f2f,{metalness:0.5,emissive:0x3a0f0f,emissiveIntensity:0.6})); claw.position.set(0.95*s,0.8,0); g.add(claw); }
+    for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.15,6,6), eyeMat); e.position.set(0.32*s,1.25,0.7); g.add(e); }
+    g.scale.setScalar(c.r/1.15);
+  }
+  else if(type==='troll'){
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 9), mat); body.scale.set(1.25,1.1,1); body.position.y=1.0; g.add(body);
+    const belly = new THREE.Mesh(new THREE.SphereGeometry(0.6,8,7), stdMat(0x9ab96f)); belly.position.set(0,0.75,0.8); g.add(belly);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.6,8,7), mat); head.position.y=2.05; g.add(head);
+    for(const s of [-1,1]){ const h=new THREE.Mesh(new THREE.ConeGeometry(0.2,0.8,5), mat); h.position.set(0.24*s,2.7,0); g.add(h); const e=new THREE.Mesh(new THREE.SphereGeometry(0.14,6,6), eyeMat); e.position.set(0.28*s,2.1,0.5); g.add(e); }
+    g.scale.setScalar(c.r/1.2);
+  }
+  else if(type==='laserdude'){
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.8,1,2.2,7), mat); body.position.y=1.3; g.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.7,0.8), stdMat(0x16181f)); head.position.y=2.6; g.add(head);
+    const visor = new THREE.Mesh(new THREE.BoxGeometry(0.55,0.18,0.08), new THREE.MeshBasicMaterial({color:0x4ff0ff})); visor.position.set(0,2.6,0.42); g.add(visor);
+    for(const s of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.22,0.9,0.22), mat); arm.position.set(0.95*s,1.4,0); g.add(arm); }
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='pigsassin'){
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 9), mat); body.scale.set(1.15,1.05,1); body.position.y=1.0; g.add(body);
+    const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.34,0.5,8), stdMat(0xe87fa3)); snout.rotation.x=Math.PI/2; snout.position.set(0,0.9,0.95); g.add(snout);
+    for(const s of [-1,1]){ const ear=new THREE.Mesh(new THREE.ConeGeometry(0.3,0.7,5), mat); ear.position.set(0.55*s,1.8,0.1); g.add(ear); const e=new THREE.Mesh(new THREE.SphereGeometry(0.13,6,6), eyeMat); e.position.set(0.3*s,1.4,0.8); g.add(e); }
+    const knife = new THREE.Mesh(new THREE.BoxGeometry(0.1,0.12,1.1), stdMat(0xc8ccd4,{metalness:0.8,roughness:0.2})); knife.position.set(0.7,0.7,0.6); g.add(knife);
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='absorber'){
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), mat); body.position.y=1.0; g.add(body);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.5, 10, 8), new THREE.MeshBasicMaterial({color:0xb86fff})); core.position.y=1.0; g.add(core);
+    for(const s of [-1,1]){ const horn=new THREE.Mesh(new THREE.ConeGeometry(0.22,0.7,5), stdMat(0x1a1626)); horn.position.set(0.5*s,1.7,0); g.add(horn); }
+    g.scale.setScalar(c.r);
+  }
+  else if(type==='shielder'){
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1, 0.16, 8, 24), new THREE.MeshBasicMaterial({color:0x6fa8ff}));
+    ring.rotation.x = Math.PI/2.2; g.add(ring);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), new THREE.MeshBasicMaterial({color:0x9ecbff})); g.add(core);
+    g.scale.setScalar(c.r/1.4);
+  }
+  else if(type==='dummy'){
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.4,2.4,7), mat); post.position.y=1.2; g.add(post);
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,1.6,6), mat); arm.rotation.z=Math.PI/2; arm.position.set(0,2.0,0); g.add(arm);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.5,8,7), stdMat(0xc9a86a)); head.position.y=2.6; g.add(head);
+    for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.08,5,5), new THREE.MeshBasicMaterial({color:0x000})); e.position.set(0.18*s,2.7,0.42); g.add(e); }
+    g.scale.setScalar(c.r/1.4);
+  }
+  else if(type==='box3'){
+    // orange "bomb" orb — deliberately distinct from the green XP pickups
+    const orb = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), stdMat(0xff9540, {emissive:0xff7a00, emissiveIntensity:1.05, roughness:0.4}));
+    orb.position.y = 1; g.add(orb);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 8), new THREE.MeshBasicMaterial({color:0xffd9a0}));
+    core.position.y = 1; g.add(core);
+    const glow = glowSprite(G.radialTex, 3.2, 0.5);
+    glow.material.color.set(0xff8a2a);
+    glow.position.y = 1; g.add(glow);
+    g.scale.setScalar(c.r/1.1);
+  }
+  else if(type==='boss1' || type==='boss2' || type==='boss3'){
+    const is3 = type==='boss3';
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), mat); body.scale.set(1.15,1.05,1.1); body.position.y=1.1; g.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.72,10,8), mat); head.position.y=2.15; g.add(head);
+    for(const s of [-1,1]) for(const h of [0,1]){
+      const horn=new THREE.Mesh(new THREE.ConeGeometry(is3?0.3:0.22,1.1,5), stdMat(0x16181f)); horn.position.set(0.45*s,2.7+h*0.5,0); horn.rotation.z=-0.5*s; g.add(horn);
+    }
+    for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.17,6,6), eyeMat); e.position.set(0.3*s,2.2,0.62); g.add(e); }
+    const jaw=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.14,0.2), stdMat(0x16181f)); jaw.position.set(0,1.7,0.68); g.add(jaw);
+    for(const s of [-1,1]){ const arm=new THREE.Mesh(new THREE.BoxGeometry(0.3,1.3,0.3), mat); arm.position.set(1.15*s,1.2,0); g.add(arm); }
+    if(is3){ const gl=new THREE.Mesh(new THREE.TorusGeometry(0.55,0.1,6,16), new THREE.MeshBasicMaterial({color:0x4ff0ff})); gl.rotation.x=Math.PI/2; gl.position.y=1.1; g.add(gl); }
+    g.scale.setScalar(c.r);
+  }
+  else {
+    const body = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 9), mat); body.position.y=1; g.add(body);
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.16,6,6), eyeMat); e.position.set(0.3,1.5,0.8); g.add(e);
+    g.scale.setScalar(c.r);
+  }
+
+  // blob shadow
+  const sh = new THREE.Mesh(new THREE.CircleGeometry(0.9, 16), new THREE.MeshBasicMaterial({ color:0x000000, transparent:true, opacity:0.32, depthWrite:false }));
+  sh.rotation.x = -Math.PI/2; sh.position.y = 0.14;
+  g.add(sh);
+
+  // red border ring so enemies read as "hostile" vs summons
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.98, 1.20, 28), new THREE.MeshBasicMaterial({ color:0xff2020, transparent:true, opacity:0.8, depthWrite:false, side:THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI/2;
+  ring.position.y = 0.08;
+  g.add(ring);
+  g.userData.borderRing = ring;
+
+  // remember base colors for status tinting (poison→green, burn→orange)
+  g.traverse(o=>{ if(o.isMesh && o.material && o.material.isMeshStandardMaterial && o.material.color){ o.userData.baseColor = o.material.color.clone(); } });
+
+  sceneAdd(g);
+  return g;
+}
+
+// ---------------- Spawning ----------------
+function spawnEnemy(type, wx, wz, opts={}){
+  const c = ENEMIES[type];
+  const mesh = buildEnemyMesh(type);
+  mesh.position.set(wx, 0, wz);
+  const hpMult = DIFFS[G.diff] ? DIFFS[G.diff].hpMult : 1;
+  const hp = Math.round((opts.hp != null ? opts.hp : c.hp) * hpMult);
+  const e = {
+    type, mesh, hp, maxHp: hp, r: c.r, speed: c.speed, kb: c.kb, kind: c.kind,
+    x:wx, z:wz, kbx:0, kbz:0, slowT:0, slowPct:0.5,
+    poison:null, burn:null, fireT:0, biteT:0, hitCd:0,
+    dead:false, boss:c.boss, elite:c.elite, brain:c.brain,
+    hop:c.hop, float:c.float, hopPhase: Math.random()*6.283,
+  };
+  if(type==='absorber'){ e.shield=null; e.regen=0; }
+  if(type==='shielder'){ e.pulseT=0; e.pulseScale=1; e.baseScale=mesh.scale.x; e.hp=Math.round(10000*hpMult); e.maxHp=e.hp; }
+  if(type==='shooter'){ e.fireT=3; }
+  if(type==='laserdude'){ e.shootT=2; e.beamActive=false; e.beam=null; }
+  if(type==='boss1'){ e.fireT=1; e.bh=!!opts.bh; }
+  if(type==='boss2'){ e.attackT=0; e.attackVar=0; e.pending=false; }
+  if(type==='boss3'){ e.attackT=0; e.attackVar=0; e.pending=false; e.posVar=0; e.laserT=0; e.laserIdx=0; }
+  if(opts.name) e.name = opts.name;
+  G.enemies.push(e);
+  return e;
+}
+
+function spawnAbsorberWithShield(wx,wz,hp){
+  const a = spawnEnemy('absorber', wx, wz, {hp});
+  const sh = spawnEnemy('shielder', wx, wz, {hp:10000});
+  sh.parent = a; a.shield = sh;
+  return a;
+}
+
+// ---------------- Bullets ----------------
+function fireBullet(x,z,dx,dz,dmg,opts={}){
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(opts.r??2.2, 8, 8),
+    new THREE.MeshBasicMaterial({ color: opts.color??0xffe066 })
+  );
+  mesh.position.set(x, 3, z);
+  if(opts.scale) mesh.scale.setScalar(opts.scale);
+  sceneAdd(mesh);
+  const life = opts.life ?? (G.gun ? (G.gun.special.includes('explode') ? (6 + G.gun.range) : (G.gun.range + G.hero.mods.range)) : 0.6);
+  const b = {
+    mesh, x, z, dx, dz, speed: opts.speed??BULLET_SPEED, dmg, life,
+    pierce: opts.pierce||0, bounce: opts.bounce||0, poison: opts.poison||0, slow: opts.slow||false, slowDur: opts.slowDur,
+    explode: opts.explode||0, bone: opts.bone||false, spike: opts.spike||false, kb: opts.kb??G.hero.mods.kb,
+    noCrit: opts.noCrit||false,
+    noDirect: opts.noDirect||false,
+    hit: new Set(), dead:false, color:opts.color??0xffe066,
+  };
+  G.bullets.push(b);
+  return b;
+}
+
+function fireEnemyProjectile(x,z,dx,dz,opts={}){
+  const laser = opts.laser;
+  const geo = laser ? new THREE.BoxGeometry(1.6,1.6,7) : new THREE.SphereGeometry(3.4, 8, 8);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: laser?0x4ff0ff:0xff5a5a }));
+  mesh.position.set(x, 3.4, z);
+  if(laser) mesh.lookAt(x+dx, 0, z+dz);
+  sceneAdd(mesh);
+  const b = { mesh, x, z, dx, dz, speed:opts.speed??130, dmg:HERO_HIT_DMG, hp:100, life:12, laser, rot:opts.rot||0, beam:false, dead:false };
+  G.ebullets.push(b);
+  return b;
+}
+
+// boss1 (and boss2's summoned minions use 6-way) volley: n boss bullets spread evenly across arcDeg centred on the hero
+function bossVolley(e, n, arcDeg, speed){
+  const dx = G.hero.x - e.x, dz = G.hero.z - e.z;
+  const base = Math.atan2(dx, dz);
+  for(let i=0;i<n;i++){
+    const off = n>1 ? (i/(n-1) - 0.5) * arcDeg : 0;
+    const a = base + off*Math.PI/180;
+    fireEnemyProjectile(e.x, e.z, Math.sin(a), Math.cos(a), {speed, rot:55});
+  }
+}
+
+// boss2 summons up to 8 random existing basic enemies as 3s bombs
+function boss2Summon(boss){
+  const types = ['goblingreen','goblinred','troll','box3','dummy','egger','shooter'];
+  const cands = G.enemies.filter(e=>!e.dead && types.includes(e.type) && e.bombT==null);
+  for(let i=cands.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [cands[i],cands[j]]=[cands[j],cands[i]]; }
+  for(const e of cands.slice(0, 8)){
+    e.bombT = 3;
+    e.bombOwner = boss;
+    burst(e.x, 12, e.z, 0xff5a5a, 8, 60, 0.5, 0.3);
+  }
+}
+
+// boss3 summons 2 shielded minions (random enemies not already shielded)
+function boss3SummonShields(){
+  const types = ['goblingreen','egger','goblinred','goblinblue','troll','box3','pigsassin','absorber','steelcrab'];
+  for(let k=0;k<2;k++){
+    const cands = G.enemies.filter(e=>!e.dead && types.includes(e.type) && !e.shield);
+    if(!cands.length) return;
+    const e = cands[Math.floor(Math.random()*cands.length)];
+    const sh = spawnEnemy('shielder', e.x, e.z, {hp:10000});
+    sh.parent = e; e.shield = sh;
+    sh.pulseT = 0; sh.pulseScale = 1;
+  }
+}
+
+// laserdude's horizontal beam — pinned to its owner, lasts 1s
+function spawnLaserBeam(e){
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(480, 3, 16), new THREE.MeshBasicMaterial({ color:0x4ff0ff, transparent:true, opacity:0.7 }));
+  mesh.position.set(e.x, 4, e.z);
+  sceneAdd(mesh);
+  const b = { mesh, x:e.x, z:e.z, dx:1, dz:0, speed:0, dmg:HERO_HIT_DMG, hp:100, life:1, laser:false, beam:true, hbeam:true, linked:e, dead:false, hitCd:0 };
+  G.ebullets.push(b);
+  return b;
+}
+
+// boss3's falling laser column (orig screen x -> world), falls from the top edge
+function spawnFallingBeam(origX){
+  const wx = origX - 240;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(14, 3, 26), new THREE.MeshBasicMaterial({ color:0x4ff0ff, transparent:true, opacity:0.85 }));
+  mesh.position.set(wx, 4, -145);
+  sceneAdd(mesh);
+  const b = { mesh, x:wx, z:-145, dx:0, dz:1, speed:260, dmg:HERO_HIT_DMG, hp:100, life:2.5, laser:false, beam:true, vertical:true, beamW:14, dead:false, hitCd:0 };
+  G.ebullets.push(b);
+  return b;
+}
+
+// ---------------- XP orbs ----------------
+function spawnOrb(x,z){
+  const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(1.7, 0), new THREE.MeshBasicMaterial({ color:0x9ceb5a }));
+  mesh.position.set(x, 6, z);
+  sceneAdd(mesh);
+  const glow = glowSprite(G.orbGlowTex, 15, 0.9); glow.position.copy(mesh.position); glow.position.y=4;
+  sceneAdd(glow);
+  const o = { mesh, glow, x, z, life:15, dead:false };
+  G.orbs.push(o);
+  return o;
+}
+
+// ---------------- Particles ----------------
+function burst(x,y,z,color,n,speed,up=0.5,life=0.5){
+  const col = new THREE.Color(color);
+  for(let i=0;i<n;i++){
+    const p = G.pCursor; G.pCursor=(G.pCursor+1)%(G.pPos.length/3);
+    G.pPos[p*3]=x; G.pPos[p*3+1]=y; G.pPos[p*3+2]=z;
+    const a=Math.random()*Math.PI*2, b=(Math.random()-0.5)*0.7;
+    const sp=(0.4+Math.random())*speed;
+    G.pV[p*3]=Math.cos(a)*sp; G.pV[p*3+2]=Math.sin(a)*sp; G.pV[p*3+1]=up*(0.3+Math.random()*0.7)*sp*0.4;
+    const f = 0.5+Math.random()*0.5;
+    G.pCol[p*3]=col.r*f; G.pCol[p*3+1]=col.g*f; G.pCol[p*3+2]=col.b*f;
+    G.pLife[p]=life*(0.5+Math.random()*0.8); G.pAge[p]=0;
+  }
+}
+
+// turbulent tumbling smoke cloud on death
+function smokeBurst(x, y, z, color=0x565c66, n=7){
+  const grp = new THREE.Group();
+  const matBase = new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.6, depthWrite:false });
+  for(let i=0;i<n;i++){
+    const s = 1.2 + Math.random()*1.6;
+    const m = new THREE.Mesh(new THREE.SphereGeometry(s, 9, 7), matBase.clone());
+    m.userData = {
+      dx:(Math.random()*2-1)*3.2, dz:(Math.random()*2-1)*3.2,
+      vy: 3+Math.random()*3,
+      ph: Math.random()*Math.PI*2, wob: 2.2+Math.random()*3,
+      grow: 1.4+Math.random()*1.0, rot: (Math.random()-0.5)*4,
+      s, life: 0.5+Math.random()*0.3
+    };
+    m.position.set((Math.random()*2-1)*0.7, (Math.random()-0.5)*1.5, (Math.random()*2-1)*0.7);
+    grp.add(m);
+  }
+  grp.position.set(x, y, z);
+  sceneAdd(grp);
+  G.effects.push({ kind:'smoke', mesh:grp, t:0, life:0.85 });
+}
+
+function eggplosion(x, z){
+  AUD.boom();
+  burst(x, 12, z, 0xffc36b, 22, 140, 0.9, 0.6);
+  burst(x, 12, z, 0xfff3d6, 12, 95, 0.6, 0.4);
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 10), new THREE.MeshBasicMaterial({ color:0xffd27a, transparent:true, opacity:0.85 }));
+  flash.position.set(x, 13, z);
+  sceneAdd(flash);
+  G.effects.push({ kind:'flash', mesh:flash, t:0, life:0.35, max:52 });
+  for(const tgt of G.enemies){
+    if(tgt.dead || tgt===undefined) continue;
+    if(dist2(tgt.x,tgt.z,x,z) < (52+tgt.r)*(52+tgt.r)){
+      tgt.hp -= 50;
+      tgt.lastHitDmg = 50;
+      floater('50', tgt.x, tgt.z, '');
+      const dx=tgt.x-x, dz=tgt.z-z; const l=Math.max(0.01,Math.hypot(dx,dz));
+      tgt.kbx += dx/l*130; tgt.kbz += dz/l*130;
+      if(tgt.hp<=0) killEnemy(tgt);
+    }
+  }
+}
+
+function updateParticles(dt){
+  const n = G.pPos.length/3;
+  for(let i=0;i<n;i++){
+    if(G.pLife[i]<0) continue;
+    G.pAge[i]+=dt;
+    if(G.pAge[i]>=G.pLife[i]){ G.pLife[i]=-1; G.pPos[i*3+1]=-50; continue; }
+    G.pPos[i*3]+=G.pV[i*3]*dt; G.pPos[i*3+1]+=G.pV[i*3+1]*dt; G.pPos[i*3+2]+=G.pV[i*3+2]*dt;
+    G.pV[i*3+1]-=6*dt;
+  }
+  G.parts.geometry.attributes.position.needsUpdate = true;
+  G.parts.material.opacity = 0.9;
+}
+
+// ---------------- Floating text ----------------
+function floater(text, x, z, cls=''){
+  const el = document.createElement('div');
+  el.className = 'floater '+cls;
+  el.textContent = text;
+  $('#floaters').appendChild(el);
+  const p = worldToScreen(new THREE.Vector3(x, 20, z));
+  el.style.left = p.x+'px'; el.style.top = p.y+'px';
+  setTimeout(()=>el.remove(), 950);
+}
+function banner(text){
+  const el = document.createElement('div');
+  el.className = 'floater banner';
+  el.textContent = text;
+  $('#floaters').appendChild(el);
+  setTimeout(()=>el.remove(), 2300);
+}
+function worldToScreen(v){
+  const p = v.clone().project(G.camera);
+  return { x:(p.x*0.5+0.5)*innerWidth, y:(-p.y*0.5+0.5)*innerHeight };
+}
+
+// ---------------- Combat ----------------
+// original's flat rage bonus (hero "ragedamage"): absolute HP thresholds, added to every bullet
+function rageFlat(h){
+  const hp = h.hp;
+  if(hp <= 1) return 40;
+  if(hp <= 2) return 35;
+  if(hp < 5)  return 20;
+  if(hp < 10) return 15;
+  if(hp < 20) return 10;
+  if(hp < 30) return 7;
+  if(hp < 40) return 4;
+  return 0;
+}
+function computeBulletDamage(noStationary){
+  const h = G.hero;
+  let d = G.gun.dmg * h.mods.dmg + h.flatDmg;
+  // original: xpdamage = exp/2 and ragedamage = flat stepwise, both added AFTER all
+  // damage multipliers (they're separate terms in its bullet-damage sum)
+  if(h.xpbuff) d += G.exp/2;
+  if(h.rager) d += rageFlat(h);
+  if(h.armorKing) d += h.shield;
+  const moving = G.heroMoving;
+  // noStationary: orig explode/bone bullets deal gun's totalbasedamage, which has no
+  // stationary term — pass true when matching those
+  if(!noStationary && !moving){
+    d += h.mods.stationary;
+    d *= (1 + h.mods.stationaryMult);
+  }
+  return Math.max(1, d);
+}
+
+function damageEnemy(e, dmg, opts={}){
+  if(e.dead) return;
+  if(e.type==='absorber' && e.shield && !e.shield.dead && e.shield.pulseScale >= 0.4){
+    // shield is up (pulse phase 6-12s) — it absorbs the hit; while shrunk the absorber is vulnerable
+    const s = e.shield;
+    s.hp -= dmg;
+    burst(e.x, 14, e.z, 0x6fa8ff, 3, 50, 0.3, 0.3);
+    if(opts.show) floater(Math.round(dmg), e.x, e.z, '');
+    if(s.hp<=0){
+      s.dead = true; s.mesh.visible = false;
+      burst(e.x, 12, e.z, 0x6fa8ff, 26, 140, 1, 0.6);
+      if(s.parent) s.parent.shield = null;
+    }
+    return;
+  }
+  if(e.type==='shielder'){ e.hp -= dmg; if(e.hp<=0 && !e.dead){ e.dead=true; e.mesh.visible=false; burst(e.x,12,e.z,0x6fa8ff,26,140,1,0.6); if(e.parent) e.parent.shield=null; } return; }
+
+  e.hp -= dmg;
+  e.lastHitDmg = dmg;
+  if(opts.show) floater(Math.round(dmg), e.x, e.z, opts.cls||(opts.crit?'crit':''));
+  burst(e.x, 10, e.z, e.boss?0xff8a8a:0xb32222, e.boss?10:5, 90, 0.5, 0.35);
+
+  // knockback
+  const kb = opts.kb || 0;
+  if(kb>0){
+    const m = kb / (1 + e.kb*0.03);
+    e.kbx += opts.dirx*m; e.kbz += opts.dirz*m;
+  }
+  // slow bullets perk
+  if(opts.slow || G.hero.slowBullets){ e.slowT = Math.max(e.slowT, opts.slowDur ?? 1.6); }
+  if(opts.poison){ e.poison = { dps: opts.poison, t: Math.max(e.poison?e.poison.t:0, 3) }; }
+  if(opts.burn){ e.burn = { dps: opts.burn, t: Math.max(e.burn?e.burn.t:0, 2.5) }; }
+  if(G.hero.lordAmmo && Math.random()<0.10) G.hero.ammo = Math.min(G.hero.maxAmmo, G.hero.ammo+1);
+
+  if(e.hp<=0) killEnemy(e);
+}
+
+function killEnemy(e){
+  if(e.dead) return;
+  e.dead = true;
+  if(e.type==='shielder' && e.parent) e.parent.shield = null;
+  e.mesh.visible = false;
+  const x=e.x, z=e.z;
+  G.kills++;
+  if(e.brain||e.boss) AUD.boom(); else AUD.kill();
+
+  if(e.brain || e.boss){
+    // brain-death: visual + camera shake (orig spawns the "braindeath" brain object + shake)
+    burst(x, 14, z, 0xff8a3a, 40, 160, 1.2, 0.7);
+    burst(x, 14, z, 0xffffff, 18, 100, 1, 0.4);
+    smokeBurst(x, 6, z, 0x3c3230, 10);
+    G.shake = Math.max(G.shake, 0.7);
+    banner('BRAINDEATH');
+    if(e.boss){
+      // boss death shockwave: every enemy within 100px of the boss is shoved away from the hero (orig polar force 250)
+      const h = G.hero;
+      for(const o of G.enemies){
+        if(o.dead || o===e) continue;
+        if(dist2(o.x, o.z, x, z) < 100*100){
+          const dx=o.x-h.x, dz=o.z-h.z; const len=Math.max(0.01, Math.hypot(dx,dz));
+          o.kbx += dx/len*250; o.kbz += dz/len*250;
+        }
+      }
+    }
+    if(e.type==='absorber' || e.type==='laserdude'){
+      // absorber/laserdude death deletes every shield in the arena (orig: all shieldersshields deleted)
+      for(const o of G.enemies){
+        if(o.type==='shielder'){
+          o.dead = true; sceneRemove(o.mesh);
+          if(o.parent) o.parent.shield = null;
+        }
+      }
+    }
+  }
+  else {
+    burst(x, 10, z, 0xb32222, 9, 90, 0.6, 0.4);
+    smokeBurst(x, 5, z, 0x3f454e, 8);
+  }
+
+  // explode perk: any killed enemy (incl. bosses/brain) may detonate — orig rolls 1-10==10
+  // on every death, firing a ring of 12 bullets that DETONATE on impact, dealing full bullet
+  // damage (gun's totalbasedamage: no stationary term, no crit, no knockback) as an AoE to
+  // everything in the explosion radius — CAN hit bosses. No direct-hit damage (orig's
+  // explodebullet deals its damage only via the detonation). With explodebones the ring is
+  // bone bullets (speed 250); otherwise explode bullets (300).
+  // Non-boss enemies' FireBullet uses a 360° firing arc; bosses' is 90°.
+  if(G.hero.explodeDeath && Math.random()<0.10){
+    const dmg = computeBulletDamage(true);
+    const bones = G.hero.explodeBones;
+    const base = Math.random()*Math.PI*2;
+    const arc = e.boss ? 90 : 360;
+    for(let i=0;i<12;i++){
+      const a = base + (arc===360 ? i/12 : i/11*arc/360)*Math.PI*2;
+      fireBullet(x, z, Math.cos(a), Math.sin(a), dmg,
+        bones
+          ? {bone:true, color:0xe8e0d0, r:1.8, speed:250, life:6, kb:0, noCrit:true, explode:dmg, noDirect:true}
+          : {color:0xffb347, speed:300, life:6, kb:0, noCrit:true, explode:dmg, noDirect:true});
+    }
+  }
+
+  // egger detonates on death — turbulent smoke + eggplosion AoE
+  if(e.type==='egger') eggplosion(x, z);
+
+  // rewards: every kill drops exactly 1 orb (orig)
+  spawnOrb(x, z);
+  if(e.elite){ G.gold += 20; }
+  // orig enragedammo: on ANY kill, 10% chance (roll 1-10 == 4) to gain 2 ammo — no HP gate
+  if(G.hero.enragedammo && Math.random()<0.10) G.hero.ammo = Math.min(G.hero.maxAmmo, G.hero.ammo+2);
+
+  sceneRemove(e.mesh);
+}
+
+function explodeDamage(x,z,r,dmg,color){
+  AUD.boom();
+  burst(x, 10, z, color??0xffb347, 20, 150, 0.8, 0.5);
+  const flash = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), new THREE.MeshBasicMaterial({ color:0xffd27a, transparent:true, opacity:0.85 }));
+  flash.position.set(x, 12, z);
+  sceneAdd(flash);
+  G.effects.push({ kind:'flash', mesh:flash, t:0, life:0.25, max:r });
+  for(const e of G.enemies){
+    if(e.dead) continue;
+    if(dist2(e.x,e.z,x,z) < (r+e.r)*(r+e.r)){
+      const dx=e.x-x, dz=e.z-z; const len=Math.max(0.01,Math.hypot(dx,dz));
+      e.hp -= dmg;
+      e.lastHitDmg = dmg;
+      floater(Math.round(dmg), e.x, e.z, '');
+      e.kbx += dx/len*160; e.kbz += dz/len*160;
+      if(e.hp<=0) killEnemy(e);
+    }
+  }
+}
+
+function healHero(n){
+  if(!G.hero) return;
+  G.hero.hp = Math.min(G.hero.maxHp, G.hero.hp + n);
+  floater('+'+n, G.hero.x, G.hero.z, 'heal');
+}
+
+// ---------------- Hero damage ----------------
+function damageHero(dmg){
+  const h = G.hero;
+  if(h.dead || h.invince>0) return;
+  if(Math.random() < h.mods.dodge){
+    floater('DODGED!', h.x, h.z, 'dodge');
+    // NOTE (balance parity): orig SetShieldPoints(20) — refills shield to the default cap of 20, not +10
+    if(h.dodgeKing){ h.shield = Math.min(h.maxShield, 20); }
+    h.invince = 0.4;
+    return;
+  }
+  let d = dmg;
+  if(h.shield>0){
+    const absorbed = Math.min(h.shield, d);
+    h.shield -= absorbed; d -= absorbed;
+    burst(h.x, 12, h.z, 0x8fd4ff, 8, 80, 0.4, 0.3);
+  }
+  d *= (1 - Math.min(0.6, h.mods.armor));
+  h.hp -= d;
+  h.invince = HERO_BASE.hitInvince * h.mods.invince + h.invinceFlat;
+  if(h.bruiser) h.ammo = Math.min(h.maxAmmo, h.ammo+6);
+  G.shake = Math.max(G.shake, 0.3);
+  AUD.hurt();
+  dmgVignette();
+  burst(h.x, 12, h.z, 0xff5a5a, 8, 90, 0.5, 0.4);
+  $('#hpBar').style.background = 'linear-gradient(180deg,#ff8a8a,#c22a2a)';
+  setTimeout(()=>{ $('#hpBar').style.background = 'linear-gradient(180deg,#7bf07f,#3fae44)'; }, 150);
+  if(h.hp<=0){
+    h.hp=0; h.dead=true;
+    gameOver();
+  }
+}
+
+// ---------------- Reload / fire ----------------
+function startReload(){
+  const h = G.hero;
+  if(h.reloading || h.dead) return;
+  if(h.ammo >= h.maxAmmo) return;
+  h.reloading = true;
+  h.reloadT = 0;
+  h.reloadDur = G.gun.reload * h.mods.reload;
+}
+
+function finishReload(){
+  const h = G.hero;
+  h.reloading = false;
+  h.ammo = h.maxAmmo;
+  h.minigunSpin = 0;
+  if(h.reloadbomb){
+    // drop a bomb with a short fuse that bursts into a ring of bullets
+    const b = { x:h.x, z:h.z, t:0, life:2 };
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(4, 8, 8), new THREE.MeshBasicMaterial({color:0x2a2a2e}));
+    mesh.position.set(h.x, 2, h.z); sceneAdd(mesh);
+    b.mesh = mesh;
+    G.effects.push({ kind:'bomb', ...b });
+  }
+  if(h.reloadreckoner && Math.random()<0.05){
+    h.hp = Math.min(h.maxHp, h.hp+7);
+    floater('+7', h.x, h.z, 'heal');
+  }
+}
+
+function fireShot(){
+  const h = G.hero;
+  h.ammo = Math.max(0, h.ammo-1);
+  AUD.shoot();
+  // gun smoke
+  burst(h.x + G.aimDir.x*18, 13, h.z + G.aimDir.z*18, 0x77776e, 4, 34, 0.6, 0.5);
+
+  const base = computeBulletDamage();
+  const n = G.gun.proj + h.mods.proj;
+  const arc = ((G.gun.arc||0) + (h.mods.spread||0)) * Math.PI/180;
+  const aimA = Math.atan2(G.aimDir.x, G.aimDir.z);
+  if(G.gun.special.includes('beam')){
+    // BUGSY'S ZAPPER — the orig fires a laserbullet at speed 0 (a stationary electric beam at the
+    // muzzle, deleted by a 0.5s range timer). We model it as a short hitscan line along the aim
+    // that zaps every enemy it crosses (13 dmg, same 0.5s fire interval).
+    const BL = 170;
+    const bx = h.x, bz = h.z;
+    const ex = bx + Math.sin(aimA)*BL, ez = bz + Math.cos(aimA)*BL;
+    const abx = ex-bx, abz = ez-bz, abl2 = abx*abx+abz*abz;
+    for(const e of G.enemies){
+      if(e.dead) continue;
+      const apx = e.x-bx, apz = e.z-bz;
+      const t = Math.max(0, Math.min(1, (apx*abx+apz*abz)/abl2));
+      const cx = bx + t*abx, cz = bz + t*abz;
+      if(dist2(e.x, e.z, cx, cz) < (e.r+8)*(e.r+8)){
+        const crit = Math.random() < G.hero.mods.crit;
+        const dmg = base * (crit?2:1);
+        damageEnemy(e, dmg, { dirx:Math.sin(aimA), dirz:Math.cos(aimA), kb:G.gun.kb*h.mods.kb, show:true, crit, poison:0 });
+        if(crit && G.hero.explosiveCrits){ explodeDamage(e.x, e.z, 36, base, 0xffd166); floater('EXPLOSIVE CRIT', e.x, e.z, 'crit'); }
+        burst(e.x, 8, e.z, 0x5be3ff, 5, 70, 0.4, 0.25);
+      }
+    }
+    const beamMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, BL), new THREE.MeshBasicMaterial({ color:0x5be3ff, transparent:true, opacity:0.9 }));
+    beamMesh.position.set((bx+ex)/2, 3, (bz+ez)/2);
+    beamMesh.lookAt(ex, 0, ez);
+    sceneAdd(beamMesh);
+    G.effects.push({ kind:'beamfx', mesh:beamMesh, t:0, life:0.4 });
+  } else {
+    for(let i=0;i<n;i++){
+      let a = aimA;
+      if(n>1) a += (i/(n-1) - 0.5) * arc;
+      else if(arc>0) a += (Math.random()-0.5)*arc;
+      else a += (Math.random()-0.5)*0.09;
+      const dx = Math.sin(a), dz = Math.cos(a);
+      // ranger: damage scales with distance to aim
+      let dmg = base;
+      if(h.ranger) dmg = Math.max(1, dmg + Math.hypot(G.aimWorld.x-h.x, G.aimWorld.z-h.z)*0.045 - 5);
+      const opts = {
+        color: G.gun.color, kb: G.gun.kb * h.mods.kb,
+        speed: (G.gun.speed || BULLET_SPEED) * h.mods.bulletSpeed,
+        pierce: G.gun.special.includes('pierce') ? 99 : 0,
+        bounce: G.gun.special.includes('bounce') ? 999 : 0,
+        explode: G.gun.special.includes('explode') ? base : 0,
+        slow: G.gun.special.includes('slow'),
+        poison: G.gun.special.includes('poison') ? poisonDps() : 0,
+        bone: G.gun.special.includes('bone'),
+        scale: G.gun.id==='bouncecannon' ? (h.bounceCharge||1) : 1,
+      };
+      fireBullet(h.x, h.z, dx, dz, dmg, opts);
+    }
+    if(G.gun.id==='bouncecannon') h.bounceCharge = 1;
+  }
+  // MAG passive: +5 fire damage per hit is applied as burn-ish flat — see bullet hit
+  if(G.gun.special.includes('void')){
+    const r = (Math.random()*4)|0;
+    if(r<2){
+      const n = r+1;
+      h.ammo = Math.min(h.maxAmmo, h.ammo+n);
+      floater('+'+n+' Ammo', h.x, h.z, 'ammo');
+    }
+  }
+  burst(h.x + G.aimDir.x*12, 8, h.z + G.aimDir.z*12, 0xffe066, 3, 60, 0.3, 0.12);
+}
+
+function tryFire(dt){
+  const h = G.hero;
+  if(h.reloading || h.dead) return;
+  if(h.ammo<=0){ AUD.empty(); startReload(); return; }
+  let interval = G.gun.fire * h.mods.fire;
+  if(G.time - h.lastFire < interval) return;
+  h.lastFire = G.time;
+  fireShot();
+  // scrapper: original fires a 2nd shot 0.1s later (costs another bullet, no fire-rate reset)
+  if(G.gun.special.includes('dblshot')){
+    G.effects.push({ kind:'dblshot', t:0 });
+  }
+}
+
+function poisonDps(){
+  let d = 10 * G.hero.mods.poison;
+  if(G.hero.poisonScalesAmmo) d *= (G.hero.maxAmmo/10);
+  return d;
+}
+
+// ---------------- Supers ----------------
+function castSuper(){
+  const h = G.hero;
+  if(h.dead || h.super.uses<=0 || h.super.chargeT < h.super.chargeMax) return;
+  h.super.uses--;
+  h.super.chargeT = 0;
+  AUD.super();
+  const id = G.char.id;
+  const S = { x:h.x, z:h.z };
+
+  if(id==='pulse'){
+    for(const e of G.enemies){
+      if(e.dead) continue;
+      const dx=e.x-h.x, dz=e.z-h.z; const len=Math.max(1,Math.hypot(dx,dz));
+      if(len<240){ e.kbx+=dx/len*420; e.kbz+=dz/len*420; }
+    }
+    h.hp = Math.min(h.maxHp, h.hp+7);
+    floater('+7', h.x, h.z, 'heal');
+    burst(h.x, 14, h.z, 0x7fd4ff, 30, 160, 0.8, 0.6);
+    G.shake = Math.max(G.shake, 0.4);
+  }
+  else if(id==='mag'){
+    const mesh = new THREE.Mesh(new THREE.ConeGeometry(12, 10, 4), new THREE.MeshBasicMaterial({color:0xff5a3d}));
+    mesh.rotation.x = Math.PI; mesh.rotation.y = Math.PI/4;
+    mesh.position.set(h.x, 16, h.z); sceneAdd(mesh);
+    G.effects.push({ kind:'magnet', mesh, t:0, life:6, r:160, x:h.x, z:h.z });
+    burst(h.x, 16, h.z, 0xff5a3d, 20, 120, 0.8, 0.6);
+  }
+  else if(id==='bones'){
+    // orig BONES super spawns 4 permanent doggo2 companions around the hero
+    for(let i=0;i<4;i++) addDog(false);
+    banner('PACK!');
+  }
+  else if(id==='porter' || id==='blink'){
+    // teleport to aim (clamped inside view)
+    const tx = clamp(G.aimWorld.x, -(VIEW.visW-10), VIEW.visW-10), tz = clamp(G.aimWorld.z, -(VIEW.visH-10), VIEW.visH-10);
+    burst(h.x, 14, h.z, 0x8f6bff, 24, 130, 0.7, 0.5);
+    h.x = tx; h.z = tz; h.mesh.position.set(tx,0,tz);
+    burst(tx, 14, tz, 0x8f6bff, 24, 130, 0.7, 0.5);
+    for(let i=0;i<12;i++){
+      const a = i/12*Math.PI*2;
+      fireBullet(tx,tz,Math.cos(a),Math.sin(a), G.gun.dmg, {color:0xb78fff, bounce:3, kb:G.gun.kb});
+    }
+    if(id==='blink'){ h.invince = Math.max(h.invince, 3); h.phaseT = 3; }
+  }
+  else if(id==='payne'){
+    const half = Math.floor(h.hp/2);
+    h.hp = Math.max(1, h.hp - half);
+    let hits = 0;
+    for(const e of G.enemies){
+      if(e.dead) continue;
+      if(dist2(e.x,e.z,h.x,h.z) < 260*260){ e.hp -= 100; e.lastHitDmg=100; floater('100', e.x, e.z, 'crit'); hits++; if(e.hp<=0) killEnemy(e); }
+    }
+    h.hp = Math.min(h.maxHp, h.hp + hits);
+    burst(h.x, 14, h.z, 0xff4f4f, 36, 170, 0.9, 0.7);
+    G.shake = Math.max(G.shake, 0.6);
+  }
+  else if(id==='haze'){
+    let n=0;
+    for(const o of G.orbs){
+      if(o.dead) continue;
+      if(dist2(o.x,o.z,h.x,h.z) < 150*150){ o.dead=true; o.mesh.visible=false; o.glow.visible=false; addCloud(o.x,o.z); n++; }
+    }
+    if(n===0){ for(let i=0;i<3;i++) addCloud(h.x+(Math.random()*2-1)*80, h.z+(Math.random()*2-1)*80); }
+    banner(n? 'TOXIC BURST' : 'TOXIC CLOUDS');
+  }
+  else if(id==='mo'){
+    explodeDamage(h.x, h.z, 100, h.maxAmmo, 0xffd166);
+    banner('AMMO BOMB!');
+  }
+  else if(id==='nikki'){
+    for(const t of G.summons.filter(s=>s.kind==='turret')){
+      t.boostT = 5;
+    }
+    banner('OVERDRIVE');
+  }
+  else if(id==='rooty'){
+    const n = 10;
+    for(let i=0;i<n;i++){
+      const a = i/n*Math.PI*2;
+      const m = new THREE.Mesh(new THREE.ConeGeometry(5, 12, 6), stdMat(0x3f9e4f));
+      m.position.set(h.x+Math.cos(a)*90, 6, h.z+Math.sin(a)*90);
+      m.rotation.z = Math.PI;
+      sceneAdd(m);
+      G.effects.push({ kind:'bramble', mesh:m, t:0, life:6, x:m.position.x, z:m.position.z });
+    }
+    banner('BRAMBLES');
+  }
+}
+
+// ---------------- Clouds / summons ----------------
+function addCloud(x,z){
+  const m = new THREE.Mesh(new THREE.SphereGeometry(26, 10, 8), new THREE.MeshStandardMaterial({ color:0x5abf4f, emissive:0x2a7a2a, emissiveIntensity:0.8, transparent:true, opacity:0.55 }));
+  m.position.set(x, 8, z);
+  sceneAdd(m);
+  G.clouds.push({ mesh:m, x, z, t:0, life:5 });
+}
+
+function addDog(temp){
+  const m = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(9,5,14), stdMat(0x8a6233));
+  const head = new THREE.Mesh(new THREE.SphereGeometry(4, 8, 8), stdMat(0x9a6e38)); head.position.set(0,3,8);
+  for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.8,6,6), new THREE.MeshBasicMaterial({color:0x1a1a1a})); e.position.set(1.6*s,4,10.5); head.add(e); }
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(1,4,5), stdMat(0x8a6233)); tail.rotation.x=Math.PI/2; tail.position.set(0,4,-9); tail.rotation.z=0.4;
+  const dog = { kind:'dog', mesh:m, x:0, z:0, temp:!!temp, t:temp?8:Infinity, biteT:0, alive:true, body, head, tail };
+  m.add(body); m.add(head); m.add(tail);
+  m.position.set(G.hero.x+20, 0, G.hero.z+20);
+  sceneAdd(m);
+  G.summons.push(dog);
+  return dog;
+}
+
+function addTurret(){
+  const m = new THREE.Group();
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(7,8,5,8), stdMat(0x4a525c,{metalness:0.4,roughness:0.5}));
+  const tur = new THREE.Mesh(new THREE.CylinderGeometry(5,5,8,8), stdMat(0x666f7a,{metalness:0.4,roughness:0.5})); tur.position.y=6;
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(1.6,1.6,10,8), stdMat(0x2a2e33,{metalness:0.6})); barrel.rotation.x=Math.PI/2; barrel.position.set(0,7,8);
+  m.add(base); m.add(tur); m.add(barrel);
+  const t = { kind:'turret', mesh:m, x:G.hero.x, z:G.hero.z, fireT:0, boostT:0, alive:true, barrel };
+  m.position.set(G.hero.x, 0, G.hero.z);
+  sceneAdd(m);
+  G.summons.push(t);
+  return t;
+}
+
+// ---------------- Effects update ----------------
+function updateEffects(dt){
+  for(const fx of G.effects){
+    fx.t += dt;
+    if(fx.kind==='flash'){
+      const k = fx.t/fx.life;
+      fx.mesh.scale.setScalar(1 + fx.max*2*k);
+      fx.mesh.material.opacity = 0.85*(1-k);
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='beamfx'){
+      fx.mesh.material.opacity = 0.9*(1-fx.t/fx.life);
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='smoke'){
+      for(const m of fx.mesh.children){
+        const u = m.userData;
+        const tk = fx.t/u.life;
+        if(tk>=1){ m.visible=false; continue; }
+        m.scale.setScalar(u.s*(1 + tk*u.grow*1.0));
+        m.position.x = u.dx*tk + Math.sin(fx.t*u.wob + u.ph)*1.2*tk;
+        m.position.z = u.dz*tk + Math.cos(fx.t*u.wob*0.8 + u.ph)*1.2*tk;
+        m.position.y = u.vy*tk - Math.sin(fx.t*6+u.ph)*1.0*tk;
+        m.rotation.y += u.rot*dt*0.6; m.rotation.x += u.rot*0.4*dt;
+        m.material.opacity = 0.62*(1-tk);
+      }
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='bomb'){
+      const k = fx.t/fx.life;
+      fx.mesh.scale.setScalar(1 + Math.sin(fx.t*22)*0.18*(0.4+k));
+      if(fx.t>=fx.life){
+        for(let i=0;i<12;i++){
+          const a = i/12*Math.PI*2;
+          fireBullet(fx.x, fx.z, Math.cos(a), Math.sin(a), 30, {color:0xffb347, speed:300, life:0.3, kb:20, r:2.2});
+        }
+        burst(fx.x, 10, fx.z, 0xffb347, 16, 130, 0.6, 0.4);
+        sceneRemove(fx.mesh); fx.dead=true;
+      }
+    }
+    else if(fx.kind==='magnet'){
+      fx.mesh.rotation.y += dt*3;
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        const dx=e.x-fx.x, dz=e.z-fx.z; const d2=dx*dx+dz*dz;
+        if(d2 < fx.r*fx.r){
+          const len=Math.max(1,Math.sqrt(d2));
+          e.kbx -= dx/len*130*dt*10;
+          e.kbz -= dz/len*130*dt*10;
+          e.burn = { dps: 14*G.hero.mods.fire, t: Math.max(e.burn?e.burn.t:0, 1) };
+          if(Math.random()<dt*3) burst(e.x, 8, e.z, 0xff5a3d, 1, 40, 0.4, 0.2);
+        }
+      }
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='bramble'){
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        if(dist2(e.x,e.z,fx.x,fx.z) < 16*16){
+          e.slowT = Math.max(e.slowT, 0.8);
+          e.hitCd = 0.5;
+          if(Math.random()<dt*4){ const d=25*G.hero.mods.summon; e.hp-=d; e.lastHitDmg=d; floater(Math.round(d), e.x, e.z, ''); if(e.hp<=0) killEnemy(e); }
+        }
+      }
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='spiketrap'){
+      for(const e of G.enemies){
+        if(e.dead || e.boss) continue;
+        if(dist2(e.x,e.z,fx.x,fx.z) < 18*18){
+          e.slowT = Math.max(e.slowT, 0.8);
+          if(Math.random()<dt*2){ e.hp-=fx.dmg; e.lastHitDmg=fx.dmg; floater(Math.round(fx.dmg), e.x, e.z, ''); if(e.hp<=0) killEnemy(e); }
+        }
+      }
+      if(fx.t>=fx.life){ sceneRemove(fx.mesh); fx.dead=true; }
+    }
+    else if(fx.kind==='stinkbug'){
+      fx.mesh.position.y = 4 + Math.abs(Math.sin(fx.t*6))*2;
+      if(fx.t>=fx.life){
+        explodeDamage(fx.x, fx.z, 70, 30, 0x7ac74a);
+        addCloud(fx.x, fx.z);
+        sceneRemove(fx.mesh); fx.dead=true;
+      }
+    }
+    else if(fx.kind==='dblshot'){
+      if(fx.t>=0.1){ fireShot(); fx.dead=true; }
+    }
+  }
+  G.effects = G.effects.filter(f=>!f.dead);
+}
+
+// ---------------- Perk actives (timed) ----------------
+function updatePerkActives(dt){
+  const h = G.hero;
+  // Dead code from a removed perk: 'mindpopper' was never obtainable in the original
+  // game (see the NOTE above the PERKS table) — keep it out. Readding it breaks parity.
+  if(h.mindpopper){
+    h.mindpopperT = (h.mindpopperT||0) + dt;
+    if(h.mindpopperT >= 2){
+      const alive = G.enemies.filter(e=>!e.dead && ['goblingreen','goblinred','goblinblue','troll','box3','dummy','egger'].includes(e.type));
+      if(alive.length){
+        h.mindpopperT = 0;
+        const t = alive[Math.floor(Math.random()*alive.length)];
+        burst(t.x, 12, t.z, 0x7ac74a, 12, 90, 0.5, 0.4);
+        for(let i=0;i<12;i++){
+          const a = Math.random()*Math.PI*2;
+          fireBullet(t.x, t.z, Math.cos(a), Math.sin(a), 10, {color:0x7ac74a, r:1.6, speed:200, life:1.5, kb:10, poison:poisonDps()*0.5});
+        }
+        killEnemy(t);
+        spawnOrb(t.x, t.z);
+        floater('POP!', t.x, t.z, 'crit');
+      }
+    }
+  }
+  if(h.stinkbug){
+    h.stinkbugT = (h.stinkbugT||0) + dt;
+    if(h.stinkbugT >= 4){
+      h.stinkbugT = 0;
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(5, 8, 8), new THREE.MeshBasicMaterial({color:0x6fbf4f}));
+      mesh.position.set(h.x, 4, h.z);
+      sceneAdd(mesh);
+      G.summons.push({ kind:'stinkbug', mesh, t:8, alive:true });
+    }
+  }
+  if(h.burningroots){
+    h.burningrootsT = (h.burningrootsT||0) + dt;
+    if(h.burningrootsT >= 4){
+      h.burningrootsT = 0;
+      const lr = h.lightRadius;
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        if(dist2(e.x,e.z,h.x,h.z) < lr*lr){
+          e.burn = { dps: burnDps(), t: Math.max(e.burn?e.burn.t:0, 1.5) };
+        }
+      }
+    }
+  }
+  if(h.bulletspikes){
+    h.bulletspikesT = (h.bulletspikesT||0) + dt;
+    if(h.bulletspikesT >= 3){
+      h.bulletspikesT = 0;
+      const n=12;
+      for(let i=0;i<n;i++){
+        const a=i/n*Math.PI*2;
+        fireBullet(h.x, h.z, Math.cos(a), Math.sin(a), h.spikeDmg, {color:0xb8b8c0, r:1.8, speed:75, life:0.75, kb:15, slow:true, slowDur:5, pierce:99, spike:true});
+      }
+    }
+  }
+  if(h.slowspikes){
+    h.slowspikesT = (h.slowspikesT||0) + dt;
+    if(h.slowspikesT >= 3){
+      h.slowspikesT = 0;
+      const mesh = new THREE.Mesh(new THREE.ConeGeometry(9, 3, 10), new THREE.MeshBasicMaterial({color:0x9a9aa6, transparent:true, opacity:0.8}));
+      mesh.rotation.x = -Math.PI/2;
+      mesh.position.set(h.x, 1, h.z);
+      sceneAdd(mesh);
+      G.effects.push({ kind:'spiketrap', mesh, x:h.x, z:h.z, t:0, life:6, dmg:15 });
+    }
+  }
+  if(h.knockbackKing){
+    h.knockbackKingT = (h.knockbackKingT||0) + dt;
+    if(h.knockbackKingT >= 4){
+      h.knockbackKingT = 0;
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        const dx=e.x-h.x, dz=e.z-h.z; const len=Math.max(1,Math.hypot(dx,dz));
+        if(len<200){ e.kbx+=dx/len*340; e.kbz+=dz/len*340; }
+      }
+      burst(h.x, 14, h.z, 0xcfd6e0, 16, 130, 0.6, 0.4);
+    }
+  }
+}
+
+// ---------------- Spawning drivers ----------------
+function initSpawners(){
+  G.spawners = [];
+  for(const s of SPAWNS){
+    if(s.only && !s.only.includes(G.diff)) continue;
+    G.spawners.push({ def:s, t: s.at });
+  }
+  G.bossIdx = 0;
+  G.bossSchedule = BOSS_SPAWNS[G.diff] || BOSS_SPAWNS.Normal;
+  G.mIdx = 0; G.mGoldIdx = 0;
+  G.scoreMilestones = [ [100,100],[200,200],[300,300],[400,400] ];
+  G.goldMilestones = [ [25,25],[50,25],[75,25],[100,100],[125,35],[150,35],[175,35],[200,200],[225,45],[250,45],[275,45],[300,300],[325,55],[350,55],[375,55],[400,400],[425,200],[450,200] ];
+}
+
+function spawnAtSide(side){
+  let x, z;
+  if(side==='left'){ x = -(VIEW.visW+22); z = (Math.random()*2-1)*VIEW.visH; }
+  else if(side==='right'){ x = VIEW.visW+22; z = (Math.random()*2-1)*VIEW.visH; }
+  else if(side==='top'){ z = -(VIEW.visH+22); x = (Math.random()*2-1)*VIEW.visW; }
+  else { z = VIEW.visH+22; x = (Math.random()*2-1)*VIEW.visW; }
+  return { x, z };
+}
+
+function updateSpawning(dt){
+  const t = G.time;
+  for(const s of G.spawners){
+    if(t < s.def.at) continue;
+    if(t >= s.t){
+      const sb = s.def.sb ? G.sb * Math.floor(t/10) : 0;
+      s.t = t + Math.max(0.05, s.def.interval - sb);
+      const count = s.def.count;
+      let sides;
+      if(s.def.side==='all') sides = ['left','right','top','bottom'];
+      else if(s.def.side==='lr') sides = ['left','right'];
+      else if(s.def.side==='tb') sides = ['top','bottom'];
+      else sides = [['left','right','top','bottom'][Math.floor(Math.random()*4)]];
+      for(let i=0;i<count;i++){
+        const p = spawnAtSide(sides[i % sides.length]);
+        spawnEnemy(s.def.type, p.x, p.z);
+      }
+    }
+  }
+  // bosses
+  const sched = G.bossSchedule;
+  while(G.bossIdx < sched.length && t >= sched[G.bossIdx].t){
+    const b = sched[G.bossIdx]; G.bossIdx++;
+    let w;
+    if(b.x!=null && b.y!=null){
+      const wx = b.x===460 ? VIEW.visW-12 : 0;
+      const wz = b.y===300 ? VIEW.visH-12 : -(VIEW.visH-12);
+      w = { x:wx, z:wz };
+    }
+    else if(b.e==='absorber') w = { x:-(VIEW.visW+22), z:(Math.random()*2-1)*VIEW.visH };
+    else if(b.e==='laserdude') w = { x:(Math.random()*2-1)*VIEW.visW, z:-(VIEW.visH+22) };
+    else w = { x:(Math.random()*2-1)*VIEW.visW, z:-(VIEW.visH+60) };
+    if(b.e==='absorber'){
+      spawnAbsorberWithShield(w.x, w.z, b.hp);
+    } else {
+      spawnEnemy(b.e, w.x, w.z, {hp:b.hp, bh:!!b.bh});
+    }
+    G.shake = Math.max(G.shake, 0.5);
+    banner('⚠ BOSS INCOMING');
+  }
+  // milestones
+  while(G.mIdx < G.scoreMilestones.length && t >= G.scoreMilestones[G.mIdx][0]){
+    G.score += G.scoreMilestones[G.mIdx][1] * G.mult; G.mIdx++;
+    floater('+'+G.scoreMilestones[G.mIdx-1][1]+' SCORE', G.hero.x, G.hero.z, 'crit');
+  }
+  while(G.mGoldIdx < G.goldMilestones.length && t >= G.goldMilestones[G.mGoldIdx][0]){
+    G.gold += G.goldMilestones[G.mGoldIdx][1]; G.mGoldIdx++;
+  }
+}
+
+// ---------------- Enemy update ----------------
+function updateEnemies(dt){
+  const h = G.hero;
+  const heroX=h.x, heroZ=h.z;
+  for(const e of G.enemies){
+    if(e.dead) continue;
+    // status effects
+    if(e.slowT>0) e.slowT -= dt;
+    if(e.poison){
+      e.hp -= e.poison.dps*dt;
+      if(Math.random()<0.4) burst(e.x, 9, e.z, 0x7ac74a, 1, 30, 0.3, 0.3);
+      e.poisonAcc = (e.poisonAcc||0) + e.poison.dps*dt;
+      e.poisonTick = (e.poisonTick||0) - dt;
+      if(e.poisonTick<=0){ e.poisonTick=0.3; if(e.poisonAcc>=1){ floater(Math.round(e.poisonAcc), e.x, e.z, 'poison'); e.poisonAcc=0; } }
+      e.poison.t -= dt;
+      if(e.poison.t<=0) e.poison=null;
+      if(e.hp<=0){ killEnemy(e); continue; }
+    }
+    if(e.burn){
+      e.hp -= e.burn.dps*dt;
+      if(Math.random()<0.3) burst(e.x, 9, e.z, 0xff7a3d, 1, 30, 0.5, 0.25);
+      e.burnAcc = (e.burnAcc||0) + e.burn.dps*dt;
+      e.burnTick = (e.burnTick||0) - dt;
+      if(e.burnTick<=0){ e.burnTick=0.3; if(e.burnAcc>=1){ floater(Math.round(e.burnAcc), e.x, e.z, 'fire'); e.burnAcc=0; } }
+      e.burn.t -= dt;
+      if(e.burn.t<=0) e.burn=null;
+      if(e.hp<=0){ killEnemy(e); continue; }
+    }
+    applyStatusTint(e);
+    if(e.type==='box3'){
+      // pulsing + occasional stutter so the orange bomb-orbs read as threats, not pickups
+      const fl = 0.72 + 0.28*Math.sin(G.time*19 + e.hopPhase*5) + (Math.sin(G.time*47 + e.hopPhase*11) > 0.85 ? -0.35 : 0);
+      const orbMat = e.mesh.children[0] && e.mesh.children[0].material;
+      if(orbMat) orbMat.emissiveIntensity = 1.05 * Math.max(0.25, fl);
+      const glowMat = e.mesh.children[2] && e.mesh.children[2].material;
+      if(glowMat) glowMat.opacity = 0.5 * Math.max(0.2, fl);
+    }
+    if(e.type==='absorber' && e.shield && e.shield.dead){ e.shield=null; }
+
+    // movement
+    let mx=0, mz=0;
+    const dx = heroX - e.x, dz = heroZ - e.z;
+    const len = Math.max(0.01, Math.hypot(dx,dz));
+
+    if(e.kind==='shield'){
+      // shieldersshield: centered on its linked enemy + 12s scale pulse (shrink 0-6s, grow 6-12s)
+      if(e.parent && !e.parent.dead){
+        e.x = e.parent.x; e.z = e.parent.z;
+        e.mesh.position.x = e.x; e.mesh.position.z = e.z;
+        e.pulseT = (e.pulseT||0) + dt;
+        const target = e.pulseT < 6 ? 0 : 1;
+        const rate = target===0 ? 10 : 2;   // ~100ms shrink, ~500ms grow (orig tweens)
+        e.pulseScale = e.pulseScale + (target - e.pulseScale) * Math.min(1, rate*dt);
+        if(e.pulseScale < 0.02) e.pulseScale = 0;
+        if(e.pulseScale > 0.98) e.pulseScale = 1;
+        if(e.pulseT >= 12) e.pulseT = 0;
+        e.mesh.scale.setScalar(e.baseScale * Math.max(0.02, e.pulseScale));
+      }
+    }
+    else if(e.kind!=='stationary'){
+      // per-kind chase rules
+      let chasing = true;
+      let tx = heroX, tz = heroZ;
+      if(e.kind==='shooter')            chasing = len < 100;
+      if(e.kind==='boss' && e.type==='boss1') chasing = len < 100;
+      if(e.kind==='boss' && e.type==='boss2') chasing = e.attackT <= 6;
+      if(e.kind==='boss' && e.type==='boss3') chasing = false;
+      if(e.kind==='laser'){
+        // laserdude mirrors the hero's row: hero above -> sweep to bottom row, else top row; tracks hero.x
+        if(Math.abs(heroX - e.x) < 0.6){ chasing = false; }
+        else { tz = heroZ <= e.z ? VIEW.visH-8 : -(VIEW.visH-8); }
+      }
+      if(chasing){
+        const slow = e.slowT>0 ? e.slowPct : 1;
+        let ls = 1;
+        if(G.hero.slowingLight){
+          const lr = G.hero.lightRadius;
+          if(dist2(e.x,e.z,tx,tz) < lr*lr) ls = 0.45;
+        }
+        const ldx = tx-e.x, ldz = tz-e.z;
+        const llen = Math.max(0.01, Math.hypot(ldx,ldz));
+        mx = ldx/llen * e.speed * slow * ls;
+        mz = ldz/llen * e.speed * slow * ls;
+      }
+      if(e.kind==='absorber' && e.shield) { mx*=0.4; mz*=0.4; }
+      e.x += (mx + e.kbx) * dt;
+      e.z += (mz + e.kbz) * dt;
+      e.mesh.position.x = e.x; e.mesh.position.z = e.z;
+      if(e.type==='boss1'){
+        e.mesh.rotation.y += dt * 15 * (Math.PI/180) * 60; // spins ~15°/frame (orig rotate(15))
+      } else {
+        e.mesh.rotation.y = Math.atan2(dx, dz);
+      }
+      if(e.float){
+        e.mesh.position.y = 9 + Math.sin(G.time*3 + e.hopPhase)*3;
+      } else if(e.hop){
+        e.mesh.position.y = Math.abs(Math.sin(G.time*11 + e.hopPhase)) * e.hop;
+      }
+    }
+    // knockback damping
+    e.kbx *= Math.exp(-7*dt); e.kbz *= Math.exp(-7*dt);
+
+    // ---- attacks ----
+    if(e.kind==='shooter'){
+      // stops beyond 101px and hurls a single boss bullet @45 at the hero every 3s
+      e.fireT -= dt;
+      if(len > 101 && e.fireT<=0){
+        e.fireT = 3;
+        fireEnemyProjectile(e.x, e.z, dx/len, dz/len, {speed:45, rot:55});
+      }
+    }
+    if(e.kind==='laser'){
+      // every 2s spawn a horizontal beam at its row (follows the laserdude, lasts 1s)
+      if(e.shootT>0) e.shootT -= dt;
+      if(e.shootT<=0 && !e.beamActive){
+        e.shootT = 2;
+        e.beamActive = true;
+        e.beamEndT = 1;
+        e.beam = spawnLaserBeam(e);
+        burst(e.x, 12, e.z, 0x4ff0ff, 6, 50, 0.3, 0.2);
+      }
+      if(e.beamActive){
+        e.beamEndT -= dt;
+        if(e.beamEndT<=0){
+          e.beamActive = false;
+          if(e.beam){ e.beam.dead = true; sceneRemove(e.beam.mesh); e.beam = null; }
+        }
+      }
+    }
+    if(e.kind==='boss' && e.type==='boss1'){
+      // chases inside 100px; beyond 101px stops and fires a volley across a 90° arc @35 (5 bullets, cd 1s — 8 bullets @0.75s on Insane)
+      e.fireT -= dt;
+      if(len > 101 && e.fireT<=0){
+        e.fireT = e.bh ? 0.75 : 1;
+        bossVolley(e, e.bh ? 8 : 5, 90, 35);
+      }
+    }
+    if(e.kind==='boss' && e.type==='boss2'){
+      e.attackT += dt;
+      // NOTE (parity): the original does NOT clamp boss2 HP — Insane spawns it at 8000 (base 5000 + 3000),
+      // with the health bar maxed at 8000. (An earlier draft clamped to 5000; that was wrong.)
+      if(e.hp > e.maxHp) e.hp = e.maxHp;
+      if(e.attackT > 6 && !e.pending){
+        e.pending = true;
+        e.attackVar = 1 + Math.floor(Math.random()*3);
+        if(e.attackVar <= 2){
+          boss2Summon(e);
+        } else {
+          G.magnet = { x:e.x, z:e.z, t:2.2 }; // magnet all XP orbs toward self
+        }
+      }
+      if(e.attackT > 8){ e.attackT = 0; e.pending = false; e.attackVar = 0; }
+      // touching an XP orb: heal +100 and delete every orb in the scene
+      for(const o of G.orbs){
+        if(o.dead) continue;
+        if(dist2(o.x,o.z,e.x,e.z) < (e.r+5)*(e.r+5)){
+          e.hp = Math.min(e.maxHp, e.hp + 100);
+          floater('+100', e.x, e.z, 'heal');
+          for(const o2 of G.orbs){ if(!o2.dead){ o2.dead=true; sceneRemove(o2.mesh); sceneRemove(o2.glow); } }
+          break;
+        }
+      }
+    }
+    if(e.kind==='boss' && e.type==='boss3'){
+      e.attackT += dt;
+      if(e.hp > 7500) e.hp = 7500;
+      // teleports between 4 corners on every new attack cycle
+      if(e.posVar === 0){
+        e.posVar = 1 + Math.floor(Math.random()*4);
+        const corners = [null, [-164,-49], [-180,109], [204,111], [204,-51]];
+        const c = corners[e.posVar];
+        e.x = c[0]; e.z = c[1];
+        e.mesh.position.x = e.x; e.mesh.position.z = e.z;
+        burst(e.x, 14, e.z, 0x7dd8ff, 16, 80, 0.5, 0.4);
+      }
+      if(e.attackT > 2 && !e.pending){
+        e.pending = true;
+        e.attackVar = 1 + Math.floor(Math.random()*3);
+        if(e.attackVar === 1){
+          e.laserT = 0; e.laserIdx = 1; // laser barrage
+        } else if(e.attackVar === 2){
+          boss3SummonShields();         // 2 shielded minions
+        } else {
+          e.hp = Math.min(e.maxHp, e.hp + 250); // heal +250
+          floater('+250', e.x, e.z, 'heal');
+        }
+      }
+      // laser barrage: beam pairs sweep from the walls inward at 1s intervals
+      if(e.attackVar === 1 && e.laserIdx){
+        e.laserT += dt;
+        while(e.laserIdx <= 5 && e.laserT >= e.laserIdx){
+          const pairs = {1:[45,435],2:[90,390],3:[135,345],4:[180,300],5:[225,255]}[e.laserIdx];
+          for(const x of pairs) spawnFallingBeam(x);
+          e.laserIdx++;
+        }
+        if(e.laserIdx > 5) e.laserIdx = 0;
+      }
+      if(e.attackT >= 7){ e.attackT = 0; e.posVar = 0; e.pending = false; }
+    }
+
+    // contact damage
+    if(e.kind!=='shield' && e.hitCd>0) e.hitCd -= dt;
+    if(e.kind!=='shield' && dist2(e.x,e.z,heroX,heroZ) < (e.r+HERO_R)*(e.r+HERO_R) && e.hitCd<=0){
+      e.hitCd = 0.6;
+      damageHero(HERO_HIT_DMG);
+    }
+
+    const br = e.mesh.userData.borderRing;
+    if(br && br.material){
+      if(e.bombT!=null && e.bombOwner && !e.bombOwner.dead){
+        br.material.opacity = 0.3 + 0.7*Math.abs(Math.sin(G.time*22 + e.x));
+      } else {
+        br.material.opacity = 0.55 + 0.35*Math.sin(G.time*4 + e.x*0.7);
+      }
+    }
+  }
+  // boss2 summoned-minion bombs: 3s after summon, each fires a 6-way @175 ring and the whole basic crowd (plus warnings) is deleted
+  {
+    let bombExpired = false;
+    for(const e of G.enemies){
+      if(e.dead || e.bombT==null) continue;
+      if(e.bombOwner && e.bombOwner.dead) continue;
+      e.bombT -= dt;
+      if(e.bombT<=0){ e.bombT=0; bombExpired=true; }
+    }
+    if(bombExpired){
+      for(const e of G.enemies){
+        if(e.dead || e.bombT==null) continue;
+        if(e.bombOwner && e.bombOwner.dead) continue;
+        for(let i=0;i<6;i++){
+          const a = i/6*Math.PI*2;
+          fireEnemyProjectile(e.x, e.z, Math.sin(a), Math.cos(a), {speed:175, rot:55});
+        }
+      }
+      const SEVEN = {goblingreen:1, goblinred:1, troll:1, box3:1, dummy:1, egger:1, shooter:1};
+      for(const e of G.enemies){
+        if(e.dead || !SEVEN[e.type]) continue;
+        e.dead = true;
+        sceneRemove(e.mesh);
+      }
+    }
+  }
+  // separation: keep enemies from stacking on top of each other
+  {
+    const es = G.enemies;
+    for(let i=0;i<es.length;i++){
+      const a = es[i]; if(a.dead || a.kind==='shield') continue;
+      for(let j=i+1;j<es.length;j++){
+        const b = es[j]; if(b.dead || b.kind==='shield') continue;
+        const dx = b.x-a.x, dz = b.z-a.z;
+        const rr = (a.r+b.r)*0.62;
+        let d2 = dx*dx+dz*dz;
+        if(d2 < rr*rr){
+          if(d2 > 0.0001){
+            const d = Math.sqrt(d2); const push = (rr-d)/2;
+            const ux = dx/d, uz = dz/d;
+            a.x -= ux*push; a.z -= uz*push;
+            b.x += ux*push; b.z += uz*push;
+          } else {
+            const ang = Math.random()*Math.PI*2;
+            a.x += Math.cos(ang)*rr*0.25; a.z += Math.sin(ang)*rr*0.25;
+            b.x -= Math.cos(ang)*rr*0.25; b.z -= Math.sin(ang)*rr*0.25;
+          }
+          a.mesh.position.x = a.x; a.mesh.position.z = a.z;
+          b.mesh.position.x = b.x; b.mesh.position.z = b.z;
+        }
+      }
+    }
+  }
+  // boss HUD
+  const boss = G.enemies.find(e=>!e.dead && e.boss);
+  if(boss){
+    $('#bossbarWrap').hidden = false;
+    $('#bossName').textContent = (boss.type==='boss1'?'BOSS · CRUSHER':boss.type==='boss2'?'BOSS · HEXLORD':boss.type==='boss3'?'BOSS · WRAITH':'ELITE');
+    $('#bossFill').style.width = clamp(boss.hp/boss.maxHp,0,1)*100 + '%';
+  } else {
+    $('#bossbarWrap').hidden = true;
+  }
+}
+
+// ---------------- Bullets update ----------------
+function updateBullets(dt){
+  for(const b of G.bullets){
+    if(b.dead) continue;
+    b.x += b.dx*b.speed*dt; b.z += b.dz*b.speed*dt;
+    b.life -= dt;
+    b.mesh.position.x = b.x; b.mesh.position.z = b.z;
+    if(b.life<=0){ b.dead=true; continue; }
+    // bounce off walls
+    if(b.bounce>0){
+      let bounced=false;
+      if(b.x < -VIEW.visW || b.x > VIEW.visW){ b.dx = -b.dx; b.x = clamp(b.x,-VIEW.visW,VIEW.visW); bounced=true; }
+      if(b.z < -VIEW.visH || b.z > VIEW.visH){ b.dz = -b.dz; b.z = clamp(b.z,-VIEW.visH,VIEW.visH); bounced=true; }
+      if(bounced){ b.bounce--; burst(b.x, 8, b.z, 0xffe066, 4, 50, 0.3, 0.2); }
+    }
+    // hit enemies — shielders absorb first (shrunk shields let bullets through)
+    let hit = false;
+    for(const e of G.enemies){
+      if(e.type!=='shielder' || e.dead || b.hit.has(e)) continue;
+      if(e.pulseScale!=null && e.pulseScale < 0.4) continue;
+      if(dist2(b.x,b.z,e.x,e.z) < (e.r+3)*(e.r+3)){
+        b.hit.add(e);
+        if(b.noDirect){
+          explodeDamage(b.x, b.z, 36, b.explode, 0xff8a3a);
+          b.dead = true;
+          hit = true;
+          break;
+        }
+        const crit = !b.noCrit && Math.random() < G.hero.mods.crit;
+        let dmg = b.dmg * (crit?2:1);
+        damageEnemy(e, dmg, { dirx:b.dx, dirz:b.dz, kb:b.kb, show:true, crit, poison:b.poison, slow:b.slow||undefined, slowDur:b.slowDur });
+        if(crit && G.hero.explosiveCrits){
+          explodeDamage(e.x, e.z, 36, b.dmg, 0xffd166);
+          floater('EXPLOSIVE CRIT', e.x, e.z, 'crit');
+        }
+        if(b.explode) explodeDamage(b.x, b.z, 36, b.explode, 0xff8a3a);
+        if(b.bone && !G.hero.boneDogSpawned && Math.random()<0.09){ G.hero.boneDogSpawned = true; addDog(false); floater('DOGGO!', e.x, e.z, 'heal'); }
+        if(b.pierce>0){ b.pierce--; } else { b.dead = true; }
+        hit = true;
+        break;
+      }
+    }
+    if(!hit){
+      for(const e of G.enemies){
+        if(e.type==='shielder' || e.dead || b.hit.has(e)) continue;
+        if(dist2(b.x,b.z,e.x,e.z) < (e.r+3)*(e.r+3)){
+          b.hit.add(e);
+          if(b.noDirect){
+            explodeDamage(b.x, b.z, 36, b.explode, 0xff8a3a);
+            b.dead = true;
+            hit = true;
+            break;
+          }
+          const crit = !b.noCrit && Math.random() < G.hero.mods.crit;
+          let dmg = b.dmg * (crit?2:1);
+          damageEnemy(e, dmg, { dirx:b.dx, dirz:b.dz, kb:b.kb, show:true, crit, poison:b.poison, slow:b.slow||undefined, slowDur:b.slowDur });
+          if(crit && G.hero.explosiveCrits){
+            explodeDamage(e.x, e.z, 36, b.dmg, 0xffd166);
+            floater('EXPLOSIVE CRIT', e.x, e.z, 'crit');
+          }
+          if(b.explode) explodeDamage(b.x, b.z, 36, b.explode, 0xff8a3a);
+          if(b.bone && !G.hero.boneDogSpawned && Math.random()<0.09){ G.hero.boneDogSpawned = true; addDog(false); floater('DOGGO!', e.x, e.z, 'heal'); }
+          if(b.pierce>0){
+            b.pierce--;
+          } else {
+            b.dead = true;
+          }
+          break;
+        }
+      }
+    }
+    // (no projectile-shooting-down: the original Bullet Bunny has no such mechanic)
+  }
+  G.bullets = G.bullets.filter(b=>{ if(b.dead){ sceneRemove(b.mesh); return false; } return true; });
+}
+
+function burnDps(){
+  // NOTE (balance parity): orig base burn = hero var20 burninglightdamage (5), ticked
+  // every 1.5s while in radius; we keep the procced-DOT model but use the orig base.
+  let d = 5 * G.hero.mods.fire;
+  if(G.hero.rootedfire && !G.heroMoving) d *= 2;
+  if(G.hero.spikeFire) d *= 1.4;
+  return d;
+}
+
+function updateEnemyBullets(dt){
+  const h = G.hero;
+  for(const b of G.ebullets){
+    if(b.dead) continue;
+    if(b.hbeam){
+      // laserdude beam — pinned to its owner, stationary hazard lasting 1s
+      const e = b.linked;
+      if(!e || e.dead){ b.dead=true; continue; }
+      b.x = e.x; b.z = e.z;
+      b.life -= dt;
+      b.mesh.position.x = b.x; b.mesh.position.z = b.z;
+      if(b.life<=0){ b.dead=true; continue; }
+      if(Math.abs(h.z - b.z) < 8+HERO_R && Math.abs(h.x - b.x) < VIEW.halfW+10){
+        if(b.hitCd<=0){ b.hitCd = 0.6; damageHero(b.dmg); }
+      }
+      if(b.hitCd>0) b.hitCd -= dt;
+      continue;
+    }
+    if(b.vertical){
+      // boss3 laser column — falls from the top edge
+      b.z += b.dz*b.speed*dt;
+      b.life -= dt;
+      b.mesh.position.z = b.z;
+      if(b.life<=0 || b.z > VIEW.visH+40){ b.dead=true; continue; }
+      if(Math.abs(h.x - b.x) < b.beamW/2+HERO_R && Math.abs(h.z - b.z) < 13+HERO_R){
+        if(b.hitCd<=0){ b.hitCd = 0.6; damageHero(b.dmg); }
+      }
+      if(b.hitCd>0) b.hitCd -= dt;
+      continue;
+    }
+    b.x += b.dx*b.speed*dt; b.z += b.dz*b.speed*dt;
+    b.life -= dt;
+    b.mesh.position.x = b.x; b.mesh.position.z = b.z;
+    if(b.rot) b.mesh.rotation.y += b.rot*dt*60;
+    if(b.laser) b.mesh.lookAt(b.x+b.dx, 0, b.z+b.dz);
+    if(b.life<=0){ b.dead=true; continue; }
+    if(dist2(b.x,b.z,h.x,h.z) < (6+HERO_R)*(6+HERO_R)){
+      b.dead = true;
+      damageHero(b.dmg);
+    }
+  }
+  G.ebullets = G.ebullets.filter(b=>{ if(b.dead){ sceneRemove(b.mesh); return false; } return true; });
+}
+
+// ---------------- Orbs update ----------------
+function updateOrbs(dt){
+  const h = G.hero;
+  const magnet = h.magnetRadius;
+  if(G.magnet){
+    G.magnet.t -= dt;
+    if(G.magnet.t<=0) G.magnet = null;
+  }
+  for(const o of G.orbs){
+    if(o.dead) continue;
+    o.life -= dt;
+    if(o.life<=0){
+      if(o.life>-3){ o.mesh.visible = (Math.floor(o.life*5)%2===0); o.glow.visible = o.mesh.visible; }
+      if(o.life<-3){ o.dead=true; o.mesh.visible=false; o.glow.visible=false; continue; }
+    }
+    let px=h.x, pz=h.z, pr=magnet;
+    if(G.magnet && G.magnet.t>0){ px=G.magnet.x; pz=G.magnet.z; pr=1e9; }
+    const d2 = dist2(o.x,o.z,px,pz);
+    if(d2 < pr*pr){
+      const len = Math.max(1, Math.sqrt(d2));
+      const pull = (1 - Math.min(1, len/(pr===1e9?480:pr))) * 420 + 60;
+      o.x += (px-o.x)/len * pull * dt;
+      o.z += (pz-o.z)/len * pull * dt;
+    }
+    o.mesh.position.x = o.x; o.mesh.position.z = o.z;
+    o.mesh.position.y = 6 + Math.sin(G.time*4 + o.x)*1.4;
+    o.glow.position.copy(o.mesh.position);
+    o.mesh.rotation.y += dt*2;
+    o.mesh.rotation.z += dt*1.4;
+    if(d2 < 15*15){
+      o.dead = true;
+      collectOrb();
+    }
+  }
+  G.orbs = G.orbs.filter(o=>{ if(o.dead){ sceneRemove(o.mesh); sceneRemove(o.glow); return false; } return true; });
+}
+
+function addExp(n){
+  const h = G.hero;
+  G.exp += n * (h.expMult||1);
+  if(G.exp >= EXPM(G.level)) triggerLevelup();
+}
+
+function collectOrb(){
+  const h = G.hero;
+  AUD.xp();
+  addExp(1);
+  G.score += 1;
+  G.gold += 1.5;
+  burst(h.x, 8, h.z, 0x9ceb5a, 5, 60, 0.5, 0.3);
+  if(h.stablefocus && Math.random()<0.2) h.ammo = Math.min(h.maxAmmo, h.ammo+1);
+}
+
+// ---------------- Level up ----------------
+const MASTERIES = ['Armor','Reload','Summon','Pyro','Rooted','Dodge','Knockback','Critical'];
+const KING_OF = {
+  Armor:'armorking', Reload:'reloadreckoner', Summon:'summonking', Pyro:'lordofthelight',
+  Rooted:'rootedking', Dodge:'dodgeking', Knockback:'knockbackking', Critical:'exsplosivecrits',
+};
+function masteryPoints(){
+  const m = { Armor:0, Reload:0, Summon:0, Pyro:0, Rooted:0, Dodge:0, Knockback:0, Critical:0 };
+  for(const pid of G.perks){
+    const p = PERKS.find(x=>x.id===pid);
+    if(!p) continue;
+    if(p.mastery && m[p.mastery]!=null) m[p.mastery]++;
+    if(p.id==='rootedfire') m.Pyro++;
+  }
+  for(const k in (G.masteryBonus||{})){ if(m[k]!=null) m[k] += G.masteryBonus[k]; }
+  m.total = MASTERIES.reduce((a,t)=>a+m[t], 0);
+  return m;
+}
+
+function drawPerks(){
+  const m = masteryPoints();
+  const avail = PERKS.filter(p=>{
+    if(G.perks.includes(p.id)) return false;
+    if(p.requires && !G.perks.includes(p.requires)) return false;
+    if(p.king) return false;
+    return true;
+  });
+  for(const t of MASTERIES){
+    if(m[t] >= 3 && !G.unlockedKings.includes(KING_OF[t])) G.unlockedKings.push(KING_OF[t]);
+  }
+  if(m.Pyro>=2 && m.Rooted>=2 && !G.unlockedKings.includes('burningroots')) G.unlockedKings.push('burningroots');
+  for(const kid of G.unlockedKings){
+    const kp = PERKS.find(x=>x.id===kid);
+    if(kp && !G.perks.includes(kid) && !avail.includes(kp)) avail.push(kp);
+  }
+  const pool = avail.length ? avail : PERKS.filter(p=>!G.perks.includes(p.id));
+  const picks = [];
+  while(picks.length<3 && pool.length){
+    const i = Math.floor(Math.random()*pool.length);
+    if(!picks.includes(pool[i])) picks.push(pool[i]);
+  }
+  return picks;
+}
+
+function triggerLevelup(){
+  G.state = 'levelup';
+  G.simPaused = true;
+  G.level++;
+  AUD.levelup();
+  showLevelupChoices();
+}
+
+function showLevelupChoices(){
+  const picks = drawPerks();
+  // orig's die (xpmultiplyer) shows a uniform random 1-4 face each level-up and adds that
+  // to the score multiplier (setAnimation(randomInRange(0,3)) in the original)
+  const roll = 1 + Math.floor(Math.random()*4);
+  const cards = picks.map(p=>({
+    title:p.name, subtitle:p.desc, icon:PERK_ICONS[p.id],
+    meta: [p.king? '👑 KING PERK' : (p.mastery? '+1 '+p.mastery+' Mastery' : null)].filter(Boolean).join(' · ') || null,
+    cls:'', color: p.king ? '#cf7dff' : '#ffd166',
+    onPick: ()=>{ takePerk(p); }
+  }));
+  cards.push({
+    title:'SCORE ×'+(G.mult+roll), subtitle:'Permanently multiply your score gain.',
+    meta:'+'+roll+' SCORE MULTIPLIER', cls:'dieCard', color:'#9ceb5a',
+    onPick: ()=>{ takeDie(roll); }
+  });
+  showChoice('LEVEL UP!', 'Choose an upgrade', cards, true);
+}
+
+function ensureSummons(){
+  const wantSpin = G.hero.spinners||0;
+  const spinners = G.summons.filter(s=>s.kind==='spinner');
+  while(spinners.length < wantSpin){
+    const m = new THREE.Mesh(new THREE.SphereGeometry(7, 10, 8), new THREE.MeshBasicMaterial({ color:0x7fd4ff }));
+    sceneAdd(m);
+    G.summons.push({ kind:'spinner', mesh:m, t:Infinity, alive:true });
+    spinners.push(1);
+  }
+  while(spinners.length > wantSpin){
+    const s = spinners.pop();
+    const real = G.summons.find(x=>x.kind==='spinner' && x.alive);
+    if(real){ real.alive=false; sceneRemove(real.mesh); }
+  }
+  const havePen = G.summons.filter(s=>s.kind==='penguin').length;
+  if(G.hero.penguin && havePen===0) addPenguin();
+  if(!G.hero.penguin && havePen>0){
+    const s = G.summons.find(x=>x.kind==='penguin');
+    if(s){ s.alive=false; sceneRemove(s.mesh); }
+  }
+}
+
+function takePerk(p){
+  G.perks.push(p.id);
+  try {
+    p.apply(G);
+  } catch(err){ console.error('perk failed:', p.id, err); }
+  ensureSummons();
+  finishLevelup();
+}
+
+function takeDie(roll){
+  G.mult += roll;
+  finishLevelup();
+}
+
+function finishLevelup(){
+  const h = G.hero;
+  G.exp = 0;
+  h.invince = Math.max(h.invince, 1);
+  for(const e of G.enemies){
+    if(e.dead) continue;
+    const dx=e.x-h.x, dz=e.z-h.z; const len=Math.max(1,Math.hypot(dx,dz));
+    if(len<90){ e.kbx+=dx/len*260; e.kbz+=dz/len*260; }
+  }
+  burst(h.x, 14, h.z, 0xcfd6e0, 16, 130, 0.6, 0.4);
+  AUD.perk();
+  G.state='arena';
+  G.simPaused=false;
+  hideChoice();
+  refreshPerkPanel();
+}
+
+// ---------------- Summons update ----------------
+function updateSummons(dt){
+  const h = G.hero;
+  const sm = h.mods.summon;
+  const closest = () => {
+    let best=null, bd=1e9;
+    for(const e of G.enemies){ if(e.dead) continue; const d=dist2(e.x,e.z,0,0); const d2=dist2(e.x,e.z,h.x,h.z); if(d2<bd){bd=d2;best=e;} }
+    return best;
+  };
+  for(const s of G.summons){
+    if(!s.alive) continue;
+    s.t -= dt;
+    if(s.t<=0){ s.alive=false; sceneRemove(s.mesh); continue; }
+
+    if(s.kind==='dog'){
+      const e = closest();
+      if(e){
+        const dx=e.x-s.mesh.position.x, dz=e.z-s.mesh.position.z;
+        const len=Math.max(1,Math.hypot(dx,dz));
+        const sp = 40 + h.dogSpeed + (s.temp?20:0);
+        s.mesh.position.x += dx/len*sp*dt;
+        s.mesh.position.z += dz/len*sp*dt;
+        s.mesh.rotation.y = Math.atan2(dx,dz);
+        s.biteT -= dt;
+        if(len<30 && s.biteT<=0){
+          s.biteT = 0.7;
+          damageEnemy(e, 12*h.dogMult*sm, {dirx:dx/len, dirz:dz/len, kb:30, show:true});
+          burst(e.x, 8, e.z, 0xff8a8a, 3, 40, 0.3, 0.2);
+        }
+      } else {
+        // follow hero
+        const dx=h.x-s.mesh.position.x, dz=h.z-s.mesh.position.z; const len=Math.max(1,Math.hypot(dx,dz));
+        if(len>40){ s.mesh.position.x+=dx/len*40*dt; s.mesh.position.z+=dz/len*40*dt; }
+        s.mesh.rotation.y = Math.atan2(dx,dz);
+      }
+    }
+    else if(s.kind==='turret'){
+      const e = closest();
+      s.fireT -= dt;
+      if(e){
+        const dx=e.x-s.mesh.position.x, dz=e.z-s.mesh.position.z; const len=Math.max(1,Math.hypot(dx,dz));
+        s.mesh.rotation.y = Math.atan2(dx,dz);
+        if(len<300 && s.fireT<=0){
+          s.fireT = Math.max(0.1, 1.2 - h.turretRateBuff);
+          const boost = s.boostT>0 ? 2 : 1;
+          fireBullet(s.mesh.position.x, s.mesh.position.z, dx/len, dz/len,
+            (8 * h.turretDmg) * sm * boost, {color:0x9fd4ff, speed:450, kb:20, life:0.8, r:1.8});
+        }
+      }
+    }
+    else if(s.kind==='spinner'){
+      const idx = G.summons.filter(x=>x.kind==='spinner'&&x.alive).indexOf(s);
+      const spin = idx===0 ? 2.5 : 3.25;
+      const a = G.time*spin + idx*Math.PI;
+      s.mesh.position.x = h.x + Math.cos(a)*40;
+      s.mesh.position.z = h.z + Math.sin(a)*40;
+      s.mesh.rotation.y += dt*4;
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        if(dist2(e.x,e.z,s.mesh.position.x,s.mesh.position.z) < (e.r+8)*(e.r+8) && e.hitCd<=0){
+          e.hitCd = 0.5;
+          damageEnemy(e, 30*sm, {dirx:Math.cos(a), dirz:Math.sin(a), kb:60, show:true});
+        }
+      }
+    }
+    else if(s.kind==='penguin'){
+      let best=null, bd=1e9;
+      for(const o of G.orbs){
+        if(o.dead) continue;
+        const d2 = dist2(o.x,o.z,s.mesh.position.x,s.mesh.position.z);
+        if(d2<bd){ bd=d2; best=o; }
+      }
+      if(best){
+        const dx=best.x-s.mesh.position.x, dz=best.z-s.mesh.position.z; const len=Math.max(1,Math.sqrt(bd));
+        s.mesh.position.x += dx/len*25*dt;
+        s.mesh.position.z += dz/len*25*dt;
+        s.mesh.rotation.y = Math.atan2(dx,dz);
+        if(bd < 16*16){
+          best.dead = true;
+          G.gold += 1;
+          G.score += 1;
+          addExp(1);
+          AUD.xp();
+          burst(best.x, 8, best.z, 0x9ceb5a, 5, 60, 0.5, 0.3);
+        }
+      }
+      s.slamT -= dt;
+      if(G.hero.penburst && s.slamT<=0){
+        s.slamT = 5;
+        burst(s.mesh.position.x, 8, s.mesh.position.z, 0xdfe8f5, 14, 90, 0.6, 0.4);
+        explodeDamage(s.mesh.position.x, s.mesh.position.z, 70, 50*sm, 0xdfe8f5);
+      }
+    }
+    else if(s.kind==='stinkbug'){
+      let best=null, bd=1e9;
+      for(const e of G.enemies){
+        if(e.dead) continue;
+        const d2 = dist2(e.x,e.z,s.mesh.position.x,s.mesh.position.z);
+        if(d2<bd){ bd=d2; best=e; }
+      }
+      if(best){
+        const dx=best.x-s.mesh.position.x, dz=best.z-s.mesh.position.z; const len=Math.max(1,Math.sqrt(bd));
+        s.mesh.position.x += dx/len*25*dt;
+        s.mesh.position.z += dz/len*25*dt;
+        s.mesh.rotation.y = Math.atan2(dx,dz);
+        if(bd < 20*20){
+          sceneRemove(s.mesh);
+          s.alive = false;
+          burst(best.x, 10, best.z, 0x7ac74a, 12, 90, 0.5, 0.4);
+          addCloud(best.x, best.z);
+          explodeDamage(best.x, best.z, 60, 10*h.mods.poison, 0x7ac74a);
+          for(const e of G.enemies){
+            if(e.dead) continue;
+            if(dist2(e.x,e.z,best.x,best.z) < 60*60){
+              e.poison = { dps: poisonDps(), t: Math.max(e.poison?e.poison.t:0, 2) };
+            }
+          }
+        }
+      }
+    }
+  }
+  G.summons = G.summons.filter(s=>s.alive);
+}
+
+// ---------------- Hero update ----------------
+function updateHero(dt){
+  const h = G.hero;
+  if(h.dead) return;
+
+  // movement
+  let mx=0, mz=0;
+  const k = G.keys;
+  if(k['KeyW']||k['ArrowUp']) mz -= 1;
+  if(k['KeyS']||k['ArrowDown']) mz += 1;
+  if(k['KeyA']||k['ArrowLeft']) mx -= 1;
+  if(k['KeyD']||k['ArrowRight']) mx += 1;
+  // touch joystick
+  if(G.touch && G.touch.move){
+    mx += G.touch.move.dx; mz += G.touch.move.dz;
+  }
+  const mag = Math.hypot(mx,mz);
+  const ml = Math.max(1, mag);
+  const speed = HERO_BASE.speed * h.mods.speed * (h.phaseT>0?1.4:1);
+  h.x += mx/ml * speed * dt;
+  h.z += mz/ml * speed * dt;
+  G.heroMoving = mag>0.1;
+  h.x = clamp(h.x, -(VIEW.visW-4), VIEW.visW-4);
+  h.z = clamp(h.z, -(VIEW.visH-4)+VIEW.walkShift, (VIEW.visH-4)+VIEW.walkShift);
+  h.mesh.position.x = h.x;
+  h.mesh.position.z = h.z;
+
+  // super recharge (real-time, mirrors original supertimer/superchargerate)
+  h.super.chargeT = Math.min(h.super.chargeMax, h.super.chargeT + dt);
+
+  // bob + face
+  h.mesh.position.y = G.heroMoving ? Math.abs(Math.sin(G.time*10))*2 : Math.sin(G.time*3)*0.8;
+  h.mesh.rotation.y = Math.atan2(G.aimDir.x, G.aimDir.z);
+  h.bobT += dt;
+
+  // walk animation: feet
+  const hf = h.mesh.userData.feet;
+  if(hf){
+    if(G.heroMoving){
+      const ph = Math.sin(G.time*15);
+      hf[0].position.y = 2 + Math.max(0, ph)*2;
+      hf[1].position.y = 2 + Math.max(0, -ph)*2;
+    } else {
+      hf[0].position.y = 2; hf[1].position.y = 2;
+    }
+  }
+  // dust trail while moving
+  if(G.heroMoving){
+    h.dustT = (h.dustT||0) + dt;
+    if(h.dustT >= 0.09){
+      h.dustT = 0;
+      burst(h.x - G.aimDir.x*5, 1.5, h.z - G.aimDir.z*5, 0x9a9684, 2, 26, 1.1, 0.4);
+    }
+  }
+
+  // invincibility blink
+  if(h.invince>0){
+    h.invince -= dt;
+    h.mesh.visible = Math.floor(h.invince*12)%2===0;
+    if(h.invince<=0) h.mesh.visible = true;
+  }
+  if(h.phaseT>0) h.phaseT -= dt;
+
+  // aiming
+  aimFromPointer();
+
+  // firing
+  if((G.mouse.down || (G.touch && G.touch.fire)) && !G.aimingDisabled){
+    // BB-NOZIA: holding fire charges the next projectile's size (up to 2.5× over 750ms, orig bouncecharge tween)
+    if(G.gun.id==='bouncecannon') h.bounceCharge = Math.min(2.5, (h.bounceCharge||1) + (dt/0.75)*1.5);
+    tryFire(dt);
+  } else {
+    h.minigunSpin = Math.max(0, (h.minigunSpin||0)-dt*0.2);
+    h.lastFire = Math.min(h.lastFire, G.time);
+    h.bounceCharge = 1;
+  }
+
+  // reload
+  if(h.reloading){
+    h.reloadT += dt;
+    if(h.reloadT >= h.reloadDur) finishReload();
+  } else if(!G.mouse.down && !(G.touch&&G.touch.fire) && G.keys['KeyR']){
+    // handled in keydown
+  }
+
+  // passive timers
+  if(h.regen){ h.regenT = (h.regenT||0)+dt; if(h.regenT>=30){ h.regenT=0; h.hp=Math.min(h.maxHp,h.hp+10); floater('+10',h.x,h.z,'heal'); } }
+  if(h.shieldRegen) h.shield = Math.min(h.maxShield, h.shield + 0.25*dt);
+  if(h.rootedking && !G.heroMoving){ h.hp = Math.min(h.maxHp, h.hp + 0.5*dt); }
+  // backbone: orig fires 3 bone bullets behind the aim (25° arc, speed 250, full bullet
+  // damage — gun totalbasedamage, no stationary/crit/kb) every 2.5s, independent of firing
+  if(h.backbone){
+    h.backboneT = (h.backboneT||0) + dt;
+    if(h.backboneT >= 2.5){
+      h.backboneT -= 2.5;
+      const aimA = Math.atan2(G.aimDir.x, G.aimDir.z);
+      const base = aimA + Math.PI;
+      const dmg = computeBulletDamage(true);
+      for(let i=0;i<3;i++){
+        const a = base + (i/2 - 0.5)*25*Math.PI/180;
+        fireBullet(h.x, h.z, Math.sin(a), Math.cos(a), dmg, {bone:true, color:0xe8e0d0, r:1.8, speed:250, life:6, kb:0, noCrit:true});
+      }
+    }
+  }
+
+  // light
+  h.lightRadius = 74 + h.mods.light + (h.stationLight && !G.heroMoving ? 25 : 0);
+  const lr = h.lightRadius;
+  G.heroLight.position.set(h.x, 26, h.z);
+  G.heroLight.distance = lr + 40;
+  G.charLight.position.set(h.x, 22, h.z);
+  G.heroLight.color.set(G.char.lightColor);
+  G.charLight.color.set(G.char.color);
+
+  // light damage effects
+  for(const e of G.enemies){
+    if(e.dead) continue;
+    if(dist2(e.x,e.z,h.x,h.z) < lr*lr){
+      if(G.hero.burningLight && Math.random()<dt*0.5){
+        e.burn = { dps: burnDps(), t: Math.max(e.burn?e.burn.t:0, 1.5) };
+      }
+    }
+  }
+
+  // magnet radius (original caps pull radius at 100 = its magnetlevel 5)
+  h.magnetRadius = Math.min(100, 50 + h.mods.magnet);
+
+  // regen super? no
+}
+
+function aimFromPointer(){
+  if(G.touch && G.touch.aim){
+    const d = Math.max(0.001, Math.hypot(G.touch.aim.dx, G.touch.aim.dz));
+    G.aimDir.x = G.touch.aim.dx/d; G.aimDir.z = G.touch.aim.dz/d;
+    return;
+  }
+  if(G.mouse.touchMode) return; // last input was touch: keep the tap/joystick aim direction instead of reverting toward the (stale) mouse
+  const r = G.raycaster;
+  r.setFromCamera(new THREE.Vector2(G.mouse.x, G.mouse.y), G.camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
+  r.ray.intersectPlane(plane, G.aimWorld);
+  if(G.aimWorld){
+    const dx = G.aimWorld.x - G.hero.x, dz = G.aimWorld.z - G.hero.z;
+    const len = Math.max(0.001, Math.hypot(dx,dz));
+    G.aimDir.x = dx/len; G.aimDir.z = dz/len;
+  }
+}
+
+// ---------------- Effects / misc helpers ----------------
+function addPenguin(){
+  const m = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(5, 10, 9), stdMat(0x1c1e24));
+  body.scale.set(1,1.35,0.9); body.position.y=6;
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(3.4, 8, 7), stdMat(0xf2f2f2));
+  belly.scale.set(1,1.3,0.85); belly.position.set(0,5.4,2.4);
+  const beak = new THREE.Mesh(new THREE.ConeGeometry(1.1,2.2,5), stdMat(0xffa94d)); beak.rotation.x=Math.PI/2; beak.position.set(0,5.6,5.2);
+  for(const s of [-1,1]){ const e=new THREE.Mesh(new THREE.SphereGeometry(0.9,6,6), new THREE.MeshBasicMaterial({color:0xffffff})); e.position.set(2.1*s,8,3.8); m.add(e); const p=new THREE.Mesh(new THREE.SphereGeometry(0.35,5,5), new THREE.MeshBasicMaterial({color:0x1c1e24})); p.position.set(2.1*s,8,4.3); m.add(p); }
+  m.add(body); m.add(belly); m.add(beak);
+  m.position.set(G.hero.x, 0, G.hero.z);
+  sceneAdd(m);
+  const p = { kind:'penguin', mesh:m, x:0, z:0, slamT:5, alive:true };
+  G.summons.push(p);
+  return p;
+}
+
+// ---------------- Start run ----------------
+function beginRun(){
+  goFullscreen();
+  const sel = G.sel;
+  if(!ownsHero(sel.char)) sel.char='pulse';
+  if(!ownsGun(sel.gun)) sel.gun='rustyp';
+  if(!ownsGem(sel.gem)) sel.gem='green';
+  G.char = CHARACTERS.find(c=>c.id===sel.char);
+  G.gun = GUNS.find(g=>g.id===sel.gun);
+  G.gem = GEMS.find(g=>g.id===sel.gem);
+  G.diff = sel.diff;
+  G.sb = DIFFS[G.diff].sb;
+
+  clearArena();
+  G.enemies=[]; G.bullets=[]; G.ebullets=[]; G.orbs=[]; G.summons=[]; G.effects=[]; G.clouds=[]; G.perks=[];
+  G.time=0; G.score=0; G.gold=0; G.kills=0; G.exp=0; G.level=0;
+  G.mult=1; G.unlockedKings=[]; G.masteryBonus={ Critical: G.gem.id==='crit'?1:0 };
+  G.shake=0; G.simPaused=false; G.aimingDisabled=false; G.lastTickSec = WIN_TIME+1;
+  if(G.heroMesh) sceneRemove(G.heroMesh);
+  const hm = buildHeroMesh();
+  hm.position.set(0, 0, 0);
+  G.heroMesh = hm;
+
+  const h = G.hero = {
+    mesh: hm, x:0, z:0, hp:HERO_BASE.hp, maxHp:HERO_BASE.hp,
+    speed:1, mods:{ dmg:1, fire:1, reload:1, speed:1, crit:G.gun.crit/100, armor:0, dodge:0, kb:1,
+      proj:0, range:0, magnet:0, light:0, poison:1, fire:1, summon:1, stationary:0, stationaryMult:0, maxAmmo:0, invince:1, bulletSpeed:1, spread:0 },
+    // NOTE (balance parity): orig hero Health behavior defaults MaxShieldPoints to 20
+    // (shield starts at 0, only regens with shieldregen) — dodgeking refills to this cap.
+    flatDmg:0, spikeDmg:15, maxShield:20, shield:0, shieldRegen:false, ammo:0, maxAmmo:0,
+    reloading:false, reloadT:0, reloadDur:0, lastFire:-9, minigunSpin:0, invince:0, phaseT:0, invinceFlat:0,
+    dogMult:1, dogSpeed:0, turretDmg:1, turretSpeed:1, turretRateBuff:0, spinners:0, magnetRadius:50, lightRadius:74,
+    stablefocus:false, expMult:1, super:{ uses:G.char.superUses, maxUses:G.char.superUses, chargeT:0, chargeMax:G.char.superCharge }, regen:false,
+    slowBullets:false, slowingLight:false, burningLight:false, explosiveCrits:false,
+    explodeDeath:false, explodeBones:false, xpbuff:false, rager:false, armorKing:false,
+    enragedammo:false, poisonScalesAmmo:false, reloadbomb:false, reloadreckoner:false,
+    knockbackKing:false, ranger:false, rootedfire:false, rootedking:false, lordAmmo:false, stationLight:false,
+    spikeFire:false, bruiser:false, dodgeKing:false, backbone:false, mindpopper:false,
+    stinkbug:false, bulletspikes:false, slowspikes:false, penguin:false, penburst:false,
+    boneDogSpawned:false, backboneT:0, bounceCharge:1,
+    dead:false, fireT:0, poisonMult:1,
+  };
+
+  // character passive
+  // NOTE (balance parity): the original's character SELECT grants only the speed/super
+  // config applied below. Its selection-room "passive" texts (mag +5 Fire DMG, bones
+  // +50% Summon DMG, payne Rage, haze +50% Poison DMG, mo Double Ammo, porter +10%
+  // Dodge) are NOT applied on character select in the original's arena code — a
+  // whole-file scan of code5.js shows the only per-character stat writes are var59/60
+  // (super) and var39 (speed, chars 3/6/8/9); those other effects exist only as HUB
+  // backbling/consumable purchases the clone doesn't have. We match the original's
+  // mechanics and keep its (wrong) display texts, same as the yellow gem.
+  const cid = G.char.id;
+  if(cid==='porter'){ h.mods.speed *= 1.15; }
+  if(cid==='mo'){ h.mods.speed *= 0.85; }
+  if(cid==='blink') h.mods.speed *= 1.15;
+  if(cid==='rooty') h.mods.speed *= 0.7;
+
+  // gun ammo
+  h.maxAmmo = G.gun.ammo;
+  h.ammo = G.gun.ammo;
+  G.gem.apply(G);
+
+  // HUB vending consumables: applied at run start, then consumed (matches the
+  // original, which applies them at arena scene start and resets the flag).
+  for(const vid of SAVE.vending.slice()) applyVending(vid);
+  if(SAVE.vending.length){ SAVE.vending=[]; saveGame(); }
+
+  // gun color
+  hm.userData.gun.traverse(o=>{ if(o.isMesh) o.material = new THREE.MeshStandardMaterial({color:G.gun.color, roughness:0.4, metalness:0.55}); });
+
+  // boss/char lights
+  G.char.lightColor = new THREE.Color(G.char.color);
+
+  initSpawners();
+  ensureSummons();
+  updateHUD(true);
+  setScreen('none');
+  $('#hud').hidden = false;
+  G.state = 'arena';
+  AUD.playTrack(G.sel.music);
+}
+
+// ---------------- Mobile: joysticks, fullscreen, orientation ----------------
+function isCoarse(){ return matchMedia('(pointer:coarse)').matches; }
+
+function goFullscreen(){
+  if(!isCoarse()) return;
+  const de = document.documentElement;
+  try{
+    if(de.requestFullscreen){ const p = de.requestFullscreen(); if(p&&p.catch) p.catch(()=>{}); }
+    else if(de.webkitRequestFullscreen){ de.webkitRequestFullscreen(); }
+  }catch(e){}
+  try{
+    if(screen.orientation && screen.orientation.lock){
+      const p = screen.orientation.lock('landscape');
+      if(p&&p.catch) p.catch(()=>{});
+    }
+  }catch(e){}
+  checkOrientation();
+}
+
+function checkOrientation(){
+  const ov = $('#rotateOv');
+  if(!ov) return;
+  ov.hidden = !(isCoarse() && innerHeight > innerWidth);
+}
+
+const JOY_R = 44;                       // joystick knob travel radius, px
+function joyBase(side){ return document.getElementById(side==='L'?'joyL':'joyR'); }
+function touchInJoy(side, x, y){
+  const b = joyBase(side); if(!b) return false;
+  const r = b.getBoundingClientRect();
+  if(!r.width || !r.height) return false;
+  const cx = r.left + r.width/2, cy = r.top + r.height/2;
+  return Math.hypot(x-cx, y-cy) <= r.width/2;
+}
+function showJoy(side){
+  const b = joyBase(side); if(!b) return;
+  b.classList.add('dragging');
+}
+function dragJoy(side, ox, oy){
+  const b = joyBase(side); if(!b) return;
+  const d = Math.hypot(ox,oy); const sc = d>JOY_R ? JOY_R/d : 1;
+  const k = b.querySelector('.jknob'); if(k) k.style.transform = 'translate('+(ox*sc)+'px,'+(oy*sc)+'px)';
+}
+function resetJoy(side){
+  const b = joyBase(side); if(!b) return;
+  b.classList.remove('dragging');
+  b.style.left=''; b.style.top='';
+  const k = b.querySelector('.jknob'); if(k) k.style.transform='';
+}
+function aimTowardScreen(sx, sy){
+  if(!G.hero) return null;
+  G.raycaster.setFromCamera(new THREE.Vector2((sx/innerWidth)*2-1, -(sy/innerHeight)*2+1), G.camera);
+  const plane = new THREE.Plane(new THREE.Vector3(0,1,0), 0);
+  G.raycaster.ray.intersectPlane(plane, G.aimWorld);
+  const w = G.aimWorld;
+  if(!w) return null;
+  const dx = w.x - G.hero.x, dz = w.z - G.hero.z;
+  const len = Math.max(0.001, Math.hypot(dx,dz));
+  const dir = { x:dx/len, z:dz/len };
+  G.aimDir.x = dir.x; G.aimDir.z = dir.z;
+  return dir;
+}
+
+// ---------------- Input ----------------
+function initInput(){
+  $('#muteBtn').hidden = !$('#menuScreen').hidden;
+  $('#muteBtn').addEventListener('click', ()=>{ AUD.setMuted(!AUD.muted); $('#muteBtn').textContent = AUD.muted ? '🔇' : '🔊'; });
+  const ov = $('#rotateOv');
+  if(ov) ov.addEventListener('click', ()=>goFullscreen());
+  window.addEventListener('resize', checkOrientation);
+  window.addEventListener('orientationchange', ()=>setTimeout(checkOrientation, 250));
+  checkOrientation();
+  if(isCoarse()){
+    const sw = $('#subWrap'), hb = $('#howBtn'), hw = $('#howWrap');
+    if(sw && hb) sw.appendChild(hb);
+    if(hw && hw.children.length===0) hw.remove();
+  }
+  const gesture = ()=>{ AUD.init(); AUD.resume(); };
+  window.addEventListener('pointerdown', gesture, {once:true});
+  window.addEventListener('keydown', gesture, {once:true});
+  window.addEventListener('keydown', e=>{
+    G.keys[e.code] = true;
+    if(e.code==='KeyR') startReload();
+    if(e.code==='KeyE') castSuper();
+    if(e.code==='KeyD' && G.state==='menu') $('#debugBtn').hidden = false;
+    if(e.code==='Escape' || e.code==='KeyP'){
+      if(G.state==='arena'){ G.state='paused'; G.simPaused=true; $('#pauseScreen').hidden=false; }
+      else if(G.state==='paused'){ G.state='arena'; G.simPaused=false; $('#pauseScreen').hidden=true; }
+    }
+    if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', e=>{ G.keys[e.code]=false; });
+
+  const canvas = G.renderer.domElement;
+  canvas.addEventListener('contextmenu', e=>e.preventDefault());
+  window.addEventListener('mousemove', e=>{
+    G.mouse.x = (e.clientX/innerWidth)*2-1;
+    G.mouse.y = -(e.clientY/innerHeight)*2+1;
+    G.mouse.touchMode = false;
+  });
+  window.addEventListener('mousedown', e=>{
+    if(e.button===0){
+      G.mouse.down = true;
+      if(G.state==='arena' && !G.simPaused && G.hero && G.hero.ammo<=0 && !G.hero.reloading){ AUD.empty(); startReload(); }
+    }
+  });
+  window.addEventListener('mouseup', e=>{ if(e.button===0) G.mouse.down=false; });
+
+  // touch — left half = move joystick, right half = aim + hold to fire; a quick tap
+  // anywhere on the screen fires one shot toward the tapped point
+  canvas.addEventListener('touchstart', e=>{
+    e.preventDefault();
+    G.mouse.touchMode = true;
+    for(const t of e.changedTouches){
+      G.touch = G.touch||{};
+      const tap = { id:t.identifier, x:t.clientX, y:t.clientY, t:performance.now(), moved:false };
+      if(touchInJoy('L', t.clientX, t.clientY)){
+        G.touch.moveId = t.identifier;
+        const _b = joyBase('L').getBoundingClientRect();
+        G.touch.moveBase = {x:_b.left + _b.width/2, y:_b.top + _b.height/2};
+        G.touch.move = {dx:0, dz:0};
+        showJoy('L');
+      } else if(touchInJoy('R', t.clientX, t.clientY)){
+        G.touch.aimId = t.identifier;
+        G.touch.aimStart = {x:t.clientX, y:t.clientY};
+        const d = aimTowardScreen(t.clientX, t.clientY) || {x:0, z:0.001};
+        G.touch.aim = {dx:d.x, dz:d.z};
+        G.touch.fire = true;
+        G.touch.tap = tap;
+        showJoy('R');
+      } else {
+        aimTowardScreen(t.clientX, t.clientY);
+        G.touch.tap = tap;
+      }
+    }
+  }, {passive:false});
+  canvas.addEventListener('touchmove', e=>{
+    e.preventDefault();
+    for(const t of e.changedTouches){
+      if(G.touch && G.touch.tap && t.identifier===G.touch.tap.id &&
+         Math.hypot(t.clientX-G.touch.tap.x, t.clientY-G.touch.tap.y) > 16) G.touch.tap.moved = true;
+      if(G.touch && G.touch.move && t.identifier===G.touch.moveId){
+        const _ox = t.clientX-G.touch.moveBase.x, _oy = t.clientY-G.touch.moveBase.y;
+        G.touch.move.dx = clamp(_ox/JOY_R,-1,1);
+        G.touch.move.dz = clamp(_oy/JOY_R,-1,1);
+        dragJoy('L', _ox, _oy);
+      } else if(G.touch && G.touch.aim && t.identifier===G.touch.aimId){
+        const dx=(t.clientX-G.touch.aimStart.x)/innerWidth*3;
+        const dy=(t.clientY-G.touch.aimStart.y)/innerHeight*3;
+        const d = Math.max(0.18, Math.hypot(dx,dy));
+        G.touch.aim.dx = dx/d; G.touch.aim.dz = dy/d;
+        dragJoy('R', t.clientX-G.touch.aimStart.x, t.clientY-G.touch.aimStart.y);
+      }
+    }
+  }, {passive:false});
+  canvas.addEventListener('touchend', e=>{
+    for(const t of e.changedTouches){
+      const tap = G.touch && G.touch.tap;
+      if(tap && t.identifier===tap.id){
+        G.touch.tap = null;
+        if(!tap.moved && (performance.now()-tap.t) < 300){
+          const d = aimTowardScreen(tap.x, tap.y);
+          const h = G.hero;
+          if(d && h && !h.dead){
+            if(tap.id === G.touch.aimId){
+              const interval = G.gun.fire * h.mods.fire;
+              if(G.time - h.lastFire >= interval){ h.lastFire = -9; tryFire(0); }
+            } else {
+              h.lastFire = -9; tryFire(0);
+            }
+          }
+        }
+      }
+      if(G.touch && t.identifier===G.touch.moveId){ G.touch.move=null; G.touch.moveId=null; resetJoy('L'); }
+      if(G.touch && t.identifier===G.touch.aimId){ G.touch.aim=null; G.touch.aimId=null; G.touch.fire=false; resetJoy('R'); }
+    }
+  });
+  canvas.addEventListener('touchcancel', e=>{
+    for(const t of e.changedTouches){
+      const tap = G.touch && G.touch.tap;
+      if(tap && t.identifier===tap.id) G.touch.tap = null;
+      if(G.touch && t.identifier===G.touch.moveId){ G.touch.move=null; G.touch.moveId=null; resetJoy('L'); }
+      if(G.touch && t.identifier===G.touch.aimId){ G.touch.aim=null; G.touch.aimId=null; G.touch.fire=false; resetJoy('R'); }
+    }
+  });
+}
+
+// ---------------- HUD ----------------
+function updateHUD(force=false){
+  if(!G.hero || G.state==='menu') return;
+  const h = G.hero;
+  const hpRatio = clamp(h.hp/h.maxHp,0,1);
+  $('#hpBar').style.width = (hpRatio*100)+'%';
+  $('#hpText').textContent = Math.ceil(h.hp)+'/'+h.maxHp;
+  $('#shieldBar').style.width = (h.maxShield? clamp(h.shield/h.maxShield,0,1)*100 : 0)+'%';
+  $('#statusLabel').innerHTML = h.invince>0 ? 'INVINCIBLE' : (h.super.uses>0?'&nbsp;':'&nbsp;');
+  $('#timeText').textContent = Math.ceil(G.time);
+  const thresh = EXPM(G.level);
+  $('#lvlText').textContent = G.level+1;
+  $('#expText').textContent = Math.floor(G.exp)+'/'+thresh;
+  $('#xpBar').style.width = clamp(G.exp/thresh,0,1)*100+'%';
+  $('#scoreText').textContent = Math.floor(G.score);
+  $('#goldText').textContent = Math.floor(G.gold/10);
+  $('#killsText').textContent = G.kills;
+  $('#ammoText').textContent = h.ammo;
+  $('#gunName').textContent = G.gun ? G.gun.name : '';
+  $('#ammoText').style.color = h.ammo===0 ? 'var(--red)' : '';
+  $('#reloadBar').style.width = h.reloading ? (h.reloadT/h.reloadDur*100)+'%' : '0%';
+  $('#reloadHint').textContent = h.reloading ? 'RELOADING...' : (h.ammo< h.maxAmmo ? 'CLICK / R TO RELOAD' : '');
+  $('#superMeter').style.height = (h.super.chargeT/h.super.chargeMax*100)+'%';
+  $('#touchSuperMeter').style.height = (h.super.chargeT/h.super.chargeMax*100)+'%';
+  $('#superUses').textContent = h.super.uses;
+  $('#superSub').textContent = h.super.uses>0 ? 'READY IN '+Math.max(1,Math.ceil(h.super.chargeMax - h.super.chargeT))+'s' : 'NO CHARGES';
+  const superReady = h.super.uses>0 && h.super.chargeT>=h.super.chargeMax;
+  $('#superBtn').style.borderColor = superReady ? 'var(--gold)' : 'var(--line)';
+  $('#superBtn').style.color = superReady ? 'var(--gold)' : 'var(--dim)';
+  $('#touchSuperBtn').style.borderColor = superReady ? 'var(--gold)' : 'var(--line)';
+  const tsb = $('#touchSuperBtn').querySelector('.lbl');
+  if(tsb) tsb.textContent = superReady ? 'SUPER!' : 'SUPER';
+  $('#tAmmoText').textContent = h.ammo;
+  $('#tAmmoText').style.color = h.ammo===0 ? 'var(--red)' : '';
+  $('#tGunName').textContent = G.gun ? G.gun.name : '';
+  $('#touchReloadBar').style.width = h.reloading ? (h.reloadT/h.reloadDur*100)+'%' : '0%';
+}
+
+function refreshPerkPanel(){
+  const el = $('#perkList');
+  el.innerHTML = '';
+  for(const pid of G.perks){
+    const p = PERKS.find(x=>x.id===pid);
+    if(!p) continue;
+    const row = document.createElement('div');
+    row.className = 'perkRow';
+    const ic = PERK_ICONS[p.id];
+    row.innerHTML = (ic? '<span class="piconSm" style="background-image:url('+ICON_URL+');background-position:-'+(ic[0]*32)+'px -'+(ic[1]*32)+'px"></span>':'') + '<b>'+p.name+'</b>' + (p.king? ' <span class="m">👑 KING</span>' : (p.mastery? ' <span class="m">['+p.mastery+']</span>':'')) + '<br><span style="color:#8fa3b8">'+p.desc+'</span>';
+    el.appendChild(row);
+  }
+  const m = masteryPoints();
+  const mr = MASTERIES.filter(t=>m[t]>0).map(t=>t+' '+m[t]).join(' · ');
+  $('#masteryRow').textContent = mr ? 'Mastery: '+mr : '';
+}
+
+$('#superBtn').addEventListener('click', ()=>castSuper());
+$('#touchSuperBtn').addEventListener('pointerdown', e=>{ e.preventDefault(); castSuper(); });
+
+// ---------------- Choice UI ----------------
+let choiceOnPick = null;
+function showChoice(heading, sub, cards, isLevelup){
+  G.choiceCards = cards;
+  $('#stageHead').textContent = heading;
+  $('#stageSub').textContent = sub;
+  const ctn = $('#selectCards');
+  ctn.innerHTML = '';
+  for(const c of cards){
+    const el = document.createElement('div');
+    el.className = 'card '+(c.cls||'');
+    el.style.borderColor = c.color||'var(--line)';
+    const ic = c.icon;
+    const chip = ic
+      ? '<div class="chip" style="background:'+(c.color||'#333')+'"><i class="picon" style="background-image:url('+ICON_URL+');background-position:-'+(ic[0]*32)+'px -'+(ic[1]*32)+'px"></i></div>'
+      : '<div class="chip" style="background:'+(c.color||'#333')+'">'+(c.iconGlyph||'★')+'</div>';
+    el.innerHTML = chip +
+      '<div class="cname">'+c.title+'</div>'+
+      '<div class="cdesc">'+(c.subtitle||'')+'</div>'+
+      (c.meta? '<div class="stat">'+c.meta+'</div>':'');
+    el.onclick = ()=>{ if(el.classList.contains('locked')) return; if(c.onPick) c.onPick(); };
+    el.classList.add('locked');
+    setTimeout(()=>el.classList.remove('locked'), 1200);
+    ctn.appendChild(el);
+  }
+  const masteryPanel = $('#masteryPanel');
+  if(isLevelup){
+    renderMasteryPanel();
+    masteryPanel.hidden = false;
+  } else {
+    masteryPanel.hidden = true;
+  }
+  $('#selBackBtn').hidden = true;
+  $('#selNextBtn').hidden = true;
+  $('#selectScreen').hidden = false;
+}
+
+function renderMasteryPanel(){
+  const m = masteryPoints();
+  const el = $('#masteryList');
+  el.innerHTML = MASTERIES.map(c=>
+    '<div class="masteryRow'+(m[c]>=3?' king':'')+'"><span>'+c+'</span><b>'+m[c]+'</b></div>').join('');
+  $('#masteryHint').innerHTML = '3 POINTS IN A TRACK<br>UNLOCKS ITS KING PERK';
+}
+function hideChoice(){
+  $('#selectScreen').hidden = true;
+}
+
+// ---------------- Screens ----------------
+function setScreen(name){
+  $('#muteBtn').hidden = name!=='menu';
+  for(const id of ['menuScreen','selectScreen','customScreen','pauseScreen','endScreen','hubScreen','debugScreen']){
+    $('#'+id).hidden = true;
+  }
+  if(name==='menu'){ $('#menuScreen').hidden = false; updateMenuCredits(); }
+  if(name==='select') $('#selectScreen').hidden = false;
+  if(name==='custom') $('#customScreen').hidden = false;
+  if(name==='pause') $('#pauseScreen').hidden = false;
+  if(name==='end') $('#endScreen').hidden = false;
+  if(name==='hub') $('#hubScreen').hidden = false;
+  if(name==='debug') $('#debugScreen').hidden = false;
+}
+
+function hexColor(n){ return '#'+n.toString(16).padStart(6,'0'); }
+
+function renderGroup(ctn, items, key, onpick){
+  ctn.innerHTML = '';
+  for(const it of items){
+    const el = document.createElement('div');
+    el.className = 'card '+(it.cls||'')+(it.locked?' locked':'');
+    const col = hexColor(it.color);
+    const sel = G.sel[key]===it.id;
+    el.style.borderColor = sel ? col : 'var(--line)';
+    el.style.outline = sel ? '2px solid '+col : 'none';
+    el.innerHTML =
+      '<div class="chip" style="background:'+col+'">'+(it.icon||'?')+'</div>'+
+      '<div class="cname">'+it.title+'</div>'+
+      '<div class="cdesc">'+(it.subtitle||'')+'</div>'+
+      (it.locked ? '<div class="stat" style="color:var(--gold)">🔒 '+(it.lockText||'LOCKED')+'</div>'
+        : (it.meta? '<div class="stat">'+it.meta+'</div>':''))+
+      (sel? '<div class="picked">✓</div>':'');
+    if(!it.locked) el.onclick = ()=>{ G.sel[key]=it.id; renderCustomize(); AUD.ui(); if(onpick) onpick(it); };
+    ctn.appendChild(el);
+  }
+}
+
+function renderCustomize(){
+  renderGroup($('#ccChar'), CHARACTERS.map(c=>({
+    id:c.id, color:c.color, icon:'🐰', title:c.name, subtitle:c.passiveDesc,
+    meta:c.superName+': '+c.superDesc,
+    locked:!ownsHero(c.id), lockText:'BUY IN HUB · '+HERO_PRICE+' CR',
+  })), 'char');
+  renderGroup($('#ccGun'), GUNS.map(g=>{
+    const rangeLabel = g.special.includes('long')?'LONG':g.special.includes('mid')?'MID':'SHORT';
+    return {
+      id:g.id, color:g.color, icon:'🔫', title:g.name, cls:'gunCard', subtitle:g.desc,
+      meta:'DMG <b>'+g.dmg+'</b> · AMMO <b>'+g.ammo+'</b> · RATE <b>'+g.fire+'</b> · RANGE <b>'+rangeLabel+'</b> · CRIT <b>'+g.crit+'%</b>',
+      locked:!ownsGun(g.id), lockText:'BUY IN HUB · '+GUN_PRICE+' CR',
+    };
+  }), 'gun');
+  renderGroup($('#ccGem'), GEMS.map(g=>({
+    id:g.id, color:g.color, icon:'💎', title:g.name, subtitle:g.desc,
+    locked:!ownsGem(g.id), lockText:'BUY IN HUB · '+GEM_PRICE+' CR',
+  })), 'gem');
+  renderGroup($('#ccMusic'), MUSIC.map(m=>({
+    id:m.id, color:m.url?0x4fc3ff:0x75869a, icon:'♪', title:m.name, subtitle:m.desc,
+  })), 'music', it=>{ AUD.init(); AUD.resume(); AUD.playTrack(it.id); });
+}
+
+function showCustomize(){
+  setScreen('custom');
+  renderCustomize();
+}
+
+// ---------------- Menu ----------------
+function initMenus(){
+  $('#startBtn').addEventListener('click', ()=>{
+    AUD.init(); AUD.resume();
+    beginRun();
+  });
+  $('#customBtn').addEventListener('click', ()=>{
+    AUD.init(); AUD.resume();
+    showCustomize();
+  });
+  $('#customBackBtn').addEventListener('click', ()=> setScreen('menu'));
+  $('#customGoBtn').addEventListener('click', ()=>{
+    AUD.init(); AUD.resume();
+    beginRun();
+  });
+  $('#hubBtn').addEventListener('click', showHub);
+  $('#debugBtn').addEventListener('click', ()=>{
+    AUD.init(); AUD.resume();
+    setScreen('debug');
+    renderDebug();
+  });
+  $('#debugBackBtn').addEventListener('click', ()=>{ setScreen('menu'); });
+  $('#hubBackBtn').addEventListener('click', ()=>{ setScreen('menu'); });
+  document.querySelectorAll('#hubTabs .segBtn').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      hubTab = b.dataset.t;
+      renderHub();
+      AUD.ui();
+    });
+  });
+  document.querySelectorAll('#diffSeg .segBtn').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      G.sel.diff = b.dataset.d;
+      document.querySelectorAll('#diffSeg .segBtn').forEach(x=>x.classList.toggle('active', x===b));
+      AUD.ui();
+    });
+  });
+  $('#howBtn').addEventListener('click', ()=>{
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:60;background:rgba(6,9,13,.94);display:flex;align-items:center;justify-content:center;';
+    ov.innerHTML = '<div style="max-width:520px;background:#141a24;border:1px solid #26313f;border-radius:12px;padding:24px 30px;line-height:1.9;font-size:13px;color:#e8eef5">'+
+      '<div style="font-size:20px;font-weight:800;letter-spacing:2px;margin-bottom:12px;color:#6fd9ff">HOW TO PLAY</div>'+
+      '<b>WASD</b> — move<br><b>Mouse</b> — aim<br><b>Hold LMB</b> — fire<br><b>Click / R</b> — reload<br><b>E</b> — super<br><b>Esc</b> — pause<br><br>'+
+      'Survive <b>500 seconds</b>. Kill enemies for XP orbs. Leveling up pauses the fight and offers 1-of-3 upgrades plus a <b>score-multiplier die</b>. '+
+      'Mastery perks level a track — <b>3 points in a track unlock its king perk</b>. '+
+      'Pick a difficulty on this screen, or tap <b>CUSTOMIZE CHARACTER</b> to pick a bunny, weapon and gem. '+
+      'Watch out for the big ones — bosses drop in on a schedule.<br><br>'+
+      '<button class="btn" id="howClose" style="width:100%">GOT IT</button></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#howClose').onclick = ()=>ov.remove();
+  });
+  $('#resumeBtn').addEventListener('click', ()=>{
+    if(G.state==='paused'){ G.state='arena'; G.simPaused=false; $('#pauseScreen').hidden=true; AUD.playTrack(G.sel.music); }
+  });
+  $('#quitBtn').addEventListener('click', ()=>{
+    G.state='menu'; G.simPaused=false;
+    AUD.stopBGM();
+    setScreen('menu'); $('#hud').hidden=true;
+  });
+  $('#retryBtn').addEventListener('click', ()=>{
+    if(G.endResult && G.endResult.win && G.endResult.nextDiff) G.sel.diff = G.endResult.nextDiff;
+    beginRun();
+  });
+  $('#menuBtn').addEventListener('click', ()=>{
+    G.state='menu';
+    AUD.stopBGM();
+    setScreen('menu'); $('#hud').hidden=true;
+  });
+}
+
+function gameOver(){
+  G.state='end';
+  G.simPaused = true;
+  AUD.stopBGM();
+  AUD.lose();
+  G.endResult = { win:false };
+  $('#endTitle').textContent = 'YOU DIED';
+  $('#endTitle').className = 'endTitle lose';
+  $('#endSub').textContent = 'The lab claims another bunny.';
+  showEndScreen();
+}
+
+function winGame(){
+  G.state='end';
+  G.simPaused = true;
+  AUD.stopBGM();
+  AUD.win();
+  G.score += 500 * G.mult; G.gold += 1200;
+  const diffs = ['Normal','Hard','Insane'];
+  const ni = diffs.indexOf(G.diff);
+  const nextDiff = (ni>=0 && ni<diffs.length-1) ? diffs[ni+1] : null;
+  G.endResult = { win:true, nextDiff };
+  $('#endTitle').textContent = 'YOU SURVIVED!';
+  $('#endTitle').className = 'endTitle win';
+  $('#endSub').textContent = nextDiff ? 'You survived the night. Ready for '+DIFFS[nextDiff].label+'?' : 'You survived the night. The lab is yours.';
+  showEndScreen();
+}
+
+function showEndScreen(){
+  bankRunGold();
+  $('#endScore').textContent = Math.floor(G.score);
+  $('#endGold').textContent = Math.floor(G.gold/10);
+  $('#endKills').textContent = G.kills;
+  $('#endTime').textContent = Math.floor(G.time);
+  $('#endLevel').textContent = G.level+1;
+  const harder = G.endResult && G.endResult.win && G.endResult.nextDiff;
+  $('#retryBtn').textContent = harder ? 'MAKE IT HARDER' : 'TRY AGAIN';
+  setScreen('end');
+}
+
+// ---------------- Main loop ----------------
+function sceneAdd(o){ G.scene.add(o); }
+function sceneRemove(o){ G.scene.remove(o); o.traverse && o.traverse(x=>{ if(x.isMesh || x.isSprite || x.isPoints){ x.geometry && x.geometry.dispose && x.geometry.dispose(); if(x.material && x.material.map && x.material.map!==G.radialTex){} } }); }
+
+let lastFrame = 0;
+
+let vigEl = null;
+const _vigV = new THREE.Vector3();
+function updateVig(){
+  if(!vigEl) vigEl = document.querySelector('#vig');
+  if(!vigEl) return;
+  const m = G.heroMesh;
+  if(!m){ vigEl.style.background = ''; return; }
+  _vigV.copy(m.position).project(G.camera);
+  const w = innerWidth, h = innerHeight;
+  const px = (_vigV.x+1)*0.5*w;
+  const py = (1-_vigV.y)*0.5*h;
+  const R = Math.max(w,h)*0.55;
+  vigEl.style.background = 'radial-gradient('+R+'px '+R+'px at '+px.toFixed(0)+'px '+py.toFixed(0)+'px, rgba(3,5,9,0) 0%, rgba(3,5,9,.05) 16%, rgba(3,5,9,.55) 38%, rgba(2,4,8,.93) 70%, rgba(2,4,8,.97) 100%)';
+}
+function loop(ts){
+  requestAnimationFrame(loop);
+  const dt = Math.min(0.05, G.clock.getDelta());
+  lastFrame = ts;
+
+  if(G.state==='arena' && !G.simPaused){
+    G.time += dt;
+    G.score += dt * G.mult;
+    updateHero(dt);    updateSpawning(dt);
+    updateEnemies(dt);
+    updateBullets(dt);
+    updateEnemyBullets(dt);
+    updateOrbs(dt);
+    updateSummons(dt);
+    updatePerkActives(dt);
+    updateClouds(dt);
+    updateEffects(dt);
+    updateParticles(dt);
+    if(G.time >= WIN_TIME && G.state==='arena') winGame();
+    const remain = WIN_TIME - G.time;
+    if(remain <= 30 && remain > 0){
+      const sec = Math.ceil(remain);
+      if(sec !== G.lastTickSec){ G.lastTickSec = sec; AUD.tick(sec); }
+    }
+  } else if(G.state==='end'){
+    updateParticles(dt);
+  }
+
+  // fixed camera: the whole arena is always on screen, only screen shake moves it
+  G.shake *= Math.exp(-7*dt);
+  const sx = (Math.random()-0.5)*2*G.shake*10;
+  const sz = (Math.random()-0.5)*2*G.shake*10;
+  G.camera.position.set(sx, CAM_OFF.y, CAM_OFF.z+sz);
+  G.camera.lookAt(0, 0, 0);
+
+  G.renderer.render(G.scene, G.camera);
+  updateVig();
+  updateHUD();
+}
+
+function updateClouds(dt){
+  for(const c of G.clouds){
+    c.t += dt;
+    const k = c.t/c.life;
+    c.mesh.material.opacity = 0.55*(1-k);
+    c.mesh.scale.setScalar(1 + k*0.5);
+    if(c.t>=c.life){ sceneRemove(c.mesh); c.dead=true; }
+    for(const e of G.enemies){
+      if(e.dead) continue;
+      if(dist2(e.x,e.z,c.x,c.z) < 55*55){
+        e.poison = { dps: 10*G.hero.mods.poison, t: 1 };
+      }
+    }
+  }
+  G.clouds = G.clouds.filter(c=>!c.dead);
+}
+
+// ---------------- Music tracks ----------------
+// 5 dark/intense electronic tracks generated with perchance's generate_music (dubstep battle, brooding menu,
+// neurofunk boss, dark-orchestral victory, gritty synthwave). Rebuild recipe: regenerate similar moods,
+// upload the mp3s, swap the URLs below.
+const MUSIC = [
+  { id:'d2', name:'SHADOW PROLOGUE', url:'https://user.uploads.dev/file/ffc5a5ad8ed0eacb12bbce26dea90584.mp3', desc:'Brooding electronic pulse, 110 BPM' },
+  { id:'d3', name:'BOSS RAMPAGE',  url:'https://user.uploads.dev/file/5534e73dfe78dea3de7f2917b694dea0.mp3', desc:'Neurofunk DnB assault, 175 BPM' },
+  { id:'d4', name:'DAWN OF CHAOS', url:'https://user.uploads.dev/file/bcf7bd0cea673c9639540116e47a2108.mp3', desc:'Dark orchestral-electronic anthem' },
+  { id:'d5', name:'NEON SAVAGE',   url:'https://user.uploads.dev/file/4b979aa3f75841c12c7d88dbabee213a.mp3', desc:'Gritty dark synthwave, 130 BPM' },
+];
+
+// ---------------- HUB shop / persistence ----------------
+// Ported from the original Bullet Bunny's HUB. The original banks arena gold into a
+// persistent "Credits" currency (GDevelop storage file "tinyalch"/"gold", game var 1)
+// spent in its HUB. Its HUB backbling lockers (game var 5, charunlock "bone"/"lightbag"/
+// etc. keys) are DEAD content — the selection room never reads those keys — so we port
+// only the WORKING purchases: gems (gemunlock keys, 1000 each), heroes (charunlock,
+// 2500 each), guns (gununlock, 1500 each) and the vending-machine "cursed" consumables
+// (500-750, applied at the start of the next arena run, then consumed).
+const SAVE_KEY = 'bb_hub_save_v1';
+const HERO_PRICE = 2500, GUN_PRICE = 1500, GEM_PRICE = 1000;
+// Guns that come free from the start (the original gives all 16 away; rustyp is the clone's
+// starter, and these 5 are the remaining original arsenal ported as free unlocks).
+const FREE_GUNS = new Set(['rustyp','zneeke','zapper','bouncecannon','bonebarrel','salamandro']);
+const HUB_SHOP = {
+  gems: GEMS.filter(g=>g.id!=='green').map(g=>({ id:g.id, cat:'gems', icon:'💎', color:g.color, name:g.name, desc:g.desc, price:GEM_PRICE })),
+  heroes: ['mag','bones','porter','payne','haze','mo'].map(id=>{ const c=CHARACTERS.find(x=>x.id===id); return { id, cat:'heroes', icon:'🐰', color:c.color, name:c.name, desc:c.passiveDesc, price:HERO_PRICE }; }),
+  guns: GUNS.filter(g=>!FREE_GUNS.has(g.id)).map(g=>({ id:g.id, cat:'guns', icon:'🔫', color:g.color, name:g.name, desc:g.desc, price:GUN_PRICE })),
+  vending: [
+    { id:'v1', cat:'vending', icon:'🧪', color:0x8fd4ff, name:'CURSED CRYSTAL', price:500, desc:'+25% DMG Resist · −40% Move Speed' },
+    { id:'v2', cat:'vending', icon:'🐾', color:0xe8e8e0, name:"SUMMONER'S MARK", price:500, desc:'+50% Summon DMG · −25% Gun DMG' },
+    { id:'v3', cat:'vending', icon:'☠️', color:0x6fbf4f, name:'POISONED TOOTH', price:500, desc:'+50% Poison DMG · −10% Gun DMG' },
+    { id:'v4', cat:'vending', icon:'🥤', color:0xc9a86a, name:'BANDOLIER', price:750, desc:'+50% Max Ammo · −15% Reload Speed' },
+    { id:'v5', cat:'vending', icon:'❤️‍🔥', color:0xff5a5a, name:'RAGE PUMP', price:500, desc:'+25% Gun DMG · −25 Max HP' },
+    { id:'v6', cat:'vending', icon:'🫀', color:0xff8f4f, name:'GRIZZLED HEART', price:750, desc:'+50% Gun DMG · −50 Max HP' },
+    { id:'v7', cat:'vending', icon:'⚡', color:0xffd166, name:'OVERCLOCK', price:750, desc:'+3 Super Uses · −25% Super Charge Rate' },
+    { id:'v8', cat:'vending', icon:'💥', color:0xffb0d0, name:'BRUTAL PACT', price:750, desc:'+15% Knockback · +1 KB Mastery · −10% DMG Resist' },
+    { id:'v9', cat:'vending', icon:'🚀', color:0x6aa3ff, name:'HAIR TRIGGER', price:750, desc:'+25% Fire Rate · −25% Reload Speed' },
+    { id:'v10', cat:'vending', icon:'🔥', color:0xff7a3d, name:'MOLTEN ROUNDS', price:750, desc:'+7 Fire DMG · −10% Gun DMG · −10 Max HP' },
+  ],
+};
+function defaultSave(){ return { credits:0, gems:['green'], heroes:['pulse','nikki','blink','rooty'], guns:[...FREE_GUNS], vending:[] }; }
+let SAVE = defaultSave();
+function loadSave(){ try{ const raw=localStorage.getItem(SAVE_KEY); if(raw) SAVE=Object.assign(defaultSave(), JSON.parse(raw)); }catch(e){} for(const g of FREE_GUNS){ if(!SAVE.guns.includes(g)) SAVE.guns.push(g); } }
+function saveGame(){ try{ localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); }catch(e){} }
+const ownsGem = id => SAVE.gems.includes(id);
+const ownsHero = id => SAVE.heroes.includes(id);
+const ownsGun = id => SAVE.guns.includes(id);
+function hubItemOwned(it){ if(it.cat==='gems') return ownsGem(it.id); if(it.cat==='heroes') return ownsHero(it.id); if(it.cat==='guns') return ownsGun(it.id); return SAVE.vending.includes(it.id); }
+function buyHubItem(it){
+  if(hubItemOwned(it) || SAVE.credits<it.price) return false;
+  SAVE.credits -= it.price;
+  if(it.cat==='gems') SAVE.gems.push(it.id);
+  else if(it.cat==='heroes') SAVE.heroes.push(it.id);
+  else if(it.cat==='guns') SAVE.guns.push(it.id);
+  else SAVE.vending.push(it.id);
+  saveGame(); AUD.ui();
+  return true;
+}
+// vending consumables: one-run "cursed" buff+drawback items. The original applies
+// them at arena scene start and resets the flag (code5.js eventsList38), so a purchase
+// takes effect on the NEXT run only.
+function applyVending(id){
+  const h = G.hero;
+  switch(id){
+    case 'v1': h.mods.armor+=0.25; h.mods.speed*=0.6; break;
+    case 'v2': h.mods.summon*=1.5; h.mods.dmg*=0.75; break;
+    case 'v3': h.mods.poison*=1.5; h.mods.dmg*=0.9; break;
+    case 'v4': h.maxAmmo=Math.ceil(h.maxAmmo*1.5); h.ammo=Math.min(h.maxAmmo,h.ammo); h.mods.reload*=1.15; break;
+    case 'v5': h.mods.dmg*=1.25; h.maxHp-=25; break;
+    case 'v6': h.mods.dmg*=1.5; h.maxHp-=50; break;
+    case 'v7': h.super.maxUses+=3; h.super.uses+=3; h.super.chargeMax*=1.25; break;
+    case 'v8': h.mods.kb*=1.15; G.masteryBonus.Knockback=(G.masteryBonus.Knockback||0)+1; h.mods.armor=Math.max(0,h.mods.armor-0.10); break;
+    case 'v9': h.mods.fire*=0.75; h.mods.reload*=1.25; break;
+    case 'v10': h.flatDmg+=7; h.mods.dmg*=0.9; h.maxHp-=10; break;
+  }
+  h.hp = Math.min(h.hp, h.maxHp);
+}
+function bankRunGold(){
+  if(G.gold>0){ SAVE.credits += Math.floor(G.gold/10); saveGame(); }
+}
+function updateMenuCredits(){ const el=$('#menuCredits'); if(el) el.textContent=SAVE.credits; }
+
+let hubTab='gems';
+function showHub(){
+  AUD.init(); AUD.resume();
+  setScreen('hub');
+  renderHub();
+}
+const DEBUG_SOUNDS = [
+  { name:'TICK (last 30s)',   fn:()=>AUD.tick(30) },
+  { name:'TICK (final 5s)',   fn:()=>AUD.tick(3) },
+  { name:'WIN',               fn:()=>AUD.win() },
+  { name:'LOSE',              fn:()=>AUD.lose() },
+  { name:'SHOOT',             fn:()=>AUD.shoot() },
+  { name:'EMPTY',             fn:()=>AUD.empty() },
+  { name:'KILL',              fn:()=>AUD.kill() },
+  { name:'XP',                fn:()=>AUD.xp() },
+  { name:'HURT',              fn:()=>AUD.hurt() },
+  { name:'PERK',              fn:()=>AUD.perk() },
+  { name:'LEVEL UP',          fn:()=>AUD.levelup() },
+  { name:'BOOM',              fn:()=>AUD.boom() },
+  { name:'SUPER',             fn:()=>AUD.super() },
+  { name:'BOSS',              fn:()=>AUD.boss() },
+  { name:'UI',                fn:()=>AUD.ui() },
+];
+function renderDebug(){
+  const ctn=$('#debugCards'); ctn.innerHTML='';
+  for(const s of DEBUG_SOUNDS){
+    const el=document.createElement('div');
+    el.className='card debugCard';
+    el.innerHTML='<div class="cname">🔊 '+s.name+'</div>';
+    el.onclick = ()=>{ AUD.init(); AUD.resume(); s.fn(); AUD.ui(); };
+    ctn.appendChild(el);
+  }
+}
+function hubTabHint(){
+  const hints = {
+    gems: 'Gems are permanent passive boons. The green gem is free; the other 7 cost '+GEM_PRICE+' credits each.',
+    heroes: 'Unlock bunnies permanently for '+HERO_PRICE+' credits each. Their passives are their speed/super config.',
+    guns: 'Unlock weapons permanently for '+GUN_PRICE+' credits each.',
+    vending: 'Cursed vending items — a buff and a drawback. They apply to your NEXT run, then are consumed. Up to 10 can stack.',
+  };
+  $('#hubHint').textContent = hints[hubTab];
+}
+function renderHub(){
+  $('#hubCredits').textContent = SAVE.credits;
+  document.querySelectorAll('#hubTabs .segBtn').forEach(b=>b.classList.toggle('active', b.dataset.t===hubTab));
+  hubTabHint();
+  const ctn=$('#hubCards'); ctn.innerHTML='';
+  for(const it of HUB_SHOP[hubTab]) ctn.appendChild(hubCard(it));
+}
+function hubCard(it){
+  const el=document.createElement('div');
+  el.className='card hubCard';
+  const col=hexColor(it.color);
+  const owned=hubItemOwned(it);
+  const afford=SAVE.credits>=it.price;
+  const badge = it.cat==='vending' ? '<div class="pendingBadge">NEXT RUN</div>' : '<div class="ownedBadge">OWNED ✓</div>';
+  const priceRow = '<div class="price">'+it.price+' CR</div><button class="buyBtn" '+(afford?'':'disabled')+'>BUY</button>';
+  el.innerHTML =
+    '<div class="chip" style="background:'+col+'">'+(it.icon||'?')+'</div>'+
+    '<div class="cname">'+it.name+'</div>'+
+    '<div class="cdesc">'+it.desc+'</div>'+
+    (owned? badge : priceRow);
+  const bb=el.querySelector('.buyBtn');
+  if(bb) bb.onclick=(e)=>{
+    e.stopPropagation();
+    if(buyHubItem(it)){ renderHub(); AUD.ui(); }
+  };
+  return el;
+}
+
+// ---------------- Boot ----------------
+G.sel = { char:'pulse', gun:'rustyp', gem:'green', diff:'Normal', music:'d2' };
+loadSave();
+if(!ownsHero(G.sel.char)) G.sel.char='pulse';
+if(!ownsGun(G.sel.gun)) G.sel.gun='rustyp';
+if(!ownsGem(G.sel.gem)) G.sel.gem='green';
+initScene();
+initInput();
+initMenus();
+setScreen('menu');
+$('#hud').hidden = true;
+window.__BB = G; // debugging hook
+window.__THREE = THREE;
+window.__BBAPI = { beginRun, spawnEnemy, spawnOrb, fireBullet, damageHero, buildHeroMesh, triggerLevelup, drawPerks, masteryPoints, computeBulletDamage, burnDps, poisonDps, updateHero, updatePerkActives, updateEffects, tryFire, ENEMIES, PERKS, GUNS, CHARACTERS, GEMS, DIFFS, AUD, MUSIC, applyStatusTint, SPAWNS, BOSS_SPAWNS, MASTERIES, KING_OF, G, addExp, collectOrb, updateSpawning, updateSummons, updateEnemies, updateBullets, updateEnemyBullets, updateOrbs, killEnemy, takePerk, takeDie, showLevelupChoices, renderMasteryPanel, refreshPerkPanel, winGame, spawnLaserBeam, spawnFallingBeam, bossVolley, boss2Summon, boss3SummonShields, damageEnemy, HUB_SHOP, SAVE, saveGame, buyHubItem, applyVending, showHub, renderHub, ownsGem, ownsHero, ownsGun, bankRunGold };
+
+requestAnimationFrame(loop);
