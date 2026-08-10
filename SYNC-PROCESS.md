@@ -72,13 +72,19 @@ own **GitHub Backup screen** built into its menu (`#ghScreen` in `html.txt`, wir
 `src/main.js`'s `initGithubBackup()`). This runs live, in the browser, as the owning user —
 which sidesteps step 3's manual paste for the **capture → GitHub** half specifically:
 
-- **Backup → GitHub**: one click calls `root.gh.backupGenerator(repo)`, which pulls this
-  generator's *own last-saved* `main.pjs`/`index.html` straight from perchance's API and pushes
-  them to a repo you own, as a single commit. No copy-paste, no capture tool.
-- **Restore ← GitHub**: fetches `main.pjs`/`index.html` from the repo via `root.gh.raw(...)` and
-  offers them as downloads to review. It still does **not** write back into perchance's editor —
-  same `/api/save` limitation as ever (see `perchance-generator-reference`'s
-  `reference/open-threads.md` T-13) — so applying a restore is still steps 2-3 above, manually.
+- **Backup → GitHub**: one click fetches this generator's *own last-saved* Lists/HTML panels
+  straight from perchance's API and pushes them to `<generator-name>/lists.txt` +
+  `<generator-name>/html.txt` in a repo you own, as a single commit. No copy-paste, no capture
+  tool. **Deliberately does not use `root.gh.backupGenerator()`** — that call hardcodes
+  root-level `main.pjs`/`index.html` with no path option, which collides across every generator
+  sharing one repo (confirmed live 2026-08-10: pointing Restore at `Rathji/generators`
+  404'd looking for a root `main.pjs` that was never going to exist in a multi-generator repo).
+  `root.gh.push()`/`.raw()` with slug-prefixed paths are used directly instead.
+- **Restore ← GitHub**: fetches `<generator-name>/lists.txt` + `<generator-name>/html.txt` via
+  `root.gh.raw(...)` and offers them as downloads to review. It still does **not** write back
+  into perchance's editor — same `/api/save` limitation as ever (see
+  `perchance-generator-reference`'s `reference/open-threads.md` T-13) — so applying a restore is
+  still steps 2-3 above, manually.
 
 This only covers the two panels, matching what `backupGenerator()` actually reaches — it says
 nothing about `src/main.js`, which still needs the manual files-panel re-upload in step 3. Don't
