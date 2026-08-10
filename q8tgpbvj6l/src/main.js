@@ -496,7 +496,7 @@ function initScene(){
   G.renderer = renderer;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x04060a);
+  scene.background = new THREE.Color(0x9d00ff);
   G.scene = scene;
 
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 2500);
