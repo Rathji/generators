@@ -186,12 +186,12 @@ This repo currently holds both, on purpose:
 
 | | count |
 |---|---|
-| directories with `lists.txt`/`html.txt` (old) | 42 |
+| directories with `lists.txt`/`html.txt` (old) | 33 (9 template-named ones split to `perchance-templates` on 2026-08-11) |
 | directories with `main.pjs`/`index.html` (new) | 1 (`q8tgpbvj6l`) |
 | directories with `src/` | 1 (`q8tgpbvj6l`) |
 
 `main.pjs`/`index.html` is perchance's own export convention and what `--layout perchance` writes;
-GitHub renders and syntax-highlights it. The 42 old directories are **not being migrated** — that
+GitHub renders and syntax-highlights it. The old directories are **not being migrated** — that
 was decided deliberately on 2026-08-10, and the new naming applies going forward only. A directory
 the fleet runner touches therefore ends up holding **both** pairs, as `q8tgpbvj6l` does (its
 `main.pjs` and `lists.txt` are identical apart from a trailing newline).

@@ -1,7 +1,11 @@
-# rathjis-generators
+# generators
 
-Captured source for Mark's own perchance.org generators (perchance handle `Rathji`), used for
+Captured source for Rathji's own perchance.org generators (perchance handle `Rathji`), used for
 GitHub-backed backup and round-trip testing.
+
+The 9 generators whose name contained "template" were split out to
+[perchance-templates](https://github.com/Rathji/perchance-templates) on 2026-08-11 (history
+preserved). This repo keeps the rest.
 
 **This is not regenerable output.** Some of what is here exists nowhere else —
 `q8tgpbvj6l/src/main.js` in particular is referenced by no manifest and no capture will bring it
@@ -14,7 +18,7 @@ Each `<slug>/` holds the two editor panels plus `meta.json`
 
 | files | directories | meaning |
 |---|---|---|
-| `lists.txt` + `html.txt` | 42 | the original capture naming |
+| `lists.txt` + `html.txt` | 33 | the original capture naming |
 | `main.pjs` + `index.html` | 1 (`q8tgpbvj6l`) | perchance's own export convention, written by `--layout perchance` |
 | `src/<name>` | 1 (`q8tgpbvj6l`) | files a generator's `srcManifest` declares |
 
