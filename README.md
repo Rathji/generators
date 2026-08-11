@@ -18,12 +18,19 @@ Each `<slug>/` holds the two editor panels plus `meta.json`
 
 | files | directories | meaning |
 |---|---|---|
-| `lists.txt` + `html.txt` | 33 | the original capture naming |
+| `lists.txt` + `html.txt` | 32 | the original capture naming |
 | `main.pjs` + `index.html` | 1 (`q8tgpbvj6l`) | perchance's own export convention, written by `--layout perchance` |
 | `src/<name>` | 1 (`q8tgpbvj6l`) | files a generator's `srcManifest` declares |
 
 The old directories are not being migrated; the new naming applies to future captures only, so a
 directory that gets re-captured ends up holding both pairs. See `SYNC-PROCESS.md`.
+
+**`github-data-plugin/` was removed on 2026-08-11** and now lives only in
+`Rathji/perchance-manager` under `plugins/github-data-plugin/`, which is where `SYNC-PROCESS.md`
+has named its home since the split. It is *our source*, not captured third-party data, and keeping
+a second copy here — under the old `lists.txt`/`html.txt` naming, in a different repo — is what
+allowed the two to drift apart unnoticed until a deploy nearly overwrote live content with the
+staler one. Do not re-capture it into this repo. The pre-move bytes remain in commit `1089309`.
 
 `source.html` is skipped on capture (`--no-source`) — it is a near-duplicate perchance page
 wrapper, not generator content.
