@@ -16,6 +16,10 @@ preserved). This repo keeps the rest.
 `q8tgpbvj6l/src/main.js` in particular is referenced by no manifest and no capture will bring it
 back. Treat the repo as a backup of record, not a cache.
 
+Originally captured 2026-08-10. The captures are **snapshots of the day they were taken** — nothing
+re-captures a generator when it changes live, so an old directory reflects that generator as it was,
+not as it is.
+
 ## Layout
 
 Each `<slug>/` holds the two editor panels plus `meta.json`
@@ -24,11 +28,23 @@ Each `<slug>/` holds the two editor panels plus `meta.json`
 | files | directories | meaning |
 |---|---|---|
 | `lists.txt` + `html.txt` | 32 | the original capture naming |
-| `main.pjs` + `index.html` | 1 (`q8tgpbvj6l`) | perchance's own export convention, written by `--layout perchance` |
-| `src/<name>` | 1 (`q8tgpbvj6l`) | files a generator's `srcManifest` declares |
+| `main.pjs` + `index.html` | 15 | perchance's own export convention, written by `--layout perchance` |
+| `src/<name>` | 11 | files a generator's `srcManifest` declares |
+
+46 directories in total; one (`q8tgpbvj6l`) holds both naming pairs, and there they are not two
+copies of the same thing — see below.
 
 The old directories are not being migrated; the new naming applies to future captures only, so a
 directory that gets re-captured ends up holding both pairs. See `SYNC-PROCESS.md`.
+
+**14 of the 15 new-naming directories arrived together on 2026-08-14**, in a catch-up pass that
+captured every owned generator that had no backup anywhere. They are `flux-reification-engine`,
+`card-deck-plugin`, `vng-minesweeper`, `vgn-civilization`, `bgn-dice-generator`, `vgn-arkanoid`,
+`vgn-pong`, `vgn-character-creator`, `bgn-word-search`, `vgn-scorched-earth`,
+`bgn-dnd-source-reference`, `battle-map-forge`, `v7bz82vul1`, and `3d-dice-plugin` — the last of
+which is a **private** generator on perchance, captured in full regardless (its `meta.json` records
+`isPrivate: true`). Six further unbacked generators captured in the same pass carry "template" in
+the name and went to `perchance-templates` instead, per the 2026-08-11 split.
 
 `q8tgpbvj6l` is the slug the plugin test ran on, and it is now a demo/landing page for
 `github-data-plugin` — rewritten into that form on 2026-08-11, replacing a build described further
@@ -63,4 +79,13 @@ node <path-to-perchance-manager>/tools/fleet-backup.mjs --repo <path-to-this-rep
 `SYNC-PROCESS.md` is the full runbook — including why pushing changes *back* into a live
 generator is still a manual step, and a GitHub Backup hazard that once lived here, now fixed.
 
-Originally captured 2026-08-10; all generators were `isPrivate: false` at capture time.
+Of the 46, 45 were `isPrivate: false` at capture time. **The exception is `3d-dice-plugin`**,
+captured 2026-08-14, whose `meta.json` records `isPrivate: true`. Perchance's capture endpoints
+serve a private generator's full record to an unauthenticated request, so being private neither
+hides a generator from a capture nor makes the resulting copy a stub — the full 74 KB `main.pjs`
+came down.
+
+**This repository is public, so that capture publishes the source of a generator its author chose
+to keep private on perchance.** Nothing in the capture path notices the difference; the tool has no
+concept of the destination's visibility. Treat a private slug's presence here as a decision someone
+has to make on purpose, and check `isPrivate` before adding another one.

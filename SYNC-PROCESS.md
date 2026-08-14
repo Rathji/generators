@@ -273,8 +273,9 @@ This repo currently holds both, on purpose:
 | | count |
 |---|---|
 | directories with `lists.txt`/`html.txt` (old) | 32 (9 template-named ones split to `perchance-templates` on 2026-08-11) |
-| directories with `main.pjs`/`index.html` (new) | 1 (`q8tgpbvj6l`) |
-| directories with `src/` | 1 (`q8tgpbvj6l`) |
+| directories with `main.pjs`/`index.html` (new) | 15 (14 of them captured 2026-08-14, plus `q8tgpbvj6l`) |
+| directories with `src/` | 11 |
+| **total directories** | **46** |
 
 `main.pjs`/`index.html` is perchance's own export convention and what `--layout perchance` writes;
 GitHub renders and syntax-highlights it. The old directories are **not being migrated** — that
@@ -286,6 +287,10 @@ old-naming pair and new-naming pair are not two copies of the same content; see 
 `fleet-backup.mjs` requires an explicit slug scope and has no `--all` flag, so nothing spreads the
 duplication repo-wide by accident. Tracked as **T-15** in
 `perchance-manager/docs/open-threads.md`.
+
+**The 2026-08-14 catch-up did not change that balance.** It added 14 directories, all of them new
+and all on the new naming, so no existing directory gained a second pair. The old-naming count is
+still 32 and `q8tgpbvj6l` is still the only directory holding both.
 
 `.gitattributes` here pins LF for `.txt`, `.json`, `.md`, `.js`, **`.pjs`, and `.html`** — the
 last two added 2026-08-10, when git first warned about normalizing the new layout's output.
