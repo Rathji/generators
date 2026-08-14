@@ -1,0 +1,475 @@
+<!--
+  SCORCHED EARTH — VGN EDITION
+  Built on the VGN Platform Template (vgn-platform-template) for the Video
+  Game Network (vgn-video-game-network). A classic 1991 artillery duel,
+  rebuilt by hand: aim with arrows or mouse, set the power, mind the wind,
+  and blow the other tanks off the mountain.
+
+  Everything renders with procedurally generated pixel art and synthesized
+  sound: no images, no audio files, no CDN.
+
+  Code lives in src/ (plain classic scripts loaded in filename order — the
+  order is load-bearing, so keep the numeric prefixes):
+    00-core.js     canvas, game loop, input, shared helpers
+    10-terrain.js  destructible mountain generation + rendering
+    20-entities.js tanks, weapons, projectiles, explosions, fire, particles
+    30-ai.js       opponent aiming solver
+    40-audio.js    WebAudio sound effects
+    50-ui.js       overlays, HUD, setup screen, turn orchestration
+-->
+
+<style>
+  :root {
+    --clr-accent: #e40000;
+    --clr-gold: #fcbc3c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #07070d;
+    overflow: hidden;
+    font-family: 'Courier New', Courier, monospace;
+    color: #fcfcfc;
+  }
+  body { text-align: left; }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #screen {
+    position: relative;
+    height: min(96vh, 64vw);
+    aspect-ratio: 3 / 2;
+    max-width: 96vw;
+    box-shadow: 0 0 0 6px #17171f, 0 0 40px rgba(0,0,0,0.8), inset 0 0 0 2px rgba(255,255,255,0.06);
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  canvas#game {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    background: #5c94fc;
+    touch-action: none;
+    cursor: crosshair;
+  }
+
+  .scanlines {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 2;
+    background: repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0 2px,
+      rgba(0,0,0,0.12) 2px 3px);
+    mix-blend-mode: multiply;
+  }
+
+  /* ── HUD ─────────────────────────────────────────────── */
+  #roster {
+    position: absolute;
+    top: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: center;
+    z-index: 3;
+    max-width: 86%;
+    pointer-events: none;
+  }
+  .roster-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.22);
+    padding: 2px 6px;
+    font-size: 10px;
+    color: #fff;
+    border-radius: 3px;
+  }
+  .roster-chip.dead { opacity: 0.4; }
+  .roster-chip.dead .rname { text-decoration: line-through; }
+  .rdot { width: 8px; height: 8px; flex: none; border: 1px solid rgba(0,0,0,0.6); }
+  .rname { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rhp { width: 34px; height: 5px; background: #111; border-radius: 2px; overflow: hidden; flex: none; }
+  .rbar { display: block; height: 100%; background: #4cde3c; }
+
+  #turnBox {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    z-index: 3;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.22);
+    color: #ffd23a;
+    font-size: 12px;
+    padding: 3px 8px;
+    letter-spacing: 1px;
+  }
+
+  #windBox {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 3;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.22);
+    color: #fff;
+    font-size: 10px;
+    padding: 3px 8px;
+    text-align: center;
+    line-height: 1.4;
+  }
+  #windArrow { color: #9fd8ff; font-size: 18px; line-height: 1; }
+
+  #muteBtn {
+    position: absolute;
+    top: 44px;
+    right: 6px;
+    z-index: 5;
+    background: rgba(0,0,0,0.6);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #fff;
+    font-size: 13px;
+    padding: 2px 7px;
+    cursor: pointer;
+  }
+
+  #cmdBar {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    z-index: 3;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    padding: 5px 6px;
+    background: rgba(0,0,0,0.65);
+    border-top: 2px solid rgba(255,255,255,0.18);
+  }
+  #weapons { display: flex; gap: 4px; flex: 1; flex-wrap: wrap; align-items: center; }
+  .wp {
+    background: #171720;
+    border: 1px solid #333;
+    color: #bbb;
+    font-family: inherit;
+    font-size: 10px;
+    padding: 4px 7px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    line-height: 1.3;
+    text-align: left;
+  }
+  .wp:hover:not(.out) { border-color: #888; color: #fff; }
+  .wp.active { border-color: #ffd23a; color: #ffd23a; box-shadow: 0 0 6px rgba(255,210,58,0.45); }
+  .wp.out { opacity: 0.28; cursor: default; }
+  .wp small { display: block; opacity: 0.75; }
+  #aimBox {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    color: #ffd23a;
+    font-size: 11px;
+    padding: 0 2px;
+    min-width: 118px;
+    text-align: right;
+    line-height: 1.6;
+    white-space: nowrap;
+  }
+  #aimTimer { color: #ff8c8c; font-size: 10px; }
+  #passBtn {
+    background: #33333f;
+    border: 1px solid #666;
+    color: #fff;
+    font-family: inherit;
+    font-size: 11px;
+    padding: 4px 12px;
+    cursor: pointer;
+    border-radius: 3px;
+    align-self: center;
+  }
+  #passBtn:disabled { opacity: 0.3; cursor: default; }
+
+  #banner {
+    position: absolute;
+    top: 30%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 4;
+    pointer-events: none;
+    font-size: clamp(16px, 3.4vw, 26px);
+    letter-spacing: 2px;
+    color: #ffd23a;
+    text-shadow: 2px 2px 0 #000;
+    text-align: center;
+    opacity: 0;
+    max-width: 94%;
+  }
+  #banner.show { animation: bannerAnim 1.7s ease forwards; }
+  #banner.dest { color: #ff7a5c; }
+  #banner.turn { color: #9fd8ff; }
+  @keyframes bannerAnim {
+    0%   { opacity: 0; transform: translate(-50%, -30%) scale(0.9); }
+    12%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    78%  { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -50%); }
+  }
+
+  .side-link {
+    position: absolute;
+    bottom: 52px;
+    z-index: 5;
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: rgba(255,255,255,0.5);
+    text-decoration: none;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid rgba(255,255,255,0.15);
+    padding: 2px 8px;
+    border-radius: 3px;
+  }
+  .side-link:hover { color: #fff; }
+  #hubBtn { left: 6px; }
+  footer.credit { right: 6px; pointer-events: none; }
+
+  /* ── OVERLAYS ───────────────────────────────────────── */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: rgba(5, 6, 12, 0.9);
+    padding: 18px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: clamp(22px, 5vw, 40px);
+    margin: 0 0 4px;
+    color: var(--clr-accent);
+    text-shadow: 3px 3px 0 #000, 0 0 18px rgba(228,0,0,0.35);
+    letter-spacing: 2px;
+  }
+  .overlay h2 {
+    font-size: clamp(12px, 2.6vw, 17px);
+    margin: 0 0 16px;
+    color: var(--clr-gold);
+    letter-spacing: 4px;
+  }
+  .overlay p {
+    max-width: 440px;
+    line-height: 1.7;
+    font-size: 12px;
+    color: #c8c8d0;
+  }
+  .overlay .fine { font-size: 10px; color: #8a8a94; margin-top: 14px; }
+  .controls { display: inline-block; text-align: left; font-size: 12px; line-height: 1.9; color: #d8d8e0; }
+  .controls b { color: var(--clr-gold); }
+
+  button.big {
+    margin-top: 16px;
+    background: var(--clr-accent);
+    border: 3px solid #fff;
+    padding: 12px 28px;
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 4px 4px 0 #000;
+  }
+  button.big:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 #000; }
+  button.small {
+    margin-top: 12px;
+    background: transparent;
+    border: 1px solid #555;
+    color: #bbb;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 7px 16px;
+    cursor: pointer;
+    letter-spacing: 1px;
+  }
+  button.small:hover { border-color: #999; color: #fff; }
+
+  .cfg { margin: 6px 0 12px; width: 100%; max-width: 400px; }
+  .cfg-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    font-size: 13px;
+    color: #e8e8f0;
+    letter-spacing: 1px;
+  }
+  .stepper { display: flex; align-items: center; gap: 10px; }
+  .stepper button, .diff button {
+    background: #1c1c28;
+    border: 1px solid #444;
+    color: #fff;
+    font-family: inherit;
+    font-size: 14px;
+    width: 30px; height: 28px;
+    cursor: pointer;
+    border-radius: 3px;
+    line-height: 1;
+  }
+  .stepper button:hover, .diff button:hover { border-color: #999; }
+  #playerCount { min-width: 24px; color: var(--clr-gold); font-weight: bold; }
+  .diff { display: flex; gap: 6px; }
+  .diff button { width: auto; padding: 0 10px; font-size: 11px; letter-spacing: 1px; }
+  .diff button.on { border-color: var(--clr-gold); color: var(--clr-gold); box-shadow: 0 0 6px rgba(252,188,60,0.35); }
+
+  #playerRows { width: 100%; max-width: 400px; margin-bottom: 4px; }
+  .prow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255,255,255,0.12);
+    margin-top: 6px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 4px;
+  }
+  .pdot { width: 14px; height: 14px; flex: none; border: 1px solid rgba(255,255,255,0.5); border-radius: 3px; }
+  .pname { flex: 1; text-align: left; font-size: 13px; letter-spacing: 1px; color: #fff; }
+  .ptype {
+    background: #1c1c28;
+    border: 1px solid #444;
+    color: #9fd8ff;
+    font-family: inherit;
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding: 5px 12px;
+    cursor: pointer;
+    border-radius: 3px;
+  }
+  .prow.cpu .ptype { color: #ff9d7a; }
+  .ptype:hover { border-color: #999; }
+
+  #overStats { width: 100%; max-width: 400px; margin-top: 8px; }
+  .ostat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    font-size: 12px;
+    text-align: left;
+    color: #d8d8e0;
+  }
+  .ostat .sdot { width: 10px; height: 10px; flex: none; border: 1px solid rgba(0,0,0,0.6); }
+  .ostat .sname { flex: 1; }
+  .ostat.dead { opacity: 0.45; }
+  .ostat .skills { color: var(--clr-gold); margin-right: 10px; }
+</style>
+
+<div id="stage">
+  <div id="screen">
+    <canvas id="game" width="720" height="480"></canvas>
+    <div class="scanlines"></div>
+
+    <div id="roster"></div>
+    <div id="turnBox">—</div>
+    <div id="windBox"><span>WIND</span><div id="windArrow">·</div><span id="windVal">0</span></div>
+    <button id="muteBtn" title="Toggle sound">🔊</button>
+
+    <div id="cmdBar">
+      <div id="weapons"></div>
+      <div id="aimBox">
+        <span id="aimAng">ANGLE 45°</span>
+        <span id="aimPow">POWER 50</span>
+        <span id="aimTimer"></span>
+      </div>
+      <button id="passBtn" title="End your turn without firing">PASS</button>
+    </div>
+
+    <div id="banner"></div>
+
+    <a id="hubBtn" class="side-link" href="https://perchance.org/vgn-video-game-network" target="_blank" rel="noopener">◈ VIDEO GAME NETWORK</a>
+    <footer class="credit side-link">built on vgn-platform-template</footer>
+
+    <!-- ── TITLE ─────────────────────────────────────── -->
+    <div id="titleOverlay" class="overlay">
+      <h1>SCORCHED EARTH</h1>
+      <h2>VGN NETWORK EDITION</h2>
+      <p>
+        You and your enemies are dug in on opposite mountainsides.<br>
+        Take turns. Set your angle and power. Mind the wind.<br>
+        <span style="color:#ffd23a">Last tank standing wins.</span>
+      </p>
+      <div class="controls">
+        <b>↑↓</b> / <b>W S</b> — angle &nbsp;&nbsp; <b>←→</b> / <b>A D</b> — power<br>
+        <b>Q E</b> — weapon &nbsp;&nbsp; <b>SPACE</b> — fire<br>
+        <b>MOUSE</b> — drag to aim, release to fire
+      </div>
+      <button class="big" id="startBtn">ENTER THE BATTLEFIELD</button>
+      <p class="fine">A hand-built artillery rebuild on the VGN Platform Template<br>part of the Video Game Network · 0 quarters required</p>
+    </div>
+
+    <!-- ── SETUP ─────────────────────────────────────── -->
+    <div id="setupOverlay" class="overlay hidden">
+      <h1>SET UP THE BATTLE</h1>
+      <h2>CHOOSE YOUR FORCES</h2>
+      <div class="cfg">
+        <div class="cfg-row">
+          <span>PLAYERS</span>
+          <div class="stepper">
+            <button id="playersMinus">−</button>
+            <span id="playerCount">4</span>
+            <button id="playersPlus">+</button>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <span>CPU SKILL</span>
+          <div class="diff">
+            <button class="dif" data-dif="easy">EASY</button>
+            <button class="dif" data-dif="medium">MEDIUM</button>
+            <button class="dif" data-dif="hard">HARD</button>
+          </div>
+        </div>
+      </div>
+      <div id="playerRows"></div>
+      <button class="big" id="startBattleBtn">START BATTLE</button>
+      <button class="small" id="backTitleBtn">← BACK</button>
+    </div>
+
+    <!-- ── GAME OVER ─────────────────────────────────── -->
+    <div id="overOverlay" class="overlay hidden">
+      <h1 id="overTitle">BATTLE COMPLETE</h1>
+      <h2 id="overWinner">—</h2>
+      <div id="overStats"></div>
+      <button class="big" id="rematchBtn">REMATCH</button>
+      <button class="small" id="setupBtn">NEW SETUP</button>
+    </div>
+  </div>
+</div>
+
+<script src="src/00-core.js"></script>
+<script src="src/10-terrain.js"></script>
+<script src="src/20-entities.js"></script>
+<script src="src/30-ai.js"></script>
+<script src="src/40-audio.js"></script>
+<script src="src/50-ui.js"></script>
