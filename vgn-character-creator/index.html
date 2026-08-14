@@ -1,0 +1,951 @@
+<!--
+  ============================================================================
+  VGN CHARACTER FORGE  (slug: vgn-character-forge)
+  Hub: https://perchance.org/vgn-video-game-network
+  ============================================================================
+
+  WHAT THIS IS
+  A character creator for the Video Game Network, rebuilt from the VGN Generic
+  Template shell. The CRT cabinet look, boot sequence, chiptune attract mode
+  and coin-bar back-to-hub link are kept; the game loop / HUD / high scores
+  are gone, replaced by the FORGE: species & art-style pickers, card fields,
+  AI + random generation, an avatar synthesizer, and SillyTavern card
+  import/export.
+
+  FILE MAP
+    main.pjs           — $meta + branding + the species/style/role/name lists
+                         that power the ⚡ ROLL buttons (read by src/main.js
+                         and src/forge.js via window.root).
+    index.html         — THIS file: the CRT theme + the forge DOM.
+    src/main.js        — ENTRY POINT. Boot sequence, title screen, audio,
+                         overlay switching, branding wiring.
+    src/forge.js       — The creator: pickers, card fields, ⚡ ROLL / ✦ AI
+                         generation (ai-text-plugin), avatar (text-to-image),
+                         SillyTavern export/import, TEST DRIVE live chat,
+                         localStorage autosave.
+    src/card.js        — SillyTavern CharCard V3 build/normalize + the PNG
+                         tEXt "chara" chunk embed/extract + file IO (pako).
+    src/audio.js       — WebAudio chiptune engine (SFX + attract music).
+    src/bg.js          — Starfield/grid backdrop behind the overlays.
+
+  SILLYTAVERN CARDS
+  The forge exports CharCard V3 (.json or .png). The .png carries the avatar
+  as the image and the card JSON in a tEXt chunk (keyword "chara", base64 of
+  zlib-deflated JSON) — the same format SillyTavern itself uses, so cards
+  round-trip through SillyTavern, Venus, etc.
+
+  VGN BETA CHECKLIST
+  [x] Runs end-to-end with no console errors
+  [x] Core loop is actually usable (character creation + export/import)
+  [ ] Two people playtested it
+  [x] Known issues: none known; AI generation depends on the ai-text-plugin
+      / text-to-image-plugin services being up.
+  [x] CRT cabinet look retained (<style> + the #coinBar footer)
+  [x] Back-to-hub link present (the coin bar carries it)
+  [x] Generator has a vgn- slug (vgn-character-forge)
+  ============================================================================
+-->
+
+<style>
+  /* CRT pixel fonts — Press Start 2P for headings and buttons, VT323 for
+     readable body text. */
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap');
+
+  :root {
+    --clr-gold:    #ffd23e;
+    --clr-magenta: #ff2d95;
+    --clr-cyan:    #2de1ff;
+    --clr-green:   #39ff6e;
+    --clr-red:     #ff3b30;
+    --clr-bg:      #05010f;
+    --clr-panel:   #120a28;
+    --font-pixel:  'Press Start 2P', monospace;
+    --font-term:   'VT323', monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    font-family: var(--font-term);
+    color: #f4f4f4;
+  }
+  /* perchance's platform CSS centers body text; undo that */
+  body { text-align: left; }
+
+  #stage {
+    position: fixed;
+    inset: 0 0 28px 0;              /* leave room for the coin bar */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(120% 90% at 50% 8%, #150a30 0%, #05010f 55%, #000 100%);
+  }
+
+  /* ---- the cabinet "screen" ------------------------------------------------- */
+  #screen {
+    position: relative;
+    /* fills the stage at 16:10 — width derived from viewport height */
+    width: min(100vw, calc((100vh - 32px) * 16 / 10));
+    aspect-ratio: 16 / 10;
+    background: #000;
+    border: 6px solid var(--clr-panel);
+    outline: 1px solid rgba(255, 45, 149, 0.55);
+    box-shadow:
+      0 0 0 1px #000,
+      0 0 22px rgba(255, 45, 149, 0.35),
+      0 0 60px rgba(45, 225, 255, 0.12),
+      inset 0 0 40px rgba(0, 0, 0, 0.8);
+    overflow: hidden;
+  }
+
+  #backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* ---- CRT overlay: scanlines + slow scan band + vignette + flicker ---------- */
+  #crtFx {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 30;
+  }
+  #crtFx::before {                    /* scanlines */
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg, rgba(0, 0, 0, 0.24) 0 1px, transparent 1px 3px);
+    mix-blend-mode: multiply;
+  }
+  #crtFx::after {                     /* subtle vignette */
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(120% 100% at 50% 50%,
+      transparent 55%, rgba(0, 0, 0, 0.45) 100%);
+  }
+  .scan-band {                        /* slow rolling bright band */
+    position: absolute;
+    left: 0; right: 0;
+    height: 110px;
+    top: -130px;
+    background: linear-gradient(180deg, transparent,
+      rgba(255, 255, 255, 0.05) 50%, transparent);
+    animation: scanRoll 7s linear infinite;
+  }
+  @keyframes scanRoll { to { transform: translateY(calc(100vh + 150px)); } }
+  .flicker {
+    animation: flicker 4s steps(60) infinite;
+  }
+  @keyframes flicker {
+    0%, 100% { opacity: 1; }
+    92%      { opacity: 1; }
+    93%      { opacity: 0.92; }
+    94%      { opacity: 1; }
+    97%      { opacity: 0.96; }
+  }
+
+  /* ---- overlays -------------------------------------------------------------- */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 24px;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.35s ease, visibility 0.35s ease;
+  }
+  .overlay.show { opacity: 1; visibility: visible; }
+  .overlay-title {
+    font-family: var(--font-pixel);
+    font-size: clamp(16px, 3.4vw, 30px);
+    letter-spacing: 2px;
+    margin: 10px 0 0;
+    color: var(--clr-cyan);
+    text-shadow:
+      0 0 8px rgba(45, 225, 255, 0.8),
+      3px 3px 0 #000;
+  }
+  .overlay-sub {
+    margin: 8px 0 0;
+    font-size: clamp(15px, 2.4vw, 21px);
+    color: #cfc6ff;
+  }
+
+  /* ---- boot screen ------------------------------------------------------------- */
+  #bootOverlay { background: #000; justify-content: center; }
+  #bootFlash {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    animation: bootFlash 0.5s ease-out 0.05s 1;
+    pointer-events: none;
+  }
+  @keyframes bootFlash {
+    0%   { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  #bootLines {
+    font-family: var(--font-term);
+    font-size: clamp(15px, 2.4vw, 20px);
+    color: var(--clr-green);
+    text-shadow: 0 0 6px rgba(57, 255, 110, 0.6);
+    text-align: left;
+    width: min(86%, 520px);
+    line-height: 1.5;
+    min-height: 130px;
+    white-space: pre-wrap;
+  }
+  #bootLines .dim { color: #7fffae; }
+  #bootLines::after {
+    content: '▮';
+    animation: blink 0.8s steps(1) infinite;
+  }
+  #bootLogo {
+    font-family: var(--font-pixel);
+    font-size: clamp(34px, 8vw, 64px);
+    color: var(--clr-gold);
+    letter-spacing: 8px;
+    margin: 14px 0 6px;
+    text-shadow:
+      0 0 10px rgba(255, 210, 62, 0.9),
+      4px 4px 0 #7a1f1f;
+    animation: bootLogoFlicker 1.2s steps(1) infinite;
+  }
+  @keyframes bootLogoFlicker {
+    0%, 100% { opacity: 1; }
+    7%  { opacity: 0.3; }
+    8%  { opacity: 1; }
+    42% { opacity: 1; }
+    43% { opacity: 0.5; }
+    44% { opacity: 1; }
+  }
+  #bootFoot {
+    font-family: var(--font-term);
+    font-size: 14px;
+    color: #7a7090;
+    margin-top: 10px;
+  }
+
+  /* ---- title screen ------------------------------------------------------------- */
+  #titleOverlay {
+    background:
+      linear-gradient(180deg,
+        rgba(5, 1, 15, 0.9) 0%, rgba(5, 1, 15, 0.72) 45%,
+        rgba(5, 1, 15, 0.9) 100%);
+  }
+  .title-logo {
+    font-family: var(--font-pixel);
+    font-size: clamp(40px, 9vw, 78px);
+    color: var(--clr-gold);
+    letter-spacing: 10px;
+    text-shadow:
+      0 0 14px rgba(255, 210, 62, 0.9),
+      0 0 40px rgba(255, 45, 149, 0.5),
+      5px 5px 0 #a11d2f;
+  }
+  .title-tagline {
+    margin: 12px 0 2px;
+    font-size: clamp(16px, 2.6vw, 22px);
+    color: var(--clr-cyan);
+    text-shadow: 0 0 8px rgba(45, 225, 255, 0.7), 2px 2px 0 #000;
+  }
+  .coin-prompt {
+    margin-top: 14px;
+    font-family: var(--font-pixel);
+    font-size: clamp(10px, 1.8vw, 14px);
+    color: var(--clr-gold);
+    letter-spacing: 1px;
+    text-shadow: 2px 2px 0 #000;
+  }
+  .coin-prompt .dot { color: var(--clr-magenta); animation: blink 1.1s steps(1) infinite; }
+  .press-start {
+    margin-top: 14px;
+    font-family: var(--font-pixel);
+    font-size: clamp(11px, 2vw, 15px);
+    color: var(--clr-green);
+    text-shadow: 0 0 8px rgba(57, 255, 110, 0.8), 2px 2px 0 #000;
+    animation: blink 1.2s steps(1) infinite;
+  }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .title-controls {
+    margin-top: 18px;
+    font-size: clamp(15px, 2.2vw, 19px);
+    color: #9f96c9;
+  }
+
+  /* ---- buttons ------------------------------------------------------------------- */
+  .btn-row {
+    margin-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    justify-content: center;
+  }
+  button.vgn-btn {
+    font-family: var(--font-pixel);
+    font-size: clamp(8px, 1.3vw, 10px);
+    letter-spacing: 1px;
+    padding: 9px 12px;
+    border: 2px solid #fff;
+    color: #fff;
+    background: var(--clr-magenta);
+    cursor: pointer;
+    box-shadow: 4px 4px 0 #000;
+    text-transform: uppercase;
+    transition: transform 0.06s ease, box-shadow 0.06s ease, background 0.15s ease;
+    user-select: none;
+  }
+  button.vgn-btn:hover  { background: #ff5cab; }
+  button.vgn-btn:active { transform: translate(3px, 3px); box-shadow: 1px 1px 0 #000; }
+  button.vgn-btn.ghost { background: transparent; color: var(--clr-cyan); border-color: var(--clr-cyan); }
+  button.vgn-btn.ghost:hover { background: rgba(45, 225, 255, 0.15); }
+  button.vgn-btn.gold { background: var(--clr-gold); color: #2a1500; }
+
+  /* ---- about screen ------------------------------------------------------------- */
+  #howtoOverlay { background: rgba(5, 1, 15, 0.94); }
+  #howToBodyEl {
+    margin: 14px 0 0;
+    font-family: var(--font-term);
+    font-size: clamp(15px, 2.2vw, 19px);
+    line-height: 1.5;
+    color: #e8e3ff;
+    white-space: pre-wrap;
+    max-width: 620px;
+    text-align: left;
+  }
+
+  /* ============================================================================
+     FORGE SCREEN
+     ============================================================================ */
+  .overlay.forge {
+    justify-content: flex-start;
+    align-items: stretch;
+    padding: 0;
+    text-align: left;
+    background: rgba(5, 1, 15, 0.93);
+    overflow-y: auto;
+  }
+  .forge-inner {
+    width: 100%;
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 18px 24px 30px;
+  }
+  .forge-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid rgba(255, 45, 149, 0.35);
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+  }
+  .forge-title {
+    font-family: var(--font-pixel);
+    font-size: clamp(13px, 2.2vw, 18px);
+    color: var(--clr-gold);
+    letter-spacing: 2px;
+    text-shadow: 0 0 10px rgba(255, 210, 62, 0.6), 2px 2px 0 #000;
+  }
+  .forge-hint {
+    font-size: clamp(13px, 1.9vw, 16px);
+    color: #9f96c9;
+  }
+  .forge-hint .ic { color: var(--clr-magenta); }
+
+  .forge-body {
+    display: flex;
+    gap: 22px;
+    align-items: flex-start;
+  }
+
+  /* left column — avatar */
+  .forge-left {
+    width: 252px;
+    flex-shrink: 0;
+  }
+  .avatar-frame {
+    position: relative;
+    border: 2px solid var(--clr-magenta);
+    box-shadow: 0 0 14px rgba(255, 45, 149, 0.4), inset 0 0 24px rgba(0, 0, 0, 0.6);
+    background: #000;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+  }
+  .avatar-frame img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    image-rendering: pixelated;
+  }
+  .avatar-tag {
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    font-family: var(--font-pixel);
+    font-size: 8px;
+    color: var(--clr-cyan);
+    text-shadow: 1px 1px 0 #000;
+    letter-spacing: 1px;
+    background: rgba(5, 1, 15, 0.65);
+    padding: 3px 5px;
+  }
+  .avatar-frame.empty img { display: none; }
+  .avatar-frame.empty::after {
+    content: 'NO AVATAR — GEN ONE TO COMPLETE YOUR CARD';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 0 14px;
+    font-family: var(--font-pixel);
+    font-size: 10px;
+    line-height: 1.9;
+    color: #8b84ad;
+  }
+  .avatar-name {
+    margin-top: 8px;
+    font-family: var(--font-pixel);
+    font-size: 11px;
+    color: #fff;
+    text-align: center;
+    letter-spacing: 1px;
+    text-shadow: 2px 2px 0 #000;
+    min-height: 1.4em;
+  }
+  .avatar-sub {
+    text-align: center;
+    font-size: 15px;
+    color: #8b84ad;
+    margin-top: 2px;
+    min-height: 1.2em;
+  }
+  .btn-col {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .forge-stats {
+    margin-top: 12px;
+    text-align: center;
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--clr-green);
+    text-shadow: 1px 1px 0 #000;
+  }
+
+  /* right column — pickers + fields */
+  .forge-right {
+    flex: 1;
+    min-width: 0;
+  }
+  .vibe-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .vibe-row .picker-label { margin-bottom: 0; flex-shrink: 0; }
+  .vibe-block {
+    flex: 1;
+    min-width: 240px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .gender-block {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .gender-block .picker-label { color: var(--clr-magenta); }
+  .gender-block .chip-grid { gap: 5px; }
+
+  /* content filter (SFW / PG13 / NSFW) */
+  .content-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    padding: 5px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .content-row .picker-label { margin-bottom: 0; color: var(--clr-magenta); }
+  .content-hint {
+    font-family: var(--font-term);
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    color: var(--clr-green);
+    margin-left: auto;
+  }
+  #contentGrid .chip.sel.sfw  { background: var(--clr-green);  border-color: var(--clr-green);  color: #00150a; box-shadow: 0 0 10px rgba(57, 255, 110, 0.55); }
+  #contentGrid .chip.sel.pg13 { background: var(--clr-gold);   border-color: var(--clr-gold);   color: #2a1500; box-shadow: 0 0 10px rgba(255, 210, 62, 0.55); }
+  #contentGrid .chip.sel.nsfw { background: var(--clr-magenta); border-color: var(--clr-magenta); color: #1c0010; box-shadow: 0 0 10px rgba(255, 45, 149, 0.6); }
+  /* NSFW chip when the USER_VALIDATED gate is locked */
+  #contentGrid .chip.locked {
+    opacity: 0.45;
+    border-style: dashed;
+    border-color: var(--clr-red);
+    color: #ff9a94;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  @media (max-width: 760px) {
+    .content-hint { margin-left: 0; width: 100%; }
+  }
+  .picker-row {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .picker-block { flex: 1; min-width: 180px; }
+  .picker-label {
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    color: var(--clr-cyan);
+    letter-spacing: 1px;
+    margin-bottom: 5px;
+  }
+  .chip-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+  .chip {
+    font-family: var(--font-term);
+    font-size: 13px;
+    line-height: 1.1;
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.04);
+    color: #e8e3ff;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    user-select: none;
+  }
+  .chip:hover { border-color: var(--clr-cyan); color: #fff; }
+  .chip.sel {
+    background: var(--clr-cyan);
+    border-color: var(--clr-cyan);
+    color: #001018;
+    box-shadow: 0 0 10px rgba(45, 225, 255, 0.55);
+    font-weight: bold;
+  }
+
+  /* card fields */
+  .field-grid {
+    display: grid;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .field-grid.cols2 { grid-template-columns: 1fr 1fr; }
+  .field-grid .field-row { margin-bottom: 0; }
+  .field-row { margin-bottom: 12px; }
+  .field-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 5px;
+    gap: 8px;
+  }
+  .field-head label {
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--clr-magenta);
+  }
+  .field-btns { display: flex; gap: 6px; }
+  button.mini {
+    font-family: var(--font-term);
+    font-size: 14px;
+    line-height: 1.3;
+    padding: 2px 8px;
+    border: 1px solid #fff;
+    background: #221046;
+    color: #fff;
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.12s ease;
+  }
+  button.mini:hover { transform: translateY(-1px); }
+  button.mini.ai:hover { background: var(--clr-magenta); }
+  button.mini.rnd:hover { background: var(--clr-gold); color: #2a1500; }
+  textarea.field, input.field {
+    width: 100%;
+    background: #0a0420;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #f4f4f4;
+    font-family: var(--font-term);
+    font-size: 16px;
+    line-height: 1.3;
+    padding: 6px 10px;
+    resize: vertical;
+  }
+  textarea.field { resize: vertical; }
+  textarea.field:focus, input.field:focus {
+    outline: none;
+    border-color: var(--clr-cyan);
+    box-shadow: 0 0 8px rgba(45, 225, 255, 0.25);
+  }
+  textarea.field::placeholder, input.field::placeholder { color: #5d5578; }
+  details.adv { margin: 4px 0 12px; border-top: 1px dashed rgba(255, 255, 255, 0.15); padding-top: 8px; }
+  details.adv summary {
+    cursor: pointer;
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: #8b84ad;
+    user-select: none;
+  }
+  details.adv[open] summary { color: var(--clr-gold); }
+
+  /* action bar + status (sticky so exports are always reachable) */
+  .forge-bottom {
+    position: sticky;
+    bottom: 0;
+    z-index: 4;
+    margin-top: 2px;
+    padding: 8px 0 6px;
+    background: linear-gradient(180deg, rgba(5, 1, 15, 0.65), rgba(5, 1, 15, 0.99) 55%);
+  }
+  .forge-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255, 45, 149, 0.35);
+  }
+  .forge-status {
+    margin-top: 6px;
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--clr-gold);
+    min-height: 1.2em;
+  }
+  .forge-foot {
+    margin-top: 2px;
+    text-align: center;
+    font-family: var(--font-term);
+    font-size: 12px;
+    color: #5d5578;
+  }
+
+  /* ---- busy overlay (AI / image generation) ------------------------------------ */
+  #busyOverlay { background: rgba(2, 0, 10, 0.9); }
+  .busy-spinner {
+    width: 46px;
+    height: 46px;
+    border: 4px solid rgba(45, 225, 255, 0.25);
+    border-top-color: var(--clr-cyan);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .busy-title {
+    font-family: var(--font-pixel);
+    font-size: clamp(11px, 2vw, 14px);
+    letter-spacing: 2px;
+    color: var(--clr-gold);
+    margin-top: 18px;
+    text-shadow: 0 0 8px rgba(255, 210, 62, 0.7);
+    animation: blink 1s steps(1) infinite;
+  }
+  .busy-sub {
+    margin-top: 8px;
+    font-size: clamp(14px, 2vw, 17px);
+    color: #9f96c9;
+  }
+
+  /* ---- test-drive chat ----------------------------------------------------------- */
+  #driveOverlay { background: rgba(3, 0, 12, 0.95); }
+  .drive-window {
+    width: min(92%, 620px);
+    height: min(86%, 540px);
+    display: flex;
+    flex-direction: column;
+    border: 2px solid var(--clr-cyan);
+    background: #07031a;
+    box-shadow: 0 0 30px rgba(45, 225, 255, 0.25);
+  }
+  .drive-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(45, 225, 255, 0.35);
+    font-family: var(--font-pixel);
+    font-size: 9px;
+    letter-spacing: 1px;
+    color: var(--clr-cyan);
+  }
+  .drive-log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .drive-msg {
+    max-width: 80%;
+    padding: 7px 12px;
+    font-size: 15px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .drive-msg .who {
+    display: block;
+    font-family: var(--font-pixel);
+    font-size: 8px;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+  }
+  .drive-msg.player { align-self: flex-end; background: #20104a; border: 1px solid var(--clr-magenta); }
+  .drive-msg.player .who { color: var(--clr-magenta); }
+  .drive-msg.char { align-self: flex-start; background: #06203a; border: 1px solid var(--clr-cyan); }
+  .drive-msg.char .who { color: var(--clr-cyan); }
+  .drive-msg.typing .drive-text { animation: blink 0.7s steps(1) infinite; color: var(--clr-gold); }
+  .drive-input-row {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
+  }
+  #driveInput { flex: 1; }
+
+  /* ---- coin bar footer (VGN identity — keep this) -------------------------------------- */
+  #coinBar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 28px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 12px;
+    background: #0d0620;
+    border-top: 1px solid rgba(255, 45, 149, 0.6);
+    font-family: var(--font-term);
+    font-size: 16px;
+    letter-spacing: 1px;
+  }
+  #coinBar .bar-left {
+    color: var(--clr-gold);
+    text-shadow: 0 0 6px rgba(255, 210, 62, 0.6);
+    white-space: nowrap;
+  }
+  #coinBar .bar-left .dot { color: var(--clr-magenta); animation: blink 1.1s steps(1) infinite; }
+  #hubLink {
+    color: var(--clr-cyan);
+    text-decoration: none;
+    text-shadow: 0 0 6px rgba(45, 225, 255, 0.6);
+    white-space: nowrap;
+  }
+  #hubLink:hover { color: #fff; text-decoration: underline; }
+  #coinBar .bar-right { color: #6b6390; font-size: 14px; white-space: nowrap; }
+
+  /* ---- scrollbars --------------------------------------------------------------- */
+  #forgeOverlay::-webkit-scrollbar, .drive-log::-webkit-scrollbar { width: 8px; }
+  #forgeOverlay::-webkit-scrollbar-thumb, .drive-log::-webkit-scrollbar-thumb {
+    background: rgba(255, 45, 149, 0.4);
+  }
+
+  @media (max-width: 760px) {
+    .forge-body { flex-direction: column; }
+    .forge-left { width: 100%; max-width: 320px; margin: 0 auto; }
+    .field-grid.cols2 { grid-template-columns: 1fr; }
+    .drive-window { height: 80%; }
+  }
+</style>
+
+<div id="stage">
+  <div id="screen" class="flicker">
+    <canvas id="backdrop"></canvas>
+
+    <!-- CRT overlay stack (pointer-events: none) -->
+    <div id="crtFx">
+      <div class="scan-band"></div>
+    </div>
+
+    <!-- BOOT : CRT power-on sequence (auto-advances to TITLE) -->
+    <div id="bootOverlay" class="overlay show">
+      <div id="bootFlash"></div>
+      <div id="bootLines"></div>
+      <div id="bootLogo">VGN</div>
+      <div id="bootFoot">vgn-character-forge &middot; v1.0.0</div>
+    </div>
+
+    <!-- TITLE / attract screen -->
+    <div id="titleOverlay" class="overlay">
+      <div class="title-logo">VGN</div>
+      <h1 class="overlay-title" id="titleEl">CHARACTER FORGE</h1>
+      <p class="title-tagline" id="taglineEl"></p>
+      <p class="coin-prompt"><span class="dot">&bull;</span><span id="coinPromptTxt"> PRESS START TO OPEN THE FORGE</span></p>
+      <p class="press-start" id="pressStartEl">PRESS START</p>
+      <div class="btn-row">
+        <button class="vgn-btn" id="startBtn">START FORGING</button>
+        <button class="vgn-btn ghost" id="aboutBtn">ABOUT</button>
+      </div>
+      <p class="title-controls">PICK A SPECIES &amp; STYLE &nbsp;&middot;&nbsp; ROLL ⚡ / AI ✦ EVERY FIELD &nbsp;&middot;&nbsp; EXPORT A SILLYTAVERN CARD</p>
+    </div>
+
+    <!-- FORGE : the character creator -->
+    <div id="forgeOverlay" class="overlay forge">
+      <div class="forge-inner">
+        <div class="forge-head">
+          <div class="forge-title" id="forgeTitleEl">VGN CHARACTER FORGE</div>
+          <div class="forge-hint">type &middot; roll <span class="ic">⚡</span> &middot; AI-forge <span class="ic">✦</span> &middot; export a SillyTavern card</div>
+        </div>
+
+        <!-- CONTENT FILTER : gates the AI text, the avatar image, the
+             test-drive chat, and the rating tag stamped on the exported card -->
+        <div class="content-row">
+          <span class="picker-label">CONTENT FILTER</span>
+          <div class="chip-grid" id="contentGrid">
+            <button type="button" class="chip sfw" data-level="sfw">SFW</button>
+            <button type="button" class="chip pg13" data-level="pg13">PG13</button>
+            <button type="button" class="chip nsfw" data-level="nsfw">NSFW</button>
+          </div>
+          <span class="content-hint" id="contentHintEl">FAMILY-FRIENDLY — no sexual or graphic content.</span>
+        </div>
+
+        <div class="forge-body">
+          <!-- LEFT: avatar + overview -->
+          <div class="forge-left">
+            <div class="avatar-frame empty" id="avatarFrame">
+              <img id="avatarImg" alt="">
+              <div class="avatar-tag">CHARACTER SELECT</div>
+            </div>
+            <div class="avatar-name" id="avatarNameEl">—</div>
+            <div class="avatar-sub" id="avatarSubEl">pick a species &amp; style</div>
+            <div class="btn-col">
+              <button class="vgn-btn" id="genAvatarBtn">✦ GEN AVATAR</button>
+              <button class="vgn-btn ghost" id="clearAvatarBtn">CLEAR AVATAR</button>
+            </div>
+            <div class="forge-stats" id="forgeStatsEl">CARD 0% COMPLETE</div>
+          </div>
+
+          <!-- RIGHT: pickers + fields -->
+          <div class="forge-right">
+            <div class="vibe-row">
+              <div class="vibe-block">
+                <label class="picker-label" for="vibeInput">VIBE / CONCEPT</label>
+                <input id="vibeInput" class="field" placeholder="e.g. a brooding cyberpunk gunslinger who owes the network a favor">
+              </div>
+              <div class="gender-block">
+                <span class="picker-label">GENDER</span>
+                <div class="chip-grid" id="genderGrid"></div>
+              </div>
+            </div>
+
+            <div class="picker-row">
+              <div class="picker-block">
+                <div class="picker-label">SPECIES</div>
+                <div class="chip-grid" id="speciesGrid"></div>
+              </div>
+              <div class="picker-block">
+                <div class="picker-label">ART STYLE</div>
+                <div class="chip-grid" id="styleGrid"></div>
+              </div>
+            </div>
+            <div class="picker-row">
+              <div class="picker-block">
+                <div class="picker-label">ROLE / CLASS</div>
+                <div class="chip-grid" id="roleGrid"></div>
+              </div>
+            </div>
+
+            <div id="fieldsCtn"></div>
+
+            <div class="forge-bottom">
+              <div class="forge-actions">
+                <button class="vgn-btn gold" id="forgeAllBtn">✦ FORGE ALL</button>
+                <button class="vgn-btn" id="randomizeBtn">⚡ RANDOMIZE</button>
+                <button class="vgn-btn ghost" id="testDriveBtn">TEST DRIVE</button>
+                <button class="vgn-btn ghost" id="exportJsonBtn">EXPORT .JSON</button>
+                <button class="vgn-btn ghost" id="exportPngBtn">EXPORT CARD .PNG</button>
+                <button class="vgn-btn ghost" id="importBtn">IMPORT CARD</button>
+                <button class="vgn-btn ghost" id="newBtn">NEW</button>
+              </div>
+              <input type="file" id="importInput" accept=".json,.png,image/png,application/json" hidden>
+              <div id="statusEl" class="forge-status"></div>
+              <div class="forge-foot" id="forgeFoot"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ABOUT / HOW TO USE -->
+    <div id="howtoOverlay" class="overlay">
+      <h2 class="overlay-title" id="howToTitleEl">ABOUT &amp; HOW TO USE</h2>
+      <div id="howToBodyEl"></div>
+      <div class="btn-row">
+        <button class="vgn-btn" id="howToBackBtn">BACK</button>
+      </div>
+    </div>
+
+    <!-- BUSY : AI / image generation in progress -->
+    <div id="busyOverlay" class="overlay">
+      <div class="busy-spinner"></div>
+      <div class="busy-title" id="busyTitle">FORGE-CORE BUSY</div>
+      <div class="busy-sub" id="busySub">GENERATING&hellip;</div>
+    </div>
+
+    <!-- TEST DRIVE : live AI chat with your card -->
+    <div id="driveOverlay" class="overlay">
+      <div class="drive-window">
+        <div class="drive-head">
+          <span>TEST DRIVE — live AI chat with this card</span>
+          <button class="mini" id="driveCloseBtn">✕ CLOSE</button>
+        </div>
+        <div class="drive-log" id="driveLogEl"></div>
+        <div class="drive-input-row">
+          <input id="driveInput" class="field" placeholder="Say something…">
+          <button class="vgn-btn" id="driveSendBtn">SEND</button>
+        </div>
+      </div>
+    </div>
+  </div><!-- /#screen -->
+</div><!-- /#stage -->
+
+<!-- VGN coin bar footer: INSERT COIN prompt + the mandatory back-to-hub link -->
+<footer id="coinBar">
+  <span class="bar-left"><span class="dot">&bull;</span> INSERT COIN &gt;&gt;</span>
+  <a id="hubLink" href="https://perchance.org/vgn-video-game-network" target="_blank" rel="noopener">&lt;&lt; RETURN TO VGN HUB</a>
+  <span class="bar-right">vgn-character-forge</span>
+</footer>
+
+<!-- ============================================================================
+     ENTRY POINT — all application logic lives in ES modules under src/.
+     ============================================================================ -->
+<script type="module" src="src/main.js"></script>

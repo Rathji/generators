@@ -1,0 +1,353 @@
+// ============================================================================
+//  VGN CHARACTER FORGE  (slug: vgn-character-forge)
+//  ============================================================================
+//  A character creator for the Video Game Network — build game characters,
+//  avatars and chat personas, then export them as SillyTavern-compatible
+//  character cards (.json or .png) or import a card to remix it.
+//
+//  WHAT THIS FILE IS
+//  ----------------------------------------------------------------------------
+//  main.pjs is the "control panel": branding, the species/style/name/role
+//  lists that power the ⚡ ROLL buttons, and the text shown in the About
+//  screen. All app code lives in src/ as real ES modules (see index.html).
+//
+//  HOW THE FORGE WORKS
+//  ----------------------------------------------------------------------------
+//  • Pick a SPECIES and ART STYLE (pixel art, anime, cartoon, …) or type a
+//    vibe and hit ✦ FORGE ALL to have the AI build the whole card.
+//  • Every card field has two buttons: ⚡ ROLL (instant perchance idea) and
+//    ✦ AI (in-context AI generation via the ai-text-plugin).
+//  • Generate an avatar, then EXPORT a SillyTavern card (.json or .png).
+//  ============================================================================
+
+$meta
+  title = VGN Character Forge
+  description = Build video-game characters for the VGN network — game NPCs, avatars and chat personas. Pick a species (cyborg, alien, fairy, demon, angel, hologram…) and an art style (pixel art, anime, cartoon, retro arcade…), roll or AI-generate every field, generate an avatar, then export an importable SillyTavern character card (.json or .png) — or import a card to remix it. Built on the VGN Generic Template shell: CRT cabinet look, boot sequence and coin-bar branding included.
+  tags = vgn, video game network, character, creator, avatar, oc, generator, rpg, ai, sillytavern, character card, chat
+  image = https://user.uploads.dev/file/9459d62f27facbd85505dc1fb659d42a.jpg
+
+// The AI engines powering ✦ generation.
+generateText = {import:ai-text-plugin}
+generateImage = {import:text-to-image-plugin}
+
+// ============================================================================
+//  CONFIG  —  brand and tune the forge
+//  ----------------------------------------------------------------------------
+//  Read at boot by src/main.js via the cfg() helper. Strings stay strings;
+//  numbers and booleans are parsed automatically.
+//  ============================================================================
+config
+  // -- Branding ---------------------------------------------------------------
+  gameTitle = VGN CHARACTER FORGE        // shown on the title screen
+  tagline = Forge game characters for VGN games, avatars & chat.
+  coinPrompt = PRESS START TO OPEN THE FORGE
+
+  // -- VGN network (do not change the hub URL — it's a Beta requirement) -------
+  backHubUrl = https://perchance.org/vgn-video-game-network
+  backHubLabel = RETURN TO VGN HUB
+
+  // -- Platform ---------------------------------------------------------------
+  slug = vgn-character-forge             // small slug shown in the footer
+  draftKey = vgn-character-forge-draft   // localStorage key for autosave
+
+  // -- NSFW access gate -------------------------------------------------------
+  // USER_VALIDATED defaults to true (NSFW open). When set to false, the NSFW
+  // level is locked in the UI and any NSFW request downgrades to PG13. A real
+  // validation flow can flip this at runtime via window.setUserValidated().
+  userValidated = true
+
+  // -- About / how-to screen --------------------------------------------------
+  howToUse
+    VGN CHARACTER FORGE builds characters for the Video Game Network — game NPCs, chat avatars and network personas — and exports them as SillyTavern-compatible character cards.
+    HOW TO FORGE
+    • Pick a SPECIES and ART STYLE, or type a vibe and hit ✦ FORGE ALL to let the AI build the whole card.
+    • Every card field has two buttons: ⚡ ROLL (instant perchance idea) and ✦ AI (in-context AI generation).
+    • CONTENT FILTER (SFW / PG13 / NSFW) gates everything the AI writes and draws, and stamps the rating tag onto the exported card.
+    • Generate an avatar, then EXPORT as .json or a .png card (avatar + card data in one file).
+    • IMPORT CARD to load and remix any SillyTavern card you already have — its rating is detected and applied.
+    • Your draft autosaves in this browser — NEW starts a fresh one.
+    SILLYTAVERN
+    Export a .png or .json, then in SillyTavern: CHARACTERS → IMPORT CHARACTER CARD and pick the file. The card is CharCard V3 and imports to other character-card players too.
+    $output = [this.joinItems("\n")]
+
+
+// ============================================================================
+//  SPECIES — what your character is. Each has an art keyword block (used for
+//  both AI image prompts and the ⚡ description roll) and a flavor line.
+//  ============================================================================
+species
+  human
+    slug = human
+    label = Human
+    img = athletic build, expressive face, practical clothing, determination in the eyes
+    flavor = the everyman hero with a spark no machine can copy
+  cyborg
+    slug = cyborg
+    label = Cyborg
+    img = cybernetic chrome arm and one glowing eye, exposed circuitry, reinforced plating
+    flavor = flesh and machine fused — upgraded beyond human limits
+  alien
+    slug = alien
+    label = Alien
+    img = exotic skin tones, unusual eye shapes, antennae or tendrils, otherworldly markings
+    flavor = a visitor from another star with customs no one here understands
+  fairy
+    slug = fairy
+    label = Fairy
+    img = iridescent translucent wings, glowing dust, tiny pointed ears, soft pastel shimmer
+    flavor = quick as a thought, bright as starlight, older than they look
+  demon
+    slug = demon
+    label = Demon
+    img = curved horns, sharp teeth, tail, ember-lit eyes, crimson and black palette
+    flavor = a dealmaker from the underworld who always wins the bargain
+  angel
+    slug = angel
+    label = Angel
+    img = wings of light, soft halo, serene face, white and gold palette, gentle glow
+    flavor = a guardian with a heart too big for heaven
+  hologram
+    slug = hologram
+    label = Hologram
+    img = translucent glitchy projection, scanlines, flickering edges, drifting data motes
+    flavor = a glitch that woke up — data that decided it wanted a life
+  robot
+    slug = robot
+    label = Robot
+    img = sleek metal plating, glowing visor eyes, visible joints and servos
+    flavor = a machine learning what it means to have a heart
+  elf
+    slug = elf
+    label = Elf
+    img = pointed ears, elegant features, nature motifs, forest and silver tones
+    flavor = an ancient archer with centuries of patience and one grudge
+  vampire
+    slug = vampire
+    label = Vampire
+    img = pale skin, sharp fangs, elegant dark attire, crimson accents
+    flavor = a centuries-old predator with surprisingly modern tastes
+  ghost
+    slug = ghost
+    label = Ghost
+    img = translucent specter, trailing wisps, faint glow, tattered edges
+    flavor = unfinished business and a sharp sense of humor
+  dragonkin
+    slug = dragonkin
+    label = Dragonkin
+    img = scaled skin, small horns, slit pupils, subtle wings or tail, fiery palette
+    flavor = a fragment of an ancient dragon wearing a mortal shape
+  orc
+    slug = orc
+    label = Orc
+    img = hulking frame, tusks, scars, rough battle-worn armor
+    flavor = a gentle giant whose fists ask questions first
+  mermaid
+    slug = mermaid
+    label = Mermaid
+    img = scaled tail or finned ears, webbed accents, pearl and sea-glass tones
+    flavor = a deep-sea wanderer who surfaced for the adventure
+
+
+// ============================================================================
+//  ART STYLES — how the character is drawn. Each has an art keyword block
+//  (used in AI image prompts) and a descriptive tone.
+//  ============================================================================
+artStyle
+  pixel
+    slug = pixel
+    label = Pixel Art
+    img = 16-bit pixel art, crisp chunky pixels, limited retro palette, sprite portrait
+  anime
+    slug = anime
+    label = Anime
+    img = anime style, clean bold lineart, cel shading, big expressive eyes, vibrant colors
+  cartoon
+    slug = cartoon
+    label = Cartoon
+    img = classic cartoon style, bold outlines, exaggerated expressions, rubbery poses
+  chibi
+    slug = chibi
+    label = Chibi
+    img = chibi style, oversized head, tiny body, adorable proportions, soft colors
+  comic
+    slug = comic
+    label = Comic Book
+    img = comic book style, heavy inks, halftone dots, dramatic shadows
+  retro
+    slug = retro
+    label = Retro Arcade
+    img = 80s arcade cabinet art, neon glow, chrome accents, dark synthwave backdrop
+  watercolor
+    slug = watercolor
+    label = Watercolor
+    img = soft watercolor washes, paper texture, delicate blending edges
+  lowpoly
+    slug = lowpoly
+    label = Low Poly
+    img = low poly 3D render, faceted flat-shaded geometry, clean silhouette
+  vector
+    slug = vector
+    label = Vector Flat
+    img = flat vector art, geometric shapes, bold solid colors, clean gradients
+  painterly
+    slug = painterly
+    label = Painterly
+    img = painterly digital painting, rich visible brushstrokes, atmospheric lighting
+  pixelHd
+    slug = pixelHd
+    label = HD Pixel
+    img = modern high-res pixel art, ambient lighting, soft glow, detailed sprites
+  silhouette
+    slug = silhouette
+    label = Glow Silhouette
+    img = dark silhouette with glowing neon accents, strong rim light, moody
+
+
+// ============================================================================
+//  ROLE / CLASS — what the character does in the game or on the network.
+//  ============================================================================
+role
+  Brawler
+  Sniper
+  Assassin
+  Mage
+  Healer
+  Support
+  Tank
+  Summoner
+  Pilot
+  Hacker
+  Bounty Hunter
+  Arcade Champion
+  Shopkeeper
+  Guild Leader
+  Streamer
+  Courier
+
+
+// ============================================================================
+//  NAME FACTORY — powers the ⚡ roll on the NAME field.
+//  ============================================================================
+nameCore
+  Nova
+  Volt
+  Blaze
+  Pixel
+  Zeta
+  Glitch
+  Neon
+  Rogue
+  Jet
+  Byte
+  Echo
+  Flux
+  Sage
+  Turbo
+  Ivy
+  Onyx
+  Kira
+  Deck
+  Mara
+  Jinx
+  Rune
+  Vega
+  Wren
+  Puck
+  Nix
+  Astra
+  Bolt
+  Cypher
+  Dusk
+  Ember
+  Frost
+  Glimmer
+  Hex
+  Indigo
+  Joule
+  Kai
+  Lyra
+  Mirage
+  Nimbus
+  Orchid
+  Pulse
+  Quill
+  Raven
+  Slate
+  Tempest
+  Umbra
+  Vex
+  Wisp
+  Xen
+  Yuri
+  Zephyr
+nameSuffix
+  X
+  Prime
+  7
+  Byte
+  99
+  0
+  9
+  3000
+  Star
+  Nine
+  Ghost
+  Queen
+  Lord
+  -X
+  -9
+  -7
+randomName
+  [nameCore.selectOne][nameSuffix.selectOne]
+  [nameCore.selectOne]
+  [nameCore.selectOne] [nameCore.selectOne]
+  [nameCore.selectOne][nameSuffix.selectOne]
+  [nameCore.selectOne] the [nameSuffix.selectOne]
+
+
+// ============================================================================
+//  TRAITS / SCENES / GREETINGS — power the ⚡ rolls for the other fields.
+//  ============================================================================
+trait
+  Heroic
+  Grumpy
+  Cheerful
+  Mysterious
+  Cocky
+  Kind
+  Chaotic
+  Serious
+  Playful
+  Loyal
+  Cynical
+  Energetic
+  Calm
+  Mischievous
+  Brave
+  Shy
+  Deadpan
+  Fierce
+
+scenePlace
+  a neon-lit arcade
+  the pixel depths of a dungeon
+  a rooftop above the city grid
+  a rain-slicked spaceport bar
+  the glitch between game levels
+  a boss room after the fight
+  the VGN network chat lobby
+  a synthwave sunset highway
+  a forgotten save file
+  the arcade prize counter
+randomScenario
+  You meet [scenePlace.selectOne], and the night is just getting started.
+  You run into each other at [scenePlace.selectOne] — neither of you planned it. That's how it always starts.
+  [scenePlace.selectOne] is where you meet. Try not to break anything.
+
+firstMesTpl
+  Hey. The name's \{name\}. You look like you just hit start on something big.
+  Well well — the network finally sent me someone interesting. \{name\} at your service.
+  Yo! \{name\} here. Welcome to my corner of the VGN.
+  The screen brightened the moment you showed up. \{name\}, ready when you are.
+  You found me. Good. \{name\} was starting to think the network forgot me.
+  Huh. A fresh face. Name's \{name\} — try to keep up.
