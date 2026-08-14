@@ -87,5 +87,11 @@ came down.
 
 **This repository is public, so that capture publishes the source of a generator its author chose
 to keep private on perchance.** Nothing in the capture path notices the difference; the tool has no
-concept of the destination's visibility. Treat a private slug's presence here as a decision someone
-has to make on purpose, and check `isPrivate` before adding another one.
+concept of the destination's visibility.
+
+**This was raised with the owner on 2026-08-14 and the answer was to leave it public.** It is a
+reviewed, accepted state, not an oversight — do not "fix" it. Recorded here because the combination
+looks like a mistake to anyone who finds it cold.
+
+The general rule still holds for the next one: check `isPrivate` in a captured `meta.json` before
+adding a private slug to a public repo, and ask rather than assume.
