@@ -1,0 +1,1294 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BATTLE MAP — a BGN network game built on the bgn-blank-template.
+     Per-table multiplayer: each room code owns its own persistent
+     map doc (tokens, walls, chat, fog toggle, map image). The room
+     creator is the DM; anyone who joins with the code sits at the
+     table. No turn logic — it's a shared real-time table.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+"use strict";
+var COLS = 22, ROWS = 17;
+var MAX_TOKENS = 300, MAX_WALLS = 1000, MAX_CHAT = 60, MAX_PLAYERS = 12;
+var SLOT = 65536;
+var MAX_ROOMS = Math.min(512, Math.max(16, Math.floor((state.length - 8) / SLOT)));
+var CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+var rooms = new Map();   // code -> {slot, code, doc, conns:Set, lastAct}
+var conns = new Map();   // conn.id -> {code, name, hits}
+
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function genCode(){
+  for(var t=0;t<60;t++){
+    var s="";
+    for(var k=0;k<5;k++) s += CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s)) return s;
+  }
+  return "AAAAA";
+}
+
+/* utf8 helpers */
+function utf8Encode(str){
+  var out=[], i, c, c2;
+  for(i=0;i<str.length;i++){
+    c = str.charCodeAt(i);
+    if(c < 0x80) out.push(c);
+    else if(c < 0x800) out.push(0xc0|(c>>6), 0x80|(c&63));
+    else if(c >= 0xd800 && c <= 0xdbff && i+1 < str.length){
+      c2 = str.charCodeAt(i+1);
+      if(c2 >= 0xdc00 && c2 <= 0xdfff){
+        var cp = 0x10000 + ((c-0xd800)<<10) + (c2-0xdc00);
+        out.push(0xf0|(cp>>18), 0x80|((cp>>12)&63), 0x80|((cp>>6)&63), 0x80|(cp&63));
+        i++;
+      } else out.push(0xe0|(c>>12), 0x80|((c>>6)&63), 0x80|(c&63));
+    } else if(c >= 0xdc00 && c <= 0xdfff){
+      out.push(0xef, 0xbf, 0xbd);
+    } else out.push(0xe0|(c>>12), 0x80|((c>>6)&63), 0x80|(c&63));
+  }
+  return new Uint8Array(out);
+}
+function utf8Decode(bytes, start, end){
+  var s="", i=start, b, cp;
+  while(i < end){
+    b = bytes[i];
+    if(b < 0x80){ s += String.fromCharCode(b); i++; }
+    else if(b < 0xe0){ s += String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; }
+    else if(b < 0xf0){ s += String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; }
+    else {
+      cp = ((b&7)<<18)|((bytes[i+1]&63)<<12)|((bytes[i+2]&63)<<6)|(bytes[i+3]&63);
+      cp -= 0x10000;
+      s += String.fromCharCode(0xd800|(cp>>10), 0xdc00|(cp&1023));
+      i+=4;
+    }
+  }
+  return s;
+}
+
+/* room persistence: slot = 8-byte header ("MAP2" + u32 length) + UTF-8 JSON {code,lastAct,doc} */
+function saveRoom(room){
+  var bytes = utf8Encode(JSON.stringify({code:room.code, lastAct:room.lastAct, doc:room.doc}));
+  while(bytes.length > SLOT - 8 && room.doc.chat.length > 0){
+    room.doc.chat.shift();
+    bytes = utf8Encode(JSON.stringify({code:room.code, lastAct:room.lastAct, doc:room.doc}));
+  }
+  if(bytes.length > SLOT - 8) throw new Error("table too large");
+  var o = room.slot * SLOT;
+  var view = new DataView(state.buffer, state.byteOffset + o, 8);
+  view.setUint32(0, 0x4d415032, false);
+  view.setUint32(4, bytes.length, false);
+  state.set(bytes, o + 8);
+}
+function loadRooms(){
+  rooms = new Map();
+  for(var i=0;i<MAX_ROOMS;i++){
+    var o = i * SLOT;
+    if(state.length < o + 8) break;
+    var view = new DataView(state.buffer, state.byteOffset + o, 8);
+    var magic = view.getUint32(0, false);
+    var len = view.getUint32(4, false);
+    if(magic !== 0x4d415032 || len <= 0 || len > SLOT - 8) continue;
+    var parsed;
+    try { parsed = JSON.parse(utf8Decode(state, o + 8, o + 8 + len)); } catch(e){ continue; }
+    if(!parsed || typeof parsed !== "object" || !parsed.doc || typeof parsed.code !== "string") continue;
+    var doc = parsed.doc;
+    if(!Array.isArray(doc.walls)) doc.walls = [];
+    if(!Array.isArray(doc.tokens)) doc.tokens = [];
+    if(!Array.isArray(doc.chat)) doc.chat = [];
+    if(typeof doc.dmId !== "string") doc.dmId = "";
+    if(typeof doc.enforceLos !== "boolean") doc.enforceLos = false;
+    if(typeof doc.mapImage !== "string") doc.mapImage = "";
+    if(typeof doc.initCurrent !== "string") doc.initCurrent = "";
+    rooms.set(parsed.code, {slot:i, code:parsed.code, doc:doc, conns:new Set(), lastAct:num(parsed.lastAct, nowSec())});
+  }
+}
+function freeSlot(){
+  var oldest=-1, oldestT=Infinity;
+  for(var i=0;i<MAX_ROOMS;i++){
+    var o = i * SLOT;
+    var magic = 0;
+    if(state.length >= o + 8){
+      var view = new DataView(state.buffer, state.byteOffset + o, 8);
+      magic = view.getUint32(0, false);
+    }
+    if(magic !== 0x4d415032) return i;
+    var room = null;
+    rooms.forEach(function(r){ if(r.slot === i) room = r; });
+    var la = room ? room.lastAct : 0;
+    if(la < oldestT){ oldestT = la; oldest = i; }
+  }
+  return oldest;
+}
+
+function freshDoc(){ return {walls:[], tokens:[], chat:[], dmId:"", enforceLos:false, mapImage:"", initCurrent:""}; }
+function roomOf(conn){ var rec = conns.get(conn.id); return (rec && rec.code) ? rooms.get(rec.code) : null; }
+function connRec(conn){
+  var c = conns.get(conn.id);
+  if(!c){ c = {conn:conn, code:"", name:"Player-"+conn.id.slice(0,4), hits:{}}; conns.set(conn.id, c); }
+  return c;
+}
+function nameOf(conn){ return connRec(conn).name; }
+function isDM(conn, room){ return room.doc.dmId === conn.id && room.conns.has(conn.id); }
+function canMove(conn, room, token){ return isDM(conn, room) || token.owner === nameOf(conn); }
+function presence(room){
+  var list = [];
+  room.conns.forEach(function(id){
+    var rec = conns.get(id);
+    if(rec) list.push({id:id, name:rec.name, isDm:id===room.doc.dmId});
+  });
+  return list;
+}
+function broadcastTo(room, msg){
+  var s = typeof msg === "string" ? msg : JSON.stringify(msg);
+  room.conns.forEach(function(id){
+    var rec = conns.get(id);
+    if(rec) { try { rec.conn.send(s); } catch(e){} }
+  });
+}
+function broadcastDoc(room){ broadcastTo(room, {t:"state", doc:room.doc}); }
+function broadcastPresence(room){ broadcastTo(room, {t:"presence", players:presence(room)}); }
+function rateLimit(conn, key, limit, windowMs){
+  var c = connRec(conn);
+  var now = Date.now();
+  var arr = c.hits[key] || (c.hits[key]=[]);
+  while(arr.length && now - arr[0] > windowMs) arr.shift();
+  if(arr.length >= limit) return false;
+  arr.push(now);
+  return true;
+}
+function safeParse(data){
+  try { return JSON.parse(data); } catch(e){ return null; }
+}
+function findToken(room, id){
+  for(var i=0;i<room.doc.tokens.length;i++) if(room.doc.tokens[i].id===id) return room.doc.tokens[i];
+  return null;
+}
+function initsorted(room){
+  var list = [];
+  for(var i=0;i<room.doc.tokens.length;i++) if(room.doc.tokens[i].inTracker) list.push(room.doc.tokens[i]);
+  list.sort(function(a,b){ return num(b.init,0) - num(a.init,0); });
+  return list;
+}
+function genId(room){
+  var id;
+  do { id = "t" + Math.floor(Math.random()*1e15).toString(36); }
+  while(room.doc.tokens.some(function(t){ return t.id===id; }));
+  return id;
+}
+function freeCell(room){
+  var start = Math.floor(Math.random()*ROWS);
+  for(var y=0;y<ROWS;y++){
+    for(var x=0;x<COLS;x++){
+      var yy = (y+start)%ROWS;
+      var busy = false;
+      for(var i=0;i<room.doc.tokens.length;i++){
+        var t = room.doc.tokens[i];
+        if(x >= t.x && x < t.x+t.w && yy >= t.y && yy < t.y+t.h){ busy = true; break; }
+      }
+      if(busy) continue;
+      return {x:x, y:yy};
+    }
+  }
+  return {x:0, y:0};
+}
+function saneColor(col){
+  if(typeof col === "string"){
+    var m = col.match(/^#([0-9a-fA-F]{6})$/);
+    if(m) return "#"+m[1].toLowerCase();
+    m = col.match(/^#([0-9a-fA-F]{3})$/);
+    if(m){ var r=m[1][0], g=m[1][1], b=m[1][2]; return "#"+r+r+g+g+b+b; }
+  }
+  return "";
+}
+function saneImg(url){
+  if(typeof url !== "string") return "";
+  url = url.trim();
+  if(/^https?:\/\//.test(url) || /^data:image\//.test(url)) return url.slice(0, 300);
+  return "";
+}
+function num(v, def){
+  if(typeof v === "number" && Number.isFinite(v)) return v;
+  if(typeof v === "string" && v.trim() !== ""){
+    var n = Number(v);
+    if(Number.isFinite(n)) return n;
+  }
+  return def;
+}
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+function cleanCode(s){
+  return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+}
+function welcome(conn, room){
+  return {t:"welcome", code:room.code, yourId:conn.id, doc:room.doc, players:presence(room)};
+}
+
+function join(conn, code){
+  var room = rooms.get(code);
+  if(!room) throw new Error("table_not_found");
+  var existing = conns.get(conn.id);
+  if(existing && existing.code === code) return room;
+  if(room.conns.size >= MAX_PLAYERS) throw new Error("table_full");
+  room.conns.add(conn.id);
+  existing.code = code;
+  room.lastAct = nowSec();
+  saveRoom(room);
+  return room;
+}
+
+self.onopen = function({conn}){ connRec(conn); };
+
+self.onclose = function({conn}){
+  var rec = conns.get(conn.id);
+  if(!rec) return;
+  var room = rec.code ? rooms.get(rec.code) : null;
+  conns.delete(conn.id);
+  if(!room) return;
+  room.conns.delete(conn.id);
+  if(room.doc.dmId === conn.id){
+    room.doc.dmId = "";
+    saveRoom(room);
+    broadcastDoc(room);
+  }
+  room.lastAct = nowSec();
+  saveRoom(room);
+  broadcastPresence(room);
+};
+
+self.rpc = {
+  createRoom: function({conn}, data){
+    if(connRec(conn).code){
+      var old = rooms.get(connRec(conn).code);
+      if(old) old.conns.delete(conn.id);
+    }
+    var slot = freeSlot();
+    if(slot < 0) throw new Error("network_full");
+    var code = genCode();
+    var room = {slot:slot, code:code, doc:freshDoc(), conns:new Set(), lastAct:nowSec()};
+    room.doc.dmId = conn.id;
+    rooms.set(code, room);
+    connRec(conn).code = code;
+    room.conns.add(conn.id);
+    saveRoom(room);
+    broadcastPresence(room);
+    return JSON.stringify(welcome(conn, room));
+  },
+  joinRoom: function({conn}, data){
+    var d = safeParse(data);
+    var code = cleanCode((d && d.code) || data || "");
+    var room = join(conn, code);
+    saveRoom(room);
+    broadcastPresence(room);
+    return JSON.stringify(welcome(conn, room));
+  },
+  getRoom: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    return JSON.stringify(welcome(conn, room));
+  },
+  leave: function({conn}, data){
+    var rec = conns.get(conn.id);
+    if(rec && rec.code){
+      var room = rooms.get(rec.code);
+      if(room){ room.conns.delete(conn.id); room.lastAct = nowSec(); saveRoom(room); broadcastPresence(room); }
+      rec.code = "";
+    }
+    return "ok";
+  },
+  setName: function({conn}, data){
+    var d = safeParse(data);
+    var name = String((d && d.name) || "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 24);
+    if(!name) throw new Error("invalid name");
+    connRec(conn).name = name;
+    var room = roomOf(conn);
+    if(room) broadcastPresence(room);
+    return "ok";
+  },
+  claimDM: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(room.doc.dmId && room.doc.dmId !== conn.id){
+      if(room.conns.has(room.doc.dmId)) throw new Error("DM already claimed");
+      room.doc.dmId = "";
+    }
+    room.doc.dmId = conn.id;
+    saveRoom(room);
+    broadcastDoc(room);
+    broadcastPresence(room);
+    return "ok";
+  },
+  releaseDM: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(room.doc.dmId === conn.id){
+      room.doc.dmId = "";
+      saveRoom(room);
+      broadcastDoc(room);
+      broadcastPresence(room);
+    }
+    return "ok";
+  },
+  importChars: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!rateLimit(conn, "import", 6, 5000)) throw new Error("too_many_requests");
+    var d = safeParse(data);
+    var chars = (d && Array.isArray(d.chars)) ? d.chars : [];
+    if(!chars.length) throw new Error("no_characters");
+    var owner = nameOf(conn);
+    var made = 0;
+    for(var i=0;i<chars.length && room.doc.tokens.length < MAX_TOKENS;i++){
+      var ch = chars[i] || {};
+      var nm = String(ch.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      if(!nm) nm = "Token";
+      var cell = freeCell(room);
+      var rx = clamp(Math.round(num(ch.x, cell.x)), 0, COLS - 1);
+      var ry = clamp(Math.round(num(ch.y, cell.y)), 0, ROWS - 1);
+      room.doc.tokens.push({
+        id: genId(room),
+        name: nm,
+        owner: owner,
+        color: saneColor(ch.color) || "#4a76d9",
+        img: saneImg(ch.img),
+        hp: num(ch.hp, 0),
+        vision: clamp(num(ch.vision, 12), 0, 60),
+        w: clamp(Math.round(num(ch.w, 1)) || 1, 1, 8),
+        h: clamp(Math.round(num(ch.h, 1)) || 1, 1, 8),
+        x: rx,
+        y: ry,
+        init: 0,
+        inTracker: false
+      });
+      made++;
+    }
+    if(!made) throw new Error("no_tokens_created");
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok:" + made;
+  },
+  moveToken: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!rateLimit(conn, "move", 30, 3000)) throw new Error("moving_too_fast");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    if(!canMove(conn, room, t)) throw new Error("not_allowed");
+    t.x = clamp(num(d.x, t.x), 0, COLS - t.w);
+    t.y = clamp(num(d.y, t.y), 0, ROWS - t.h);
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  resizeToken: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    if(!canMove(conn, room, t)) throw new Error("not_allowed");
+    t.w = clamp(Math.round(num(d.w, t.w)) || 1, 1, 8);
+    t.h = clamp(Math.round(num(d.h, t.h)) || 1, 1, 8);
+    t.x = clamp(t.x, 0, COLS - t.w);
+    t.y = clamp(t.y, 0, ROWS - t.h);
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  deleteToken: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    if(!(isDM(conn, room) || t.owner === nameOf(conn))) throw new Error("not_allowed");
+    room.doc.tokens = room.doc.tokens.filter(function(k){ return k.id !== t.id; });
+    if(room.doc.initCurrent === t.id) room.doc.initCurrent = "";
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  setTokenInit: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    if(!canMove(conn, room, t)) throw new Error("not_allowed");
+    t.init = clamp(num(d && d.init, 0), 0, 999);
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  initAdd: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    if(t.inTracker) return "ok";
+    t.inTracker = true;
+    if(!room.doc.initCurrent) room.doc.initCurrent = t.id;
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  initRemove: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    t.inTracker = false;
+    t.init = 0;
+    if(room.doc.initCurrent === t.id) room.doc.initCurrent = "";
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  initNext: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var list = initsorted(room);
+    if(!list.length){ room.doc.initCurrent = ""; saveRoom(room); broadcastDoc(room); return "ok"; }
+    var idx = -1;
+    for(var i=0;i<list.length;i++) if(list[i].id === room.doc.initCurrent){ idx = i; break; }
+    var cur = list[(idx + 1) % list.length];
+    room.doc.initCurrent = cur.id;
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  initGoto: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    var t = findToken(room, String(d && d.id));
+    if(!t) throw new Error("token_not_found");
+    t.inTracker = true;
+    room.doc.initCurrent = t.id;
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  addWall: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    if(!rateLimit(conn, "wall", 40, 5000)) throw new Error("too_fast");
+    var d = safeParse(data);
+    var x1 = clamp(num(d.x1, 0), 0, COLS), y1 = clamp(num(d.y1, 0), 0, ROWS);
+    var x2 = clamp(num(d.x2, 0), 0, COLS), y2 = clamp(num(d.y2, 0), 0, ROWS);
+    if(Math.abs(x2-x1) < 0.4 && Math.abs(y2-y1) < 0.4) throw new Error("wall_too_short");
+    if(room.doc.walls.length >= MAX_WALLS) throw new Error("too_many_walls");
+    room.doc.walls.push({id:genId(room), x1:x1, y1:y1, x2:x2, y2:y2});
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  deleteWall: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    var before = room.doc.walls.length;
+    room.doc.walls = room.doc.walls.filter(function(w){ return w.id !== String(d && d.id); });
+    if(room.doc.walls.length === before) throw new Error("wall_not_found");
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  clearMap: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    room.doc.walls = [];
+    room.doc.tokens = [];
+    room.doc.initCurrent = "";
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  toggleLos: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    if(d && typeof d.on === "boolean") room.doc.enforceLos = d.on;
+    else room.doc.enforceLos = !room.doc.enforceLos;
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  setMap: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    if(!rateLimit(conn, "map", 8, 10000)) throw new Error("too_fast");
+    var d = safeParse(data);
+    var image = String((d && d.image) || "").trim().slice(0, 500);
+    if(image && !/^https?:\/\//.test(image)) throw new Error("invalid_image_url");
+    room.doc.mapImage = image;
+    saveRoom(room);
+    broadcastDoc(room);
+    return "ok";
+  },
+  chat: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    var d = safeParse(data);
+    var text = String((d && d.text) || "").trim().slice(0, 500);
+    if(!text) throw new Error("empty_message");
+    if(!rateLimit(conn, "chat", 4, 6000)) throw new Error("too_fast");
+    var name = nameOf(conn);
+    var msg = {n:name, x:text, ts:Date.now()};
+    room.doc.chat.push(msg);
+    if(room.doc.chat.length > MAX_CHAT) room.doc.chat.shift();
+    saveRoom(room);
+    broadcastTo(room, {t:"chat", n:name, x:text, ts:msg.ts});
+    return "ok";
+  }
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">A shared 22×17 campaign battle map. Drop in characters, draw walls, flip on fog of war, and run the fight — locally, solo, or live with a room code.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Local table</span>
+        <span class="bgn-mode-sub">One screen, no network — you run it</span>
+      </button>
+      <button class="bgn-mode" data-mode="solo">
+        <span class="bgn-mode-icon">🧙</span>
+        <span class="bgn-mode-name">Solo DM</span>
+        <span class="bgn-mode-sub">Practice with a sample party &amp; map</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online table</span>
+        <span class="bgn-mode-sub">Live match — create or join with a 5-letter code</span>
+      </button>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div class="panel center quickjoin" style="margin-top:22px">
+      <h3>🔑 Join a D&amp;D session</h3>
+      <p class="muted small">Your group already has a table running? Enter its 5-letter code to land on their map and chat — your own tokens, their map, all synced live.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <input id="quickJoinInput" maxlength="5" autocomplete="off" spellcheck="false"
+               placeholder="CODE"
+               style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+        <button class="btn btn-gold" id="quickJoinBtn">Join table</button>
+      </div>
+      <p class="muted small" id="quickJoinMsg"></p>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last table</h3>
+      <p class="muted small" id="continueInfoEl">A saved local table was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a table and share the 5-letter code with your group, or join a friend's with theirs. The DM who starts the table owns the map.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a table</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table">
+      <div class="panel bgn-stagepanel" id="mapStagePanel">
+
+        <div class="bgn-players">
+          <div class="bgn-player" id="pHost">
+            <span class="bgn-avatar host"></span>
+            <div>
+              <div class="bgn-pname" id="hostNameEl">DM</div>
+              <div class="bgn-psub" id="hostSubEl">dungeon master</div>
+            </div>
+          </div>
+          <div class="bgn-turn" id="turnEl">Local table</div>
+          <div class="bgn-player right" id="pGuest">
+            <span class="bgn-avatar guest"></span>
+            <div>
+              <div class="bgn-pname" id="guestNameEl">You</div>
+              <div class="bgn-psub" id="guestSubEl">player</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="dmCtl">
+          <button class="modeBtn active" data-mode="move">Move</button>
+          <button class="modeBtn" data-mode="wall">Walls</button>
+          <button class="modeBtn" data-mode="erase">Erase</button>
+          <span id="hintText"></span>
+        </div>
+
+        <div id="mapWrap">
+          <div id="main">
+            <canvas id="mapCanvas"></canvas>
+            <div id="viewCtl">
+              <button id="zoomTokenBtn" title="Zoom to selected token (2×)">◎</button>
+              <button id="zoomInBtn">+</button>
+              <button id="zoomOutBtn">−</button>
+              <button id="fitBtn">⤢</button>
+            </div>
+            <div id="banner"></div>
+            <div id="toast"></div>
+          </div>
+
+          <aside id="sidebar">
+            <div class="sidebarHead">
+              <span class="panelLabel" style="margin:0">Table tools</span>
+              <button id="sidebarToggle" class="btn">☰</button>
+            </div>
+            <div class="tabs">
+              <button data-tab="chat" class="active">Chat</button>
+              <button data-tab="players">Players</button>
+              <button data-tab="import">Import</button>
+              <button data-tab="map">Map</button>
+              <button data-tab="init">Init</button>
+            </div>
+
+            <div id="panel-chat" class="panel active">
+              <div id="chatLog"></div>
+              <div class="chatInputRow">
+                <input id="chatInput" placeholder="Message…" maxlength="500">
+                <button id="chatSendBtn">Send</button>
+              </div>
+            </div>
+
+            <div id="panel-players" class="panel">
+              <div class="nameRow">
+                <input id="nameInput" maxlength="24">
+                <button class="btn" id="nameSaveBtn">Save</button>
+              </div>
+              <div id="dmBox"></div>
+              <div id="playerList"></div>
+            </div>
+
+            <div id="panel-import" class="panel">
+              <div class="panelLabel">Default characters</div>
+              <div id="defaultChars"></div>
+              <div class="hint" style="margin-top:8px">Tap a portrait to place that character on the map — it's yours to move.</div>
+              <div class="panelLabel" style="margin-top:14px">NPCs</div>
+              <div id="npcChars"></div>
+              <div class="panelLabel" style="margin-top:14px">Monsters</div>
+              <div id="monsterChars"></div>
+              <div class="panelLabel" style="margin-top:14px">Bosses</div>
+              <div id="bossChars"></div>
+              <div class="panelLabel" style="margin-top:14px">Custom import</div>
+              <textarea id="importInput" placeholder="Paste characters here…"></textarea>
+              <button class="btn primary" id="importBtn" style="margin-top:8px">Add tokens to map</button>
+              <div class="hint">
+                Tokens are owned by whoever imports them — only the owner (and the DM) can move or resize them.
+                Drag a token to move it (it snaps to the grid), drag its bottom-right corner to resize it.
+                Vision radius (default 12) is in grid cells. Walls are drawn by the DM in the Walls mode and block line of sight.
+              </div>
+            </div>
+
+            <div id="panel-map" class="panel">
+              <div class="panelLabel">Built-in maps</div>
+              <div id="mapPicker" class="mapGrid"></div>
+              <div class="hint" style="margin-top:8px">The DM's chosen map is shown to everyone. Dungeon is the default grid.</div>
+              <div id="mapUploadBox" style="margin-top:14px">
+                <div class="panelLabel">Upload your own map</div>
+                <input type="file" id="mapFileInput" accept="image/*">
+                <button class="btn primary" id="mapUploadBtn">Upload map image</button>
+                <div class="hint">Picks an image from your device, converts it to webp (22×17 crop), and sets it as the map. DM only.</div>
+              </div>
+            </div>
+
+            <div id="panel-init" class="panel">
+              <div class="initTop">
+                <span class="panelLabel" style="margin:0">Initiative</span>
+                <button class="btn btn-sm" id="initSortBtn">↓ High first</button>
+              </div>
+              <div id="initNowRow" class="initNowRow" hidden>
+                <span id="initNowEl"></span>
+                <button class="btn btn-sm" id="initNextBtn">Next ▶</button>
+              </div>
+              <div id="initList"></div>
+              <div class="initAddRow">
+                <select id="initAddSel"></select>
+                <button class="btn btn-sm" id="initAddBtn" title="Add selected token to initiative">＋</button>
+              </div>
+              <div class="hint">
+                Set each token's initiative roll — the list sorts automatically, highest first. The token whose turn it is glows and shows a ▶ marker on the map, and is highlighted here. Click a row to jump to that token's turn; <b>Next ▶</b> advances to the following one.
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <div id="tableBar" hidden>
+          <span class="dot" id="connDot"></span><span id="connText">connecting…</span>
+          <span class="tbLabel">Table</span>
+          <b id="roomCodeEl">—</b>
+          <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+          <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave table</button>
+        </div>
+
+        <div class="bgn-actions" style="justify-content:center; margin-top:12px">
+          <button class="btn btn-gold btn-sm" id="newGameBtn">Restart table</button>
+          <button class="btn btn-ghost btn-sm" id="menuBtn">Back to lobby</button>
+          <button class="btn btn-ghost btn-sm" id="tableHelpBtn">❓ Help</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2,#d4af37)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+
+<style>
+/* ═══ BATTLE MAP — table, stage & tools (overrides + app styles) ═══ */
+html { color-scheme: dark; }
+#gameCtn .bgn-table { display:block; max-width:1180px; margin:0 auto; }
+.bgn-stagepanel { padding:14px; text-align:left; }
+
+.bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+.bgn-turn{ font-size:.78rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(212,175,55,.35); border-radius:999px; padding:5px 14px; white-space:nowrap; font-variant-numeric:tabular-nums; letter-spacing:.12em; text-transform:uppercase; font-weight:600; }
+.bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
+.bgn-player.right{ flex-direction:row-reverse; text-align:right; }
+.bgn-player.on{ border-color:var(--bgn-accent2,#d4af37); box-shadow:0 0 14px rgba(212,175,55,.35); }
+.bgn-avatar{ width:26px; height:26px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.25); flex:none; }
+.bgn-avatar.host{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.bgn-avatar.guest{ background:radial-gradient(circle at 35% 30%, #3c3c44, #050507); }
+.bgn-pname{ font-weight:700; font-size:.92rem; white-space:nowrap; }
+.bgn-psub{ font-size:.7rem; opacity:.7; white-space:nowrap; }
+
+#dmCtl { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:6px 0 10px; }
+body:not(.isDm) #dmCtl { display:none; }
+.modeBtn {
+  background:rgba(23,20,40,.8); color:var(--bgn-cream); border:1px solid rgba(212,175,55,.3);
+  padding:6px 14px; border-radius:999px; cursor:pointer; font:600 12.5px var(--bgn-sans); letter-spacing:.05em;
+}
+.modeBtn:hover { border-color:var(--bgn-accent2,#f2dc8b); }
+.modeBtn.active { background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent) 60%,var(--bgn-accent3)); color:#221803; border-color:transparent; }
+#hintText { font-size:12px; color:var(--bgn-muted); }
+
+#mapWrap { display:flex; gap:12px; align-items:stretch; height:clamp(400px, 58vh, 680px); text-align:left; position:relative; }
+#main { flex:1; position:relative; min-width:0; min-height:0; background:#0b0912; border:1px solid var(--bgn-line); border-radius:10px; overflow:hidden; }
+canvas#mapCanvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+#viewCtl { position:absolute; right:12px; top:12px; display:flex; flex-direction:column; gap:6px; z-index:5; }
+#viewCtl button {
+  width:30px; height:30px; border-radius:8px; background:rgba(16,13,26,.85); color:var(--bgn-cream);
+  border:1px solid rgba(212,175,55,.35); cursor:pointer; font-size:15px; backdrop-filter:blur(4px);
+}
+#viewCtl button:hover { background:rgba(40,32,60,.9); }
+#viewCtl button:disabled { opacity:.4; cursor:default; background:rgba(16,13,26,.6); }
+#zoomTokenBtn.active { border-color:var(--bgn-accent); color:var(--bgn-accent2); }
+#toast {
+  position:absolute; left:50%; bottom:16px; transform:translateX(-50%);
+  background:rgba(23,20,40,.95); border:1px solid rgba(212,175,55,.4); padding:8px 16px; border-radius:999px;
+  font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:9; max-width:80%;
+}
+#toast.show { opacity:1; }
+#banner {
+  position:absolute; left:50%; top:14px; transform:translateX(-50%);
+  background:rgba(23,20,40,.9); border:1px solid rgba(212,175,55,.45); padding:8px 14px;
+  border-radius:999px; font-size:12.5px; color:var(--bgn-accent2); z-index:5; display:none; max-width:70%; text-align:center;
+}
+
+#sidebar {
+  width:310px; display:flex; flex-direction:column; min-height:0;
+  background:rgba(14,12,23,.96); border:1px solid var(--bgn-line); border-radius:10px; overflow:hidden;
+}
+.sidebarHead { display:flex; align-items:center; justify-content:space-between; padding:8px 12px 4px; }
+#sidebarToggle { display:none; padding:4px 10px; }
+.tabs { display:flex; border-bottom:1px solid rgba(212,175,55,.16); }
+.tabs button {
+  flex:1; background:none; border:none; color:var(--bgn-muted); padding:10px 4px;
+  cursor:pointer; font:600 13px var(--bgn-sans); border-bottom:2px solid transparent;
+}
+.tabs button.active { color:var(--bgn-cream); border-bottom-color:var(--bgn-accent); }
+.initTop { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.initNowRow { display:flex; align-items:center; justify-content:space-between; gap:8px; background:rgba(212,175,55,.12); border:1px solid rgba(212,175,55,.4); border-radius:8px; padding:7px 9px; margin-bottom:8px; }
+#initNowEl { font-weight:700; color:var(--bgn-accent2); font-size:13px; letter-spacing:.04em; border-left:3px solid var(--bgn-accent); padding-left:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#initList { display:flex; flex-direction:column; gap:5px; overflow-y:auto; flex:1; min-height:0; }
+.initRow { display:flex; align-items:center; gap:6px; background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.18); border-radius:7px; padding:5px 7px; }
+.initRow.current { border-color:var(--bgn-accent); background:rgba(212,175,55,.1); box-shadow:0 0 0 1px var(--bgn-accent); }
+.initTurn { color:var(--bgn-accent2); font-size:11px; width:14px; text-align:center; opacity:0; flex-shrink:0; }
+.initRow.current .initTurn { opacity:1; }
+.initVal { width:46px; flex-shrink:0; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:5px; color:var(--bgn-text); font-size:13px; padding:4px 5px; text-align:center; font-family:inherit; outline:none; }
+.initVal:focus { border-color:var(--bgn-accent); }
+.initVal:disabled { opacity:.5; }
+.initNameWrap { flex:1; min-width:0; display:flex; flex-direction:column; }
+.initName { font-size:12.5px; color:var(--bgn-cream); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.initSub { font-size:10.5px; color:var(--bgn-muted); }
+.initDel { width:22px; height:22px; flex-shrink:0; border:none; background:transparent; color:var(--bgn-muted); cursor:pointer; font-size:11px; border-radius:5px; }
+.initDel:hover { background:rgba(212,175,55,.15); color:var(--bgn-accent2); }
+.initDel:disabled { opacity:.3; cursor:default; }
+.initEmpty { font-size:12px; color:var(--bgn-muted); text-align:center; padding:14px 4px; line-height:1.5; }
+.initAddRow { display:flex; gap:6px; margin-top:8px; }
+#initAddSel { flex:1; min-width:0; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text); font-size:12.5px; padding:6px 8px; outline:none; }
+#initAddBtn { flex-shrink:0; }
+#sidebar .panel { display:none; flex:1; flex-direction:column; min-height:0; padding:10px; }
+#sidebar .panel.active { display:flex; }
+#chatLog { flex:1; overflow-y:auto; min-height:0; display:flex; flex-direction:column; gap:6px; padding:2px; }
+.chatRow { font-size:13px; line-height:1.35; word-break:break-word; color:var(--bgn-text); }
+.chatRow .who { font-weight:600; color:var(--bgn-accent2); }
+.chatRow .tm { color:#6f6880; font-size:11px; margin-left:6px; }
+.chatInputRow { display:flex; gap:6px; margin-top:8px; }
+.chatInputRow input {
+  flex:1; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); border-radius:8px;
+  color:var(--bgn-text); padding:8px 10px; font-size:13px; outline:none; font-family:inherit;
+}
+.chatInputRow input:focus { border-color:var(--bgn-accent); }
+.chatInputRow button { background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); border:none; color:#221803; font-weight:700; border-radius:8px; padding:0 14px; cursor:pointer; font:700 12px var(--bgn-sans); }
+#dmBox { background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.2); border-radius:10px; padding:10px; margin-bottom:10px; font-size:13px; }
+.dmRow { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#playerList { display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+.player-row { display:flex; align-items:center; gap:8px; font-size:13px; padding:5px 8px; border-radius:8px; background:rgba(23,20,40,.6); }
+.player-row .pdot { width:9px; height:9px; border-radius:50%; background:#3fcf6e; }
+.player-row .name { flex:1; font-weight:500; }
+.badge { font-size:10px; background:var(--bgn-accent3); color:#221803; font-weight:700; border-radius:4px; padding:1px 6px; }
+.badge.dm { background:var(--bgn-accent); }
+.nameRow { display:flex; gap:6px; margin-bottom:10px; }
+.nameRow input {
+  flex:1; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); border-radius:8px;
+  color:var(--bgn-text); padding:7px 9px; font-size:13px; outline:none; font-family:inherit;
+}
+.nameRow input:focus { border-color:var(--bgn-accent); }
+#importInput {
+  width:100%; min-height:130px; resize:vertical; background:#0b0912;
+  border:1px solid rgba(212,175,55,.25); border-radius:8px; color:var(--bgn-text); padding:9px;
+  font-size:12.5px; font-family:ui-monospace, monospace; outline:none;
+}
+.hint { font-size:11.5px; color:var(--bgn-muted); margin-top:8px; line-height:1.5; }
+.losToggle { display:flex; align-items:center; gap:7px; width:100%; font-size:12.5px; color:var(--bgn-cream); margin-top:8px; cursor:pointer; }
+.losToggle input { accent-color:var(--bgn-accent); width:15px; height:15px; margin:0; cursor:pointer; }
+.panelLabel { font-size:11px; color:var(--bgn-muted); text-transform:uppercase; letter-spacing:.12em; margin-bottom:8px; }
+.mapGrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.mapBtn { background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.2); border-radius:8px; padding:0; overflow:hidden; cursor:pointer; text-align:left; }
+.mapBtn:hover { border-color:rgba(212,175,55,.5); }
+.mapBtn:disabled { opacity:.55; cursor:default; }
+.mapBtn.selected { border-color:var(--bgn-accent); box-shadow:0 0 0 1px var(--bgn-accent); }
+.mapThumb { display:block; width:100%; height:66px; background:rgba(23,20,40,.6); }
+.mapThumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.mapName { display:block; padding:6px 8px; font-size:12px; color:var(--bgn-cream); }
+#mapUploadBtn { margin-top:8px; width:100%; }
+#mapFileInput { display:none; }
+#defaultChars, #npcChars, #monsterChars, #bossChars { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.defChar {
+  display:flex; align-items:center; gap:8px; background:rgba(23,20,40,.6);
+  border:1px solid rgba(212,175,55,.2); border-radius:8px; padding:6px; cursor:pointer; text-align:left;
+}
+.defChar:hover { border-color:rgba(212,175,55,.5); }
+.defImg { width:44px; height:44px; border-radius:7px; object-fit:cover; }
+.defInfo { display:flex; flex-direction:column; min-width:0; }
+.defTitle { font-size:12px; color:var(--bgn-cream); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.defSub { font-size:11px; color:var(--bgn-muted); }
+
+#tableBar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:12px; padding:10px 14px; border:1px dashed rgba(212,175,55,.4); border-radius:10px; font-size:13px; }
+#tableBar[hidden]{ display:none; }
+.dot { width:8px; height:8px; border-radius:50%; background:#7a8294; display:inline-block; }
+.dot.on { background:#3fcf6e; }
+.dot.err { background:#e04848; }
+#connText { color:var(--bgn-muted); font-size:12px; }
+.tbLabel { color:var(--bgn-muted); font-size:12px; text-transform:uppercase; letter-spacing:.12em; }
+#roomCodeEl { font-size:1.4rem; letter-spacing:6px; color:var(--bgn-accent2); }
+
+/* small buttons inside the table UI (BGN .btn is too big) */
+#mapWrap .btn, #tableBar .btn, .bgn-actions .btn { font:600 12px var(--bgn-sans); letter-spacing:.06em; text-transform:none; padding:9px 16px; border-radius:999px; }
+#mapWrap .btn.primary { background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent) 60%,var(--bgn-accent3)); color:#221803; }
+#mapWrap .btn.danger { background:#7a2525; color:#fff; border-color:#983434; }
+
+@media (max-width: 860px) {
+  #sidebar {
+    position:absolute; right:0; top:0; bottom:0; z-index:20;
+    transform:translateX(105%); transition:transform .22s; box-shadow:-8px 0 30px rgba(0,0,0,.5);
+  }
+  #sidebar.open { transform:none; }
+  #sidebarToggle { display:inline-block; }
+  .bgn-nav-title{ max-width:56vw; }
+}
+/* ── help / popup instructions modal ── */
+.bgn-help-overlay{
+  position:fixed; inset:0; z-index:1000;
+  background:rgba(8,7,14,.72);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+}
+.bgn-help{
+  position:relative; width:100%; max-width:560px; max-height:84vh;
+  background:linear-gradient(180deg,#191531,#120f20);
+  border:1px solid var(--bgn-line,rgba(212,175,55,.16));
+  border-radius:12px;
+  box-shadow:0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(212,175,55,.08);
+  padding:34px 36px 30px;
+}
+.bgn-help-close{
+  position:absolute; top:12px; right:12px; width:34px; height:34px; border-radius:50%;
+  border:1px solid rgba(212,175,55,.35); background:rgba(20,17,32,.6); color:var(--bgn-muted,#a49bb4);
+  font-size:14px; cursor:pointer; line-height:1;
+}
+.bgn-help-close:hover{ color:var(--bgn-accent2,#f2dc8b); border-color:var(--bgn-accent,#d4af37); }
+.bgn-help-body{ max-height:calc(84vh - 70px); overflow-y:auto; padding-right:8px; }
+.bgn-help-body h2{ margin:0 0 14px; font-size:1.5rem; font-family:var(--bgn-serif,Cinzel,serif); }
+.bgn-help-body h3{ font-family:var(--bgn-serif,Cinzel,serif); letter-spacing:.1em; text-transform:uppercase; font-size:.82rem; color:var(--bgn-accent2,#f2dc8b); margin:22px 0 10px; border-bottom:1px solid var(--bgn-line,rgba(212,175,55,.16)); padding-bottom:8px; }
+.bgn-help-body p{ margin:8px 0; font-size:.92rem; }
+.bgn-help-body .btn{ margin-top:20px; }
+@media (max-width:560px){
+  .bgn-help{ padding:26px 20px 22px; }
+  .bgn-help-body{ max-height:calc(84vh - 60px); }
+}
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+
+<script type="module" src="src/main.js"></script>
+
+<script>
+(function(){
+"use strict";
+
+/* theme config from main.pjs */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+var lobbyCtn=document.getElementById("lobbyCtn");
+var gameCtn=document.getElementById("gameCtn");
+var onlinePanel=document.getElementById("onlinePanel");
+var onlineMsgEl=document.getElementById("onlineMsg");
+var joinCodeInput=document.getElementById("joinCodeInput");
+var roomBoxHidden=false;
+var app=null, tableMode=null;
+
+function friendly(err){
+  var m = (err && err.message) ? err.message : String(err||"unknown error");
+  return ({
+    table_not_found:"no table found with that code",
+    table_full:"that table is full (12 players max)",
+    network_full:"the network is at capacity right now",
+    "socket timeout":"couldn't reach the network",
+    "Couldn't join table":"couldn't join the table"
+  })[m] || m;
+}
+function setOnlineMsg(t){ if(onlineMsgEl) onlineMsgEl.textContent=t; }
+
+function ready(cb){
+  if(window.__createApp) return cb();
+  setTimeout(function(){ ready(cb); }, 120);
+}
+
+function showGame(){
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  document.getElementById("tableBar").hidden = tableMode!=="online";
+}
+
+function startLocal(demo){
+  ready(function(){
+    tableMode="local";
+    showGame();
+    sfx("deal");
+    app = window.__createApp({ mode:"local", resume:false });
+    if(demo) app.loadDemo();
+    try { window.scrollTo({top:0}); } catch(e){}
+  });
+}
+
+function startOnline(create, code){
+  ready(function(){
+    tableMode="online";
+    showGame();
+    try { window.scrollTo({top:0}); } catch(e){}
+    app = window.__createApp({ mode:"online" });
+    sfx("deal");
+    app.openRoom(create, code).then(function(){
+      setOnlineMsg("");
+    }).catch(function(err){
+      setOnlineMsg("Couldn't start the table: "+friendly(err));
+      setTimeout(exitToLobby, 1600);
+    });
+  });
+}
+
+function exitToLobby(){
+  if(app){ try{ app.leaveTable(); app.destroy(); }catch(e){} app=null; }
+  tableMode=null;
+  gameCtn.hidden=true;
+  lobbyCtn.hidden=false;
+  onlinePanel.hidden=true;
+  refreshContinuePanel();
+}
+
+function applyTable(o){
+  if(!o || !Array.isArray(o.tokens)) return false;
+  exitToLobby();
+  tableMode="local";
+  showGame();
+  app = window.__createApp({ mode:"local", resume:false });
+  app.waitOpen().then(function(){
+    var ops = Promise.resolve();
+    ops = ops.then(function(){ return app.net.rpc("clearMap", {}).catch(function(){}); });
+    if(o.mapImage) ops = ops.then(function(){ return app.net.rpc("setMap", {image:o.mapImage}).catch(function(){}); });
+    var chars = (o.tokens||[]).map(function(t){ return {name:t.name, color:t.color, img:t.img, hp:t.hp, vision:t.vision, w:t.w, h:t.h, x:t.x, y:t.y}; });
+    if(chars.length) ops = ops.then(function(){ return app.net.rpc("importChars", {chars:chars}).catch(function(){}); });
+    var ws = (o.walls||[]);
+    for(var i=0;i<ws.length;i++) (function(w){ ops = ops.then(function(){ return app.net.rpc("addWall", {x1:w.x1,y1:w.y1,x2:w.x2,y2:w.y2}).catch(function(){}); }); })(ws[i]);
+    return ops;
+  }).then(function(){ sfx("deal"); }).catch(function(){ sfx("deal"); });
+  return true;
+}
+
+/* ── continue panel (saved local tables) ── */
+function refreshContinuePanel(){
+  var panel=document.getElementById("continuePanel");
+  if(!panel) return;
+  var has=window.__hasLocalSave && window.__hasLocalSave();
+  panel.hidden=!has;
+  if(has){
+    var info=document.getElementById("continueInfoEl");
+    try{
+      var raw=localStorage.getItem("battleboard_local_table_v1");
+      if(raw){
+        var o=JSON.parse(raw);
+        var n=(o.tokens||[]).length;
+        info.textContent="A saved local table was found"+(n?(" — "+n+" token"+(n===1?"":"s")+" on the map"):"")+".";
+      }
+    }catch(e){}
+  }
+}
+
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click", function(){
+    var m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    if(m==="local") startLocal(false);
+    else if(m==="solo") startLocal(true);
+  });
+});
+document.getElementById("createRoomBtn").addEventListener("click", function(){ setOnlineMsg("Creating table…"); startOnline(true, null); });
+document.getElementById("joinRoomBtn").addEventListener("click", function(){
+  var c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  setOnlineMsg("Joining "+c+"…");
+  startOnline(false, c);
+});
+document.getElementById("quickJoinBtn").addEventListener("click", function(){
+  var c=document.getElementById("quickJoinInput").value.trim().toUpperCase();
+  if(c.length<5){ document.getElementById("quickJoinMsg").textContent="Enter the 5-letter table code."; return; }
+  document.getElementById("quickJoinMsg").textContent="Joining table "+c+"…";
+  startOnline(false, c);
+});
+document.getElementById("quickJoinInput").addEventListener("input", function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,5);
+});
+joinCodeInput.addEventListener("input", function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,5);
+});
+document.getElementById("copyCodeBtn").addEventListener("click", function(){
+  var code = document.getElementById("roomCodeEl").textContent;
+  if(!code || code==="—") return;
+  try{ navigator.clipboard.writeText(code); flash("Code "+code+" copied!"); }catch(e){ flash(code); }
+});
+document.getElementById("leaveBtn").addEventListener("click", exitToLobby);
+document.getElementById("menuBtn").addEventListener("click", exitToLobby);
+document.getElementById("newGameBtn").addEventListener("click", function(){
+  if(!app) return;
+  if(!app.isDm()){ app.toast("Only the DM can restart the table."); return; }
+  if(confirm("Remove all tokens and walls?")) app.rpc("clearMap", {}).catch(function(e){ app.toast("Failed: "+e.message); });
+});
+var banner=null;
+function flash(msg){
+  if(window.__app && window.__app.toast && window.__app.ui && window.__app.ui.toast){
+    window.__app.toast(msg);
+    return;
+  }
+  var b=document.getElementById("banner");
+  if(!b) return;
+  b.style.display="block"; b.textContent=msg;
+  setTimeout(function(){ b.style.display="none"; }, 2200);
+}
+
+/* ── help modal ── */
+var helpOverlay=document.getElementById("helpOverlay");
+var helpBody=document.getElementById("helpBody");
+var HELP_HTML='<h2 class="goldtext">How the Battle Map works</h2>'
+  +'<p class="muted">A shared 22×17 campaign grid. Characters become tokens you drag around the map; walls block sight; the fog of war hides everything the players haven\'t seen.</p>'
+  +'<h3>Three ways to sit down</h3>'
+  +'<p><b>🛋️ Local table</b> — one screen, no network. You run the whole table yourself.</p>'
+  +'<p><b>🧙 Solo DM</b> — a sample party on a meadow map, ready to practice with.</p>'
+  +'<p><b>🌐 Online table</b> — create a table, share the 5-letter code, and your friends join live. The creator is the DM; anyone can claim DM if the DM leaves.</p>'
+  +'<h3>Playing</h3>'
+  +'<p><b>Import</b> characters from the Import tab (tap a default portrait, or paste JSON) — tokens are owned by whoever imported them. Drag a token to move it; drag its corner to resize it to 1–8 cells.</p>'
+  +'<p>As the <b>DM</b>, the Move / Walls / Erase toolbar appears. Draw walls that block line of sight, pick a built-in map or upload your own, and enforce <b>fog of war</b> from the Players tab so players only see what their tokens can actually see.</p>'
+  +'<p>When fog is on, players see the map only within their tokens\' vision radius — walls and other tokens block their line of sight.</p>'
+  +'<h3>Online extras</h3>'
+  +'<p>Have a code from a friend? Use the <b>🔑 Join a D&D session</b> box in the lobby to hop straight into their table.</p>'
+  +'<p>Share the room code so your group can rejoin any time. The table stays alive on the network until it\'s recycled by inactivity.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){ helpBody.innerHTML=HELP_HTML; document.getElementById("helpDoneBtn").addEventListener("click",closeHelp); helpOverlay.hidden=false; }
+function closeHelp(){ helpOverlay.hidden=true; }
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!helpOverlay.hidden)closeHelp(); });
+
+/* pop-up instructions on first paint */
+setTimeout(openHelp, 500);
+
+/* ── lounge ── */
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+})();
+
+/* ── share / export (bgn-share.js) ── */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-blank-template",
+    gameName:function(){ return "Battle Map"; },
+    exportData:function(){
+      if(!window.__app) return null;
+      var s=window.__app.state;
+      return {v:1, tokens:s.tokens, walls:s.walls, mapImage:s.mapImage, chat:s.chat};
+    },
+    applySave:applyTable,
+    source:function(){ return document.getElementById("mapCanvas"); },
+    title:function(){ return "BATTLE MAP"; },
+    subtitle:function(){ return "BGN · shared campaign table"; },
+    filenameBase:function(){ return "battle-map"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+
+/* ── continue / delete save ── */
+var contBtn=document.getElementById("continueBtn");
+var delBtn=document.getElementById("deleteSaveBtn");
+contBtn.addEventListener("click", function(){
+  ready(function(){
+    tableMode="local";
+    showGame();
+    sfx("deal");
+    app = window.__createApp({ mode:"local", resume:true });
+    try { window.scrollTo({top:0}); } catch(e){}
+  });
+});
+delBtn.addEventListener("click", function(){
+  if(window.__clearLocalSave) window.__clearLocalSave();
+  refreshContinuePanel();
+  flash("Saved table deleted.");
+});
+
+refreshContinuePanel();
+})();
+</script>
