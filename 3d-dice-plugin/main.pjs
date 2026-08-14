@@ -1,0 +1,1519 @@
+// ============================================================================
+//  3d-dice-plugin  —  generate beautiful SVG dice & roll them in 3D physics
+//
+//  IMPORT (use any name you like, e.g. "dice"):
+//    dice = \{import:3d-dice-plugin\}
+//
+//  GENERATE FACES (SVG strings, "Die face plates" rendering):
+//    Faces are cropped flush to the die shape - no canvas margin - so they
+//    map straight onto a 3D die. Pass tight:false for the full plate instead.
+//    [dice.face({value:6, sides:6, color:"#c40027"})]        pips on a d6
+//    [dice.face({value:20, sides:20, color:"#1546d8"})]      numerals elsewhere
+//    [dice.face({value:4, sides:4, color:"#0d8a55", shape:"triangle"})]
+//    [dice.sheet({sides:12, color:"#d98a00", cell:256})]     contact sheet
+//    dice.tightDim(shape, 1024)            ->  { w, h } for a tight render
+//    dice.palette("#c40027")  ->  { mid, lit, core, deep, mark, ... }
+//    await dice.rasterize(svgString, 1024, 1024)             -> PNG Blob
+//
+//  ROLL (standard dice notation):
+//    [dice.roll("2d6+3").total]        -> 12
+//    [dice.roll("4d6kh3").text]        -> 4d6kh3 -> (6+4+3)[dropped 1] = 13
+//    [dice.d20()]                      single die
+//    groups: NdX . dX . d% . modifiers kh/kl (keep), dh/dl (drop), adv/dis
+//
+//  ANIMATED UI (3D physics dice — three.js + cannon-es loaded on demand):
+//    dice.embed(containerEl, { color:"#c40027", dice:[{sides:6},{sides:20}], onRoll })
+//    dice.throw("2d20kh1+5", containerEl)     one-shot 3D roll
+//      -> { valid, input, element, promise }  (promise resolves with the roll)
+//    Pass { allow3D:false } to force the 2D face-tumble animation instead.
+//    Classic shapes roll in 3D (d4 d6 d8 d10 d12 d20 d% as tens+units);
+//    other side counts fall back to the 2D animation automatically.
+//
+//  RESULT SHAPES — roll(formula) returns:
+//    { valid:true, input:"2d6+3", groups:[{ count, sides, kept[], dropped[],
+//      keep, drop, sign, total }], modifier:3, total:12, text:"2d6+3 -> (3+6)+3 = 12" }
+//    on invalid input: { valid:false, error, input }
+// ============================================================================
+//
+//  CREDITS & LICENSING
+//  The 3D physics roller (three.js + cannon-es scene, D10 geometry, top-face
+//  result reading, canvas label textures) is an original vanilla-JS
+//  implementation inspired by "react-3d-dice" by Andrew (aqandrew):
+//    https://github.com/aqandrew/react-3d-dice
+//  That repo ships WITHOUT a license (all rights reserved), so this code is
+//  not derived under any open-source license — it was rewritten from scratch
+//  (the D10 shape data is adapted from that project). The concept follows the
+//  same lineage its README credits: Anton Natarov's three.js/cannon.js dice
+//  roller (http://a.teall.info/dice, public domain) and Michael Wolf's
+//  object-oriented remix (https://github.com/byWulf/threejs-dice).
+//  three.js (MIT) and cannon-es (MIT) are loaded from esm.sh at runtime.
+//  The "Die face plates" SVG face renderer is ported from bgn-dice-generator
+//  (https://github.com/bengadbois/bgn-dice-generator).
+// ============================================================================
+
+$meta
+  title = dice-roller-plugin
+  description = Beautiful SVG dice faces (d2-d20, pips & numerals, any colour) plus a 3D physics dice roller - standard dice notation, keep/drop, advantage, embeddable animated UI (three.js + cannon-es).
+  tags = dice, dnd, rpg, tabletop, roller, plugin, 3d, board game
+  image = https://user.uploads.dev/file/d3db319fc605203339957ce6d5013aca.jpg
+  header
+    mode = minimal
+
+$output = [getDiceRoller()]
+
+getDiceRoller() =>
+  if(!window.__diceRollerPlugin348271) {
+    window.__diceRollerPlugin348271 = (function() {
+
+      const VERSION = "2.0.0";
+
+      // ─────────────────────────────────────────────
+      //  Colour helpers (from bgn-dice-generator)
+      // ─────────────────────────────────────────────
+
+      function hexToRgb(hex) {
+        const h = hex.replace("#", "");
+        const v = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+        return [0, 2, 4].map((i) => parseInt(v.slice(i, i + 2), 16));
+      }
+
+      function rgbToHsl(c) {
+        let r = c[0] / 255, g = c[1] / 255, b = c[2] / 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let h = 0, s = 0;
+        const l = (max + min) / 2;
+        const d = max - min;
+        if (d) {
+          s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+          if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+          else if (max === g) h = (b - r) / d + 2;
+          else h = (r - g) / d + 4;
+          h *= 60;
+        }
+        return [h, s * 100, l * 100];
+      }
+
+      function hslToHex(h, s, l) {
+        s /= 100; l /= 100;
+        const k = (n) => (n + h / 30) % 12;
+        const a = s * Math.min(l, 1 - l);
+        const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+        const to = (x) => Math.round(255 * x).toString(16).padStart(2, "0");
+        return "#" + to(f(0)) + to(f(8)) + to(f(4));
+      }
+
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+      function buildPalette(baseHex) {
+        const [h, s, l] = rgbToHsl(hexToRgb(baseHex));
+        const [r, g, b] = hexToRgb(baseHex);
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        return {
+          mid: baseHex,
+          lit: hslToHex(h, clamp(s - 4, 0, 100), clamp(l + 24, 0, 96)),
+          core: hslToHex(h, clamp(s + 4, 0, 100), clamp(l - 14, 3, 100)),
+          deep: hslToHex(h, clamp(s + 8, 0, 100), clamp(l - 34, 2, 100)),
+          mark: lum > 0.62 ? "#1c1c1e" : "#ffffff",
+          markShade: lum > 0.62 ? "#ffffff" : "#000000",
+          light: lum > 0.62
+        };
+      }
+
+      // ─────────────────────────────────────────────
+      //  Face geometry (from bgn-dice-generator)
+      //  One authoring space of 1024, always square,
+      //  always dead-on. No perspective.
+      // ─────────────────────────────────────────────
+
+      const S = 1024, CX = 512, CY = 512;
+
+      const SHAPES = {
+        square: { label: "Square", radius: 36 },
+        triangle: { label: "Triangle", radius: 30 },
+        kite: { label: "Kite", radius: 26 },
+        pentagon: { label: "Pentagon", radius: 30 },
+        barrel: { label: "Barrel", radius: 44 },
+        circle: { label: "Disc", radius: 0 }
+      };
+
+      function autoShape(n) {
+        if (n === 2) return "circle";
+        if (n === 3 || n === 6) return "square";
+        if (n === 4 || n === 8 || n === 20) return "triangle";
+        if (n === 12) return "pentagon";
+        if (n === 10 || n === 14 || n === 16 || n === 18) return "kite";
+        return "barrel";
+      }
+
+      function vertices(shape) {
+        const poly = (count, R, rot) => {
+          const base = (rot === undefined) ? -90 : rot;
+          return Array.from({ length: count }, (_, i) => {
+            const a = ((base + (360 / count) * i) * Math.PI) / 180;
+            return [CX + R * Math.cos(a), CY + R * Math.sin(a)];
+          });
+        };
+        switch (shape) {
+          case "square": return poly(4, 452, -45);
+          case "triangle": return poly(3, 386);
+          case "pentagon": return poly(5, 356);
+          case "kite": return [[CX, 176], [CX + 276, 438], [CX, 848], [CX - 276, 438]];
+          case "barrel": {
+            const w = 336, h = 232;
+            return [[CX - w, CY - h], [CX + w, CY - h], [CX + w, CY + h], [CX - w, CY + h]];
+          }
+          default: return null;
+        }
+      }
+
+      const CIRCLE_R = 336;
+
+      function facePath(shape) {
+        if (shape === "circle") {
+          return "M " + (CX - CIRCLE_R) + " " + CY + " A " + CIRCLE_R + " " + CIRCLE_R + " 0 1 0 " + (CX + CIRCLE_R) + " " + CY + " A " + CIRCLE_R + " " + CIRCLE_R + " 0 1 0 " + (CX - CIRCLE_R) + " " + CY + " Z";
+        }
+        const pts = vertices(shape);
+        const r = SHAPES[shape].radius;
+        const n = pts.length;
+        let d = "";
+        for (let i = 0; i < n; i++) {
+          const prev = pts[(i - 1 + n) % n], cur = pts[i], next = pts[(i + 1) % n];
+          const v1 = [prev[0] - cur[0], prev[1] - cur[1]];
+          const v2 = [next[0] - cur[0], next[1] - cur[1]];
+          const l1 = Math.hypot(v1[0], v1[1]), l2 = Math.hypot(v2[0], v2[1]);
+          const rr = Math.min(r, l1 / 2.2, l2 / 2.2);
+          const a = [cur[0] + (v1[0] / l1) * rr, cur[1] + (v1[1] / l1) * rr];
+          const b = [cur[0] + (v2[0] / l2) * rr, cur[1] + (v2[1] / l2) * rr];
+          d += i === 0 ? "M " + a[0].toFixed(1) + " " + a[1].toFixed(1) + " " : "L " + a[0].toFixed(1) + " " + a[1].toFixed(1) + " ";
+          d += "Q " + cur[0].toFixed(1) + " " + cur[1].toFixed(1) + " " + b[0].toFixed(1) + " " + b[1].toFixed(1) + " ";
+        }
+        return d + "Z";
+      }
+
+      function bounds(shape) {
+        if (shape === "circle") {
+          return { x0: CX - CIRCLE_R, x1: CX + CIRCLE_R, y0: CY - CIRCLE_R, y1: CY + CIRCLE_R };
+        }
+        const pts = vertices(shape);
+        return {
+          x0: Math.min(...pts.map((p) => p[0])), x1: Math.max(...pts.map((p) => p[0])),
+          y0: Math.min(...pts.map((p) => p[1])), y1: Math.max(...pts.map((p) => p[1]))
+        };
+      }
+
+      // Tight-crop rect — the bounding box of the face shape, rounded out to the
+      // path's 0.1-unit precision so nothing clips. A tight build sets its viewBox
+      // to this rect, making the face flush with the canvas edges.
+      function tightView(shape) {
+        const bb = bounds(shape);
+        const x0 = Math.floor(bb.x0 * 10) / 10, y0 = Math.floor(bb.y0 * 10) / 10;
+        const x1 = Math.ceil(bb.x1 * 10) / 10, y1 = Math.ceil(bb.y1 * 10) / 10;
+        return { x0: x0, y0: y0, w: x1 - x0, h: y1 - y0 };
+      }
+
+      // Pixel dimensions for a tight export: longest side = `size`, other side
+      // follows the shape's aspect (a triangle is wider than tall, a kite taller).
+      function tightDim(shape, size) {
+        const tv = tightView(shape);
+        const m = Math.max(tv.w, tv.h);
+        const s = size / m;
+        return { w: Math.max(1, Math.round(tv.w * s)), h: Math.max(1, Math.round(tv.h * s)) };
+      }
+
+      const MARK_OFFSET = { triangle: 46, pentagon: 22, kite: 8, square: 0, barrel: 0, circle: 0 };
+      const MARK_SIZE = { square: 320, triangle: 250, pentagon: 290, kite: 268, barrel: 300, circle: 340 };
+
+      const CELLS = { TL: [0, 0], TC: [1, 0], TR: [2, 0], ML: [0, 1], MC: [1, 1], MR: [2, 1], BL: [0, 2], BC: [1, 2], BR: [2, 2] };
+      const PIP_FACES = {
+        1: ["MC"], 2: ["TL", "BR"], 3: ["TL", "MC", "BR"],
+        4: ["TL", "TR", "BL", "BR"], 5: ["TL", "TR", "MC", "BL", "BR"],
+        6: ["TL", "ML", "BL", "TR", "MR", "BR"]
+      };
+
+      // ─────────────────────────────────────────────
+      //  SVG builder — preview & export are the same
+      //  Tight (cropped) builds drop the studio backdrop/shadow and crop the
+      //  viewBox flush to the face, so the face fills the canvas edge-to-edge
+      //  and can be mapped straight onto a 3D die.
+      // ─────────────────────────────────────────────
+
+      let uidCounter = 0;
+
+      function buildFace(o) {
+        const c = o.palette, shape = o.shape, value = o.value;
+        const size = o.size || S;
+        const transparent = !!o.transparent;
+        const tight = o.tight !== false;
+        const underline69 = o.underline69 !== false;
+        const marking = o.marking || "numerals";
+        const uid = o.uid || ("dv" + (++uidCounter) + Math.random().toString(36).slice(2, 7));
+        const path = facePath(shape);
+        const bb = bounds(shape);
+        const span = bb.x1 - bb.x0;
+        const tall = bb.y1 - bb.y0;
+        const id = (k) => k + "-" + uid;
+        const tv = tight ? tightView(shape) : null;
+        const viewBox = tv ? tv.x0 + " " + tv.y0 + " " + tv.w + " " + tv.h : "0 0 " + S + " " + S;
+        const dim = tv ? tightDim(shape, size) : { w: size, h: size };
+
+        const bodyFillOpacity = transparent ? 0.55 : 1;
+        const corePeakOpacity = transparent ? 0.5 : 0.92;
+
+        let marks = "";
+        if (marking === "pips" && shape === "square" && value <= 6) {
+          const gx = [CX - 168, CX, CX + 168], gy = [CY - 168, CY, CY + 168];
+          const R = 58;
+          marks = PIP_FACES[value].map((k) => {
+            const i = CELLS[k][0], j = CELLS[k][1];
+            const px = gx[i], py = gy[j];
+            return '<circle cx="' + px + '" cy="' + (py + 4) + '" r="' + (R + 3) + '" fill="' + c.markShade + '" opacity="0.22"/>' + '<circle cx="' + px + '" cy="' + py + '" r="' + R + '" fill="url(#' + id("pip") + ')"/>';
+          }).join("");
+        } else {
+          const digits = String(value).length;
+          const fs = MARK_SIZE[shape] * (digits > 1 ? 0.74 : 1);
+          const my = CY + MARK_OFFSET[shape];
+          const face = 'font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="700" font-size="' + fs + '" text-anchor="middle" dominant-baseline="central"';
+          const rule = (value === 6 || value === 9) && underline69
+            ? '<rect x="' + (CX - fs * 0.3) + '" y="' + (my + fs * 0.44) + '" width="' + (fs * 0.6) + '" height="' + (fs * 0.075) + '" rx="' + (fs * 0.037) + '" fill="' + c.mark + '"/>'
+            : "";
+          marks =
+            '<text x="' + CX + '" y="' + (my + 5) + '" ' + face + ' fill="' + c.markShade + '" opacity="0.24">' + value + '</text>' +
+            '<text x="' + CX + '" y="' + my + '" ' + face + ' fill="' + c.mark + '">' + value + '</text>' + rule;
+        }
+
+        let ghost = "";
+        if (marking === "pips" && shape === "square" && value <= 6) {
+          ghost = PIP_FACES[7 - value].map((k) => {
+            const i = CELLS[k][0], j = CELLS[k][1];
+            const px = [CX - 168, CX, CX + 168][i], py = [CY - 168, CY, CY + 168][j];
+            return '<circle cx="' + px + '" cy="' + (py + 26) + '" r="64" fill="url(#' + id("ghost") + ')"/>';
+          }).join("");
+        }
+
+        return '<svg xmlns="http://www.w3.org/2000/svg" width="' + dim.w + '" height="' + dim.h + '" viewBox="' + viewBox + '">' +
+          '<defs>' +
+          '<radialGradient id="' + id("bg") + '" cx="50%" cy="38%" r="78%">' +
+            '<stop offset="0%" stop-color="#48484c"/><stop offset="60%" stop-color="#38383b"/><stop offset="100%" stop-color="#252527"/>' +
+          '</radialGradient>' +
+          '<linearGradient id="' + id("body") + '" x1="0" y1="0" x2="0.2" y2="1">' +
+            '<stop offset="0%" stop-color="' + c.lit + '"/><stop offset="55%" stop-color="' + c.mid + '"/><stop offset="100%" stop-color="' + c.mid + '"/>' +
+          '</linearGradient>' +
+          '<radialGradient id="' + id("core") + '" cx="50%" cy="52%" r="60%">' +
+            '<stop offset="0%" stop-color="' + c.deep + '" stop-opacity="' + corePeakOpacity + '"/>' +
+            '<stop offset="55%" stop-color="' + c.core + '" stop-opacity="' + (corePeakOpacity * 0.67).toFixed(3) + '"/>' +
+            '<stop offset="100%" stop-color="' + c.core + '" stop-opacity="0"/>' +
+          '</radialGradient>' +
+          '<radialGradient id="' + id("sheen") + '" cx="26%" cy="20%" r="62%">' +
+            '<stop offset="0%" stop-color="#ffffff" stop-opacity="0.16"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>' +
+          '</radialGradient>' +
+          '<linearGradient id="' + id("gloss") + '" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0%" stop-color="#ffffff" stop-opacity="0.22"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>' +
+          '</linearGradient>' +
+          '<linearGradient id="' + id("foot") + '" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0%" stop-color="#000000" stop-opacity="0"/><stop offset="100%" stop-color="#000000" stop-opacity="0.34"/>' +
+          '</linearGradient>' +
+          '<radialGradient id="' + id("pip") + '" cx="36%" cy="32%" r="72%">' +
+            '<stop offset="0%" stop-color="' + (c.light ? "#2a2a2c" : "#ffffff") + '"/>' +
+            '<stop offset="70%" stop-color="' + (c.light ? "#1c1c1e" : "#f4f4f2") + '"/>' +
+            '<stop offset="100%" stop-color="' + (c.light ? "#0e0e10" : "#d8d8d4") + '"/>' +
+          '</radialGradient>' +
+          '<radialGradient id="' + id("ghost") + '" cx="50%" cy="50%" r="50%">' +
+            '<stop offset="0%" stop-color="#000000" stop-opacity="0.20"/>' +
+            '<stop offset="62%" stop-color="#000000" stop-opacity="0.11"/>' +
+            '<stop offset="100%" stop-color="#000000" stop-opacity="0"/>' +
+          '</radialGradient>' +
+          '<radialGradient id="' + id("shadow") + '" cx="50%" cy="50%" r="50%">' +
+            '<stop offset="0%" stop-color="#000000" stop-opacity="0.55"/>' +
+            '<stop offset="55%" stop-color="#000000" stop-opacity="0.24"/>' +
+            '<stop offset="100%" stop-color="#000000" stop-opacity="0"/>' +
+          '</radialGradient>' +
+          '<clipPath id="' + id("clip") + '"><path d="' + path + '"/></clipPath>' +
+          '</defs>' +
+          (transparent || tight ? "" : '<rect width="' + S + '" height="' + S + '" fill="url(#' + id("bg") + ')"/>') +
+          (transparent || tight ? "" : '<ellipse cx="' + CX + '" cy="' + (bb.y1 + 34) + '" rx="' + (span * 0.52) + '" ry="52" fill="url(#' + id("shadow") + ')"/>') +
+          '<g clip-path="url(#' + id("clip") + ')" fill-opacity="' + bodyFillOpacity + '">' +
+            '<rect x="' + bb.x0 + '" y="' + bb.y0 + '" width="' + span + '" height="' + tall + '" fill="url(#' + id("body") + ')"/>' +
+            '<rect x="' + bb.x0 + '" y="' + bb.y0 + '" width="' + span + '" height="' + tall + '" fill="url(#' + id("core") + ')"/>' +
+            ghost +
+            '<rect x="' + bb.x0 + '" y="' + bb.y0 + '" width="' + span + '" height="' + tall + '" fill="url(#' + id("sheen") + ')"/>' +
+            '<rect x="' + bb.x0 + '" y="' + (bb.y1 - tall * 0.34) + '" width="' + span + '" height="' + (tall * 0.34) + '" fill="url(#' + id("foot") + ')"/>' +
+            '<rect x="' + bb.x0 + '" y="' + bb.y0 + '" width="' + span + '" height="' + (tall * 0.17) + '" fill="url(#' + id("gloss") + ')"/>' +
+          '</g>' +
+          '<path d="' + path + '" fill="none" stroke="#ffffff" stroke-opacity="0.42" stroke-width="4"/>' +
+          '<path d="' + path + '" fill="none" stroke="#000000" stroke-opacity="0.16" stroke-width="2"/>' +
+          marks +
+          '</svg>';
+      }
+
+      function buildSheet(o) {
+        const sides = o.sides || 6;
+        const shape = o.shape || autoShape(sides);
+        const color = o.color || "#c40027";
+        const cell = o.cell || 512;
+        const palette = o.palette || buildPalette(color);
+        const transparent = !!o.transparent;
+        const underline69 = o.underline69 !== false;
+        const marking = o.marking || "auto";
+        const mode = (marking === "pips" || marking === "auto") && shape === "square" && sides <= 6 ? "pips" : "numerals";
+        const cols = Math.ceil(Math.sqrt(sides));
+        const rows = Math.ceil(sides / cols);
+        const cells = Array.from({ length: sides }, (_, i) => {
+          const inner = buildFace({ value: i + 1, shape, palette, marking: mode, underline69, transparent, tight: false, uid: "s" + i })
+            .replace(/^<svg[^>]*>/, "").replace(/<\/svg>$/, "");
+          const x = (i % cols) * cell, y = Math.floor(i / cols) * cell;
+          return '<g transform="translate(' + x + ',' + y + ') scale(' + (cell / S) + ')">' + inner + '</g>';
+        }).join("");
+        return '<svg xmlns="http://www.w3.org/2000/svg" width="' + (cols * cell) + '" height="' + (rows * cell) + '" viewBox="0 0 ' + (cols * cell) + ' ' + (rows * cell) + '">' + cells + '</svg>';
+      }
+
+      function rasterize(svg, w, h) {
+        return new Promise(function(resolve, reject) {
+          const img = new Image();
+          img.onload = function() {
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, w, h);
+            canvas.toBlob(function(b) { return b ? resolve(b) : reject(new Error("encode failed")); }, "image/png");
+          };
+          img.onerror = function() { reject(new Error("render failed")); };
+          img.src = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(svg)));
+        });
+      }
+
+      // Public face() — the friendly wrapper around buildFace.
+      function face(opts) {
+        const o = opts || {};
+        const sides = o.sides || 6;
+        const value = Math.max(1, Math.min((o.value || 1), sides));
+        const shape = o.shape || autoShape(sides);
+        const marking = o.marking || "auto";
+        const mode = (marking === "pips" || marking === "auto") && shape === "square" && sides <= 6 ? "pips" : "numerals";
+        const palette = o.palette || buildPalette(o.color || "#c40027");
+        return buildFace({
+          value: value, shape: shape, palette: palette, marking: mode,
+          underline69: o.underline69 !== false, transparent: !!o.transparent,
+          tight: o.tight !== false,
+          size: o.size || S, uid: o.uid
+        });
+      }
+
+      // ─────────────────────────────────────────────
+      //  Dice-notation engine
+      //  Groups: [count]d[sides]  ·  d% = d100
+      //  Mods:   kh/kl (keep highest/lowest), dh/dl (drop), adv/dis
+      //  Example: "2d6+1d4+3", "4d6kh3", "2d20kh1", "2d20dis"
+      // ─────────────────────────────────────────────
+
+      function tokenize(str) {
+        const s = String(str).trim().toLowerCase();
+        const tokens = [];
+        let i = 0;
+        while (i < s.length) {
+          const ch = s[i];
+          if (/\s/.test(ch)) { i++; continue; }
+          if (/[0-9]/.test(ch)) {
+            let j = i;
+            while (j < s.length && /[0-9]/.test(s[j])) j++;
+            tokens.push({ t: "num", v: parseInt(s.slice(i, j), 10) });
+            i = j; continue;
+          }
+          if (s.startsWith("adv", i)) { tokens.push({ t: "adv" }); i += 3; continue; }
+          if (s.startsWith("dis", i)) { tokens.push({ t: "dis" }); i += 3; continue; }
+          if (s.startsWith("kh", i)) { tokens.push({ t: "kh" }); i += 2; continue; }
+          if (s.startsWith("kl", i)) { tokens.push({ t: "kl" }); i += 2; continue; }
+          if (s.startsWith("dh", i)) { tokens.push({ t: "dh" }); i += 2; continue; }
+          if (s.startsWith("dl", i)) { tokens.push({ t: "dl" }); i += 2; continue; }
+          if (ch === "+") { tokens.push({ t: "+" }); i++; continue; }
+          if (ch === "-") { tokens.push({ t: "-" }); i++; continue; }
+          if (ch === "%") { tokens.push({ t: "%" }); i++; continue; }
+          if (ch === "d") { tokens.push({ t: "d" }); i++; continue; }
+          return { error: "unexpected character '" + ch + "'" };
+        }
+        return { tokens };
+      }
+
+      function parseFormula(str) {
+        const toks = tokenize(str);
+        if (toks.error) return { valid: false, error: toks.error, input: String(str) };
+        const tokens = toks.tokens;
+        if (tokens.length === 0) return { valid: false, error: "empty formula", input: String(str) };
+        let pos = 0;
+        const groups = [];
+        let modifier = 0;
+
+        function parseSides() {
+          const tk = tokens[pos];
+          if (tk && tk.t === "num") { pos++; return tk.v; }
+          if (tk && tk.t === "%") { pos++; return 100; }
+          return null;
+        }
+
+        function parseGroup() {
+          const tk = tokens[pos];
+          if (tk && tk.t === "d") {
+            pos++;
+            const sides = parseSides();
+            if (sides === null || sides < 1) return { error: "dice must have a positive number of sides" };
+            return { count: 1, sides: sides };
+          }
+          if (tk && tk.t === "%") {
+            pos++;
+            return { count: 1, sides: 100 };
+          }
+          if (tk && tk.t === "num") {
+            const isDice = tokens[pos + 1] && (tokens[pos + 1].t === "d" || tokens[pos + 1].t === "%");
+            if (isDice) {
+              const dt = tokens[pos + 1].t;
+              pos += 2;
+              const sides = dt === "%" ? 100 : parseSides();
+              if (sides === null || sides < 1) return { error: "dice must have a positive number of sides" };
+              return { count: tk.v, sides: sides };
+            }
+            pos++;
+            return { constant: tk.v };
+          }
+          return { error: "expected a dice group (NdX) or number" };
+        }
+
+        function parseModifiers(g) {
+          const tk = tokens[pos];
+          if (tk && (tk.t === "kh" || tk.t === "kl" || tk.t === "dh" || tk.t === "dl")) {
+            pos++;
+            let n = 1;
+            const t2 = tokens[pos];
+            if (t2 && t2.t === "num") { n = t2.v; pos++; }
+            if (tk.t === "kh") g.keep = { mode: "highest", n: n };
+            else if (tk.t === "kl") g.keep = { mode: "lowest", n: n };
+            else if (tk.t === "dh") g.drop = { mode: "highest", n: n };
+            else g.drop = { mode: "lowest", n: n };
+          } else if (tk && (tk.t === "adv" || tk.t === "dis")) {
+            pos++;
+            if (g.count !== 2) return "advantage/disadvantage must roll exactly 2 dice";
+            g.keep = tk.t === "adv" ? { mode: "highest", n: 1 } : { mode: "lowest", n: 1 };
+          }
+          return null;
+        }
+
+        const lead = tokens[0];
+        let leadSign = 1;
+        if (lead.t === "+" || lead.t === "-") {
+          leadSign = lead.t === "+" ? 1 : -1;
+          pos++;
+        }
+        if (pos >= tokens.length) return { valid: false, error: "expected a dice group or number", input: String(str) };
+
+        function pushGroup(g, sign) {
+          const e = parseModifiers(g);
+          if (e) return e;
+          g.sign = sign;
+          groups.push(g);
+          return null;
+        }
+
+        let g = parseGroup();
+        if (g.error) return { valid: false, error: g.error, input: String(str) };
+        if (g.constant !== undefined) modifier += leadSign * g.constant;
+        else { const e = pushGroup(g, leadSign); if (e) return { valid: false, error: e, input: String(str) }; }
+
+        while (pos < tokens.length) {
+          const tk = tokens[pos];
+          if (tk.t !== "+" && tk.t !== "-") return { valid: false, error: "unexpected token in formula", input: String(str) };
+          const sign = tk.t === "+" ? 1 : -1;
+          pos++;
+          if (pos >= tokens.length) return { valid: false, error: "expected a dice group after '" + tk.t + "'", input: String(str) };
+          const gg = parseGroup();
+          if (gg.error) return { valid: false, error: gg.error, input: String(str) };
+          if (gg.constant !== undefined) modifier += sign * gg.constant;
+          else { const e = pushGroup(gg, sign); if (e) return { valid: false, error: e, input: String(str) }; }
+        }
+
+        return { valid: true, groups: groups, modifier: modifier, input: String(str) };
+      }
+
+      function rollInt(sides) {
+        return Math.floor(Math.random() * sides) + 1;
+      }
+
+      function applyGroupMods(g, raw) {
+        let kept = raw.slice();
+        let dropped = [];
+        if (g.keep) {
+          const n = Math.max(0, Math.min(g.keep.n, raw.length));
+          const sorted = raw.slice().sort(function(a, b) { return a - b; });
+          const picked = g.keep.mode === "highest" ? sorted.slice(raw.length - n) : sorted.slice(0, n);
+          const pickCount = {};
+          for (const v of picked) pickCount[v] = (pickCount[v] || 0) + 1;
+          kept = []; dropped = [];
+          for (const r of raw) {
+            if (pickCount[r] > 0) { kept.push(r); pickCount[r]--; } else { dropped.push(r); }
+          }
+        } else if (g.drop) {
+          const n = Math.max(0, Math.min(g.drop.n, raw.length));
+          const sorted = raw.slice().sort(function(a, b) { return a - b; });
+          const droppedVals = g.drop.mode === "highest" ? sorted.slice(raw.length - n) : sorted.slice(0, n);
+          const dropCount = {};
+          for (const v of droppedVals) dropCount[v] = (dropCount[v] || 0) + 1;
+          kept = []; dropped = [];
+          for (const r of raw) {
+            if (dropCount[r] > 0) { dropped.push(r); dropCount[r]--; } else { kept.push(r); }
+          }
+        }
+        const total = kept.reduce(function(a, b) { return a + b; }, 0);
+        return { count: g.count, sides: g.sides, kept: kept, dropped: dropped, keep: g.keep || null, drop: g.drop || null, sign: g.sign || 1, total: total };
+      }
+
+      function rollGroup(g) {
+        const raw = [];
+        for (let i = 0; i < g.count; i++) raw.push(rollInt(g.sides));
+        return applyGroupMods(g, raw);
+      }
+
+      function describeRoll(p, groups, total) {
+        const parts = [];
+        groups.forEach(function(g) {
+          let s = (parts.length === 0 && g.sign < 0) ? "-" : (parts.length ? (g.sign < 0 ? "-" : "+") : "");
+          s += "(" + g.kept.join("+") + ")";
+          if (g.dropped.length) s += "[dropped " + g.dropped.join(",") + "]";
+          parts.push(s);
+        });
+        let str = parts.join("");
+        if (p.modifier) str += (p.modifier > 0 ? "+" : "-") + Math.abs(p.modifier);
+        return p.input + " → " + str + " = " + total;
+      }
+
+      function rollFormula(input) {
+        const p = parseFormula(input);
+        if (!p.valid) return { valid: false, error: p.error || "invalid formula", input: String(input) };
+        const groups = p.groups.map(rollGroup);
+        let total = p.modifier;
+        groups.forEach(function(g) { total += g.sign * g.total; });
+        return {
+          valid: true,
+          input: p.input,
+          groups: groups,
+          modifier: p.modifier,
+          total: total,
+          text: describeRoll(p, groups, total)
+        };
+      }
+
+      function rollDice(count, sides) {
+        const r = rollFormula(count + "d" + sides);
+        return r.valid ? r.groups[0].kept.slice() : [];
+      }
+
+      function d(n) {
+        return rollInt(n);
+      }
+
+      // ─────────────────────────────────────────────
+      //  Animated roller UI
+      // ─────────────────────────────────────────────
+
+      let cssInjected = false;
+
+      function ensureCss() {
+        if (cssInjected) return;
+        cssInjected = true;
+        const style = document.createElement("style");
+        style.textContent = [
+          ".dv-root{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#191524;color:#e9e6f2;border-radius:14px;padding:16px;max-width:560px;margin:0 auto;box-sizing:border-box;text-align:left}",
+          ".dv-root *,.dv-root *:before,.dv-root *:after{box-sizing:border-box}",
+          ".dv-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}",
+          ".dv-title{font-size:11px;letter-spacing:.16em;text-transform:uppercase;opacity:.6}",
+          ".dv-clear{background:none;border:none;color:#a99fbf;cursor:pointer;font-size:12px;padding:2px 4px}",
+          ".dv-clear:hover{color:#fff;text-decoration:underline}",
+          ".dv-tray{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;background:#100d19;border:1px dashed #3a3450;border-radius:10px;padding:8px;min-height:56px}",
+          ".dv-stage{height:260px;background:#100d19;border:1px dashed #3a3450;border-radius:10px;overflow:hidden;position:relative;margin-bottom:10px}",
+          ".dv-stage canvas{display:block;width:100%;height:100%}",
+          ".dv-stage .dv-throwdice{height:100%;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center}",
+          ".dv-stage .dv-die{width:84px}",
+          ".dv-empty{color:#6a6390;font-size:12px;text-align:center;padding:8px}",
+          ".dv-die{width:72px;cursor:pointer;transition:transform .15s ease;user-select:none}",
+          ".dv-die:hover{transform:translateY(-3px)}",
+          ".dv-die.dv-dropped{opacity:.38;filter:saturate(.3)}",
+          ".dv-die .dv-face{width:100%}",
+          ".dv-die .dv-face svg{width:100%;height:auto;display:block}",
+          ".dv-dielabel{font-size:10px;letter-spacing:.08em;text-transform:uppercase;text-align:center;margin-top:2px;color:#8b8299}",
+          ".dv-rolling .dv-face{animation:dv-tumble .55s linear infinite}",
+          ".dv-settle .dv-face{animation:dv-settle .28s ease-out}",
+          "@keyframes dv-tumble{0%{transform:translate(0,0) rotate(0deg) scale(1)}20%{transform:translate(-8px,-10px) rotate(-18deg) scale(1.06)}40%{transform:translate(10px,6px) rotate(22deg) scale(.96)}60%{transform:translate(-9px,8px) rotate(-28deg) scale(1.04)}80%{transform:translate(7px,-5px) rotate(16deg) scale(.99)}100%{transform:translate(0,0) rotate(0deg) scale(1)}}",
+          "@keyframes dv-settle{0%{transform:translateY(-14px) scale(1.07)}60%{transform:translateY(2px) scale(.99)}100%{transform:translateY(0) scale(1)}}",
+          ".dv-rollrow{display:flex;gap:8px;margin-top:10px}",
+          ".dv-input{flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid #3a3450;background:#100d19;color:#eee;font-size:14px;font-family:inherit}",
+          ".dv-input:focus{outline:none;border-color:#7a6aa8}",
+          ".dv-input::placeholder{color:#5c5475}",
+          ".dv-btn{padding:8px 16px;border-radius:8px;border:none;background:#5b4b8f;color:#fff;font-weight:600;cursor:pointer;font-family:inherit;font-size:14px}",
+          ".dv-btn:hover{background:#6b5ba0}",
+          ".dv-btn:disabled{opacity:.5;cursor:default}",
+          ".dv-quickrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}",
+          ".dv-quick{padding:5px 11px;border-radius:6px;border:1px solid #3a3450;background:transparent;color:#cfc7e4;font-size:13px;cursor:pointer;font-family:inherit}",
+          ".dv-quick:hover{border-color:#8f7fd0;color:#fff}",
+          ".dv-busy .dv-quick,.dv-busy .dv-input,.dv-busy .dv-clear,.dv-busy .dv-die,.dv-busy .dv-rollbtn{pointer-events:none;opacity:.55}",
+          ".dv-totalbar{margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}",
+          ".dv-total{font-size:26px;font-weight:800;color:#fff;font-variant-numeric:tabular-nums}",
+          ".dv-breakdown{font-size:13px;color:#b7aed0}",
+          ".dv-val{display:inline-block;background:#2a2440;padding:2px 8px;border-radius:6px;margin:0 2px;font-weight:600;color:#fff}",
+          ".dv-val-drop{text-decoration:line-through;opacity:.45;background:#231f36}",
+          ".dv-keptnote{color:#8b8299;font-size:12px}",
+          ".dv-error{color:#ff9b9b;font-size:13px;margin-top:8px;min-height:1em}",
+          ".dv-history{margin-top:12px;border-top:1px solid #2a2440;padding-top:10px}",
+          ".dv-hlabel{display:flex;justify-content:space-between;align-items:center;opacity:.55;font-size:11px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px}",
+          ".dv-hclear{background:none;border:none;color:#a99fbf;cursor:pointer;font-size:11px;padding:0 2px}",
+          ".dv-hclear:hover{color:#fff;text-decoration:underline}",
+          ".dv-hitem{font-size:13px;padding:3px 0;color:#b7aed0;display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #221d35}",
+          ".dv-hitem b{color:#fff;font-variant-numeric:tabular-nums}",
+          ".dv-throw{max-width:none}",
+          ".dv-throwlabel{font-size:12px;color:#cfc7e4;margin-bottom:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
+          ".dv-throwdice{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center}",
+          ".dv-throwresult{font-size:20px;font-weight:700;color:#fff;text-align:center;margin-top:8px;font-variant-numeric:tabular-nums}"
+        ].join("");
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      function rand(sides) {
+        return Math.floor(Math.random() * sides) + 1;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      }
+
+      function animateDice(dies, items, color, done) {
+        const values = items.map(function(it) { return it.value; });
+        let settled = 0;
+        dies.forEach(function(die, i) {
+          const faceEl = die.querySelector(".dv-face");
+          const sides = items[i].sides;
+          const finalValue = values[i];
+          // Every face of the die except the result, shuffled — so while the die
+          // tumbles the other faces actually render, and the result only appears
+          // when it settles (no repeats flickering in, as pure random did).
+          const otherFaces = [];
+          for (let v = 1; v <= sides; v++) if (v !== finalValue) otherFaces.push(v);
+          for (let k = otherFaces.length - 1; k > 0; k--) {
+            const j = Math.floor(Math.random() * (k + 1));
+            const tmp = otherFaces[k]; otherFaces[k] = otherFaces[j]; otherFaces[j] = tmp;
+          }
+          die.classList.add("dv-rolling");
+          let tick = 0;
+          const iv = setInterval(function() {
+            if (otherFaces.length) {
+              faceEl.innerHTML = face({ value: otherFaces[tick % otherFaces.length], sides: sides, color: color, size: 72 });
+            }
+            tick++;
+          }, 60);
+          const dur = Math.max(450, Math.min(1500, otherFaces.length * 60 + 120)) + Math.random() * 220;
+          setTimeout(function() {
+            clearInterval(iv);
+            die.classList.remove("dv-rolling");
+            die.classList.add("dv-settle");
+            faceEl.innerHTML = face({ value: finalValue, sides: sides, color: color, size: 72 });
+            settled++;
+            if (settled === dies.length) done();
+          }, dur);
+        });
+      }
+
+      // ─────────────────────────────────────────────
+      //  3D physics roller (react-3d-dice style)
+      //  three.js + cannon-es, loaded on demand from
+      //  esm.sh. Classic dice roll with real physics;
+      //  the top face after settling IS the result.
+      // ─────────────────────────────────────────────
+
+      const THREE_SIDES = { 4: 1, 6: 1, 8: 1, 10: 1, 12: 1, 20: 1, 100: 1 };
+
+      let threeDepsPromise = null;
+      function ensure3D() {
+        if (!threeDepsPromise) {
+          threeDepsPromise = Promise.all([
+            import("https://esm.sh/three@0.170.0"),
+            import("https://esm.sh/cannon-es@0.20.0")
+          ]).catch(function(err) {
+            threeDepsPromise = null;
+            throw err;
+          });
+        }
+        return threeDepsPromise;
+      }
+
+      function makeLabelTexture(THREE, label, palette, opts) {
+        const size = 256;
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = palette.mid;
+        ctx.fillRect(0, 0, size, size);
+        ctx.fillStyle = palette.mark;
+        if (opts && opts.pips) {
+          const g = [size * 0.25, size * 0.5, size * 0.75];
+          const pts = PIP_FACES[opts.pips].map(function(k) {
+            const i = CELLS[k][0], j = CELLS[k][1];
+            return [g[i], g[j]];
+          });
+          for (const p of pts) {
+            ctx.beginPath();
+            ctx.arc(p[0], p[1], size * 0.085, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else {
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.font = "700 " + (String(label).length > 1 ? 88 : 128) + "px Helvetica Neue, Arial, sans-serif";
+          ctx.fillText(String(label), size / 2, size / 2 + 4);
+          if (opts && opts.underline) ctx.fillText(".", size / 2, size / 2 + 4);
+        }
+        const tex = new THREE.CanvasTexture(c);
+        tex.anisotropy = 4;
+        if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+        return tex;
+      }
+
+      function d10VerticesFaces() {
+        const vertices = [0, 0, 1, 0, 0, -1];
+        for (let i = 0; i < 10; ++i) {
+          const b = (i * Math.PI * 2) / 10;
+          vertices.push(-Math.cos(b), -Math.sin(b), 0.105 * (i % 2 ? 1 : -1));
+        }
+        const faces = [
+          [0, 11, 2], [0, 2, 3], [0, 3, 4], [0, 4, 5], [0, 5, 6],
+          [0, 6, 7], [0, 7, 8], [0, 8, 9], [0, 9, 10], [0, 10, 11],
+          [1, 3, 2], [1, 4, 3], [1, 5, 4], [1, 6, 5], [1, 7, 6],
+          [1, 8, 7], [1, 9, 8], [1, 10, 9], [1, 11, 10], [1, 2, 11]
+        ];
+        return { vertices: vertices, faces: faces };
+      }
+
+      function buildDieGeometry(THREE, sides) {
+        let geometry;
+        if (sides === 6) geometry = new THREE.BoxGeometry(2.2, 2.2, 2.2);
+        else if (sides === 4) geometry = new THREE.TetrahedronGeometry(2.0);
+        else if (sides === 8) geometry = new THREE.OctahedronGeometry(1.9);
+        else if (sides === 10 || sides === 100) {
+          const vf = d10VerticesFaces();
+          geometry = new THREE.PolyhedronGeometry(vf.vertices, vf.faces, 1.8, 0);
+        }
+        else if (sides === 12) geometry = new THREE.DodecahedronGeometry(1.85);
+        else if (sides === 20) geometry = new THREE.IcosahedronGeometry(1.95);
+        return geometry;
+      }
+
+      function groupFaces(THREE, geometry) {
+        const pos = geometry.attributes.position;
+        const triCount = pos.count / 3;
+        const groups = [];
+        for (let t = 0; t < triCount; t++) {
+          const i0 = t * 3, i1 = t * 3 + 1, i2 = t * 3 + 2;
+          const p0 = new THREE.Vector3().fromBufferAttribute(pos, i0);
+          const p1 = new THREE.Vector3().fromBufferAttribute(pos, i1);
+          const p2 = new THREE.Vector3().fromBufferAttribute(pos, i2);
+          const n = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0)).normalize();
+          let g = null;
+          for (const cand of groups) {
+            if (cand.n.dot(n) > 0.999) { g = cand; break; }
+          }
+          if (!g) {
+            g = { n: n.clone(), verts: [], tris: [] };
+            groups.push(g);
+          }
+          g.tris.push([i0, i1, i2]);
+          g.verts.push(i0, i1, i2);
+        }
+        return groups;
+      }
+
+      function applyFaceLayout(THREE, geometry, groups) {
+        const pos = geometry.attributes.position;
+        const uv = new Float32Array(pos.count * 2);
+        groups.forEach(function(g, gi) {
+          const centroid = new THREE.Vector3();
+          g.verts.forEach(function(vi) { centroid.add(new THREE.Vector3().fromBufferAttribute(pos, vi)); });
+          centroid.multiplyScalar(1 / g.verts.length);
+          const radial = centroid.clone().normalize();
+          let up = new THREE.Vector3().copy(radial).addScaledVector(g.n, -radial.dot(g.n));
+          if (up.lengthSq() < 1e-8) {
+            const alt = Math.abs(g.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+            up = new THREE.Vector3().crossVectors(g.n, alt).normalize();
+          } else {
+            up.normalize();
+          }
+          g.up = up.clone();
+          const uAxis = new THREE.Vector3().crossVectors(up, g.n).normalize();
+          let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+          const pts = g.verts.map(function(vi) {
+            const p = new THREE.Vector3().fromBufferAttribute(pos, vi);
+            const d = new THREE.Vector3().subVectors(p, centroid);
+            const u = d.dot(uAxis), v = d.dot(up);
+            uMin = Math.min(uMin, u); uMax = Math.max(uMax, u);
+            vMin = Math.min(vMin, v); vMax = Math.max(vMax, v);
+            return [u, v];
+          });
+          g.verts.forEach(function(vi, k) {
+            uv[vi * 2] = (pts[k][0] - uMin) / (uMax - uMin);
+            uv[vi * 2 + 1] = (pts[k][1] - vMin) / (vMax - vMin);
+          });
+          geometry.addGroup(g.tris[0][0], g.tris.length * 3, gi);
+        });
+        geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+      }
+
+      function assignFaceValues(groups, sides, customValues) {
+        const n = groups.length;
+        const value = new Array(n).fill(null);
+        if (customValues) {
+          for (let i = 0; i < n; i++) value[i] = customValues[i] || 0;
+          return value;
+        }
+        const used = new Array(n).fill(false);
+        let pair = 0;
+        for (let i = 0; i < n; i++) {
+          if (used[i]) continue;
+          let opp = -1;
+          for (let j = 0; j < n; j++) {
+            if (i !== j && !used[j] && groups[i].n.dot(groups[j].n) < -0.999) { opp = j; break; }
+          }
+          value[i] = pair + 1;
+          if (opp !== -1) { value[opp] = n - pair; used[opp] = true; }
+          used[i] = true;
+          pair++;
+        }
+        return value;
+      }
+
+      function hullFromGeometry(THREE, geometry) {
+        const pos = geometry.attributes.position;
+        const map = new Map();
+        const verts = [];
+        const faces = [];
+        const key = function(x, y, z) { return Math.round(x * 1000) + "," + Math.round(y * 1000) + "," + Math.round(z * 1000); };
+        for (let t = 0; t < pos.count / 3; t++) {
+          const idx = [];
+          for (let k = 0; k < 3; k++) {
+            const i = t * 3 + k;
+            const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+            const kk = key(x, y, z);
+            let id = map.get(kk);
+            if (id === undefined) { id = verts.length; map.set(kk, id); verts.push([x, y, z]); }
+            idx.push(id);
+          }
+          faces.push(idx);
+        }
+        return { verts: verts, faces: faces };
+      }
+
+      function run3DRoll(THREE, CANNON, stageEl, color, physDice, done) {
+        const palette = buildPalette(color);
+        const width = stageEl.clientWidth || 520;
+        const height = stageEl.clientHeight || 260;
+        const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setSize(width, height);
+        renderer.useLegacyLights = true;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        stageEl.innerHTML = "";
+        stageEl.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0f0d18);
+        const camera = new THREE.PerspectiveCamera(32, width / height, 0.1, 100);
+        camera.position.set(0, 8, 18);
+        camera.lookAt(0, 0, 0);
+
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x2a2540, 0.7));
+        const spot = new THREE.SpotLight(0xffffff, 1.3);
+        spot.position.set(3, 16, 8);
+        spot.castShadow = true;
+        spot.shadow.mapSize.set(2048, 2048);
+        spot.shadow.camera.near = 0.5;
+        spot.shadow.camera.far = 40;
+        spot.shadow.camera.fov = 50;
+        spot.shadow.bias = -0.0008;
+        scene.add(spot);
+        const dir = new THREE.DirectionalLight(0xffffff, 1.4);
+        dir.position.set(6, 14, 6);
+        dir.castShadow = true;
+        dir.shadow.mapSize.set(2048, 2048);
+        dir.shadow.camera.near = 0.5;
+        dir.shadow.camera.far = 40;
+        dir.shadow.camera.left = -8;
+        dir.shadow.camera.right = 8;
+        dir.shadow.camera.top = 8;
+        dir.shadow.camera.bottom = -8;
+        dir.shadow.bias = -0.0008;
+        scene.add(dir);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+        const floor = new THREE.Mesh(
+          new THREE.PlaneGeometry(22, 22),
+          new THREE.MeshStandardMaterial({ color: 0x3a3470, roughness: 0.9, metalness: 0.05 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -32, 0) });
+        world.allowSleep = true;
+        world.broadphase = new CANNON.SAPBroadphase(world);
+        world.solver.iterations = 12;
+        const dieMat = new CANNON.Material("die");
+        const groundMat = new CANNON.Material("ground");
+        world.addContactMaterial(new CANNON.ContactMaterial(dieMat, groundMat, { friction: 0.3, restitution: 0.2 }));
+        world.addContactMaterial(new CANNON.ContactMaterial(dieMat, dieMat, { friction: 0.1, restitution: 0.15 }));
+
+        const floorBody = new CANNON.Body({ mass: 0, material: groundMat, shape: new CANNON.Plane() });
+        floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        world.addBody(floorBody);
+
+        [
+          [0, 4.5, 0], [0, -4.5, 0], [4.5, 0, Math.PI / 2], [-4.5, 0, Math.PI / 2]
+        ].forEach(function(w) {
+          const b = new CANNON.Body({ mass: 0, material: groundMat, shape: new CANNON.Box(new CANNON.Vec3(8, 4, 0.4)) });
+          b.position.set(w[0], 2, w[1]);
+          b.quaternion.setFromEuler(0, w[2], 0);
+          world.addBody(b);
+        });
+
+        const bodies = [];
+        physDice.forEach(function(pd, idx) {
+          const geometry = buildDieGeometry(THREE, pd.sides);
+          const groups = groupFaces(THREE, geometry);
+          applyFaceLayout(THREE, geometry, groups);
+          const values = pd.customValues || assignFaceValues(groups, pd.sides);
+          const labels = pd.customLabels || values;
+          const materials = groups.map(function(g, gi) {
+            const v = values[gi], label = labels[gi];
+            const isPips = pd.sides === 6 && !pd.customValues;
+            return new THREE.MeshPhongMaterial({
+              map: makeLabelTexture(THREE, label, palette, isPips ? { pips: v } : { underline: v === 6 || v === 9 }),
+              shininess: 10,
+              specular: 0x222222
+            });
+          });
+          const mesh = new THREE.Mesh(geometry, materials);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+
+          let shape;
+          if (pd.sides === 6) {
+            shape = new CANNON.Box(new CANNON.Vec3(1.1, 1.1, 1.1));
+          } else {
+            const hull = hullFromGeometry(THREE, geometry);
+            shape = new CANNON.ConvexPolyhedron({
+              vertices: hull.verts.map(function(v) { return new CANNON.Vec3(v[0], v[1], v[2]); }),
+              faces: hull.faces
+            });
+          }
+          const body = new CANNON.Body({ mass: 1, material: dieMat, shape: shape });
+          body.sleepSpeedLimit = 0.3;
+          body.sleepTimeLimit = 0.4;
+          const n = physDice.length;
+          const cols = Math.min(4, n);
+          const col = idx % cols, row = Math.floor(idx / cols);
+          const ox = (col - (cols - 1) / 2) * 3.1 + (Math.random() - 0.5) * 0.5;
+          const oz = (row - 0.5) * 2.6 + (Math.random() - 0.5) * 0.5;
+          body.position.set(ox, 4.5 + Math.random() * 1.2, oz);
+          body.quaternion.setFromEuler(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2);
+          body.angularVelocity.set((Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6);
+          body.velocity.set((Math.random() - 0.5) * 0.8, 0, (Math.random() - 0.5) * 0.8);
+          world.addBody(body);
+          scene.add(mesh);
+          bodies.push({ body: body, mesh: mesh, groups: groups, values: values });
+        });
+
+        let settleStart = null;
+        let last = performance.now();
+        const start = performance.now();
+        let finished = false;
+        function tick() {
+          if (finished) return;
+          requestAnimationFrame(tick);
+          const now = performance.now();
+          let dt = (now - last) / 1000;
+          last = now;
+          dt = Math.min(dt, 1 / 30);
+          world.step(1 / 60, dt, 4);
+          let still = true;
+          for (const b of bodies) {
+            const bp = b.body.position, bq = b.body.quaternion;
+            if (!isFinite(bp.x + bp.y + bp.z + bq.x + bq.y + bq.z + bq.w)) {
+              // cannon exploded (NaN) — drop the die back in with a sane pose
+              const gi = Math.floor(Math.random() * b.groups.length);
+              const n = b.groups[gi].n.clone();
+              const nUp = new THREE.Vector3(0, 1, 0);
+              const nAxis = new THREE.Vector3().crossVectors(n, nUp);
+              let rq = new THREE.Quaternion();
+              if (nAxis.lengthSq() > 1e-8) {
+                const nAng = Math.acos(Math.max(-1, Math.min(1, n.dot(nUp))));
+                rq = new THREE.Quaternion().setFromAxisAngle(nAxis.normalize(), nAng);
+              }
+              rq.multiply(new THREE.Quaternion().setFromAxisAngle(nUp, Math.random() * Math.PI * 2));
+              bp.set((Math.random() - 0.5) * 3, 4.5, (Math.random() - 0.5) * 3);
+              bq.set(rq.x, rq.y, rq.z, rq.w);
+              b.body.velocity.set(0, 0, 0);
+              b.body.angularVelocity.set(0, 0, 0);
+            }
+            b.mesh.position.copy(bp);
+            b.mesh.quaternion.copy(bq);
+            if (b.body.velocity.length() > 0.07 || b.body.angularVelocity.length() > 0.12) still = false;
+          }
+          renderer.render(scene, camera);
+          if (still) {
+            if (settleStart === null) settleStart = now;
+            else if (now - settleStart > 350) { finish(); return; }
+          } else settleStart = null;
+          if (now - start > 12000) finish();
+        }
+        function finish() {
+          if (finished) return;
+          finished = true;
+          const reads = bodies.map(function(b) {
+            const q = b.body.quaternion;
+            let best = -2, bi = 0;
+            for (let gi = 0; gi < b.groups.length; gi++) {
+              const wn = b.groups[gi].n.clone().applyQuaternion(q);
+              if (wn.y > best) { best = wn.y; bi = gi; }
+            }
+            // Snap the die flat onto its top face so it visibly rests on a face
+            // (physics can leave a die balanced on a corner) and the number reads upright.
+            const wn = b.groups[bi].n.clone().applyQuaternion(q);
+            const up = new THREE.Vector3(0, 1, 0);
+            const axis = new THREE.Vector3().crossVectors(wn, up);
+            let finalQ;
+            if (axis.lengthSq() > 1e-8) {
+              const ang = Math.acos(Math.max(-1, Math.min(1, wn.dot(up))));
+              finalQ = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), ang).multiply(q);
+            } else {
+              finalQ = new THREE.Quaternion(q.x, q.y, q.z, q.w);
+            }
+            // Align the top face's label so the number reads upright toward the camera
+            // (rotate around the world Y axis).
+            const lu = b.groups[bi].up.clone().applyQuaternion(finalQ);
+            lu.y = 0;
+            if (lu.lengthSq() > 1e-8) {
+              lu.normalize();
+              const yaw = Math.atan2(lu.x, -lu.z);
+              const yawQ = new THREE.Quaternion().setFromAxisAngle(up, yaw);
+              finalQ.multiplyQuaternions(yawQ, finalQ);
+            }
+            b.mesh.quaternion.copy(finalQ);
+            let minY = Infinity;
+            const posA = b.mesh.geometry.attributes.position;
+            for (let i = 0; i < posA.count; i++) {
+              const v = new THREE.Vector3().fromBufferAttribute(posA, i).applyQuaternion(b.mesh.quaternion);
+              if (v.y < minY) minY = v.y;
+            }
+            b.mesh.position.y = -minY;
+            b.body.position.copy(b.mesh.position);
+            b.body.quaternion.copy(b.mesh.quaternion);
+            if (window.__dvDebug) {
+              if (!window.__dvDebugIn) window.__dvDebugIn = [];
+              window.__dvDebugIn.push({
+                origQ: { x: q.x, y: q.y, z: q.z, w: q.w },
+                finalQ: { x: finalQ.x, y: finalQ.y, z: finalQ.z, w: finalQ.w },
+                bi: bi,
+                value: b.values[bi]
+              });
+            }
+            return b.values[bi];
+          });
+          renderer.render(scene, camera);
+          if (window.__dvDebug) window.__dvDebug = bodies.map(function(b) {
+            const q = b.mesh.quaternion;
+            const upWorld = b.groups.map(function(g) { return g.n.clone().applyQuaternion(q); });
+            let bbi = 0, bby = -2;
+            upWorld.forEach(function(v, gi) { if (v.y > bby) { bby = v.y; bbi = gi; } });
+            const bq = b.body.quaternion;
+            return {
+              meshQ: { x: q.x, y: q.y, z: q.z, w: q.w },
+              bodyQ: { x: bq.x, y: bq.y, z: bq.z, w: bq.w },
+              pos: { x: b.mesh.position.x, y: b.mesh.position.y, z: b.mesh.position.z },
+              quat: { x: q.x, y: q.y, z: q.z, w: q.w },
+              topNormalY: upWorld.map(function(v) { return +v.y.toFixed(3); }),
+              labelUpWorld: (function() {
+                const lu = b.groups[bbi].up.clone().applyQuaternion(q);
+                return { x: +lu.x.toFixed(3), y: +lu.y.toFixed(3), z: +lu.z.toFixed(3) };
+              })(),
+              value: b.values[bbi],
+              bi: bbi
+            };
+          });
+          done(reads);
+        }
+        tick();
+      }
+
+      function runRoll2D(items, stageEl, color, done) {
+        stageEl.innerHTML = "";
+        const row = document.createElement("div");
+        row.className = "dv-throwdice";
+        stageEl.appendChild(row);
+        items.forEach(function(it) {
+          const die = document.createElement("div");
+          die.className = "dv-die" + (it.dropped ? " dv-dropped" : "");
+          die.innerHTML = '<div class="dv-face"></div><div class="dv-dielabel">d' + it.sides + '</div>';
+          row.appendChild(die);
+        });
+        const dies = Array.prototype.slice.call(row.querySelectorAll(".dv-die"));
+        animateDice(dies, items, color, done);
+      }
+
+      function rollDiceVisual(engineDice, stageEl, color, allow3D, onValues) {
+        const all3D = allow3D && engineDice.every(function(d) { return Object.prototype.hasOwnProperty.call(THREE_SIDES, d.sides); });
+        if (all3D) {
+          const phys = [];
+          engineDice.forEach(function(d) {
+            if (d.sides === 100) {
+              phys.push({
+                sides: 10, engineId: d.id, kind: "tens",
+                customValues: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90],
+                customLabels: ["00", "10", "20", "30", "40", "50", "60", "70", "80", "90"]
+              });
+              phys.push({
+                sides: 10, engineId: d.id, kind: "units",
+                customValues: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                customLabels: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+              });
+            } else {
+              phys.push({ sides: d.sides, engineId: d.id });
+            }
+          });
+          ensure3D().then(function(deps) {
+            run3DRoll(deps[0], deps[1], stageEl, color, phys, function(reads) {
+              const combo = {};
+              reads.forEach(function(r, i) {
+                const pd = phys[i];
+                combo[pd.engineId] = (combo[pd.engineId] || 0) + r;
+              });
+              engineDice.forEach(function(d) {
+                if (d.sides === 100 && combo[d.id] === 0) combo[d.id] = 100;
+              });
+              onValues(combo);
+            });
+          }).catch(function() {
+            const items = engineDice.map(function(d) { return { sides: d.sides, value: rand(d.sides), dropped: false }; });
+            runRoll2D(items, stageEl, color, function() {
+              const v = {};
+              items.forEach(function(it, i) { v[engineDice[i].id] = it.value; });
+              onValues(v);
+            });
+          });
+        } else {
+          const items = engineDice.map(function(d) { return { sides: d.sides, value: rand(d.sides), dropped: false }; });
+          runRoll2D(items, stageEl, color, function() {
+            const v = {};
+            items.forEach(function(it, i) { v[engineDice[i].id] = it.value; });
+            onValues(v);
+          });
+        }
+      }
+
+      function buildBreakdown(items, modifier) {
+        const spans = [];
+        let droppedCount = 0;
+        items.forEach(function(it) {
+          if (it.dropped) { droppedCount++; spans.push('<span class="dv-val dv-val-drop">' + it.value + '</span>'); }
+          else { spans.push('<span class="dv-val">' + it.value + '</span>'); }
+        });
+        let html = spans.join(" + ");
+        if (modifier) html += (modifier > 0 ? " + " : " - ") + Math.abs(modifier);
+        if (droppedCount) html += '<span class="dv-keptnote"> (dropped ' + droppedCount + ')</span>';
+        return html;
+      }
+
+      function embed(containerEl, options) {
+        if (!containerEl || !containerEl.appendChild) return null;
+        ensureCss();
+        const opts = options || {};
+        let color = opts.color || "#c40027";
+        let modifier = 0;
+        let rolling = false;
+        const maxDice = opts.maxDice || 40;
+        const allow3D = opts.allow3D !== false;
+        const pool = (opts.dice && opts.dice.length) ? opts.dice.map(function(d) { return { sides: d.sides }; }) : [{ sides: 6 }, { sides: 6 }, { sides: 20 }];
+
+        containerEl.innerHTML = "";
+        const root = document.createElement("div");
+        root.className = "dv-root";
+        root.innerHTML = [
+          '<div class="dv-header"><span class="dv-title">dice roller</span><button type="button" class="dv-clear">clear</button></div>',
+          '<div class="dv-stage"></div>',
+          '<div class="dv-tray"></div>',
+          '<div class="dv-rollrow"><input class="dv-input" type="text" placeholder="2d6+1d4+3  ·  4d6kh3  ·  2d20dis" spellcheck="false"><button type="button" class="dv-btn dv-rollbtn">Roll</button></div>',
+          '<div class="dv-quickrow"><button type="button" class="dv-quick" data-s="4">d4</button><button type="button" class="dv-quick" data-s="6">d6</button><button type="button" class="dv-quick" data-s="8">d8</button><button type="button" class="dv-quick" data-s="10">d10</button><button type="button" class="dv-quick" data-s="12">d12</button><button type="button" class="dv-quick" data-s="20">d20</button><button type="button" class="dv-quick" data-s="100">d100</button></div>',
+          '<div class="dv-totalbar"><div class="dv-breakdown"></div><div class="dv-total"></div></div>',
+          '<div class="dv-error"></div>',
+          '<div class="dv-history"><div class="dv-hlabel">history <button type="button" class="dv-hclear">clear</button></div><div class="dv-histlist"></div></div>'
+        ].join("");
+        containerEl.appendChild(root);
+
+        const stageEl = root.querySelector(".dv-stage");
+        const trayEl = root.querySelector(".dv-tray");
+        const inputEl = root.querySelector(".dv-input");
+        const rollBtn = root.querySelector(".dv-rollbtn");
+        const clearBtn = root.querySelector(".dv-clear");
+        const breakdownEl = root.querySelector(".dv-breakdown");
+        const totalEl = root.querySelector(".dv-total");
+        const errorEl = root.querySelector(".dv-error");
+        const histListEl = root.querySelector(".dv-histlist");
+        const history = [];
+        let rollCounter = 0;
+
+        function showError(m) { errorEl.textContent = m; }
+
+        function renderTray() {
+          trayEl.innerHTML = "";
+          pool.forEach(function(d, i) {
+            const die = document.createElement("div");
+            die.className = "dv-die" + (d._dropped ? " dv-dropped" : "");
+            die.title = "click to remove";
+            die.innerHTML = '<div class="dv-face"></div><div class="dv-dielabel">d' + d.sides + '</div>';
+            die.querySelector(".dv-face").innerHTML = face({ value: d._value || 1, sides: d.sides, color: color, size: 72 });
+            die.addEventListener("click", function() {
+              if (rolling) return;
+              pool.splice(i, 1);
+              modifier = 0;
+              renderTray();
+            });
+            trayEl.appendChild(die);
+          });
+          if (!pool.length) trayEl.innerHTML = '<div class="dv-empty">no dice — click one below or type a formula</div>';
+        }
+
+        function pushHistory(label, breakdownHtml, total) {
+          rollCounter++;
+          history.unshift({ label: label, breakdown: breakdownHtml, total: total, n: rollCounter });
+          if (history.length > 30) history.pop();
+          renderHistory();
+        }
+
+        function renderHistory() {
+          histListEl.innerHTML = "";
+          if (!history.length) { histListEl.innerHTML = '<div class="dv-empty">no rolls yet</div>'; return; }
+          history.forEach(function(h) {
+            const item = document.createElement("div");
+            item.className = "dv-hitem";
+            const lhs = document.createElement("span");
+            lhs.innerHTML = escapeHtml(h.label) + " → " + h.breakdown;
+            const rhs = document.createElement("b");
+            rhs.textContent = h.total;
+            item.appendChild(lhs);
+            item.appendChild(rhs);
+            histListEl.appendChild(item);
+          });
+        }
+
+        function poolLabel() {
+          const counts = {};
+          pool.forEach(function(d) { counts[d.sides] = (counts[d.sides] || 0) + 1; });
+          const parts = [];
+          for (const sides in counts) parts.push(counts[sides] + "d" + sides);
+          let label = parts.join("+");
+          if (modifier) label += (modifier > 0 ? "+" : "") + modifier;
+          return label;
+        }
+
+        function finishRoll(items, total, breakdownHtml, label, resultExtra) {
+          rolling = false;
+          root.classList.remove("dv-busy");
+          totalEl.textContent = total;
+          breakdownEl.innerHTML = breakdownHtml;
+          errorEl.textContent = "";
+          pushHistory(label, breakdownHtml, total);
+          if (opts.onRoll) opts.onRoll({ valid: true, input: label, total: total, groups: resultExtra ? resultExtra.groups : undefined });
+        }
+
+        function performRoll(engineDice, groups, label, commit) {
+          if (engineDice.length > maxDice) { showError("That's too many dice — max " + maxDice + "."); return; }
+          rolling = true;
+          root.classList.add("dv-busy");
+          totalEl.textContent = "";
+          breakdownEl.innerHTML = "";
+          errorEl.textContent = "";
+          const finish = function(valuesById) {
+            const rolledGroups = groups.map(function(g) {
+              const raw = [];
+              engineDice.forEach(function(d) { if (d.groupIndex === g._gi) raw.push(valuesById[d.id]); });
+              return applyGroupMods(g, raw);
+            });
+            let total = modifier;
+            rolledGroups.forEach(function(g) { total += g.sign * g.total; });
+            const items = [];
+            rolledGroups.forEach(function(g) {
+              for (let k = 0; k < g.count; k++) {
+                const isKept = k < g.kept.length;
+                items.push({ sides: g.sides, value: isKept ? g.kept[k] : g.dropped[k - g.kept.length], dropped: !isKept, sign: g.sign });
+              }
+            });
+            if (commit) commit(items);
+            finishRoll(items, total, buildBreakdown(items, modifier), label, { groups: rolledGroups });
+          };
+          rollDiceVisual(engineDice, stageEl, color, allow3D, finish);
+        }
+
+        function doPoolRoll() {
+          if (!pool.length) { showError("Add some dice first — click the dice below or type a formula."); return; }
+          const engineDice = pool.map(function(d, i) { return { id: i, sides: d.sides, groupIndex: i }; });
+          const groups = pool.map(function(d, i) { return { _gi: i, count: 1, sides: d.sides, sign: 1 }; });
+          performRoll(engineDice, groups, poolLabel(), function(items) {
+            pool.forEach(function(d, i) { d._value = items[i].value; d._dropped = items[i].dropped; });
+            renderTray();
+          });
+        }
+
+        function doFormulaRoll(p) {
+          modifier = p.modifier;
+          const engineDice = [];
+          const groups = p.groups.map(function(g, gi) {
+            g._gi = gi;
+            for (let k = 0; k < g.count; k++) engineDice.push({ id: engineDice.length, sides: g.sides, groupIndex: gi });
+            return g;
+          });
+          performRoll(engineDice, groups, p.input, function(items) {
+            pool.length = 0;
+            items.forEach(function(it) { pool.push({ sides: it.sides, _value: it.value, _dropped: it.dropped }); });
+            renderTray();
+          });
+        }
+
+        function rollAll() {
+          if (rolling) return;
+          const input = inputEl.value.trim();
+          if (input) {
+            const p = parseFormula(input);
+            if (!p.valid) { showError(p.error || "invalid formula"); return; }
+            doFormulaRoll(p);
+          } else {
+            doPoolRoll();
+          }
+        }
+
+        rollBtn.addEventListener("click", rollAll);
+        inputEl.addEventListener("keydown", function(e) { if (e.key === "Enter") rollAll(); });
+        clearBtn.addEventListener("click", function() {
+          if (rolling) return;
+          pool.length = 0;
+          modifier = 0;
+          inputEl.value = "";
+          renderTray();
+          breakdownEl.innerHTML = "";
+          totalEl.textContent = "";
+          errorEl.textContent = "";
+        });
+        root.querySelectorAll(".dv-quick").forEach(function(btn) {
+          btn.addEventListener("click", function() {
+            if (rolling) return;
+            const sides = parseInt(btn.getAttribute("data-s"), 10);
+            if (pool.length >= maxDice) { showError("Too many dice — max " + maxDice + "."); return; }
+            pool.push({ sides: sides });
+            modifier = 0;
+            errorEl.textContent = "";
+            renderTray();
+          });
+        });
+        root.querySelector(".dv-hclear").addEventListener("click", function() {
+          history.length = 0;
+          renderHistory();
+        });
+
+        renderTray();
+        if (opts.autoRoll !== false) doPoolRoll();
+
+        return {
+          element: root,
+          roll: rollAll,
+          clear: function() { clearBtn.click(); },
+          setColor: function(c) { color = c; renderTray(); },
+          getPool: function() { return pool.map(function(d) { return { sides: d.sides }; }); }
+        };
+      }
+
+      function throwDice(formula, containerEl, options) {
+        if (!containerEl || !containerEl.appendChild) return null;
+        ensureCss();
+        const o = options || {};
+        const color = o.color || "#c40027";
+        const p = parseFormula(formula);
+        containerEl.innerHTML = "";
+        const root = document.createElement("div");
+        root.className = "dv-root dv-throw";
+        containerEl.appendChild(root);
+        if (!p.valid) {
+          root.innerHTML = '<div class="dv-error">' + escapeHtml(p.error || "invalid formula") + "</div>";
+          return { valid: false, error: p.error || "invalid formula", input: String(formula), element: root };
+        }
+        root.innerHTML = '<div class="dv-throwlabel">' + escapeHtml(p.input) + '</div><div class="dv-stage"></div><div class="dv-throwresult"></div>';
+        const stageEl = root.querySelector(".dv-stage");
+        const resEl = root.querySelector(".dv-throwresult");
+
+        const engineDice = [];
+        const groups = p.groups.map(function(g, gi) {
+          g._gi = gi;
+          for (let k = 0; k < g.count; k++) engineDice.push({ id: engineDice.length, sides: g.sides, groupIndex: gi });
+          return g;
+        });
+
+        const result = { valid: true, input: p.input, modifier: p.modifier, element: root, total: null, groups: null, promise: null };
+
+        const done = function(valuesById) {
+          const rolledGroups = groups.map(function(g) {
+            const raw = [];
+            engineDice.forEach(function(d) { if (d.groupIndex === g._gi) raw.push(valuesById[d.id]); });
+            return applyGroupMods(g, raw);
+          });
+          let total = p.modifier;
+          rolledGroups.forEach(function(g) { total += g.sign * g.total; });
+          resEl.textContent = "= " + total;
+          result.total = total;
+          result.groups = rolledGroups;
+          if (o.onRoll) o.onRoll({ valid: true, input: p.input, total: total, groups: rolledGroups });
+        };
+
+        result.promise = new Promise(function(resolve) {
+          rollDiceVisual(engineDice, stageEl, color, o.allow3D !== false, function(valuesById) {
+            done(valuesById);
+            resolve(result);
+          });
+        });
+        return result;
+      }
+
+      // ─────────────────────────────────────────────
+      //  Public API
+      // ─────────────────────────────────────────────
+
+      return {
+        version: VERSION,
+
+        // rolling
+        roll: rollFormula,
+        parse: parseFormula,
+        rollDice: rollDice,
+        d: d,
+        d4: function() { return d(4); },
+        d6: function() { return d(6); },
+        d8: function() { return d(8); },
+        d10: function() { return d(10); },
+        d12: function() { return d(12); },
+        d20: function() { return d(20); },
+        d100: function() { return d(100); },
+
+        // generation
+        palette: buildPalette,
+        face: face,
+        sheet: buildSheet,
+        rasterize: rasterize,
+        autoShape: autoShape,
+        shapes: SHAPES,
+        tightView: tightView,
+        tightDim: tightDim,
+
+        // ui
+        embed: embed,
+        throw: throwDice
+      };
+    })();
+  }
+  return window.__diceRollerPlugin348271;
