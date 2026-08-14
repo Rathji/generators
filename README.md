@@ -93,5 +93,10 @@ concept of the destination's visibility.
 reviewed, accepted state, not an oversight — do not "fix" it. Recorded here because the combination
 looks like a mistake to anyone who finds it cold.
 
+The reason it is harmless: that generator is private because it is *bad* and the author would rather
+nobody used it — `isPrivate` is doing the work of a quality signal there, not a confidentiality one,
+and there is nothing sensitive in the file. Don't carry that conclusion to the next private slug,
+though; the flag doesn't record which of the two things it means.
+
 The general rule still holds for the next one: check `isPrivate` in a captured `meta.json` before
 adding a private slug to a public repo, and ask rather than assume.
