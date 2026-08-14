@@ -1,7 +1,12 @@
 # generators
 
-Captured source for Rathji's own perchance.org generators (perchance handle `Rathji`), used for
-GitHub-backed backup and round-trip testing.
+Captured source for Rathji's own perchance.org generators (perchance handle `Rathji`), kept as a
+GitHub-backed backup of record.
+
+This repo also hosted the round-trip test of `github-data-plugin` — capture out, edit, push back,
+verify. **That test is finished: the plugin works, confirmed by the operator 2026-08-14.** Backup
+is now the repo's standing purpose; the test is history, and the slug that carried it
+(`q8tgpbvj6l`) is described below.
 
 The 9 generators whose name contained "template" were split out to
 [perchance-templates](https://github.com/Rathji/perchance-templates) on 2026-08-11 (history
@@ -25,6 +30,16 @@ Each `<slug>/` holds the two editor panels plus `meta.json`
 The old directories are not being migrated; the new naming applies to future captures only, so a
 directory that gets re-captured ends up holding both pairs. See `SYNC-PROCESS.md`.
 
+`q8tgpbvj6l` is the slug the plugin test ran on, and it is now a demo/landing page for
+`github-data-plugin` — rewritten into that form on 2026-08-11, replacing a build described further
+down in `SYNC-PROCESS.md`. **Its test role is complete** (plugin confirmed working, operator,
+2026-08-14); what remains is a live demo, not work in progress. Its directory holds that demo's
+live `main.pjs`/`index.html` alongside `html.txt`, `lists.txt`, and `src/main.js` — relics of an
+unrelated, earlier generator (a captured copy of the bullet-bunny game,
+`https://gd.games/penusbmic/bullet-bunny`) that once lived under this same slug. Those relics are
+historical only; nothing about them describes the live generator today, and the do-not-delete rule
+above still covers them.
+
 **`github-data-plugin/` was removed on 2026-08-11** and now lives only in
 `Rathji/perchance-manager` under `plugins/github-data-plugin/`, which is where `SYNC-PROCESS.md`
 has named its home since the split. It is *our source*, not captured third-party data, and keeping
@@ -46,6 +61,6 @@ node <path-to-perchance-manager>/tools/fleet-backup.mjs --repo <path-to-this-rep
 ```
 
 `SYNC-PROCESS.md` is the full runbook — including why pushing changes *back* into a live
-generator is still a manual step, and one thing not to click.
+generator is still a manual step, and a GitHub Backup hazard that once lived here, now fixed.
 
 Originally captured 2026-08-10; all generators were `isPrivate: false` at capture time.
