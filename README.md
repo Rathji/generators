@@ -36,10 +36,22 @@ for(const slug of fs.readdirSync(".")){
 ```
 
 Silence means every declared file is present at its declared size. **This is not a formality — it
-found a real four-year-shaped hole the first time it was run.** On 2026-08-14 it reported 86
-declared files missing repo-wide, every one of them in a directory captured 2026-08-10, before
+found a real hole the first time it was run.** On 2026-08-14 it reported declared files missing
+across both backup repos, every one of them in a directory captured 2026-08-10, before
 `perchance-fetch.mjs` had `--src`. The manifests had always declared them; nothing had ever
-fetched them, and nothing compared the two. They were backfilled the same day.
+fetched them, and nothing compared the two.
+
+The numbers, stated once so they reconcile — the commit messages quote them in different scopes:
+
+| | count |
+|---|---|
+| declared files missing, both repos | 86 (across 32 directories) |
+| backfilled 2026-08-14 into **this** repo | 65 (23 directories) |
+| backfilled into `perchance-templates` | 14 (9 directories) |
+| **permanently lost** | **7** — all `top-down-rpg-template`, which is 404 on perchance |
+
+Of the 277 `srcManifest` entries declared across both repos, 270 are now present at exactly the
+declared size and 0 mismatch.
 
 The check is why `.gitattributes` pins LF so aggressively: a CRLF conversion changes the size of
 every text file it touches and would break the comparison repo-wide.
