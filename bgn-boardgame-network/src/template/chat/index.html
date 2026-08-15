@@ -1,0 +1,167 @@
+<script type="text/x-server-plugin">
+const TOPIC="lounge";
+const chatTimes=new Map();   // conn.id -> last chat ms (per-connection rate limit)
+const netTimes=new Map();    // conn.net[3] -> last chat ms (coarse network cooldown)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function publishOnline(){ pubsub.publish(TOPIC, JSON.stringify({t:"online", n:pubsub.numSubscribers(TOPIC)})); }
+self.onopen=({conn})=>{ conn.subscribe(TOPIC); publishOnline(); };
+self.rpc={
+  chat({conn}, data){
+    let p; try{ p=JSON.parse(data); }catch(e){ return '{"ok":false,"err":"bad"}'; }
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700) return '{"ok":false,"err":"rate"}';
+    chatTimes.set(conn.id,now);
+    const netKey=conn.net[3];
+    const netGap=conn.isProxy?15000:3000;
+    if(now-(netTimes.get(netKey)||0)<netGap) return '{"ok":false,"err":"rate"}';
+    netTimes.set(netKey,now);
+    const text=cleanText(p.text,160);
+    if(!text) return '{"ok":false,"err":"empty"}';
+    if(isChatBanned(text)) return '{"ok":false,"err":"blocked"}';
+    const name=cleanText(p.name,20)||"Guest";
+    const id=conn.id+":"+now;
+    pubsub.publish(TOPIC, JSON.stringify({t:"chat", id, name, text, ts:nowSec()}));
+    return JSON.stringify({ok:true, id});
+  }
+};
+self.onclose=({conn})=>{ chatTimes.delete(conn.id); publishOnline(); };
+</script>
+<style>
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{font:15px/1.45 system-ui,sans-serif;background:#1a2130;color:#e8ecf3;}
+  #app{display:flex;flex-direction:column;height:100%;}
+  #topbar{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#222c40;border-bottom:1px solid #33405c;flex:none;}
+  .logo{font-weight:700;letter-spacing:.3px;color:#ffd479;white-space:nowrap;}
+  .online{font-size:12px;color:#b7c4dd;background:#2a3650;border-radius:999px;padding:3px 10px;white-space:nowrap;}
+  .online .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#5ad68a;margin-right:5px;vertical-align:1px;}
+  #nameWrap{margin-left:auto;display:flex;align-items:center;gap:6px;}
+  #nameWrap label{font-size:11px;color:#9fb0cc;text-transform:uppercase;letter-spacing:.5px;}
+  #nameInput{background:#141a28;color:#e8ecf3;border:1px solid #3a4a6a;border-radius:6px;padding:5px 8px;width:130px;font-size:13px;}
+  #msgs{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;}
+  .sys{color:#9fb0cc;font-size:12px;text-align:center;padding:2px 0;}
+  .msg{max-width:88%;word-wrap:break-word;}
+  .msg .who{font-weight:600;font-size:13px;}
+  .msg .time{color:#6b7a99;font-size:11px;margin-left:6px;}
+  .msg .body{margin-top:1px;white-space:pre-wrap;color:#e8ecf3;}
+  .msg.them{align-self:flex-start;}
+  .msg.them .body{background:#2a3650;padding:6px 10px;border-radius:10px 10px 10px 2px;display:inline-block;}
+  .msg.own{align-self:flex-end;}
+  .msg.own .who{text-align:right;}
+  .msg.own .body{background:#2c5aa0;padding:6px 10px;border-radius:10px 10px 2px 10px;display:inline-block;text-align:left;}
+  #status{font-size:12px;color:#ffb454;text-align:center;padding:4px;flex:none;}
+  #inputrow{display:flex;gap:8px;padding:10px 12px;background:#222c40;border-top:1px solid #33405c;flex:none;}
+  #msgInput{flex:1;background:#141a28;color:#e8ecf3;border:1px solid #3a4a6a;border-radius:8px;padding:9px 12px;font-size:14px;}
+  #sendBtn{background:#2c5aa0;color:#fff;border:0;border-radius:8px;padding:0 18px;font-size:14px;font-weight:600;cursor:pointer;}
+  #sendBtn:hover{background:#3a6cc0;}
+  #sendBtn:disabled{opacity:.5;cursor:default;}
+</style>
+<div id="app">
+  <div id="topbar">
+    <div class="logo">BGN Lounge</div>
+    <div class="online"><span class="dot"></span><span id="onlineN">&ndash;</span></div>
+    <div id="nameWrap">
+      <label for="nameInput">Name</label>
+      <input id="nameInput" maxlength="20" autocomplete="off" spellcheck="false">
+    </div>
+  </div>
+  <div id="msgs"></div>
+  <div id="status" hidden></div>
+  <div id="inputrow">
+    <input id="msgInput" maxlength="160" autocomplete="off" placeholder="Say hi to the BGN network..." disabled>
+    <button id="sendBtn" disabled>Send</button>
+  </div>
+</div>
+<script>
+(function(){
+  const NAME_KEY="bgnLoungeName";
+  const msgsEl=document.getElementById("msgs");
+  const inputEl=document.getElementById("msgInput");
+  const sendBtn=document.getElementById("sendBtn");
+  const nameInput=document.getElementById("nameInput");
+  const onlineN=document.getElementById("onlineN");
+  const statusEl=document.getElementById("status");
+  const seenIds=new Set();
+  let name=localStorage.getItem(NAME_KEY)||("Guest"+Math.floor(10+Math.random()*90));
+  nameInput.value=name;
+  nameInput.addEventListener("change",function(){
+    name=this.value.trim().slice(0,20)||"Guest";
+    this.value=name;
+    localStorage.setItem(NAME_KEY,name);
+  });
+  function hue(str){ let h=0; for(let i=0;i<str.length;i++) h=(h*31+str.charCodeAt(i))%360; return h; }
+  function setStatus(t){ statusEl.hidden=!t; statusEl.textContent=t||""; }
+  function nearBottom(){ return msgsEl.scrollHeight-msgsEl.scrollTop-msgsEl.clientHeight<60; }
+  function scrollBottom(){ if(nearBottom()) msgsEl.scrollTop=msgsEl.scrollHeight; }
+  function addSys(t){ const d=document.createElement("div"); d.className="sys"; d.textContent=t; msgsEl.appendChild(d); scrollBottom(); }
+  function fmtTime(ts){ const d=new Date(ts*1000); return d.getHours().toString().padStart(2,"0")+":"+d.getMinutes().toString().padStart(2,"0"); }
+  function addMsg(name,text,ts,own){
+    const row=document.createElement("div");
+    row.className="msg "+(own?"own":"them");
+    const who=document.createElement("span"); who.className="who";
+    who.style.color=own?"#7fb4ff":("hsl("+hue(name)+" 70% 62%)");
+    who.textContent=own?"You":name;
+    const time=document.createElement("span"); time.className="time"; time.textContent=fmtTime(ts);
+    const body=document.createElement("div"); body.className="body"; body.textContent=text;
+    row.appendChild(who); row.appendChild(time); row.appendChild(body);
+    msgsEl.appendChild(row);
+    scrollBottom();
+  }
+  let socket=null, backoff=1000;
+  function connect(){
+    socket=root.createServerSocket();
+    const ws=socket;
+    ws.addEventListener("open",function(){
+      backoff=1000;
+      setStatus("");
+      inputEl.disabled=false; sendBtn.disabled=false;
+      inputEl.focus();
+    });
+    ws.addEventListener("message",function(e){
+      let m; try{ m=JSON.parse(e.data); }catch(_){ return; }
+      if(m.t==="chat"){
+        if(seenIds.has(m.id)) return;
+        seenIds.add(m.id);
+        if(seenIds.size>300) seenIds.clear();
+        addMsg(m.name,m.text,m.ts,false);
+        if(window.parent!==window){ try{ window.parent.postMessage({type:"bgn-lounge-sound"},"*"); }catch(_){} }
+      } else if(m.t==="online"){
+        onlineN.textContent=m.n;
+      }
+    });
+    ws.addEventListener("close",function(e){
+      inputEl.disabled=true; sendBtn.disabled=true;
+      if(e.code===4403){ setStatus("Lounge chat only works on perchance.org"); return; }
+      setStatus("Reconnecting…");
+      const delay=Math.min(15000,backoff)+Math.random()*1000;
+      backoff=Math.min(15000,backoff*2);
+      setTimeout(connect,delay);
+    });
+  }
+  function send(){
+    const text=inputEl.value.trim();
+    if(!text||!socket) return;
+    socket.rpc.chat(JSON.stringify({name:name,text:text})).then(function(r){
+      let res; try{ res=JSON.parse(r); }catch(_){ return; }
+      if(res.ok){
+        inputEl.value="";
+        seenIds.add(res.id);
+        if(seenIds.size>300) seenIds.clear();
+        addMsg(name,text,Math.floor(Date.now()/1000),true);
+      } else if(res.err==="blocked"){
+        inputEl.value="";
+        setStatus("Message blocked"); setTimeout(function(){ setStatus(""); },2500);
+      } else if(res.err==="rate"){
+        setStatus("Too fast — give it a second"); setTimeout(function(){ setStatus(""); },2500);
+      }
+    }).catch(function(){ setStatus("Not connected"); });
+  }
+  sendBtn.addEventListener("click",send);
+  inputEl.addEventListener("keydown",function(e){ if(e.key==="Enter") send(); });
+  addSys("Welcome to the BGN Lounge — chat here is visible from every BGN game.");
+  connect();
+})();
+</script>

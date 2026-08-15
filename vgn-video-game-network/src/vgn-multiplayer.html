@@ -1,0 +1,1020 @@
+<!-- ════════════════════════════════════════════════════════════
+     VGN ONLINE MULTIPLAYER TEMPLATE — v1
+     ────────────────────────────────────────────────────────────
+     A ready-made TWO-PLAYER table for the Video Game Network,
+     wrapped in the CRT arcade cabinet look. Built from the BGN
+     template patterns: rooms, room codes, turn order, presence,
+     rematch, claim-win, table chat — plus hidden/private state.
+
+     Paste this ENTIRE file into a new generator's index.html.
+     It needs one import in main.pjs:
+         createServerSocket = {import:server-plugin}
+
+     THREE WAYS TO PLAY:
+       🛋️ Local   — two players, one screen, pass the turn.
+       🤖 vs AI   — you vs the machine (override AI_DO_TURN()).
+       🌐 Online  — create a room, share the 5-letter code, play
+                    a friend. Turn order + match state are
+                    server-authoritative; reconnects and rematches
+                    are handled for you.
+
+     FEATURES (borrowed from the BGN templates, restyled):
+       · rooms / codes / host+guest / presence / reconnect
+       · rematch (flips who goes first) · resign · claim-win
+       · server-sequenced turns (move rpc, stale-move protection)
+       · PRIVATE STATE: submit a `secret` payload with each move
+         (e.g. your hidden hand) — the server stores it per-role
+         and pushes it ONLY to you; it is never broadcast.
+       · table chat (rate-limited + filtered)
+       · ⏱ turn timer (auto-passes) · turn log · save/continue
+       · CRT cabinet: scanlines, bezel toggles, fullscreen.
+
+     TO BUILD YOUR GAME:
+       1. Replace the stage placeholder (#stageEl content) with
+          your board/UI. Show/act only when `myTurn()` is true.
+       2. On your move call  moveTurn(payload, secret?)  where
+          payload is your public state and secret is private
+          (optional). End the match with  endGame("host"/"guest"/
+          "draw")  or resign().
+       3. For vs-AI, replace AI_DO_TURN() with your bot brain.
+       Server layout + full rpc list are documented in the
+       server block below.
+     ════════════════════════════════════════════════════════════ -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bezel: clamp(34px, 6vw, 72px);
+    --bezel-sides: clamp(26px, 4.5vw, 52px);
+    --aspect: 16 / 10;
+    --neon:#25d7fd; --pink:#ff2bd6; --gold:#ffd319; --green:#3ddc84; --red:#ff5a3c;
+    --text:#dce6f0; --muted:#8a93a5; --dim:#565f72; --line:rgba(120,140,180,.16);
+    --pix:'Press Start 2P',monospace;
+    --term:'VT323',monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:#07090f;color:var(--text);font-family:var(--term);font-size:1.18rem;line-height:1.5;
+    text-align:left;overflow-x:hidden;padding:24px 14px 60px;
+    background-image:
+      radial-gradient(1000px 600px at 82% -10%, rgba(37,215,253,.07), transparent 60%),
+      radial-gradient(900px 620px at 8% 110%, rgba(255,43,214,.06), transparent 60%);
+    -webkit-tap-highlight-color:transparent;
+  }
+  button{font-family:inherit;cursor:pointer}
+  input{font-family:inherit}
+  .wrap{max-width:1080px;margin:0 auto}
+
+  /* ── CRT monitor ── */
+  .monitor{
+    position:relative;width:min(96vw, 980px, calc((100svh - 320px) * 1.6));margin:0 auto;
+    padding:var(--bezel) var(--bezel-sides) calc(var(--bezel)*1.3);border-radius:26px;
+    background:linear-gradient(168deg,#202a38 0%,#0d1219 40%,#0a0e14 62%,#1a222e 100%);
+    box-shadow:0 40px 90px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.07), inset 0 -2px 0 rgba(0,0,0,.75);
+  }
+  .monitor::before{content:"";position:absolute;inset:0;border-radius:26px;pointer-events:none;z-index:6;
+    background:linear-gradient(115deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,.02) 26%, transparent 38%);}
+  .screen-wrap{position:relative;width:100%;aspect-ratio:var(--aspect);border-radius:14px;overflow:hidden;background:#020307;
+    box-shadow:inset 0 0 0 2px rgba(255,255,255,.05), inset 0 0 70px rgba(0,0,0,.9);}
+  #stage{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:16px}
+  .screen-glow{position:absolute;inset:0;z-index:2;pointer-events:none;background:radial-gradient(125% 105% at 50% 45%, transparent 58%, rgba(0,0,0,.6) 100%);}
+  .scanlines{position:absolute;inset:0;z-index:3;pointer-events:none;mix-blend-mode:multiply;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.24) 0 1px, transparent 1px 3px);}
+  .ctrl-row{position:absolute;top:10px;right:10px;z-index:7;display:flex;gap:8px}
+  .tbtn{font-family:var(--pix);font-size:.44rem;letter-spacing:.08em;padding:7px 10px;cursor:pointer;
+    background:rgba(7,9,15,.72);border:1px solid rgba(120,140,180,.28);color:#8a93a5;transition:all .2s;user-select:none;}
+  .tbtn:hover{border-color:var(--neon);color:var(--neon)}
+  .tbtn.on{color:#07090f;background:linear-gradient(180deg,#ffe25e,#ffd319);border-color:transparent}
+  .monitor-panel{position:absolute;left:var(--bezel-sides);right:var(--bezel-sides);bottom:calc(var(--bezel)*.28);z-index:6;
+    display:flex;align-items:center;justify-content:space-between;gap:12px;pointer-events:none}
+  .brand{font-family:var(--pix);font-size:.46rem;letter-spacing:.18em;color:var(--neon);text-shadow:0 0 10px rgba(37,215,253,.6)}
+  .led{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(61,220,132,.9);animation:ledpulse 3.2s ease-in-out infinite}
+  @keyframes ledpulse{0%,100%{opacity:1}50%{opacity:.45}}
+  body.bare .monitor{width:100vw;padding:0;border-radius:0;box-shadow:none}
+  body.bare .monitor-panel,body.bare .monitor::before{display:none}
+  body.bare .screen-wrap{width:100vw;height:100vh;aspect-ratio:auto;border-radius:0;box-shadow:none}
+
+  /* ── control deck (below the monitor — the cabinet's button panel) ── */
+  .deck{
+    max-width:980px;margin:18px auto 0;background:linear-gradient(180deg,#131a29,#0d1220);
+    border:1px solid var(--line);padding:16px 18px 18px;clip-path:polygon(12px 0,100% 0,100% calc(100% - 12px),calc(100% - 12px) 100%,0 100%,0 12px);
+  }
+  .status-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .players{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .pchip{display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:8px;border:1px solid var(--line);background:rgba(0,0,0,.25);font-weight:400}
+  .pchip .dot{width:9px;height:9px;border-radius:50%;background:#5a6476;flex:none}
+  .pchip.host .dot{background:#cfd8e6}
+  .pchip.guest .dot{background:#3c3c44}
+  .pchip.on{border-color:var(--gold);box-shadow:0 0 14px rgba(255,211,25,.3)}
+  .pchip.on .dot{background:var(--gold)}
+  .pchip b{font-size:1.05rem}
+  .pchip small{color:var(--dim);font-size:.95rem}
+  .turn-pill{font-family:var(--pix);font-size:.5rem;letter-spacing:.08em;color:var(--gold);text-shadow:0 0 10px rgba(255,211,25,.4);text-align:center}
+  .timer{font-size:1.1rem;color:var(--neon);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .timer.low{color:var(--red)}
+  .banner{min-height:24px;color:#b6c2d6;font-size:1.15rem;text-align:center;margin:10px 0 4px}
+  .btns{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .btn{font-family:var(--pix);font-size:.52rem;letter-spacing:.12em;text-transform:uppercase;padding:12px 18px;border:1px solid transparent;transition:all .2s;clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px)}
+  .btn-gold{color:#07090f;background:linear-gradient(180deg,#ffe25e,#ffd319);box-shadow:0 6px 20px rgba(255,211,25,.3)}
+  .btn-gold:hover{transform:translateY(-2px)}
+  .btn-ghost{color:var(--neon);border:1px solid rgba(37,215,253,.4);background:rgba(37,215,253,.06)}
+  .btn-ghost:hover{box-shadow:0 0 18px rgba(37,215,253,.2)}
+  .btn[disabled]{opacity:.4;cursor:default;transform:none;box-shadow:none}
+  .room-box{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;margin:10px 0 0;font-family:var(--pix);font-size:.5rem;letter-spacing:.1em}
+  .room-box .code{font-size:1.15rem;letter-spacing:.35em;color:var(--gold);text-shadow:0 0 12px rgba(255,211,25,.5)}
+  .code-input{width:150px;background:rgba(0,0,0,.35);border:1px solid var(--line);color:var(--text);padding:8px 10px;font-size:1.05rem;text-align:center;letter-spacing:.3em;text-transform:uppercase;outline:none}
+  .code-input:focus{border-color:var(--neon)}
+  .tabs{display:flex;gap:8px;margin-top:14px}
+  .tab{font-family:var(--pix);font-size:.44rem;letter-spacing:.1em;text-transform:uppercase;padding:8px 14px;background:rgba(0,0,0,.25);border:1px solid var(--line);color:var(--muted);transition:all .2s}
+  .tab.on{color:#07090f;background:linear-gradient(180deg,#ffe25e,#ffd319);border-color:transparent}
+  .tabpane{display:none;margin-top:10px;min-height:130px}
+  .tabpane.on{display:block}
+  .log{max-height:200px;overflow:auto;background:rgba(0,0,0,.3);border-radius:8px;padding:10px;font-size:1.05rem}
+  .log-item{padding:2px 4px;border-bottom:1px solid rgba(255,255,255,.05)}
+  .log-item b{color:var(--gold);margin-right:6px}
+  .chat-msgs{max-height:200px;overflow:auto;display:flex;flex-direction:column;gap:5px;background:rgba(0,0,0,.3);border-radius:8px;padding:10px;font-size:1.08rem;margin-bottom:8px}
+  .chat-msgs:empty::before{content:"Say hi — your opponent sees this too.";color:var(--dim);font-style:italic}
+  .chat-item{line-height:1.4;word-break:break-word}
+  .chat-item b{color:var(--gold);margin-right:6px}
+  .chat-item.mine b{color:var(--green)}
+  .chat-item .ct{color:var(--dim);font-size:.9rem;margin-left:4px}
+  .chat-compose{display:flex;gap:8px}
+  .chat-compose input{flex:1;min-width:0;background:rgba(0,0,0,.35);border:1px solid var(--line);color:var(--text);padding:8px 12px;font-size:1.05rem;outline:none}
+  .chat-compose input:focus{border-color:var(--neon)}
+
+  /* ── mode picker / stage content ── */
+  .mode-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;width:min(640px,92%);}
+  .mode{background:linear-gradient(180deg,rgba(37,215,253,.05),rgba(0,0,0,.25));border:1px solid var(--line);padding:20px 14px;text-align:center;color:var(--text);transition:all .15s;font-family:inherit}
+  .mode:hover{border-color:var(--gold);transform:translateY(-3px);box-shadow:0 10px 26px rgba(0,0,0,.5)}
+  .mode .mi{font-size:1.9rem;display:block;margin-bottom:8px}
+  .mode b{font-family:var(--pix);font-size:.56rem;letter-spacing:.05em;display:block;line-height:1.8}
+  .mode small{color:var(--muted);display:block;margin-top:4px;font-size:1rem}
+  .online-panel{width:min(560px,92%)}
+  .hint{color:var(--muted);font-size:1.1rem;margin:0 0 14px}
+  .stage-title{font-family:var(--pix);font-size:.66rem;letter-spacing:.06em;color:var(--neon);text-shadow:0 0 12px rgba(37,215,253,.5);line-height:1.9}
+  .stage-sub{color:var(--muted);max-width:520px;font-size:1.12rem}
+  #passBtn{font-size:.6rem;padding:16px 34px}
+  .center{display:flex;flex-direction:column;align-items:center;gap:12px}
+
+  /* ── help modal ── */
+  .help-overlay{position:fixed;inset:0;z-index:9500;background:rgba(4,6,10,.72);display:flex;align-items:center;justify-content:center;padding:18px}
+  .help{position:relative;width:min(600px,100%);max-height:84vh;overflow:auto;background:#10141f;border:1px solid rgba(255,211,25,.4);padding:26px 26px 22px;clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px)}
+  .help h2{font-family:var(--pix);font-size:.78rem;letter-spacing:.04em;color:var(--gold);margin:0 0 8px;text-shadow:0 0 12px rgba(255,211,25,.5)}
+  .help h3{font-family:var(--pix);font-size:.54rem;letter-spacing:.05em;color:var(--neon);margin:16px 0 6px}
+  .help p{color:var(--muted);font-size:1.08rem;margin:0 0 8px}
+  .help b{color:var(--text)}
+  .help code{color:var(--gold);background:rgba(0,0,0,.4);border:1px solid rgba(255,255,255,.1);padding:1px 6px;font-size:.95rem}
+  .help-close{position:absolute;top:10px;right:12px;background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer}
+  .help-close:hover{color:var(--pink)}
+  .help .btn{margin-top:14px}
+  @media(max-width:700px){.mode-grid{grid-template-columns:1fr}}
+  @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<!-- ════════════════════════════════════════════════════════════
+     VGN MULTIPLAYER SERVER — rooms, turns, presence, chat,
+     private state. PUBLIC SOURCE (runs authoritatively, but
+     anyone can read it) — no secrets in here.
+     Durable `state` layout (per room slot, SLOT bytes each):
+       0        status (0 free, 1 waiting, 2 playing, 3 over)
+       1..8     room code (8 ascii, zero-padded)
+       9        first (0 host first, 1 guest first; rematch flips)
+       10..11   turn (uint16 BE — completed turns)
+       12..15   lastAct (uint32 LE)
+       16       winner (0 none, 1 host, 2 guest, 3 draw)
+       17       reason (0 none, 1 resign, 2 forfeit, 3 end)
+       18..SNAP public snapshot (utf8, zero-padded)
+       +SNAP    private secret for host (utf8, zero-padded)
+       +2*SNAP  private secret for guest
+     Secrets are pushed ONLY to the owning connection — never
+     broadcast. Public snapshots + turn order go to the topic.
+     ════════════════════════════════════════════════════════════ -->
+<script type="text/x-server-plugin">
+"use strict";
+var VERSION = 1;
+var SNAP = 384;
+var SLOT = 18 + 3 * SNAP;
+var N_SLOTS = Math.floor(state.length / SLOT);
+if (N_SLOTS > 1400) N_SLOTS = 1400;
+var CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+var MAX_PAYLOAD = SNAP;
+var CHAT_BANNED = ["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+
+var rooms = new Map();     // code -> room (live cache; rebuilt from state)
+var conns = new Map();     // conn.id -> {code, role}
+var moveTimes = new Map(), chatTimes = new Map(), createTimes = new Map();
+
+if (state[0] !== 42) { state.fill(0, 0, state.length); state[0] = 42; }  // version guard
+
+function u32(o,v){ state[o]=v&255; state[o+1]=(v>>>8)&255; state[o+2]=(v>>>16)&255; state[o+3]=(v>>>24)&255; }
+function r32(o){ return (state[o]|state[o+1]<<8|state[o+2]<<16|state[o+3]<<24)>>>0; }
+function u16(o,v){ state[o]=v>>8; state[o+1]=v&255; }
+function w8(o){ var s="",i=o,e=o+8; while(i<e){ var c=state[i]; if(!c)break; s+=String.fromCharCode(c); i++; } return s; }
+function putStr(dst, s, max){
+  var b=[]; for(var i=0;i<s.length;i++){ var c=s.charCodeAt(i);
+    if(c<128) b.push(c); else if(c<2048) b.push(192|(c>>6),128|(c&63));
+    else if(c<55296||c>57343) b.push(224|(c>>12),128|((c>>6)&63),128|(c&63));
+    else { i++; var h=(c&1023)<<10 | s.charCodeAt(i)&1023; b.push(240|(h>>18),128|((h>>12)&63),128|((h>>6)&63),128|(h&63)); } }
+  if(b.length>max) b=b.slice(0,max);
+  state.fill(0, dst, dst+max);
+  for(var j=0;j<b.length;j++) state[dst+j]=b[j];
+}
+function getStr(o,max){
+  var s="",i=o,e=o+max,c;
+  while(i<e){ c=state[i++]; if(!c)break;
+    if(c<128) s+=String.fromCharCode(c);
+    else if(c>191&&c<224) s+=String.fromCharCode(((c&31)<<6)|state[i++]&63);
+    else if(c>239){ var u=((c&7)<<18)|((state[i++]&63)<<12)|((state[i++]&63)<<6)|(state[i++]&63); s+=String.fromCharCode(55296+(u>>10),56320+(u&1023)); }
+    else s+=String.fromCharCode(((c&15)<<12)|((state[i++]&63)<<6)|(state[i++]&63)); }
+  return s;
+}
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function off(i){ return i*SLOT; }
+function genCode(){
+  for(var t=0;t<200;t++){
+    var c=""; for(var i=0;i<5;i++) c+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(c)) return c;
+  }
+  return "VGN"+String(Math.floor(Math.random()*900)+100);
+}
+function findSlot(){
+  var free=-1, wait=-1, any=-1;
+  for(var i=0;i<N_SLOTS;i++){
+    var st=state[off(i)];
+    if(st===0){ free=i; break; }
+    if(st===1&&wait===-1) wait=i;
+    if(st!==0&&any===-1) any=i;
+  }
+  if(free!==-1) return free;
+  if(wait!==-1) return wait;
+  return any;
+}
+function saveRoom(room){
+  var o=off(room.slot);
+  state[o]=room.status;
+  for(var i=0;i<8;i++) state[o+1+i] = i<room.code.length ? room.code.charCodeAt(i) : 0;
+  state[o+9]=room.first;
+  u16(o+10, room.turn);
+  u32(o+12, Math.max(0,Math.min(0xFFFFFFFF,room.lastAct)));
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  putStr(o+18, room.snap||"", SNAP);
+  putStr(o+18+SNAP, room.secretHost||"", SNAP);
+  putStr(o+18+2*SNAP, room.secretGuest||"", SNAP);
+}
+function loadRooms(){
+  rooms=new Map();
+  for(var i=0;i<N_SLOTS;i++){
+    var st=state[off(i)];
+    if(st===0) continue;
+    var o=off(i), code=w8(o+1);
+    if(!code){ continue; }
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }  // abandoned waiting rooms are reclaimed
+    rooms.set(code,{slot:i,code:code,status:st,first:state[o+9],hostId:-1,guestId:-1,
+      turn:(state[o+10]<<8)|state[o+11], lastAct:r32(o+12),
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:state[o+17]===1?"resign":state[o+17]===2?"forfeit":state[o+17]===3?"end":null,
+      snap:getStr(o+18,SNAP), secretHost:getStr(o+18+SNAP,SNAP), secretGuest:getStr(o+18+2*SNAP,SNAP)});
+  }
+}
+function topic(code){ return "tbl:"+code; }
+function snapPub(room){
+  return JSON.stringify({t:"snap",snap:{code:room.code,status:room.status,snap:room.snap,first:room.first,
+    turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}});
+}
+function broadcast(room){
+  try{ pubsub.publish(topic(room.code), snapPub(room)); }catch(e){}
+  // secrets go ONLY to their owner (never to the topic)
+  var hostInfo = conns.get(room.hostId);
+  if(hostInfo && room.secretHost) try{ room.hostId!==undefined && hostInfo.conn.send(JSON.stringify({t:"secret",data:room.secretHost})); }catch(e){}
+  var guestInfo = conns.get(room.guestId);
+  if(guestInfo && room.secretGuest) try{ guestInfo.conn.send(JSON.stringify({t:"secret",data:room.secretGuest})); }catch(e){}
+}
+function roleOf(conn){ var i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ var i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+function clean(s,max){ return String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,max); }
+function isBanned(t){ var s=t.toLowerCase(); for(var i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+function canCreate(conn){
+  var k="n"+conn.net[2], n=nowSec(), e=createTimes.get(k);
+  if(!e||e[1]<n-600){ createTimes.set(k,[1,n]); return true; }
+  if(e[0]>=6) return false; e[0]++; return true;
+}
+
+self.rpc = {
+  createRoom: function({conn}, data){
+    if(conns.has(conn.id)) return JSON.stringify({ok:false,err:"already_in_room"});
+    if(!canCreate(conn)) return JSON.stringify({ok:false,err:"too_many_rooms"});
+    var slot=findSlot();
+    if(slot<0) return JSON.stringify({ok:false,err:"server_full"});
+    var code=genCode();
+    var room={slot:slot,code:code,status:1,first:0,hostId:conn.id,guestId:-1,turn:0,snap:"",secretHost:"",secretGuest:"",winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room); saveRoom(room);
+    try{ conn.subscribe(topic(code)); }catch(e){}
+    conns.set(conn.id,{code:code,role:"host",conn:conn});
+    return JSON.stringify({ok:true,code:code,role:"host",snap:{code:code,status:1,snap:"",first:0,turn:0,hostIn:true,guestIn:false,winner:null,reason:null}});
+  },
+  joinRoom: function({conn}, data){
+    var code=String(data||"").trim().toUpperCase();
+    var room=rooms.get(code);
+    if(!room) return JSON.stringify({ok:false,err:"no_such_room"});
+    var existing=conns.get(conn.id), role=null;
+    var seatFree = room.hostId===-1 || room.guestId===-1;
+    if(room.status===3 && !existing && !seatFree) return JSON.stringify({ok:false,err:"game_over"});
+    if(existing && existing.code===code) role=existing.role;
+    else if(room.hostId===-1) role="host";
+    else if(room.guestId===-1) role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(role==="host") room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1 && room.hostId!==-1 && room.guestId!==-1) room.status=2;
+    try{ conn.subscribe(topic(code)); }catch(e){}
+    conns.set(conn.id,{code:code,role:role,conn:conn});
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    var mySecret = role==="host" ? room.secretHost : room.secretGuest;
+    return JSON.stringify({ok:true,role:role,snap:{code:room.code,status:room.status,snap:room.snap,first:room.first,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason},secret:mySecret||""});
+  },
+  getRoom: function({conn}, data){
+    var code=String(data||"").trim().toUpperCase();
+    var room=rooms.get(code);
+    if(!room) return JSON.stringify({ok:false,err:"no_such_room"});
+    var role=roleOf(conn), mySecret = role==="host"?room.secretHost:role==="guest"?room.secretGuest:"";
+    return JSON.stringify({ok:true,snap:{code:room.code,status:room.status,snap:room.snap,first:room.first,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason},secret:mySecret||""});
+  },
+  move: function({conn}, data){
+    var obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    var room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room) return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2) return JSON.stringify({ok:false,err:"not_playing"});
+    var role=roleOf(conn);
+    if(!role || roomOf(conn)!==room) return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.turn,room.first)!==role) return JSON.stringify({ok:false,err:"not_your_turn"});
+    var now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<250) return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number" || obj.evt!==room.turn) return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string" || obj.data.length<0 || obj.data.length>MAX_PAYLOAD) return JSON.stringify({ok:false,err:"bad_move"});
+    room.snap=obj.data||"";
+    if(typeof obj.secret==="string"){ if(role==="host")room.secretHost=obj.secret.slice(0,MAX_PAYLOAD); else room.secretGuest=obj.secret.slice(0,MAX_PAYLOAD); }
+    room.turn++; room.lastAct=nowSec();
+    saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame: function({conn}, data){
+    var obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    var room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room) return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2) return JSON.stringify({ok:false,err:"not_playing"});
+    var role=roleOf(conn);
+    if(!role || roomOf(conn)!==room) return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1) return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign: function({conn}, data){
+    var room=roomOf(conn);
+    if(!room) return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch: function({conn}, data){
+    var room=roomOf(conn);
+    if(!room) return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3) return JSON.stringify({ok:false,err:"not_finished"});
+    var role=roleOf(conn);
+    var oppPresent = role==="host" ? room.guestId!==-1 : room.hostId!==-1;
+    if(!oppPresent) return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snap=""; room.secretHost=""; room.secretGuest="";
+    room.winner=null; room.reason=null; room.first=1-room.first;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin: function({conn}, data){
+    var room=roomOf(conn);
+    if(!room) return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2) return JSON.stringify({ok:false,err:"not_playing"});
+    var role=roleOf(conn);
+    var oppPresent = role==="host" ? room.guestId!==-1 : room.hostId!==-1;
+    if(oppPresent) return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave: function({conn}, data){
+    var room=roomOf(conn);
+    if(room && room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat: function({conn}, data){
+    var obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    var room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room) return JSON.stringify({ok:false,err:"no_such_room"});
+    var role=roleOf(conn);
+    if(!role || roomOf(conn)!==room) return JSON.stringify({ok:false,err:"not_in_room"});
+    var now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700) return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    var text=clean(obj.text,160);
+    if(!text) return JSON.stringify({ok:false,err:"empty"});
+    if(isBanned(text)) return JSON.stringify({ok:false,err:"blocked"});
+    try{ pubsub.publish(topic(room.code), JSON.stringify({t:"chat",role:role,text:text,ts:nowSec()})); }catch(e){}
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onclose = function({conn}){
+  var info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id); chatTimes.delete(conn.id);
+  if(!info) return;
+  var room=rooms.get(info.code);
+  if(!room) return;
+  if(info.role==="host") room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec(); saveRoom(room); broadcast(room); // opponent sees "disconnected" and may claim
+};
+
+loadRooms();
+</script>
+
+<div class="wrap">
+  <!-- ═══ CRT MONITOR (the game screen) ═══ -->
+  <div class="monitor">
+    <div class="screen-wrap">
+      <div id="stage">
+        <div class="mode-grid" id="modeGrid">
+          <button class="mode" data-mode="local"><span class="mi">🛋️</span><b>LOCAL</b><small>Two players, one screen</small></button>
+          <button class="mode" data-mode="ai"><span class="mi">🤖</span><b>VS AI</b><small>You vs the machine</small></button>
+          <button class="mode" data-mode="online"><span class="mi">🌐</span><b>ONLINE</b><small>Live match — share a room code</small></button>
+        </div>
+
+        <div class="online-panel center" id="onlinePanel" hidden>
+          <p class="hint">Create a room and share the 5-letter code, or join a friend's room with theirs.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center">
+            <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+            <input class="code-input" id="joinCodeInput" maxlength="5" placeholder="CODE" autocomplete="off" spellcheck="false">
+            <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+          </div>
+          <p class="hint" id="onlineMsg" style="margin-top:12px"></p>
+        </div>
+
+        <div class="center" id="stageGame" hidden>
+          <div class="stage-title">YOUR GAME GOES HERE</div>
+          <p class="stage-sub" id="stageSub">This table already handles rooms, turns, chat and presence — drop your game into <code>#stageGame</code> and ship.</p>
+          <button class="btn btn-gold" id="passBtn">Pass the turn ▸</button>
+        </div>
+      </div>
+      <div class="screen-glow" aria-hidden="true"></div>
+      <div class="scanlines" aria-hidden="true"></div>
+      <div class="ctrl-row">
+        <button class="tbtn" id="bezelBtn" aria-pressed="false">⛶ Bezel</button>
+        <button class="tbtn" id="fullBtn" aria-pressed="false">▣ Full</button>
+        <button class="tbtn" id="helpBtn" aria-pressed="false">❓</button>
+      </div>
+    </div>
+    <div class="monitor-panel" aria-hidden="true">
+      <span class="brand">◤ VGN ◥</span>
+      <span class="led"></span>
+      <span class="brand" style="color:#5a6476">MP TEMPLATE v1</span>
+    </div>
+  </div>
+
+  <!-- ═══ CONTROL DECK (below the monitor) ═══ -->
+  <div class="deck">
+    <div class="status-row">
+      <div class="players">
+        <div class="pchip host" id="pHost"><span class="dot"></span><b id="hostNameEl">Host</b><small id="hostSubEl">sitting at the table</small></div>
+        <span class="turn-pill" id="turnEl">—</span>
+        <div class="pchip guest" id="pGuest"><span class="dot"></span><b id="guestNameEl">Guest</b><small id="guestSubEl">sitting at the table</small></div>
+      </div>
+      <span class="timer" id="timerEl" hidden>⏱ —</span>
+    </div>
+    <div class="banner" id="bannerEl">Choose a way to play.</div>
+    <div class="btns">
+      <button class="btn btn-gold" id="newGameBtn" disabled>Restart</button>
+      <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+      <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
+      <button class="btn btn-ghost" id="menuBtn">Back to lobby</button>
+    </div>
+    <div class="room-box" id="roomBox" hidden>
+      <span>Room code</span><span class="code" id="roomCodeEl">—</span>
+      <button class="tbtn" id="copyCodeBtn">Copy</button>
+      <button class="tbtn" id="leaveBtn">Resign &amp; leave</button>
+      <span id="connEl" style="color:var(--muted);letter-spacing:.02em;font-family:var(--term);font-size:1rem">Connecting…</span>
+    </div>
+    <div class="tabs">
+      <button class="tab on" data-tab="log">Turn log</button>
+      <button class="tab" data-tab="chat">Table chat</button>
+    </div>
+    <div class="tabpane on" id="pane-log">
+      <div class="log" id="logEl"></div>
+    </div>
+    <div class="tabpane" id="pane-chat">
+      <div class="chat-msgs" id="chatMsgsEl"></div>
+      <div class="chat-compose">
+        <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+        <button class="btn btn-gold" id="chatSendBtn" style="padding:8px 14px">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div class="help-overlay" id="helpOverlay" hidden>
+  <div class="help">
+    <button class="help-close" id="helpCloseBtn">✕</button>
+    <div id="helpBody"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ game config (edit me) ══════════ */
+var CONFIG = {
+  title: "Your VGN Game",
+  timerSecs: 60,          // seconds per turn; 0 disables the timer
+  aiName: "Bot",          // vs-AI opponent name
+  saveKey: "vgn_mp_save"  // localStorage key for local/AI saves
+};
+
+/* ══════════ tiny sound engine (WebAudio, no files) ══════════ */
+var AC=null;
+function beep(freq,dur,type,gain,when){
+  try{
+    if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)();
+    if(AC.state==="suspended") AC.resume();
+    var t=(when||AC.currentTime)+0.01;
+    var o=AC.createOscillator(), g=AC.createGain();
+    o.type=type||"square"; o.frequency.value=freq;
+    g.gain.setValueAtTime(gain||0.08, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+(dur||0.12));
+    o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t+(dur||0.12)+0.02);
+  }catch(e){}
+}
+var SFX={
+  turn:function(){ beep(880,0.06,"square",0.06); },
+  deal:function(){ beep(523,0.07,"square",0.05); beep(659,0.07,"square",0.05); beep(784,0.09,"square",0.05); },
+  win:function(){ beep(523,0.1,"square",0.07); beep(659,0.1,"square",0.07); beep(784,0.12,"square",0.07); beep(1047,0.18,"square",0.07); },
+  lose:function(){ beep(392,0.12,"sawtooth",0.06); beep(330,0.12,"sawtooth",0.06); beep(262,0.18,"sawtooth",0.06); },
+  draw:function(){ beep(660,0.08,"square",0.06); beep(660,0.08,"square",0.06); },
+  err:function(){ beep(180,0.15,"sawtooth",0.06); }
+};
+
+/* ══════════ theme / helpers ══════════ */
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+function fmtTime(ts){ var d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+
+/* ══════════ table state ══════════
+   The server is the source of truth online. Each player submits
+   their move via moveTurn(payload, secret). Turn order derives from
+   the server turn counter (host takes 0,2,4... when first=0; a
+   rematch flips `first`). */
+var game={ mode:null, myRole:null, roomCode:null, socket:null, sockOpen:false, wantReconnect:false, retryDelay:800,
+  openResolvers:[], serverTurn:0, first:0, status:"idle", oppPresent:true, over:false, winner:null, reason:"",
+  locked:false, log:[], lastLoggedTurn:0, mySecret:"" };
+
+function $id(x){ return document.getElementById(x); }
+var stage=$id("stage"), modeGrid=$id("modeGrid"), onlinePanel=$id("onlinePanel"), onlineMsgEl=$id("onlineMsg"),
+  stageGame=$id("stageGame"), passBtn=$id("passBtn"),
+  turnEl=$id("turnEl"), bannerEl=$id("bannerEl"), logEl=$id("logEl"),
+  hostNameEl=$id("hostNameEl"), guestNameEl=$id("guestNameEl"), hostSubEl=$id("hostSubEl"), guestSubEl=$id("guestSubEl"),
+  pHost=$id("pHost"), pGuest=$id("pGuest"), timerEl=$id("timerEl"),
+  roomBox=$id("roomBox"), roomCodeEl=$id("roomCodeEl"), connEl=$id("connEl"),
+  copyCodeBtn=$id("copyCodeBtn"), leaveBtn=$id("leaveBtn"), newGameBtn=$id("newGameBtn"),
+  claimBtn=$id("claimBtn"), saveBtn=$id("saveBtn"), menuBtn=$id("menuBtn"),
+  chatMsgsEl=$id("chatMsgsEl"), chatInput=$id("chatInput"), chatSendBtn=$id("chatSendBtn"),
+  joinCodeInput=$id("joinCodeInput"), helpOverlay=$id("helpOverlay"), helpBody=$id("helpBody");
+
+function turnRoleFor(n){ return ((n+(game.first?1:0))%2)===0?"host":"guest"; }
+function roleName(r){ return r==="host"?"Host":"Guest"; }
+function myTurn(){ return game.mode==="online" ? (game.sockOpen && game.status===2 && turnRoleFor(game.serverTurn)===game.myRole)
+                                              : (turnRoleFor(game.log.length)=== (game.mode==="ai"?"host":"host")); }
+function localTurnRole(){ return turnRoleFor(game.log.length); }
+
+/* ══════════ status UI ══════════ */
+function updateNames(){
+  if(game.mode==="ai"){ hostNameEl.textContent="You"; guestNameEl.textContent=CONFIG.aiName+" 🤖"; }
+  else if(game.mode==="online" && game.myRole){ hostNameEl.textContent=game.myRole==="host"?"You":"Host"; guestNameEl.textContent=game.myRole==="host"?"Guest":"You"; }
+  else { hostNameEl.textContent="Host"; guestNameEl.textContent="Guest"; }
+}
+function addLog(role,msg){ game.log.push({r:role,m:msg}); if(game.log.length>60)game.log.shift(); renderLog(); }
+function renderLog(){
+  logEl.innerHTML="";
+  if(!game.log.length){ logEl.innerHTML='<div style="color:var(--dim)">No turns yet.</div>'; return; }
+  game.log.forEach(function(e){
+    var div=document.createElement("div"); div.className="log-item";
+    div.innerHTML="<b>"+esc(roleName(e.r))+"</b><span>"+esc(e.m)+"</span>";
+    logEl.appendChild(div);
+  });
+  logEl.scrollTop=logEl.scrollHeight;
+}
+function resultText(){
+  if(game.winner==="draw") return "Draw — the match is over.";
+  var w=roleName(game.winner);
+  var online=game.mode==="online";
+  if(online && game.winner===game.myRole){ if(game.reason==="resign")return "You win — your opponent resigned!"; if(game.reason==="forfeit")return "You win — your opponent left!"; return "You win!"; }
+  if(online && game.winner!==game.myRole){ if(game.reason==="resign")return "You lose — you resigned."; if(game.reason==="forfeit")return "You lose — you left the match."; return "You lose."; }
+  if(game.reason==="resign") return w+" wins by resignation.";
+  if(game.reason==="forfeit") return w+" wins — the other side left.";
+  return w+" wins!";
+}
+function updateBanner(){
+  var msg="";
+  if(game.mode===null){ msg="Choose a way to play."; }
+  else if(game.over){ msg=resultText(); }
+  else if(game.mode==="local"){ msg=roleName(localTurnRole())+" to move — pass when ready."; }
+  else if(game.mode==="ai"){ msg=localTurnRole()==="host"?"Your turn — pass when ready.":"Bot is thinking…"; }
+  else {
+    if(!game.sockOpen) msg="Connecting…";
+    else if(game.status===1) msg="Waiting for an opponent to join… share the room code.";
+    else if(!game.oppPresent) msg="Your opponent disconnected — they can rejoin with the code. Claim the win anytime.";
+    else if(turnRoleFor(game.serverTurn)===game.myRole) msg="Your turn — pass when ready.";
+    else msg="Waiting for your opponent…";
+  }
+  bannerEl.textContent=msg;
+}
+var bannerTimer=null;
+function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+
+/* ══════════ turn timer ══════════ */
+var timerRemain=0, timerInt=null, timerKey="";
+function timerFmt(s){ var m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0"); }
+function timerStop(){ if(timerInt){ clearInterval(timerInt); timerInt=null; } }
+function timerStart(){ if(CONFIG.timerSecs<=0)return; timerStop(); timerRemain=CONFIG.timerSecs; timerInt=setInterval(timerTick,1000); timerTick(); }
+function timerTick(){
+  timerRemain--;
+  timerEl.textContent="⏱ "+timerFmt(Math.max(0,timerRemain));
+  timerEl.classList.toggle("low",timerRemain<=10);
+  if(timerRemain<=0){ timerStop(); flashBanner("Time's up — pass auto-sent."); if(!game.over&&!game.locked)passTurn(); }
+}
+function syncTimer(){
+  var running = game.mode!==null && !game.over && !game.locked;
+  if(!running){ timerStop(); timerEl.hidden=true; return; }
+  timerEl.hidden=false;
+  var key = game.mode==="online" ? "O:"+game.serverTurn : "L:"+game.log.length;
+  var onMyTurn = game.mode==="online" ? turnRoleFor(game.serverTurn)===game.myRole : (game.mode==="ai"?localTurnRole()==="host":true);
+  if(!onMyTurn || (game.mode==="ai"&&aiThinking)){ timerStop(); timerEl.textContent="⏱ —"; return; }
+  if(key!==timerKey){ timerKey=key; timerStart(); }
+}
+function refreshTurn(){
+  var r = game.mode==="online" ? turnRoleFor(game.serverTurn) : localTurnRole();
+  var t;
+  if(game.over) t="Match over";
+  else if(game.mode==="ai") t = r==="host" ? "YOUR MOVE" : "BOT THINKING…";
+  else if(game.mode==="online") t = r===game.myRole ? ("YOUR MOVE · "+roleName(r)) : roleName(r)+" TO MOVE";
+  else t = roleName(r)+" TO MOVE";
+  turnEl.textContent=t;
+  pHost.classList.toggle("on",!game.over&&r==="host");
+  pGuest.classList.toggle("on",!game.over&&r==="guest");
+  if(game.over){ pHost.classList.remove("on"); pGuest.classList.remove("on"); }
+}
+function updateButtons(){
+  if(game.mode==="online"){
+    newGameBtn.textContent = game.over ? "Rematch" : "New match";
+    newGameBtn.style.display = game.over ? "" : "none";
+    newGameBtn.disabled = false;
+    menuBtn.textContent = "Exit match";
+    claimBtn.hidden = !(game.status===2 && !game.over && !game.oppPresent);
+    saveBtn.style.display="none";
+  } else if(game.mode){
+    newGameBtn.textContent = "Restart";
+    newGameBtn.style.display = "";
+    newGameBtn.disabled = false;
+    menuBtn.textContent = "Back to lobby";
+    claimBtn.hidden = true;
+    saveBtn.style.display = !game.over ? "" : "none";
+  } else {
+    newGameBtn.disabled = true;
+  }
+  var canMove = game.mode==="online" ? (game.sockOpen && game.status===2 && turnRoleFor(game.serverTurn)===game.myRole && !game.locked)
+                                     : (!game.locked && (game.mode==="ai"?localTurnRole()==="host":game.mode==="local"));
+  var aiTurn = game.mode==="ai" && (aiThinking || localTurnRole()!=="host");
+  passBtn.disabled = game.over || game.mode===null || !canMove || aiTurn;
+}
+function renderAll(){ updateNames(); refreshTurn(); updateBanner(); updateButtons(); renderLog(); syncTimer(); }
+
+/* ══════════ modes ══════════ */
+function resetTable(){ game.log=[]; game.lastLoggedTurn=0; game.over=false; game.winner=null; game.reason=""; game.locked=false; game.mySecret=""; timerKey=""; timerStop(); aiThinking=false; if(aiTimer){clearTimeout(aiTimer);aiTimer=null;} }
+function startMode(mode){
+  if(game.mode==="online"&&game.socket) exitOnline(false);
+  resetTable();
+  game.mode=mode;
+  updateNames();
+  roomBox.hidden=mode!=="online";
+  modeGrid.hidden=true; onlinePanel.hidden=true;
+  stageGame.hidden=false;
+  SFX.deal();
+  renderAll();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false; game.roomCode=null; game.myRole=null; game.mode=null;
+  timerStop();
+  if(showLobby) showLobbyScreen();
+}
+function showLobbyScreen(){
+  stageGame.hidden=true; modeGrid.hidden=false;
+  gameCtnReset();
+  renderAll();
+}
+function gameCtnReset(){ roomBox.hidden=true; }
+function exitToLobby(){
+  if(game.mode==="online"){ if(game.socket&&game.sockOpen) rpc("leave",game.roomCode).catch(function(){}); exitOnline(true); }
+  else { game.mode=null; showLobbyScreen(); }
+}
+
+/* ══════════ vs AI ══════════
+   The human is always Host; the AI is Guest. Override AI_DO_TURN()
+   with your bot brain — return a string describing what it did. */
+var aiThinking=false, aiTimer=null;
+function AI_DO_TURN(){ return "passed the turn"; }
+function aiPassTurn(){
+  if(game.mode!=="ai"||game.over)return;
+  if(localTurnRole()!=="guest")return;
+  aiThinking=true; refreshTurn(); updateBanner(); updateButtons(); syncTimer();
+  aiTimer=setTimeout(function(){
+    aiTimer=null; aiThinking=false;
+    if(game.mode!=="ai"){ renderAll(); return; }
+    var msg="passed the turn";
+    try{ var m=AI_DO_TURN(); if(m)msg=m; }catch(e){ console.error("AI error:",e); }
+    addLog("guest",msg); SFX.turn(); renderAll(); saveGame();
+  },900);
+}
+
+/* ══════════ save / continue (local & AI) ══════════ */
+function saveGame(){
+  if(game.mode!=="local"&&game.mode!=="ai")return;
+  if(game.over){ deleteSave(); return; }
+  try{ localStorage.setItem(CONFIG.saveKey, JSON.stringify({v:1,mode:game.mode,log:game.log,winner:game.winner,reason:game.reason,lastLoggedTurn:game.lastLoggedTurn,savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(CONFIG.saveKey); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(CONFIG.saveKey); }catch(e){} }
+
+/* ══════════ turn action ══════════
+   Builders: call this with your game's public payload (and an
+   optional secret, e.g. your hidden hand) instead of the demo
+   pass-through. Online the server validates your turn and stores
+   the payload; your opponent receives it via the snap update. */
+function passTurn(){
+  if(game.over||game.locked)return;
+  if(game.mode==="ai"){
+    if(localTurnRole()!=="host")return;
+    addLog("host","passed the turn"); SFX.turn(); saveGame(); aiPassTurn(); return;
+  }
+  if(game.mode==="local"){
+    addLog(localTurnRole(),"passed the turn"); SFX.turn(); renderAll(); saveGame(); return;
+  }
+  if(turnRoleFor(game.serverTurn)!==game.myRole)return;
+  game.locked=true; updateButtons();
+  var evt=game.serverTurn;
+  rpc("move",JSON.stringify({code:game.roomCode,evt:evt,data:"T"+(evt+1)})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok){ flashBanner("Couldn't pass the turn ("+(r&&r.err?r.err:"error")+")."); SFX.err(); }
+    else SFX.turn();
+    refreshFromServer();
+  }).catch(function(){ game.locked=false; flashBanner("Couldn't reach the server — reconnecting…"); });
+}
+function moveTurn(payload, secret){
+  if(game.mode!=="online")return;
+  if(turnRoleFor(game.serverTurn)!==game.myRole)return;
+  game.locked=true; updateButtons();
+  rpc("move",JSON.stringify({code:game.roomCode,evt:game.serverTurn,data:String(payload==null?"":payload),secret:String(secret==null?"":secret)})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok){ flashBanner("Couldn't send move ("+(r&&r.err?r.err:"error")+")."); SFX.err(); }
+    refreshFromServer();
+  }).catch(function(){ game.locked=false; flashBanner("Couldn't reach the server — reconnecting…"); });
+}
+function endGame(winner, reason){
+  if(game.mode!=="online")return;
+  rpc("endGame",JSON.stringify({code:game.roomCode,winner:winner})).then(function(r){ if(r&&!r.ok)flashBanner("Couldn't end the match ("+r.err+")."); }).catch(function(){});
+}
+function resignGame(){ if(game.mode==="online") rpc("resign",game.roomCode).catch(function(){}); else { finishLocal(game.mode==="ai"?"guest":"host","resign"); } }
+function finishLocal(winner, reason){ game.over=true; game.winner=winner; game.reason=reason||""; if(game.winner==="draw")SFX.draw(); else if(winner==="host")SFX.win(); else SFX.lose(); deleteSave(); renderAll(); }
+
+/* ══════════ table chat ══════════ */
+function addChat(role,text,ts){
+  var row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(role===game.myRole?"You":roleName(role))+"</b>"+esc(text)+'<span class="ct">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row); chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole) SFX.turn();
+}
+function sendChat(){
+  var t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){ if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+")."); }).catch(function(){});
+}
+
+/* ══════════ online client ══════════ */
+function openedP(){ return new Promise(function(res){ if(game.sockOpen)res(true); else game.openResolvers.push(res); }); }
+function connectSocket(){
+  if(game.socket)return;
+  var rootRef=window.root||{};
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }
+  catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true; game.retryDelay=800;
+    var rs=game.openResolvers; game.openResolvers=[]; rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){ if(game.mode==="online")onServerMsg(ev.data); });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    var rs=game.openResolvers; game.openResolvers=[]; rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){ game.retryDelay=Math.min(game.retryDelay*1.7,8000); game.socket=null; connectSocket(); }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){ try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); } }).catch(rej);
+  });
+}
+function setConnLabel(txt){ connEl.textContent = txt!==undefined ? txt : (game.sockOpen ? "Connected" : "Connecting…"); }
+function onServerMsg(raw){
+  var msg; try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+  else if(msg.t==="secret"){ game.mySecret=msg.data||""; window.dispatchEvent(new CustomEvent("vgn-secret",{detail:game.mySecret})); }
+}
+function refreshFromServer(){
+  return rpc("getRoom",game.roomCode).then(function(r){
+    if(r&&r.snap)applyServerSnap(r.snap);
+    if(r&&typeof r.secret==="string"){ game.mySecret=r.secret; window.dispatchEvent(new CustomEvent("vgn-secret",{detail:game.mySecret})); }
+  }).catch(function(){});
+}
+function applyServerSnap(s){
+  if(game.over && s.status===2 && s.first===game.first) return; // stale snap (late rpc reply) — ignore; rematches always flip first
+  game.serverTurn=s.turn; game.first=s.first; game.status=s.status;
+  game.oppPresent = game.myRole==="host" ? s.guestIn : s.hostIn;
+  if(s.status===2 && s.turn===0){ game.mySecret=""; window.dispatchEvent(new CustomEvent("vgn-secret",{detail:""})); }
+  while(game.lastLoggedTurn<s.turn){
+    addLog(turnRoleFor(game.lastLoggedTurn),"passed the turn");
+    game.lastLoggedTurn++;
+  }
+  if(s.status===3){
+    if(!game.over){
+      game.over=true; game.winner=s.winner; game.reason=s.reason||"";
+      if(game.winner==="draw")SFX.draw(); else if(game.winner===game.myRole)SFX.win(); else SFX.lose();
+    }
+  }else{
+    game.over=false; game.winner=null; game.reason="";
+  }
+  renderAll();
+}
+function enterOnlineGame(){
+  modeGrid.hidden=true; onlinePanel.hidden=true; stageGame.hidden=false;
+  roomBox.hidden=false; roomCodeEl.textContent=game.roomCode;
+  updateNames(); renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  var ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    var r=await rpc("createRoom","");
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=r.code; game.myRole=r.role;
+    setOnlineMsg(""); if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame(); SFX.deal();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  var ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    var r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=code; game.myRole=r.role;
+    setOnlineMsg(""); if(r.snap)applyServerSnap(r.snap);
+    if(r.secret){ game.mySecret=r.secret; window.dispatchEvent(new CustomEvent("vgn-secret",{detail:game.mySecret})); }
+    enterOnlineGame(); SFX.deal();
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){ setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500); }
+      return;
+    }
+    game.myRole=r.role;
+    if(r.snap)applyServerSnap(r.snap);
+    if(r.secret){ game.mySecret=r.secret; window.dispatchEvent(new CustomEvent("vgn-secret",{detail:game.mySecret})); }
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+
+/* ══════════ help ══════════ */
+var HELP_HTML = '<h2>'+esc(CONFIG.title)+' — Multiplayer Table</h2>'
+  +'<p>A ready-made two-player table: rooms, room codes, turn order, presence, rematch, saves and sounds — with no game logic yet. Your game drops into the CRT screen.</p>'
+  +'<h3>Three ways to play</h3>'
+  +'<p><b>🛋️ Local</b> — two players share one screen, passing the turn.</p>'
+  +'<p><b>🤖 vs AI</b> — you are Host; the machine plays Guest. The built-in bot just passes — give it a brain by overriding <code>AI_DO_TURN()</code>.</p>'
+  +'<p><b>🌐 Online</b> — create a room, share the 5-letter code, and play a friend. Turn order and match state live authoritatively on the server.</p>'
+  +'<h3>Playing</h3>'
+  +'<p>The turn pill and banner say whose move it is; <b>Pass the turn</b> ends your go. Each turn gets <b>⏱ '+CONFIG.timerSecs+' seconds</b> (edit <code>CONFIG.timerSecs</code>) — run out and your pass is sent for you. Every move lands in the turn log.</p>'
+  +'<p><b>💾 Save</b> captures a local or AI table — the lobby shows a continue prompt next time you load the page.</p>'
+  +'<h3>Online extras</h3>'
+  +'<p><b>Room code</b> — share it and your opponent joins instantly. If they disconnect they can rejoin with the same code, or you can <b>Claim win</b> if they abandon. When a match ends, <b>Rematch</b> flips who goes first.</p>'
+  +'<p><b>Private state</b> — submit a <code>secret</code> payload with each move (e.g. your hidden hand). The server stores it per-role and pushes it only to you — it is never broadcast. Listen for the <code>vgn-secret</code> event to read yours.</p>'
+  +'<h3>Building your game</h3>'
+  +'<p>Replace the <code>#stageGame</code> placeholder with your board. On your turn call <code>moveTurn(payload, secret?)</code> and end matches with <code>endGame("host"/"guest"/"draw")</code>. For single-player, override <code>AI_DO_TURN()</code>. Everything else is already handled.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){ helpBody.innerHTML=HELP_HTML; $id("helpDoneBtn").addEventListener("click",closeHelp); helpOverlay.hidden=false; }
+function closeHelp(){ helpOverlay.hidden=true; }
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    var m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; modeGrid.hidden=true; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    startMode(m);
+  });
+});
+$id("createRoomBtn").addEventListener("click",function(){ game.wantReconnect=true; connectSocket(); doCreateRoom(); });
+$id("joinRoomBtn").addEventListener("click",function(){
+  var c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true; connectSocket(); doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){ this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5); });
+copyCodeBtn.addEventListener("click",function(){ try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); } });
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+passBtn.addEventListener("click",function(){ passTurn(); });
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.over) rpc("rematch",game.roomCode).then(function(r){ if(r&&r.ok){ refreshFromServer(); SFX.deal(); } }).catch(function(){});
+    return;
+  }
+  if(!game.mode)return;
+  resetTable(); startMode(game.mode==="ai"?"ai":"local");
+});
+claimBtn.addEventListener("click",function(){
+  if(game.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){ if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet."); }).catch(function(){});
+});
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+$id("helpBtn").addEventListener("click",openHelp);
+$id("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!helpOverlay.hidden)closeHelp(); });
+document.querySelectorAll(".tab").forEach(function(t){
+  t.addEventListener("click",function(){
+    document.querySelectorAll(".tab").forEach(function(x){ x.classList.toggle("on",x===t); });
+    document.querySelectorAll(".tabpane").forEach(function(p){ p.classList.toggle("on", p.id==="pane-"+t.dataset.tab); });
+  });
+});
+$id("bezelBtn").addEventListener("click",function(){
+  var b=document.body.classList.toggle("bare");
+  this.classList.toggle("on",b);
+  window.dispatchEvent(new Event("resize"));
+});
+$id("fullBtn").addEventListener("click",function(){
+  if(!document.fullscreenElement&&!document.webkitFullscreenElement){
+    var el=document.documentElement, p=null;
+    document.body.classList.add("bare");
+    if(el.requestFullscreen)p=el.requestFullscreen(); else if(el.webkitRequestFullscreen)p=el.webkitRequestFullscreen();
+    if(p&&p.catch)p.catch(function(){ document.body.classList.remove("bare"); });
+  } else if(document.exitFullscreen)document.exitFullscreen(); else if(document.webkitExitFullscreen)document.webkitExitFullscreen();
+});
+
+/* expose for testing + game builders */
+window.VGN_MP = {
+  game:game, startMode:startMode, exitToLobby:exitToLobby, passTurn:passTurn, moveTurn:moveTurn,
+  endGame:endGame, resignGame:resignGame, aiPassTurn:aiPassTurn, AI_DO_TURN:AI_DO_TURN,
+  myTurn:myTurn, turnRoleFor:turnRoleFor, refreshFromServer:refreshFromServer,
+  doCreateRoom:doCreateRoom, doJoinRoom:doJoinRoom, saveGame:saveGame, deleteSave:deleteSave,
+  setSecret:function(v){ game.mySecret=v; }, getSecret:function(){ return game.mySecret; }
+};
+
+renderAll();
+})();
+</script>

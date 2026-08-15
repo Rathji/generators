@@ -1,0 +1,1 @@
+The VGN Text-Game Template as of Aug 2026 — engine (index.html) + data (main.pjs). To reuse: copy both files back to generator root and edit main.pjs. Preserved here so Lemonade Stand could take over the generator.

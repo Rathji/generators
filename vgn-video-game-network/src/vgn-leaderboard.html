@@ -1,0 +1,294 @@
+<!-- ════════════════════════════════════════════════════════════
+     VGN ONLINE LEADERBOARD — v1
+     ────────────────────────────────────────────────────────────
+     A ready-made high-score board for the Video Game Network,
+     wrapped in the CRT look. Drop it into any VGN game.
+
+     Paste this ENTIRE file into your generator's index.html.
+     It needs one import in main.pjs:
+         createServerSocket = {import:server-plugin}
+
+     WHAT YOU GET:
+       · server-authoritative top-10, durable forever (state)
+       · submit score → ranked against the board
+       · LIVE: every watcher's board updates the moment someone
+         lands a spot (pubsub)
+       · your entries highlighted + "rank" returned on submit
+       · rate-limited submissions (per-connection + per-network)
+       · CRT panel: scanlines, neon, press-start font
+
+     GAME BUILDER API (window.VGN_LB):
+       VGN_LB.submit(name, score) -> Promise<{ok, rank}>
+                    rank is 1-based if you made the board,
+                    -1 if you submitted but didn't rank
+       VGN_LB.onBoard(cb) -> unsub   cb({board, newEntry})
+                    fired when the board changes
+       VGN_LB.board() -> current top-10 (array)
+       VGN_LB.ready -> Promise (resolves once connected + loaded)
+
+     Notes: scores are INTEGERS, higher = better. Names are
+     trimmed/filtered server-side (14 chars shown). While a
+     generator is unsaved, the board runs on the local emulator
+     and resets on reload — save to make it real.
+     ════════════════════════════════════════════════════════════ -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --neon:#25d7fd; --pink:#ff2bd6; --gold:#ffd319; --green:#3ddc84; --red:#ff5a3c;
+    --text:#dce6f0; --muted:#8a93a5; --dim:#565f72; --line:rgba(120,140,180,.16);
+    --pix:'Press Start 2P',monospace;
+    --term:'VT323',monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:#07090f;color:var(--text);font-family:var(--term);font-size:1.2rem;line-height:1.5;
+    text-align:left;overflow-x:hidden;padding:30px 14px 60px;
+    background-image:
+      radial-gradient(900px 500px at 80% -10%, rgba(37,215,253,.08), transparent 60%),
+      radial-gradient(800px 560px at 10% 110%, rgba(255,43,214,.07), transparent 60%);
+    -webkit-tap-highlight-color:transparent;
+  }
+  button{font-family:inherit;cursor:pointer}
+  input{font-family:inherit}
+
+  .lb{
+    width:min(600px, 96vw);margin:0 auto;
+    border:1px solid rgba(120,140,180,.22);border-radius:16px;
+    background:linear-gradient(168deg,#111827,#0a0e15 70%);
+    box-shadow:0 30px 70px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+    position:relative;overflow:hidden;
+  }
+  .lb::before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px);}
+  .lb-inner{position:relative;padding:22px 24px 26px}
+  .lb-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .lb-title{font-family:var(--pix);font-size:.62rem;letter-spacing:.14em;color:var(--neon);text-shadow:0 0 14px rgba(37,215,253,.55);line-height:1.9}
+  .lb-title small{display:block;font-size:.4rem;color:var(--muted);letter-spacing:.1em;text-shadow:none;margin-top:2px}
+  .live{display:flex;align-items:center;gap:7px;font-family:var(--pix);font-size:.42rem;letter-spacing:.12em;color:var(--muted)}
+  .live .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 9px rgba(61,220,132,.9);animation:lbpulse 2.8s ease-in-out infinite}
+  .live.off .dot{background:var(--dim);box-shadow:none;animation:none}
+  @keyframes lbpulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+  .board{list-style:none;margin:0 0 16px;padding:0;font-size:1.15rem}
+  .row{display:flex;align-items:center;gap:12px;padding:7px 10px;border-radius:8px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .row:last-child{border-bottom:none}
+  .row .rk{width:34px;font-family:var(--pix);font-size:.5rem;color:var(--muted);letter-spacing:.04em;flex:none}
+  .row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#c8d3e4}
+  .row .sc{font-family:var(--pix);font-size:.5rem;color:var(--gold);text-shadow:0 0 10px rgba(255,211,25,.35);flex:none}
+  .row.top .rk{color:var(--gold);text-shadow:0 0 10px rgba(255,211,25,.6)}
+  .row.top .nm{color:#f2e9c9}
+  .row.top .sc{color:var(--gold)}
+  .row.mine{background:rgba(255,211,25,.09);border:1px solid rgba(255,211,25,.5);box-shadow:0 0 18px rgba(255,211,25,.14)}
+  .row.mine .nm{color:var(--gold)}
+  .row.mine .tag{font-family:var(--pix);font-size:.4rem;color:#07090f;background:var(--gold);padding:3px 6px;letter-spacing:.06em;flex:none}
+  .empty{color:var(--dim);font-style:italic;text-align:center;padding:18px 0;font-size:1.1rem}
+
+  .form{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .form input{background:rgba(0,0,0,.35);border:1px solid var(--line);color:var(--text);padding:10px 12px;font-size:1.1rem;outline:none;min-width:0}
+  .form input:focus{border-color:var(--neon)}
+  .name-in{flex:1.4;min-width:120px}
+  .score-in{flex:1;min-width:110px;font-variant-numeric:tabular-nums}
+  .btn{font-family:var(--pix);font-size:.48rem;letter-spacing:.1em;text-transform:uppercase;padding:12px 16px;color:#07090f;
+    background:linear-gradient(180deg,#ffe25e,#ffd319);border:1px solid transparent;box-shadow:0 6px 20px rgba(255,211,25,.25);
+    clip-path:polygon(8px 0,100% 0,100% calc(100% - 8px),calc(100% - 8px) 100%,0 100%,0 8px);transition:transform .15s}
+  .btn:hover{transform:translateY(-2px)}
+  .btn[disabled]{opacity:.4;cursor:default;transform:none}
+  .status{min-height:26px;margin-top:12px;color:var(--muted);font-size:1.08rem}
+  .status b{color:var(--gold)}
+  .status.err{color:var(--red)}
+  .status.ok{color:var(--green)}
+  .hint{color:var(--dim);font-size:.95rem;margin-top:2px}
+  .roll{display:inline-block;margin-top:6px;background:none;border:none;color:var(--neon);font-family:var(--term);font-size:1rem;text-decoration:underline;cursor:pointer;padding:0}
+  .roll:hover{color:var(--pink)}
+</style>
+
+<!-- ════════════════════════════════════════════════════════════
+     VGN LEADERBOARD SERVER — durable top-N, live updates.
+     PUBLIC SOURCE (runs authoritatively, but anyone can read it).
+     Durable `state` layout:
+       0        version guard (42)
+       1..      N=60 entries × ENTRY=32 bytes:
+                  name   (24 utf8 bytes, zero-padded)
+                  score  (u32 BE)
+                  ts     (u32 LE, seconds)
+     Topic "lb:pub" fans out every board change.
+     ════════════════════════════════════════════════════════════ -->
+<script type="text/x-server-plugin">
+"use strict";
+var N = 60, NAME = 24, ENTRY = 32, BASE = 1;
+if (state[0] !== 42) { state.fill(0, 0, state.length); state[0] = 42; }
+
+function r32(o){ return (state[o]|state[o+1]<<8|state[o+2]<<16|state[o+3]<<24)>>>0; }
+function u32(o,v){ state[o]=v&255; state[o+1]=(v>>>8)&255; state[o+2]=(v>>>16)&255; state[o+3]=(v>>>24)&255; }
+function putName(dst,s){
+  s=String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,NAME);
+  state.fill(0,dst,dst+NAME);
+  for(var i=0;i<s.length;i++) state[dst+i]=s.charCodeAt(i);
+}
+function getName(o){ var s="",i=o,e=o+NAME,c; while(i<e){ c=state[i++]; if(!c)break; s+=String.fromCharCode(c); } return s; }
+function getEntry(i){ var o=BASE+i*ENTRY; return { name:getName(o), score:r32(o+NAME), ts:r32(o+NAME+4) }; }
+function saveEntry(i,name,score,ts){ var o=BASE+i*ENTRY; putName(o,name); u32(o+NAME,score); u32(o+NAME+4,ts); }
+function top10(){ var a=[]; for(var i=0;i<N;i++){ var e=getEntry(i); if(e.score>0) a.push(e); if(a.length>=10) break; } return a; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+
+var submitTimes=new Map(), netLog=new Map();
+function canSubmit(conn){
+  var n=nowSec(), k="n"+conn.net[2], arr=netLog.get(k)||[];
+  arr=arr.filter(function(t){ return t>n-600; });       // sliding 10-min window
+  if(arr.length>=5){ netLog.set(k,arr); return false; } // max 5 per 10 min per net[2]
+  arr.push(n); netLog.set(k,arr);
+  return true;
+}
+
+self.onopen = function({conn}){ try{ conn.subscribe("lb:pub"); }catch(e){} };
+
+self.rpc = {
+  get: function(){
+    return JSON.stringify({ok:true, board:top10()});
+  },
+  submit: function({conn}, data){
+    var obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    var name=String(obj.name||"").replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,NAME);
+    var score=Math.floor(Number(obj.score));
+    if(!name) return JSON.stringify({ok:false,err:"name"});
+    if(!isFinite(score)||score<=0||score>4294967295) return JSON.stringify({ok:false,err:"score"});
+    var now=Date.now();
+    if(now-(submitTimes.get(conn.id)||0)<5000) return JSON.stringify({ok:false,err:"rate_limited"});  // 1 per 5s per connection
+    submitTimes.set(conn.id,now);
+    if(!canSubmit(conn)) return JSON.stringify({ok:false,err:"rate_limited"});
+    var idx=-1;
+    for(var i=0;i<N;i++){ var e=getEntry(i); if(e.score===0){ idx=i; break; } if(score>e.score){ idx=i; break; } }
+    if(idx===-1) return JSON.stringify({ok:true,rank:-1});   // didn't beat the board
+    for(var j=N-1;j>idx;j--){ var s=getEntry(j-1); saveEntry(j,s.name,s.score,s.ts); }
+    saveEntry(idx,name,score,nowSec());
+    try{ pubsub.publish("lb:pub", JSON.stringify({t:"lb",board:top10(),newEntry:{rank:idx+1,name:name,score:score}})); }catch(e){}
+    return JSON.stringify({ok:true,rank:idx+1});
+  }
+};
+</script>
+
+<!-- ══════════ the visible panel ══════════ -->
+<div class="lb">
+  <div class="lb-inner">
+    <div class="lb-head">
+      <div class="lb-title">◤ HIGH SCORES ◢<small>THE VIDEO GAME NETWORK</small></div>
+      <span class="live" id="liveEl"><span class="dot"></span><span id="liveTxt">LIVE</span></span>
+    </div>
+    <ul class="board" id="boardEl"></ul>
+    <div class="form">
+      <input class="name-in" id="nameInput" maxlength="14" placeholder="Your name…" autocomplete="off" spellcheck="false">
+      <input class="score-in" id="scoreInput" type="number" min="1" step="1" placeholder="Score…">
+      <button class="btn" id="submitBtn">Submit</button>
+    </div>
+    <div class="status" id="statusEl">Enter a name and your score to hit the board.</div>
+    <button class="roll" id="rollBtn">⚂ roll a demo score</button>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(x){ return document.getElementById(x); };
+var boardEl=$("boardEl"), nameInput=$("nameInput"), scoreInput=$("scoreInput"),
+  submitBtn=$("submitBtn"), statusEl=$("statusEl"), rollBtn=$("rollBtn"),
+  liveEl=$("liveEl"), liveTxt=$("liveTxt");
+var board=[], mine=[]; // {name, score} the user submitted this session
+var CONNECTING=false, socket=null, sockOpen=false, readyResolvers=[];
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+function setLive(on,txt){ liveEl.classList.toggle("off",!on); liveTxt.textContent=txt||(on?"LIVE":"OFFLINE"); }
+function setStatus(html,cls){ statusEl.innerHTML=html; statusEl.className="status"+(cls?" "+cls:""); }
+function fmt(n){ return String(n).replace(/\B(?=(\d{3})+(?!\d))/g,","); }
+
+function render(){
+  boardEl.innerHTML="";
+  if(!board.length){ var d=document.createElement("li"); d.className="empty"; d.textContent="No scores yet — be the first on the board."; boardEl.appendChild(d); return; }
+  board.forEach(function(e,i){
+    var li=document.createElement("li");
+    li.className="row"+(i<3?" top":"")+(mine.some(function(m){return m.name===e.name&&m.score===e.score;})?" mine":"");
+    var rk=document.createElement("span"); rk.className="rk"; rk.textContent=String(i+1).padStart(2,"0");
+    var nm=document.createElement("span"); nm.className="nm"; nm.textContent=e.name;
+    var sc=document.createElement("span"); sc.className="sc"; sc.textContent=fmt(e.score);
+    li.appendChild(rk); li.appendChild(nm); li.appendChild(sc);
+    if(li.classList.contains("mine")){ var tag=document.createElement("span"); tag.className="tag"; tag.textContent="YOU"; li.appendChild(tag); }
+    boardEl.appendChild(li);
+  });
+}
+
+function openedP(){ return new Promise(function(res){ if(sockOpen)res(true); else readyResolvers.push(res); }); }
+function connect(){
+  if(CONNECTING) return; CONNECTING=true;
+  var rootRef=window.root||{};
+  if(!rootRef.createServerSocket){ setLive(false,"OFFLINE"); setStatus("Online board is unavailable here.", "err"); return; }
+  try{ socket=rootRef.createServerSocket(); }catch(e){ setLive(false,"OFFLINE"); setStatus("Online board is unavailable here.", "err"); return; }
+  socket.addEventListener("open",function(){
+    sockOpen=true; setLive(true);
+    var rs=readyResolvers; readyResolvers=[]; rs.forEach(function(r){ r(true); });
+    rpc("get").then(function(r){ if(r&&r.board){ board=r.board; render(); } });
+  });
+  socket.addEventListener("message",function(ev){
+    var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
+    if(m&&m.t==="lb"){
+      board=m.board||board;
+      render();
+      fire(m);
+    }
+  });
+  socket.addEventListener("close",function(){ sockOpen=false; setLive(false,"OFFLINE"); });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!socket||!sockOpen) return rej(new Error("socket not open"));
+    socket.rpc[method](data).then(function(r){ try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); } }).catch(rej);
+  });
+}
+function fire(m){ listeners.forEach(function(cb){ try{ cb(m); }catch(e){} }); }
+
+var listeners=[];
+function onBoard(cb){ listeners.push(cb); return function(){ listeners=listeners.filter(function(x){return x!==cb;}); }; }
+
+function submit(name,score){
+  name=String(name||"").trim().slice(0,14);
+  score=Math.floor(Number(score));
+  if(!name){ setStatus("Give your score a name first.", "err"); return Promise.resolve({ok:false,err:"name"}); }
+  if(!isFinite(score)||score<=0){ setStatus("Score must be a positive number.", "err"); return Promise.resolve({ok:false,err:"score"}); }
+  submitBtn.disabled=true;
+  setStatus("Submitting…");
+  return openedP().then(function(ok){
+    if(!ok){ setStatus("Couldn't reach the board server.", "err"); submitBtn.disabled=false; return {ok:false,err:"offline"}; }
+    return rpc("submit",JSON.stringify({name:name,score:score})).then(function(r){
+      submitBtn.disabled=false;
+      if(!r.ok){ setStatus("Submission blocked ("+r.err+").", "err"); return r; }
+      if(r.rank===-1){ setStatus("That score didn't crack the board — submit again when you beat the lowest entry.", "err"); return r; }
+      mine.push({name:name,score:score});
+      render();
+      setStatus("You're <b>#"+r.rank+"</b> on the board!", "ok");
+      return r;
+    }).catch(function(){ submitBtn.disabled=false; setStatus("Couldn't reach the board server.", "err"); return {ok:false,err:"net"}; });
+  });
+}
+
+submitBtn.addEventListener("click",function(){ submit(nameInput.value, scoreInput.value); });
+nameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")submit(nameInput.value,scoreInput.value); });
+scoreInput.addEventListener("keydown",function(e){ if(e.key==="Enter")submit(nameInput.value,scoreInput.value); });
+rollBtn.addEventListener("click",function(){
+  scoreInput.value = 10+Math.floor(Math.random()*990);
+  statusEl.className="status";
+  statusEl.innerHTML='Rolled <b>'+scoreInput.value+'</b> — add a name and submit.';
+  scoreInput.focus();
+});
+
+window.VGN_LB = {
+  submit: submit, onBoard: onBoard, board: function(){ return board.slice(); },
+  get ready(){ return openedP(); }
+};
+
+connect();
+render();
+})();
+</script>

@@ -1,0 +1,1560 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN PAPER TEMPLATE — a reusable shell for pen-and-paper games
+     (word search, sudoku, boggle, crosswords, ...)
+
+     HOW TO MAKE A NEW GAME
+     1. Duplicate this generator (e.g. save as a copy) and rename it.
+     2. main.pjs  — update $meta, the difficulty tuning, and the
+                    word/data bank for your game.
+     3. index.html — change `app.meta` (name, tagline, desc, pad,
+                    buttons, leaderboard) and then replace the
+                    REFERENCE GAME section with your own `game`
+                    object implementing the contract documented there.
+     4. Save. The shared shell (difficulty tabs, timer, HUD, win
+        screen, leaderboard, autosave) works automatically.
+
+     STRUCTURE OF THE SCRIPT BELOW
+     §1 Config loader (reads main.pjs)
+     §2 THE FRAMEWORK — generic shell, timer, win screen, leaderboard
+     §3 THE GAME CONTRACT — what your game must implement
+     §4 REFERENCE GAME — a full crossword implementation
+     §5 DOM refs, shell building, boot
+     ════════════════════════════════════════════════════════════════ -->
+
+<style>
+*{box-sizing:border-box}
+:root{
+  --gold:#d4af37; --gold2:#f6e6a4; --gold3:#8f721d;
+  --bg:#0a0912; --panel:#15121f; --line:rgba(255,255,255,.09);
+  --txt:#eae6d8; --mut:#8b87a0; --err:#ff5c5c;
+  --paper:#f4efdd; --paper2:#ece0ba;
+}
+html,body{margin:0;padding:0}
+body{
+  background:radial-gradient(1100px 640px at 50% -12%, #1b1730 0%, var(--bg) 62%);
+  color:var(--txt); text-align:left;
+  font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  min-height:100vh;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:0 18px 60px}
+
+/* ── nav ── */
+.nav{border-bottom:1px solid var(--line);background:rgba(10,9,18,.6);backdrop-filter:blur(6px)}
+.nav-inner{max-width:1180px;margin:0 auto;padding:12px 18px;display:flex;align-items:center;gap:10px}
+.nav-brand{font-weight:800;letter-spacing:1px;color:var(--gold2)}
+.nav-tag{font-size:.72rem;opacity:.6;letter-spacing:2px;text-transform:uppercase}
+
+/* ── hero ── */
+.hero{text-align:center;padding:38px 18px 10px}
+.hero-title{
+  margin:0;font-family:Georgia,"Times New Roman",serif;font-size:clamp(2.2rem,6vw,3.4rem);
+  background:linear-gradient(180deg,#f6e6a4,#d4af37 55%,#8f721d);-webkit-background-clip:text;background-clip:text;color:transparent;
+  letter-spacing:6px;
+}
+.hero-sub{max-width:640px;margin:10px auto 0;color:var(--mut);font-size:.95rem;line-height:1.5}
+.demo-note{
+  margin:16px auto 0;max-width:600px;color:var(--mut);font-size:.78rem;line-height:1.55;
+  background:rgba(212,175,55,.07);border:1px dashed rgba(212,175,55,.35);border-radius:10px;padding:8px 14px;
+}
+.demo-note b{color:var(--gold2)}
+.diffs{display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap}
+.diff-tab{
+  background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:8px 18px;border-radius:999px;font:inherit;font-weight:700;font-size:.85rem;letter-spacing:.5px;transition:all .12s;
+}
+.diff-tab:hover{border-color:var(--gold3);color:var(--txt)}
+.diff-tab.active{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+
+/* ── layout ── */
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:22px;align-items:start;margin-top:26px}
+@media (max-width:920px){ main{grid-template-columns:minmax(0,1fr)} .side{order:2} }
+.game-col{min-width:0;max-width:640px;margin:0 auto;width:100%}
+.side{display:flex;flex-direction:column;gap:16px}
+
+/* ── hud ── */
+.hud{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.hud-chip{
+  background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:10px;
+  padding:6px 14px;font-variant-numeric:tabular-nums;font-weight:700;font-size:.95rem;white-space:nowrap;
+}
+
+/* ── board ── */
+.board{
+  display:grid;gap:0;
+  border:2px solid var(--gold);background:#0e0c18;border-radius:8px;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(212,175,55,.2);
+}
+.board.paused{opacity:.45;pointer-events:none}
+.black{background:#16131f;border:1px solid rgba(0,0,0,.5);aspect-ratio:1}
+.cell{
+  background:var(--paper);border:1px solid rgba(30,24,10,.14);position:relative;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .06s;
+}
+.cell:hover{filter:brightness(1.04)}
+.cell.givencell{background:var(--paper2)}
+.cell.inword{background:#ffe9a8}
+.cell.sel{background:#ffd34d;box-shadow:inset 0 0 0 2px var(--gold)}
+.cell.err{background:#ffd9d9}
+.num{position:absolute;top:1px;left:3px;font-size:calc(var(--cellpx,40px)*0.26);font-weight:800;color:var(--gold3);line-height:1;pointer-events:none}
+.letter{font-size:calc(var(--cellpx,40px)*0.5);font-weight:800;color:#241d3a;text-transform:uppercase;pointer-events:none}
+.letter.given{color:var(--gold3)}
+.letter.err{color:#c0392b}
+
+/* ── pad ── */
+.pad{display:grid;grid-template-columns:repeat(9,1fr);gap:6px;margin-top:12px}
+@media (max-width:560px){ .pad{grid-template-columns:repeat(9,1fr)} }
+.pad-btn{
+  aspect-ratio:1.5;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:8px;
+  color:var(--gold2);font:inherit;font-weight:800;font-size:.95rem;cursor:pointer;transition:all .1s;
+}
+.pad-btn:hover{background:rgba(212,175,55,.16);border-color:var(--gold3)}
+.pad-btn:active{transform:scale(.94)}
+.pad-erase{color:var(--mut);font-size:.85rem}
+
+/* ── side panels ── */
+.panel{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:14px;padding:16px}
+.panel-head{font-size:.72rem;letter-spacing:2px;text-transform:uppercase;color:var(--gold2);font-weight:800;margin-bottom:12px}
+.btn-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.btn{
+  flex:1;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--txt);cursor:pointer;
+  padding:10px 8px;border-radius:10px;font:inherit;font-weight:700;font-size:.85rem;white-space:nowrap;transition:all .1s;
+}
+.btn:hover{background:rgba(255,255,255,.12)}
+.btn:active{transform:scale(.97)}
+.btn-gold{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+.btn-gold:hover{filter:brightness(1.08);background:linear-gradient(180deg,var(--gold2),var(--gold))}
+.btn-subtle{background:transparent;border-color:transparent;color:var(--mut);font-size:.72rem;letter-spacing:1px}
+.btn-subtle:hover{color:var(--gold2);background:transparent}
+.status{min-height:20px;margin-top:4px;color:var(--gold2);font-size:.85rem;font-weight:600}
+.hintline{color:var(--mut);font-size:.75rem;margin:10px 0 0;line-height:1.5}
+
+/* ── share / export ── */
+.share-row{display:flex;gap:8px;flex-wrap:wrap}
+.share-row .btn{flex:1;min-width:0}
+.share-note{color:var(--mut);font-size:.72rem;margin:8px 0 0;line-height:1.5}
+.import-input{
+  width:100%;min-height:110px;resize:vertical;background:rgba(0,0,0,.4);border:1px solid var(--line);
+  border-radius:10px;color:var(--txt);font:inherit;font-size:.78rem;padding:10px 12px;outline:none;
+}
+.import-input:focus{border-color:var(--gold3)}
+.file-link{background:none;border:none;color:var(--gold2);cursor:pointer;font:inherit;font-size:.75rem;text-decoration:underline;padding:0}
+
+/* ── clues ── */
+.clue-cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media (max-width:560px){ .clue-cols{grid-template-columns:1fr} }
+.clue-col-head{font-size:.68rem;letter-spacing:2px;text-transform:uppercase;color:var(--gold3);font-weight:800;margin-bottom:8px}
+.clue-list{display:flex;flex-direction:column;gap:2px;max-height:360px;overflow-y:auto;padding-right:4px}
+.clue-row{display:flex;gap:8px;padding:5px 6px;border-radius:8px;cursor:pointer;font-size:.82rem;line-height:1.35;align-items:baseline;transition:background .08s}
+.clue-row:hover{background:rgba(255,255,255,.05)}
+.clue-row.active{background:rgba(212,175,55,.18);color:var(--gold2)}
+.clue-num{font-weight:800;color:var(--gold);min-width:20px;font-variant-numeric:tabular-nums}
+.clue-text{color:var(--txt);font-weight:500}
+.clue-row.active .clue-text{color:var(--gold2)}
+
+/* ── leaderboard ── */
+.lb-tabs{display:flex;gap:6px;margin-bottom:12px}
+.lb-tab{
+  flex:1;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--mut);cursor:pointer;
+  padding:7px 0;border-radius:8px;font:inherit;font-size:.75rem;font-weight:700;transition:all .1s;
+}
+.lb-tab.active{background:rgba(212,175,55,.18);border-color:var(--gold3);color:var(--gold2)}
+.lb-list{display:flex;flex-direction:column;gap:4px}
+.lb-row{display:grid;grid-template-columns:26px 1fr auto auto;gap:8px;align-items:center;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.03);font-size:.85rem}
+.lb-row.first{background:rgba(212,175,55,.12);border:1px solid rgba(212,175,55,.35)}
+.lb-rank{color:var(--mut);font-weight:800;font-variant-numeric:tabular-nums}
+.lb-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-time{font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.lb-date{color:var(--mut);font-size:.72rem;font-variant-numeric:tabular-nums}
+.lb-msg{color:var(--mut);font-size:.85rem;text-align:center;padding:18px 0;margin:0}
+
+/* ── overlays ── */
+.overlay{
+  position:fixed;inset:0;background:rgba(5,4,10,.82);backdrop-filter:blur(4px);
+  display:flex;align-items:center;justify-content:center;z-index:50;padding:18px;
+}
+.modal{
+  background:linear-gradient(180deg,#1a1730,#0f0d1a);border:1px solid rgba(212,175,55,.45);border-radius:18px;
+  padding:30px;max-width:430px;width:100%;text-align:center;box-shadow:0 40px 90px rgba(0,0,0,.6);
+}
+.modal-kicker{font-size:.72rem;letter-spacing:3px;text-transform:uppercase;color:var(--gold3);font-weight:800}
+.modal h2{margin:8px 0 16px;font-family:Georgia,serif;font-size:1.7rem;color:var(--gold2)}
+.win-stats{display:flex;justify-content:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.stat{flex:1;min-width:70px;background:rgba(255,255,255,.05);border:1px solid var(--line);border-radius:12px;padding:12px 6px}
+.stat span{display:block;font-size:1.5rem;font-weight:800;color:var(--gold2);font-variant-numeric:tabular-nums}
+.stat small{color:var(--mut);font-size:.68rem;letter-spacing:1px;text-transform:uppercase}
+.modal-line{color:var(--mut);font-size:.9rem;margin:6px 0}
+.modal-line.small{font-size:.78rem}
+.submit-row{display:flex;gap:8px;margin:10px 0 4px}
+.submit-row input{
+  flex:1;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  padding:10px 12px;font:inherit;outline:none;
+}
+.submit-row input:focus{border-color:var(--gold3)}
+.modal-actions{display:flex;gap:10px;margin-top:18px}
+
+/* ── footer ── */
+.footer{text-align:center;color:var(--mut);font-size:.8rem;padding:26px 0 40px}
+.footer b{color:var(--gold3)}
+</style>
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/c59339d9788a635635c75c0a9d397611.mp3" };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+
+<!-- help modal styles -->
+<style>
+.help-modal{max-width:520px;text-align:left}
+.help-modal h3{color:var(--gold2);margin:16px 0 6px;font-family:Georgia,serif;font-size:1.05rem}
+.help-modal p,.help-modal li{color:var(--mut);font-size:.85rem;line-height:1.6;margin:4px 0}
+.help-modal ul{margin:6px 0 0;padding-left:20px}
+.nav-help{flex:0 0 auto;padding:7px 12px;font-size:.74rem}
+.help-actions{display:flex;justify-content:center;gap:10px;margin-top:18px}
+</style>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <span class="nav-brand" id="brandEl"></span>
+    <span class="nav-tag" id="navTagEl"></span>
+    <span style="flex:1"></span>
+    <button class="btn nav-help" id="helpBtn" title="How it works">❓ How it works</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <h1 class="hero-title" id="titleEl"></h1>
+  <p class="hero-sub" id="subEl"></p>
+  <div class="diffs" id="diffTabsEl"></div>
+  <p class="demo-note" id="demoEl"></p>
+</header>
+
+<main class="wrap" id="gameWrap">
+  <section class="game-col">
+    <div class="hud">
+      <span class="hud-chip" id="timerEl">0:00</span>
+      <span class="hud-chip" id="progressEl"></span>
+      <span class="hud-chip" id="hintsEl">✎ 0</span>
+    </div>
+    <div class="board" id="boardEl"></div>
+    <div class="pad" id="padEl"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <div class="panel-head">Controls</div>
+      <div id="controlsCtn"></div>
+      <div class="status" id="statusEl">Puzzle ready.</div>
+      <p class="hintline" id="tipEl"></p>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">Share / export</div>
+      <div class="share-row">
+        <button class="btn" id="exportJsonBtn" title="Save this game (puzzle + your progress) as a .json file">⬇ JSON</button>
+        <button class="btn" id="importJsonBtn" title="Restore a game from an exported .json file">⬆ JSON</button>
+        <button class="btn" id="screenshotBtn" title="Save a printable picture of the board">📷 PNG</button>
+      </div>
+      <p class="share-note">Screenshot = shareable image of the board. JSON = the exact game, restored anytime.</p>
+    </div>
+
+    <div class="panel" id="cluesPanelEl">
+      <div class="panel-head">Clues</div>
+      <div class="clue-cols">
+        <div>
+          <div class="clue-col-head">Across</div>
+          <div class="clue-list" id="acrossEl"></div>
+        </div>
+        <div>
+          <div class="clue-col-head">Down</div>
+          <div class="clue-list" id="downEl"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="lbPanelEl">
+      <div class="panel-head">Leaderboard</div>
+      <div class="lb-tabs" id="lbTabsEl"></div>
+      <div class="lb-list" id="lbListEl"></div>
+      <p class="lb-msg" id="lbMsgEl">Loading…</p>
+    </div>
+  </aside>
+</main>
+
+<div class="overlay" id="winOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker" id="winKickerEl">Game solved</div>
+    <h2>🎉 Finished!</h2>
+    <div class="win-stats" id="winStatsEl"></div>
+    <div id="winSubmitBox">
+      <p class="modal-line" id="winQualifyEl"></p>
+      <div class="submit-row">
+        <input id="winNameInput" maxlength="20" autocomplete="off" spellcheck="false" placeholder="Your name" />
+        <button class="btn btn-gold" id="winSubmitBtn">Publish</button>
+      </div>
+      <p class="modal-line small" id="winMsgEl"></p>
+    </div>
+    <p class="modal-line small" id="winPersonalEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="winPlayAgainBtn">Play again</button>
+      <button class="btn" id="winCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="importOverlay" hidden>
+  <div class="modal">
+    <div class="modal-kicker">Restore a game</div>
+    <h2>⬆ Import</h2>
+    <p class="modal-line" style="margin-bottom:10px">Paste an exported game's JSON below, or load a .json file. It must come from the same game (same template copy).</p>
+    <textarea class="import-input" id="importInput" placeholder='\{ "tpl": "bgn-paper-template", "game": … \}'></textarea>
+    <p class="modal-line" style="text-align:left;margin:8px 0 0"><button class="file-link" id="importFileBtn">or choose a .json file…</button></p>
+    <input type="file" id="importFileInput" accept=".json,application/json" hidden />
+    <p class="modal-line small" id="importMsgEl"></p>
+    <div class="modal-actions">
+      <button class="btn btn-gold" id="importOkBtn">Import</button>
+      <button class="btn" id="importCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<footer class="footer wrap">
+  <p>Every game is freshly generated on your device — no two plays are alike.</p>
+  <p><b id="footerBrandEl">▦</b> Pen &amp; paper template on <a href="https://perchance.org" target="_blank" rel="noopener" style="color:var(--gold3)">Perchance</a></p>
+</footer>
+
+<div class="overlay" id="helpOverlay" hidden>
+  <div class="modal help-modal">
+    <div class="modal-kicker">How it works</div>
+    <h2>Pen &amp; Paper template</h2>
+    <p>A ready-made shell for pen-and-paper games — this copy ships with a working <b>crossword</b>. Fork it, keep the shell, and swap in your own game (word search, sudoku, boggle…).</p>
+    <h3>Playing the crossword</h3>
+    <ul>
+      <li><b>Type letters</b> to fill the selected square; <b>arrows</b> move, <b>Tab/Space</b> switch across/down, <b>⌫</b> erases.</li>
+      <li>Click a <b>clue</b> to jump straight to that word.</li>
+    </ul>
+    <h3>The controls</h3>
+    <ul>
+      <li><b>✓ Check</b> — marks wrong letters red.</li>
+      <li><b>✎ Letter / ✎ Word</b> — reveal a hint (+30s / +60s to your finish time).</li>
+      <li><b>⏸ Pause</b> — stop the timer.</li>
+      <li><b>Reveal all</b> — gives up and shows the whole solution.</li>
+    </ul>
+    <h3>Difficulties &amp; scores</h3>
+    <ul>
+      <li>Easy / Medium / Hard change board size and starting letters.</li>
+      <li>Finish fast enough to make the <b>shared leaderboard</b>; your personal best is saved on your device.</li>
+      <li>Your game <b>auto-saves</b> after every move and resumes next visit.</li>
+    </ul>
+    <h3>Share / export</h3>
+    <ul>
+      <li><b>⬇ JSON</b> downloads the exact game — restore it anytime with <b>⬆ JSON</b>.</li>
+      <li><b>📷 PNG</b> saves a printable screenshot of the board.</li>
+    </ul>
+    <div class="help-actions"><button class="btn btn-gold" id="helpDoneBtn">Got it</button></div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════════════════════════════════════════════════════
+   §1 CONFIG LOADER — reads values from main.pjs (via `root`)
+   ══════════════════════════════════════════════════════════ */
+var rootRef=window.root||{};
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+function cfg(name,dflt){
+  var v=rootRef[name];
+  if(v==null)return dflt;
+  try{ if(typeof v.evaluateItem==="function")v=v.evaluateItem(); }catch(e){}
+  if(v==null||String(v).trim()==="")return dflt;
+  var s=String(v).trim();
+  if(s.length>=2&&s.charAt(0)==='"'&&s.charAt(s.length-1)==='"')s=s.slice(1,-1);
+  var n=Number(s);
+  if(s!==""&&!isNaN(n))return n;
+  return s;
+}
+function val(x){
+  if(x==null)return x;
+  if(typeof x==="function")x=x();
+  if(x&&typeof x.evaluateItem==="function")x=x.evaluateItem();
+  return x;
+}
+function arrOf(x){
+  if(x==null)return [];
+  if(typeof x==="function")x=x();
+  if(x&&typeof x.selectAll!=="undefined")x=(typeof x.selectAll==="function")?x.selectAll():x.selectAll;
+  if(x&&typeof x.evaluateItem==="function")x=x.evaluateItem();
+  return Array.isArray(x)?x:[];
+}
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+/* ══════════════════════════════════════════════════════════
+   §2 THE FRAMEWORK
+   Generic, game-agnostic shell: HUD + timer + pause, difficulty
+   tabs, win screen, optional time-based leaderboard, autosave,
+   and input routing. It knows NOTHING about the game itself —
+   everything game-specific happens through the `game` object
+   that you define in §4.
+
+   `app.meta` below is the only per-game config in this section.
+   ══════════════════════════════════════════════════════════ */
+var HINT_PENALTY=cfg("hintPenaltySeconds",30)*1000;
+
+var app={};
+app.meta={
+  // ── the shared shell's identity — this copy is a TEMPLATE ──
+  name:"Pen & Paper Template",      // shown in the nav, hero and page title
+  reference:"Crossword",            // the working demo game this template ships with
+  icon:"▦",
+  tagline:"working demo: crossword",// small text next to the brand
+  kicker:"Puzzle solved",           // label above the win-screen heading
+  desc:"A template for building pen-and-paper games on Perchance. The crossword below is a complete working example built with the shared framework — duplicate this generator, then swap in your own game (word search, sudoku, boggle…) by replacing the reference-game section in index.html.",
+  tip:"Type letters · arrows to move · Tab/Space switch across/down · ⌫ erase · click a clue to jump",
+
+  // ── pad buttons under the board ──
+  // Letters for word games, "123456789" for sudoku, "" to hide the pad.
+  pad:"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+
+  // ── Controls panel ──
+  // Rows of buttons. Actions: check | clear | hint1 | hint2 | reveal |
+  // pause | newGame. Buttons whose handler the game doesn't provide are
+  // skipped automatically, so a game can offer fewer actions.
+  controls:[
+    ["check","clear","pause"],
+    ["hint1","hint2","newGame"],
+    ["reveal"]
+  ],
+  buttons:{
+    check:  {label:"✓ Check",  title:"Mark wrong entries red"},
+    clear:  {label:"⌫ Clear",  title:"Clear the whole board"},
+    hint1:  {label:"✎ Letter", title:"Reveal this square (+30s)"},
+    hint2:  {label:"✎ Word",   title:"Reveal this whole word (+60s)"},
+    reveal: {label:"Reveal all",title:"Reveal the whole solution",cls:"btn btn-subtle"},
+    pause:  {label:"⏸ Pause",  title:"Pause the timer"},
+    newGame:{label:"New game", title:"Start a fresh game",cls:"btn btn-gold"}
+  },
+
+  // hint time penalties (added to your finish time)
+  hint1Cost:HINT_PENALTY,
+  hint2Cost:HINT_PENALTY*2,
+
+  // ── shared time-based leaderboard ──
+  // Set leaderboardFile:"" to hide the leaderboard panel entirely.
+  leaderboardFile:cfg("leaderboardFileName",""),
+  leaderboardEditKey:cfg("leaderboardEditKey",""),
+
+  // optional side panels. Set a flag to false to hide that panel.
+  panels:{clues:true},
+
+  // localStorage prefix for autosave, personal bests and remembered name
+  saveKey:"bgnpp"
+};
+/* name of the actual game this copy is demonstrating — used on the
+   screenshot and for export/import validation */
+app.gameName=function(){ return app.meta.reference||app.meta.name; };
+
+/* ── framework state ── */
+app.diff=""; app.hints=0; app.hintPenaltyMs=0;
+app.elapsed=0; app.timer=null; app.startTs=0;
+app.status="idle";              // idle | playing | paused | won
+app.winTimeMs=0; app.pauseBtn=null;
+
+/* ── timer ── */
+app.displayMs=function(){ return app.elapsed*1000+app.hintPenaltyMs; };
+app.fmtTime=function(ms){
+  var t=Math.max(0,Math.round(ms/1000));
+  var m=Math.floor(t/60),s=t%60;
+  return m+":"+String(s).padStart(2,"0");
+};
+app.tick=function(){ if(app.status!=="playing")return; app.elapsed=Math.floor((Date.now()-app.startTs)/1000); app.renderHud(); };
+app.startTimer=function(){ if(app.timer)clearInterval(app.timer); app.timer=setInterval(app.tick,250); app.tick(); };
+app.stopTimer=function(){ if(app.timer)clearInterval(app.timer); app.timer=null; };
+app.setStatus=function(t){ statusEl.textContent=t||""; };
+
+/* ── HUD ── */
+app.renderHud=function(){
+  timerEl.textContent=app.fmtTime(app.displayMs());
+  hintsEl.textContent="✎ "+app.hints;
+  if(typeof game.renderHud==="function")game.renderHud();
+};
+app.renderControls=function(){
+  for(var i=0;i<diffBtns.length;i++)diffBtns[i].classList.toggle("active",diffBtns[i].dataset.diff===app.diff);
+  if(app.pauseBtn)app.pauseBtn.textContent=app.status==="paused"?"▶ Resume":"⏸ Pause";
+};
+
+/* ── hints (games call this to spend a hint) ── */
+app.addHint=function(cost){ app.hints++; app.hintPenaltyMs+=cost; app.renderHud(); };
+
+/* ── input routing ── */
+app.input=function(ch){
+  if(app.status!=="playing"||typeof game.input!=="function")return;
+  game.input(ch);
+  app.save();
+  app.completeIfWon();
+};
+app.erase=function(){
+  if(app.status!=="playing"||typeof game.erase!=="function")return;
+  sfx("discard");
+  game.erase();
+  app.save();
+  app.completeIfWon();
+};
+var ACTION_METHODS={check:"check",clear:"clearAll",hint1:"hint1",hint2:"hint2",reveal:"revealAll"};
+app.action=function(name){
+  if(app.status!=="playing")return;
+  var m=ACTION_METHODS[name];
+  if(!m||typeof game[m]!=="function")return;
+  game[m]();
+  if(name==="hint1"||name==="hint2")sfx("hint");
+  if(name==="clear")sfx("discard");
+  app.save();
+  app.completeIfWon();
+};
+
+/* ── pause ── */
+app.togglePause=function(){
+  if(app.status==="playing"){
+    app.stopTimer();
+    app.elapsed=Math.floor((Date.now()-app.startTs)/1000);
+    app.status="paused";
+    boardEl.classList.add("paused");
+    app.setStatus("Paused.");
+  }else if(app.status==="paused"){
+    app.status="playing";
+    app.startTs=Date.now()-app.elapsed*1000;
+    app.startTimer();
+    boardEl.classList.remove("paused");
+    app.setStatus("");
+  }
+  app.renderHud(); app.renderControls();
+};
+
+/* ── win ── */
+app.completeIfWon=function(){
+  if(app.status!=="playing")return;
+  if(typeof game.isComplete==="function"&&game.isComplete())app.win();
+};
+app.qualifies=function(diff,t){
+  var list=boards[diff]||[];
+  if(list.length<10)return true;
+  return t<list[list.length-1].t;
+};
+app.win=function(){
+  sfx("win");
+  app.stopTimer();
+  app.elapsed=Math.floor((Date.now()-app.startTs)/1000);
+  app.status="won";
+  app.winTimeMs=app.displayMs();
+  localStorage.removeItem(app.meta.saveKey);
+  var bestKey=app.meta.saveKey+"-best-"+app.diff;
+  var prev=Number(localStorage.getItem(bestKey)||0);
+  if(!prev||app.winTimeMs<prev)localStorage.setItem(bestKey,String(app.winTimeMs));
+  winKickerEl.textContent=app.meta.kicker||"Game solved";
+  winStatsEl.innerHTML="";
+  function card(v,label){
+    var d=document.createElement("div"); d.className="stat";
+    var s=document.createElement("span"); s.textContent=v;
+    var l=document.createElement("small"); l.textContent=label;
+    d.appendChild(s); d.appendChild(l);
+    return d;
+  }
+  winStatsEl.appendChild(card(app.fmtTime(app.winTimeMs),"time"));
+  winStatsEl.appendChild(card(app.hints,"hints"));
+  var extras=(typeof game.winStats==="function")?(game.winStats()||[]):[];
+  for(var i=0;i<extras.length;i++)winStatsEl.appendChild(card(extras[i].value,extras[i].label));
+  var pb=Math.min(prev||Infinity,app.winTimeMs);
+  winPersonalEl.textContent=pb<Infinity?("Personal best ("+(DIFFS[app.diff]?DIFFS[app.diff].label:app.diff)+"): "+app.fmtTime(pb)):"First finish on this difficulty!";
+  var q=app.qualifies(app.diff,app.winTimeMs);
+  winSubmitBox.hidden=!q;
+  if(q)winQualifyEl.textContent="You made the board — publish your time:";
+  else{
+    var list=boards[app.diff]||[];
+    winQualifyEl.textContent=list.length>=10?("No entry this time — #10 is "+app.fmtTime(list[9].t)+"."):"No entry this time — try again!";
+  }
+  winNameInput.value=localStorage.getItem(app.meta.saveKey+"-name")||"";
+  winMsgEl.textContent="";
+  winOverlay.hidden=false;
+  app.renderHud();
+  if(typeof game.render==="function")game.render();
+};
+app.hideOverlays=function(){ winOverlay.hidden=true; };
+
+/* ── autosave ── */
+app.save=function(){
+  if(app.status==="won")return;
+  if(typeof game.serialize!=="function")return;
+  try{
+    localStorage.setItem(app.meta.saveKey,JSON.stringify({
+      diff:app.diff,hints:app.hints,hp:app.hintPenaltyMs,
+      e:app.status==="playing"?Math.floor((Date.now()-app.startTs)/1000):app.elapsed,
+      game:game.serialize()
+    }));
+  }catch(e){}
+};
+app.restore=function(){
+  try{
+    var raw=localStorage.getItem(app.meta.saveKey);
+    if(!raw)return false;
+    return app.applySave(JSON.parse(raw));
+  }catch(e){ return false; }
+};
+app.applySave=function(d){
+  if(!d||!d.game||typeof game.deserialize!=="function")return false;
+  if(!game.deserialize(d.game))return false;
+  app.diff=DIFFS[d.diff]?d.diff:Object.keys(DIFFS)[0];
+  app.hints=d.hints||0; app.hintPenaltyMs=d.hp||0;
+  app.elapsed=d.e||0;
+  app.status="playing";
+  app.startTs=Date.now()-app.elapsed*1000;
+  app.renderControls();
+  return true;
+};
+
+/* ── new game ── */
+app.newGame=function(diff){
+  sfx("deal");
+  if(diff)app.diff=diff;
+  app.hints=0; app.hintPenaltyMs=0; app.elapsed=0;
+  app.status="playing";
+  app.hideOverlays();
+  var msg=(typeof game.newGame==="function")?game.newGame(app.diff):"";
+  app.startTs=Date.now();
+  app.startTimer();
+  app.setStatus(msg||"Good luck!");
+  app.renderControls();
+  app.save();
+};
+
+/* ── export / import JSON ── */
+app.exportData=function(){
+  if(typeof game.serialize!=="function")return null;
+  return {
+    tpl:"bgn-paper-template", ver:1,
+    gameName:app.gameName(),
+    date:new Date().toISOString(),
+    diff:app.diff, diffLabel:(DIFFS[app.diff]?DIFFS[app.diff].label:app.diff),
+    hints:app.hints, hp:app.hintPenaltyMs,
+    e:app.status==="playing"?Math.floor((Date.now()-app.startTs)/1000):app.elapsed,
+    game:game.serialize()
+  };
+};
+app.exportJSON=function(){
+  var data=app.exportData();
+  if(!data){ app.setStatus("This game doesn't support JSON export."); return; }
+  var base=app.gameName().toLowerCase().replace(/[^a-z0-9]+/g,"-")+"-"+app.diff+"-"+new Date().toISOString().slice(0,10);
+  downloadBlob(base+".json","application/json",new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+  app.setStatus("Exported a "+data.diffLabel+" game to JSON.");
+};
+app.importJSON=function(str){
+  var d;
+  try{ d=JSON.parse(str); }catch(e){ return "That doesn't look like valid JSON."; }
+  if(!d||typeof d!=="object"||Array.isArray(d))return "That doesn't look like a game export.";
+  if(d.tpl&&d.tpl!=="bgn-paper-template")return "That export was made by a different template ("+d.tpl+").";
+  if(d.gameName&&d.gameName!==app.gameName())return "That save is from "+d.gameName+", not "+app.gameName()+". Games can't be swapped between copies.";
+  if(!app.applySave(d))return "That JSON isn't a valid "+app.gameName()+" game.";
+  app.hideOverlays();
+  app.startTimer();
+  app.setStatus("Imported a "+(d.diffLabel||DIFFS[app.diff].label)+" game.");
+  app.save();
+  return null;
+};
+
+/* ── screenshot ── */
+function cloneWithStyles(src){
+  var clone=src.cloneNode(true);
+  clone.setAttribute("xmlns","http://www.w3.org/1999/xhtml");
+  var PROPS=["display","position","top","left","width","height","min-width","min-height","aspect-ratio","box-sizing",
+    "padding-top","padding-right","padding-bottom","padding-left","margin-top","margin-right","margin-bottom","margin-left",
+    "grid-template-columns","grid-template-rows","gap","grid-gap","align-items","justify-content","justify-items","align-content","flex-direction","flex-wrap",
+    "background-color","background-image","background-size","background-position","background-repeat",
+    "border-radius",
+    "border-top-width","border-top-style","border-top-color","border-right-width","border-right-style","border-right-color",
+    "border-bottom-width","border-bottom-style","border-bottom-color","border-left-width","border-left-style","border-left-color",
+    "color","font-family","font-size","font-weight","font-style","line-height","letter-spacing","text-transform","text-align",
+    "box-shadow","opacity","overflow","cursor","user-select","text-shadow","outline"];
+  function walk(el,c){
+    if(!el||!c)return;
+    var cs=window.getComputedStyle(el),style="";
+    for(var i=0;i<PROPS.length;i++){
+      var v=cs.getPropertyValue(PROPS[i]);
+      if(v)style+=PROPS[i]+":"+v+";";
+    }
+    c.setAttribute("style",style);
+    for(var k=0;k<el.children.length;k++)walk(el.children[k],c.children[k]);
+  }
+  walk(src,clone);
+  return clone;
+}
+app.renderBoardImage=function(){
+  var el=(typeof game.captureTarget==="function")?game.captureTarget():boardEl;
+  var w=el.offsetWidth,h=el.offsetHeight;
+  if(!w||!h)return Promise.resolve(null);
+  var scale=3;
+  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'+
+    '<foreignObject width="100%" height="100%">'+new XMLSerializer().serializeToString(cloneWithStyles(el))+'</foreignObject></svg>';
+  return new Promise(function(resolve){
+    var img=new Image();
+    img.onload=function(){
+      var c=document.createElement("canvas");
+      c.width=Math.round(w*scale); c.height=Math.round(h*scale);
+      var ctx=c.getContext("2d");
+      ctx.scale(scale,scale);
+      ctx.drawImage(img,0,0);
+      resolve(c);
+    };
+    img.onerror=function(){ resolve(null); };
+    img.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg);
+  });
+};
+app.renderFramedImage=function(){
+  return app.renderBoardImage().then(function(boardCanvas){
+    if(!boardCanvas)return null;
+    var s=3; /* supersample factor — matches the board canvas */
+    var bw=boardCanvas.width/s, bh=boardCanvas.height/s;
+    var side=48, top=84, bottom=64;
+    var W=bw+side*2, H=bh+top+bottom;
+    var c=document.createElement("canvas");
+    c.width=Math.round(W*s); c.height=Math.round(H*s);
+    var ctx=c.getContext("2d");
+    function rr(x,y,w,h,r){
+      ctx.beginPath();
+      ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+      ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r);
+      ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+    }
+    /* background — matches the page's dark radial theme */
+    var g=ctx.createRadialGradient(W/2*s,0,0,W/2*s,0,Math.max(W,H)*s);
+    g.addColorStop(0,"#1b1730"); g.addColorStop(1,"#0a0912");
+    ctx.fillStyle=g; ctx.fillRect(0,0,W*s,H*s);
+    /* the board itself (blitted at native resolution) */
+    ctx.drawImage(boardCanvas,side*s,top*s);
+    /* gold frame */
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=3*s;
+    rr((side-14)*s,(top-14)*s,(bw+28)*s,(bh+28)*s,10*s); ctx.stroke();
+    ctx.strokeStyle="rgba(212,175,55,.3)"; ctx.lineWidth=1*s;
+    rr((side-22)*s,(top-22)*s,(bw+44)*s,(bh+44)*s,14*s); ctx.stroke();
+    /* title + subtitle */
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="600 "+Math.round(30*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText(app.gameName().toUpperCase(),W/2*s,(top/2-10)*s);
+    ctx.fillStyle="#8f721d";
+    ctx.font="700 "+Math.round(12*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.fillText(((DIFFS[app.diff]?DIFFS[app.diff].label:app.diff)+" · "+new Date().toISOString().slice(0,10)).toUpperCase(),W/2*s,(top/2+11)*s);
+    /* footer strip */
+    ctx.strokeStyle="rgba(212,175,55,.35)"; ctx.lineWidth=1*s;
+    ctx.beginPath(); ctx.moveTo(side*s,(H-bottom)*s); ctx.lineTo((W-side)*s,(H-bottom)*s); ctx.stroke();
+    /* URL (bottom-left) */
+    ctx.fillStyle="#8b87a0";
+    ctx.font="600 "+Math.round(14*s)+"px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign="left"; ctx.textBaseline="middle";
+    var url="https://perchance.org/"+(window.generatorName||"");
+    var fy=((H-bottom)+(bottom/2))*s;
+    var badgeW=96,badgeGap=24;
+    var avail=(W-side-8)-(side+8)-badgeW-badgeGap;
+    var urlW=ctx.measureText(url).width;
+    if(urlW>avail){
+      var f=Math.max(9,Math.floor(14*avail/urlW));
+      ctx.font="600 "+Math.round(f*s)+"px ui-sans-serif, system-ui, sans-serif";
+    }
+    ctx.fillText(url,(side+8)*s,fy);
+    /* BGN badge (bottom-right) */
+    var bh2=36,bx=W-side-badgeW-10,by=H-bottom+((bottom-bh2)/2);
+    ctx.fillStyle="rgba(212,175,55,.12)";
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.fill();
+    ctx.strokeStyle="#d4af37"; ctx.lineWidth=1.5*s;
+    rr(bx*s,by*s,badgeW*s,bh2*s,9*s); ctx.stroke();
+    ctx.fillStyle="#f6e6a4";
+    ctx.font="800 "+Math.round(19*s)+"px Georgia, serif";
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillText("BGN",(bx+badgeW/2)*s,(by+bh2/2+1)*s);
+    return c;
+  });
+};
+app.screenshot=function(){
+  app.setStatus("Rendering screenshot…");
+  app.renderFramedImage().then(function(c){
+    if(!c){ app.setStatus("Couldn't render a screenshot."); return; }
+    var base=app.gameName().toLowerCase().replace(/[^a-z0-9]+/g,"-")+"-"+app.diff+"-"+new Date().toISOString().slice(0,10);
+    c.toBlob(function(blob){
+      if(blob)downloadBlob(base+".png","image/png",blob);
+      app.setStatus("Screenshot saved ("+base+".png).");
+    },"image/png");
+  });
+};
+function downloadBlob(name,mime,blob){
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url; a.download=name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },100);
+}
+
+/* ── leaderboard ── */
+var lbLoaded=false,lbTab="";
+app.loadLeaderboard=function(){
+  if(!app.meta.leaderboardFile){ lbPanelEl.hidden=true; return; }
+  if(!rootRef.uploadPlugin){ lbMsgEl.textContent="Leaderboard unavailable on this page."; lbLoaded=true; app.renderLeaderboard(); return; }
+  lbMsgEl.textContent="Loading…";
+  rootRef.uploadPlugin.editable.get(app.meta.leaderboardFile).then(function(t){
+    if(t){
+      try{ var b=JSON.parse(t); for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10); }catch(e){}
+    }
+    lbLoaded=true;
+    app.renderLeaderboard();
+  }).catch(function(){
+    lbLoaded=true;
+    lbMsgEl.textContent="Couldn't reach the leaderboard right now.";
+    app.renderLeaderboard();
+  });
+};
+app.renderLeaderboard=function(){
+  var tabs=lbTabsEl.querySelectorAll(".lb-tab");
+  for(var i=0;i<tabs.length;i++)tabs[i].classList.toggle("active",tabs[i].dataset.diff===lbTab);
+  lbListEl.innerHTML="";
+  if(!lbLoaded){ lbMsgEl.hidden=false; lbMsgEl.textContent="Loading…"; return; }
+  var list=boards[lbTab]||[];
+  if(!list.length){ lbMsgEl.hidden=false; lbMsgEl.textContent="No times yet — be the first!"; return; }
+  lbMsgEl.hidden=true;
+  var medals=["🥇","🥈","🥉"];
+  for(var i2=0;i2<list.length;i2++){
+    var e=list[i2];
+    var row=document.createElement("div"); row.className="lb-row"+(i2===0?" first":"");
+    var rank=document.createElement("span"); rank.className="lb-rank"; rank.textContent=i2+1;
+    var nm=document.createElement("span"); nm.className="lb-name"; nm.textContent=(medals[i2]?medals[i2]+" ":"")+esc(e.n||"Anonymous");
+    var tt=document.createElement("span"); tt.className="lb-time"; tt.textContent=app.fmtTime(e.t)+(e.h>0?" ✎"+e.h:"");
+    var dt=document.createElement("span"); dt.className="lb-date"; dt.textContent=(e.d||"").slice(5);
+    row.appendChild(rank); row.appendChild(nm); row.appendChild(tt); row.appendChild(dt);
+    lbListEl.appendChild(row);
+  }
+};
+app.submitScore=function(){
+  if(app.winTimeMs<3000){ winMsgEl.textContent="That was too fast to count — solve it for real!"; return; }
+  var name=(winNameInput.value||"").trim().slice(0,20)||"Anonymous";
+  localStorage.setItem(app.meta.saveKey+"-name",name);
+  var entry={n:name,t:app.winTimeMs,d:new Date().toISOString().slice(0,10),h:app.hints};
+  winMsgEl.textContent="Publishing…";
+  Promise.resolve().then(function(){
+    if(rootRef.uploadPlugin&&app.meta.leaderboardFile)return rootRef.uploadPlugin.editable.get(app.meta.leaderboardFile);
+    return null;
+  }).then(function(fresh){
+    if(fresh){
+      try{
+        var b=JSON.parse(fresh);
+        for(var k in boards)if(b[k]&&Array.isArray(b[k]))boards[k]=b[k].slice(0,10);
+      }catch(e){}
+    }
+    var list=(boards[app.diff]||[]).concat(entry).sort(function(a,b){return a.t-b.t;}).slice(0,10);
+    boards[app.diff]=list;
+    app.renderLeaderboard();
+    if(!rootRef.uploadPlugin||!app.meta.leaderboardFile){ winMsgEl.textContent="Score saved locally."; return; }
+    var knownKey=localStorage.getItem(app.meta.saveKey+"-lbKey")||app.meta.leaderboardEditKey;
+    var data=JSON.stringify(boards);
+    function createFresh(){
+      return rootRef.uploadPlugin.editable.set(app.meta.leaderboardFile,data).then(function(created){
+        if(created&&created.editKey){
+          localStorage.setItem(app.meta.saveKey+"-lbKey",created.editKey);
+          winMsgEl.textContent="Published! For a board every player can update, paste this editKey into main.pjs: "+created.editKey;
+        }else if(created&&created.error){
+          winMsgEl.textContent="Couldn't publish to the shared board ("+created.error+") — score kept locally.";
+        }else{
+          winMsgEl.textContent="Couldn't publish to the shared board — score kept locally.";
+        }
+      });
+    }
+    var p=knownKey?rootRef.uploadPlugin.editable.set(app.meta.leaderboardFile,data,{editKey:knownKey}):createFresh();
+    p.then(function(res){
+      if(!res)return;
+      if(res&&res.editKey){
+        localStorage.setItem(app.meta.saveKey+"-lbKey",res.editKey);
+        winMsgEl.textContent="Published to the leaderboard!";
+        return;
+      }
+      if(res&&res.error==="invalid_edit_key")return createFresh();
+      if(res&&res.error)winMsgEl.textContent="Couldn't publish to the shared board ("+res.error+") — score kept locally.";
+      else winMsgEl.textContent="Published to the leaderboard!";
+    }).catch(function(){
+      winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+    });
+  }).catch(function(){
+    winMsgEl.textContent="Couldn't reach the leaderboard — score kept locally.";
+  });
+};
+
+/* ── shell building ── */
+function buildPad(){
+  padEl.innerHTML="";
+  var pad=app.meta.pad;
+  if(!pad||!String(pad).length){ padEl.hidden=true; return; }
+  padEl.hidden=false;
+  String(pad).split("").forEach(function(ch){
+    var b=document.createElement("button");
+    b.className="pad-btn"; b.textContent=ch;
+    b.addEventListener("click",function(){ app.input(ch); });
+    padEl.appendChild(b);
+  });
+  var e=document.createElement("button");
+  e.className="pad-btn pad-erase"; e.textContent="⌫";
+  e.addEventListener("click",app.erase);
+  padEl.appendChild(e);
+}
+function buildShell(){
+  brandEl.textContent=app.meta.icon+" "+app.meta.name.toUpperCase();
+  footerBrandEl.textContent=app.meta.icon;
+  navTagEl.textContent=app.meta.tagline;
+  titleEl.textContent=app.meta.name.toUpperCase();
+  subEl.textContent=app.meta.desc;
+  demoEl.textContent="This template ships with a working "+app.meta.reference+" game. Duplicate this generator, then swap in your own game (word search, sudoku, boggle…) by replacing the reference-game section in index.html.";
+  document.title=app.meta.name;
+  if(app.meta.panels&&app.meta.panels.clues===false)cluesPanelEl.hidden=true;
+  diffTabsEl.innerHTML="";
+  for(var diffId in DIFFS){
+    (function(id){
+      var b=document.createElement("button");
+      b.className="diff-tab"; b.textContent=DIFFS[id].label; b.dataset.diff=id;
+      b.addEventListener("click",function(){ app.newGame(id); });
+      diffTabsEl.appendChild(b);
+    })(diffId);
+  }
+  diffBtns=diffTabsEl.querySelectorAll(".diff-tab");
+  controlsCtn.innerHTML="";
+  app.meta.controls.forEach(function(row){
+    var rd=document.createElement("div"); rd.className="btn-row";
+    row.forEach(function(action){
+      var def=app.meta.buttons[action];
+      var fn=null;
+      if(action==="pause")fn=app.togglePause;
+      else if(action==="newGame")fn=function(){ app.newGame(app.diff); };
+      else if(ACTION_METHODS[action]){ var m=ACTION_METHODS[action]; if(typeof game[m]==="function")fn=function(){ app.action(action); }; }
+      if(!def||typeof fn!=="function")return;
+      var b=document.createElement("button");
+      b.className=def.cls||"btn"; b.textContent=def.label||action;
+      if(def.title)b.title=def.title;
+      b.addEventListener("click",fn);
+      if(action==="pause")app.pauseBtn=b;
+      rd.appendChild(b);
+    });
+    if(rd.children.length)controlsCtn.appendChild(rd);
+  });
+  tipEl.textContent=app.meta.tip||"";
+  if(typeof game.renderHud!=="function")progressEl.hidden=true;
+  buildPad();
+  lbTabsEl.innerHTML="";
+  for(var id2 in DIFFS){
+    (function(id){
+      var b=document.createElement("button");
+      b.className="lb-tab"; b.textContent=DIFFS[id].label; b.dataset.diff=id;
+      b.addEventListener("click",function(){ lbTab=id; app.renderLeaderboard(); });
+      lbTabsEl.appendChild(b);
+    })(id2);
+  }
+  lbTab=Object.keys(DIFFS)[0];
+}
+
+/* ══════════════════════════════════════════════════════════
+   §3 THE GAME CONTRACT
+   The framework below talks to your game ONLY through the
+   `game` object. Implement these members:
+
+   game.newGame(diff)   build a fresh game, render it, and return
+                        a status message string (or "").
+   game.render()        redraw the board (also called on resize).
+   game.renderHud()     optional — update the progress chip (#progressEl).
+   game.input(ch)       handle one character (letter or digit).
+   game.erase()         handle backspace / the pad erase button.
+   game.check()         optional — validate the current board.
+   game.clearAll()      optional — wipe the board.
+   game.hint1()         optional — first hint action.
+   game.hint2()         optional — second hint action.
+   game.revealAll()     optional — reveal the whole solution.
+   game.isComplete()    return true when the game is solved; the
+                        framework shows the win screen automatically.
+   game.winStats()      optional — [{value,label}] extra stat cards.
+   game.serialize()     optional — return plain state for autosave + JSON export.
+   game.deserialize(d)  optional — restore that state + render;
+                        return true on success.
+   game.keydown(e)      optional — extra keys (arrows etc); return
+                        true if you consumed the event.
+   game.captureTarget() optional — return the element the screenshot
+                        button should capture (default: #boardEl).
+
+   The framework auto-saves after every action, resumes from the
+   save on load, and detects wins via isComplete().
+   ══════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════
+   §4 REFERENCE GAME — CROSSWORD
+   A complete implementation of the contract above. Use it as a
+   pattern for your own game: keep the shell, replace this whole
+   section with your own `game` object (plus the `game` section
+   of main.pjs), and adjust app.meta in §2.
+   ══════════════════════════════════════════════════════════ */
+
+/* ── word bank (from main.pjs) ── */
+var WORDS=[];
+(function(){
+  var items=arrOf(rootRef.words);
+  for(var i=0;i<items.length;i++){
+    var w=String(val(items[i].word)||"").toUpperCase().replace(/[^A-Z]/g,"");
+    var c=String(val(items[i].clue)||"").trim();
+    if(w.length>=3)WORDS.push({w:w,c:c||"..."});
+  }
+})();
+
+/* ── difficulties (from main.pjs) ── */
+var DIFFS={
+  easy:{label:"Easy",words:cfg("crosswordWordsEasy",8),givens:cfg("crosswordGivensEasy",3),minLen:3,maxLen:6},
+  medium:{label:"Medium",words:cfg("crosswordWordsMedium",12),givens:cfg("crosswordGivensMedium",1),minLen:3,maxLen:8},
+  hard:{label:"Hard",words:cfg("crosswordWordsHard",16),givens:cfg("crosswordGivensHard",0),minLen:4,maxLen:10}
+};
+var boards={};
+for(var diffKey in DIFFS)boards[diffKey]=null;
+
+/* ── crossword engine ── */
+function shuffle(a){ for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)),t=a[i];a[i]=a[j];a[j]=t; } return a; }
+function key(r,c){ return r+","+c; }
+function canPlace(grid,r,c,dir,word){
+  var len=word.length,dr=dir===0?0:1,dc=dir===0?1:0;
+  for(var i=0;i<len;i++){
+    var nr=r+dr*i,nc=c+dc*i,k=key(nr,nc);
+    if(grid.has(k)){
+      var ex=grid.get(k);
+      if(ex.letter!==word.charAt(i))return false;
+      if(ex.dir===dir)return false;
+    }else{
+      var side=dir===0?[[nr-1,nc],[nr+1,nc]]:[[nr,nc-1],[nr,nc+1]];
+      if(grid.has(key(side[0][0],side[0][1])))return false;
+      if(grid.has(key(side[1][0],side[1][1])))return false;
+    }
+  }
+  if(grid.has(key(r-dr,c-dc)))return false;
+  if(grid.has(key(r+dr*len,c+dc*len)))return false;
+  return true;
+}
+function countCross(grid,placed,r,c,dir,word){
+  var dr=dir===0?0:1,dc=dir===0?1:0,n=0;
+  for(var i=0;i<word.length;i++)if(grid.has(key(r+dr*i,c+dc*i)))n++;
+  return n;
+}
+function collectCands(grid,placed,word){
+  var cands=[],seen={};
+  for(var p=0;p<placed.length;p++){
+    var pw=placed[p];
+    var ndir=pw.dir===0?1:0;
+    for(var i=0;i<pw.word.length;i++){
+      var er=pw.dir===0?pw.r:pw.r+i, ec=pw.dir===0?pw.c+i:pw.c;
+      for(var j=0;j<word.length;j++){
+        if(pw.word.charAt(i)!==word.charAt(j))continue;
+        var r=ndir===0?er:er-j, c=ndir===0?ec-j:ec;
+        var dk=ndir+":"+r+":"+c;
+        if(seen[dk])continue; seen[dk]=1;
+        if(!canPlace(grid,r,c,ndir,word))continue;
+        cands.push({r:r,c:c,dir:ndir,cross:countCross(grid,placed,r,c,ndir,word)});
+      }
+    }
+  }
+  return cands;
+}
+function placeWord(grid,placed,wd,r,c,dir){
+  var dr=dir===0?0:1,dc=dir===0?1:0;
+  for(var i=0;i<wd.w.length;i++){
+    grid.set(key(r+dr*i,c+dc*i),{letter:wd.w.charAt(i),dir:dir});
+  }
+  placed.push({dir:dir,r:r,c:c,word:wd.w,clue:wd.c,num:0});
+}
+function pickWords(diff){
+  var d=DIFFS[diff];
+  var pool=[];
+  for(var i=0;i<WORDS.length;i++){ var x=WORDS[i]; if(x.w.length>=d.minLen&&x.w.length<=d.maxLen)pool.push(x); }
+  var chosen=shuffle(pool.slice());
+  chosen.sort(function(a,b){ return (b.w.length+Math.random()*2.2)-(a.w.length+Math.random()*2.2); });
+  return chosen.slice(0,d.words*2);
+}
+function genPuzzle(diff){
+  var d=DIFFS[diff],target=d.words,best=null;
+  for(var attempt=0;attempt<70;attempt++){
+    var candsW=pickWords(diff);
+    if(!candsW.length)break;
+    var grid=new Map(),placed=[];
+    var first=candsW[0];
+    var dir=Math.random()<0.5?0:1;
+    placeWord(grid,placed,first,8,8,dir);
+    var n=1;
+    for(var i=1;i<candsW.length&&n<target;i++){
+      var cc=collectCands(grid,placed,candsW[i].w);
+      if(!cc.length)continue;
+      var minR=1e9,maxR=-1e9,minC=1e9,maxC=-1e9;
+      for(var p=0;p<placed.length;p++){
+        var w=placed[p],dr=w.dir===0?0:1,dc=w.dir===0?1:0;
+        for(var q=0;q<w.word.length;q++){
+          var rr=w.r+dr*q,cc2=w.c+dc*q;
+          if(rr<minR)minR=rr; if(rr>maxR)maxR=rr;
+          if(cc2<minC)minC=cc2; if(cc2>maxC)maxC=cc2;
+        }
+      }
+      var bestScore=-1e9,bestCands=[],wl=candsW[i].w.length;
+      var cx=(minC+maxC)/2,cy=(minR+maxR)/2;
+      for(var p2=0;p2<cc.length;p2++){
+        var cd=cc[p2],dr2=cd.dir===0?0:1,dc2=cd.dir===0?1:0;
+        var loR=Math.min(minR,cd.r),hiR=Math.max(maxR,cd.r+dr2*(wl-1));
+        var loC=Math.min(minC,cd.c),hiC=Math.max(maxC,cd.c+dc2*(wl-1));
+        var area=(hiR-loR+1)*(hiC-loC+1);
+        var mx=(cd.c+dc2*(wl-1)/2),my=(cd.r+dr2*(wl-1)/2);
+        var dist=Math.sqrt((mx-cx)*(mx-cx)+(my-cy)*(my-cy));
+        var maxdim=Math.max(hiR-loR+1,hiC-loC+1);
+        var sc=cd.cross*150-maxdim*6-dist*8-area*0.1;
+        if(sc>bestScore){ bestScore=sc; bestCands=[cd]; }
+        else if(sc===bestScore)bestCands.push(cd);
+      }
+      var pick=bestCands[Math.floor(Math.random()*bestCands.length)];
+      placeWord(grid,placed,candsW[i],pick.r,pick.c,pick.dir);
+      n++;
+    }
+    if(n<2)continue;
+    var minR2=1e9,maxR2=-1e9,minC2=1e9,maxC2=-1e9;
+    for(var p3=0;p3<placed.length;p3++){
+      var w2=placed[p3],dr3=w2.dir===0?0:1,dc3=w2.dir===0?1:0;
+      for(var q2=0;q2<w2.word.length;q2++){
+        var rr2=w2.r+dr3*q2,cc3=w2.c+dc3*q2;
+        if(rr2<minR2)minR2=rr2; if(rr2>maxR2)maxR2=rr2;
+        if(cc3<minC2)minC2=cc3; if(cc3>maxC2)maxC2=cc3;
+      }
+    }
+    var area2=(maxR2-minR2+1)*(maxC2-minC2+1);
+    var score=n*1000-area2;
+    if(!best||score>best.score)best={grid:grid,placed:placed,minR:minR2,maxR:maxR2,minC:minC2,maxC:maxC2,n:n,score:score,area:area2};
+    if(n>=target&&area2<target*18)break;
+  }
+  return best;
+}
+function buildPuzzle(diff){
+  var d=DIFFS[diff];
+  var gen=genPuzzle(diff);
+  if(!gen)return null;
+  var rows=gen.maxR-gen.minR+1,cols=gen.maxC-gen.minC+1;
+  var grid=[];
+  for(var r=0;r<rows;r++)grid.push(new Array(cols).fill(""));
+  for(r=0;r<rows;r++)for(var c=0;c<cols;c++){
+    var k=key(r+gen.minR,c+gen.minC);
+    if(gen.grid.has(k))grid[r][c]=gen.grid.get(k).letter;
+  }
+  var starts=gen.placed.slice();
+  starts.sort(function(a,b){ return (a.r-b.r)||(a.c-b.c); });
+  for(var i=0;i<starts.length;i++){
+    starts[i].num=i+1;
+    starts[i].r-=gen.minR;
+    starts[i].c-=gen.minC;
+  }
+  var given=new Set(),cells=[];
+  for(r=0;r<rows;r++)for(var c2=0;c2<cols;c2++)if(grid[r][c2])cells.push([r,c2]);
+  var sh=shuffle(cells.slice());
+  for(var g=0;g<Math.min(d.givens,sh.length);g++)given.add(key(sh[g][0],sh[g][1]));
+  return {grid:grid,placed:starts,rows:rows,cols:cols,given:given};
+}
+
+/* ── crossword game state (S) + logic ── */
+var S={grid:null,user:null,given:null,placed:null,rows:0,cols:0,selected:null,dir:0,err:new Set()};
+function emptyUser(){ return Array.from({length:S.rows},function(){ return new Array(S.cols).fill(""); }); }
+function wordContaining(r,c,dir){
+  for(var i=0;i<S.placed.length;i++){
+    var w=S.placed[i];
+    if(w.dir!==dir)continue;
+    if(dir===0&&w.r===r&&c>=w.c&&c<w.c+w.word.length)return w;
+    if(dir===1&&w.c===c&&r>=w.r&&r<w.r+w.word.length)return w;
+  }
+  return null;
+}
+function nextCell(r,c,dir,back){
+  var w=wordContaining(r,c,dir);
+  if(!w)return null;
+  var idx=dir===0?c-w.c:r-w.r,step=back?-1:1;
+  idx+=step;
+  if(idx<0||idx>=w.word.length)return null;
+  return dir===0?{r:r,c:w.c+idx}:{r:w.r+idx,c:c};
+}
+function firstCell(){
+  for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++)if(S.grid[r][c])return {r:r,c:c};
+  return null;
+}
+function selectCell(r,c){
+  S.selected={r:r,c:c};
+  if(!wordContaining(r,c,S.dir)){
+    if(wordContaining(r,c,0))S.dir=0;
+    else if(wordContaining(r,c,1))S.dir=1;
+  }
+  renderBoard(); renderClues();
+}
+function renderBoard(){
+  if(!S.grid)return;
+  var cols=S.cols;
+  boardEl.style.gridTemplateColumns="repeat("+cols+",1fr)";
+  var px=boardEl.clientWidth/cols;
+  if(!px||!isFinite(px))px=40;
+  boardEl.style.setProperty("--cellpx",px+"px");
+  boardEl.innerHTML="";
+  var sel=S.selected,active=null;
+  if(sel)active=wordContaining(sel.r,sel.c,S.dir);
+  for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++){
+    var d=document.createElement("div");
+    var gv=S.grid[r][c];
+    if(!gv){ d.className="black"; boardEl.appendChild(d); continue; }
+    d.className="cell";
+    if(sel&&sel.r===r&&sel.c===c)d.className+=" sel";
+    else if(active){ var aw=wordContaining(r,c,active.dir); if(aw&&aw.num===active.num)d.className+=" inword"; }
+    var isGiven=S.given.has(key(r,c));
+    var u=S.user[r][c];
+    var bad=S.err.has(key(r,c));
+    if(isGiven)d.className+=" givencell";
+    if(bad)d.className+=" err";
+    if(isGiven||u){
+      var sp=document.createElement("span");
+      sp.className="letter"+(isGiven?" given":"")+(bad?" err":"");
+      sp.textContent=isGiven?gv:u;
+      d.appendChild(sp);
+    }
+    var nm=0;
+    for(var i=0;i<S.placed.length;i++){
+      var w=S.placed[i];
+      if(w.r===r&&w.c===c&&w.dir===0){ nm=w.num; break; }
+      if(w.r===r&&w.c===c&&w.dir===1){ nm=w.num; break; }
+    }
+    if(nm){
+      var nsp=document.createElement("span");
+      nsp.className="num"; nsp.textContent=nm;
+      d.appendChild(nsp);
+    }
+    (function(r,c){ d.addEventListener("click",function(){ selectCell(r,c); }); })(r,c);
+    boardEl.appendChild(d);
+  }
+}
+function buildClueList(el,dir,active){
+  el.innerHTML="";
+  var list=[];
+  for(var i=0;i<S.placed.length;i++)if(S.placed[i].dir===dir)list.push(S.placed[i]);
+  list.sort(function(a,b){ return a.num-b.num; });
+  for(var i2=0;i2<list.length;i2++){
+    var w=list[i2];
+    var row=document.createElement("div");
+    row.className="clue-row"+(active&&active.dir===dir&&active.num===w.num?" active":"");
+    var n=document.createElement("span"); n.className="clue-num"; n.textContent=w.num;
+    var t=document.createElement("span"); t.className="clue-text"; t.textContent=w.clue;
+    row.appendChild(n); row.appendChild(t);
+    (function(dir,num){ row.addEventListener("click",function(){ clickClue(dir,num); }); })(dir,w.num);
+    el.appendChild(row);
+  }
+}
+function renderClues(){
+  if(!S.placed)return;
+  var active=null;
+  if(S.selected)active=wordContaining(S.selected.r,S.selected.c,S.dir);
+  buildClueList(acrossEl,0,active);
+  buildClueList(downEl,1,active);
+}
+function renderGame(){
+  renderBoard(); renderClues();
+}
+function checkWin(){
+  for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++)
+    if(S.grid[r][c]&&S.user[r][c]!==S.grid[r][c])return false;
+  return true;
+}
+function placeLetter(ch){
+  if(app.status!=="playing")return;
+  if(!S.selected){ var f=firstCell(); if(!f)return; selectCell(f.r,f.c); }
+  var k=key(S.selected.r,S.selected.c);
+  if(S.given.has(k)){ var n1=nextCell(S.selected.r,S.selected.c,S.dir,false); if(n1)selectCell(n1.r,n1.c); return; }
+  var L=ch.toUpperCase();
+  if(!/[A-Z]/.test(L))return;
+  S.user[S.selected.r][S.selected.c]=L;
+  S.err.delete(k);
+  var n=nextCell(S.selected.r,S.selected.c,S.dir,false);
+  if(n)selectCell(n.r,n.c); else renderBoard();
+}
+function eraseCurrent(){
+  if(app.status!=="playing")return;
+  var s=S.selected;
+  if(!s)return;
+  var k=key(s.r,s.c);
+  if(S.given.has(k)){ var n2=nextCell(s.r,s.c,S.dir,true); if(n2)selectCell(n2.r,n2.c); return; }
+  if(S.user[s.r][s.c]){
+    S.user[s.r][s.c]="";
+    S.err.delete(k);
+    renderBoard();
+  }else{
+    var p=nextCell(s.r,s.c,S.dir,true);
+    if(p)selectCell(p.r,p.c);
+  }
+}
+function clearAllFn(){
+  if(app.status!=="playing")return;
+  S.user=emptyUser();
+  S.err.clear();
+  renderBoard();
+  app.setStatus("Board cleared.");
+}
+function checkFn(){
+  if(app.status!=="playing")return;
+  var wrong=0,filled=0,total=0;
+  for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++){
+    if(!S.grid[r][c])continue;
+    total++;
+    var u=S.user[r][c];
+    if(!u)continue;
+    filled++;
+    if(u!==S.grid[r][c]){ wrong++; S.err.add(key(r,c)); }
+  }
+  sfx(wrong>0?"error":"turn");
+  renderBoard();
+  if(filled===total){
+    if(wrong===0){} /* the framework detects the win via isComplete() */
+    else app.setStatus(wrong+" incorrect — fix them and check again.");
+  }else{
+    app.setStatus(wrong?wrong+" incorrect so far":"Checked — everything correct so far.");
+  }
+}
+function revealLetterFn(){
+  if(app.status!=="playing")return;
+  var s=S.selected;
+  if(!s)return;
+  var k=key(s.r,s.c);
+  if(S.given.has(k))return;
+  S.user[s.r][s.c]=S.grid[s.r][s.c];
+  S.err.delete(k);
+  app.addHint(app.meta.hint1Cost);
+  renderBoard();
+  app.setStatus("Letter revealed (+"+Math.round(app.meta.hint1Cost/1000)+"s).");
+}
+function revealWordFn(){
+  if(app.status!=="playing")return;
+  var s=S.selected;
+  if(!s)return;
+  var w=wordContaining(s.r,s.c,S.dir)||wordContaining(s.r,s.c,0)||wordContaining(s.r,s.c,1);
+  if(!w)return;
+  for(var i=0;i<w.word.length;i++){
+    var r=w.dir===0?w.r:w.r+i,c=w.dir===0?w.c+i:w.c;
+    var k=key(r,c);
+    if(S.given.has(k))continue;
+    S.user[r][c]=S.grid[r][c];
+    S.err.delete(k);
+  }
+  app.addHint(app.meta.hint2Cost);
+  renderBoard();
+  app.setStatus("Word revealed (+"+Math.round(app.meta.hint2Cost/1000)+"s).");
+}
+function revealAllFn(){
+  if(app.status!=="playing")return;
+  for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++)if(S.grid[r][c])S.user[r][c]=S.grid[r][c];
+  S.err.clear();
+  app.addHint(0);
+  renderBoard();
+  app.setStatus("Solution revealed.");
+}
+function clickClue(dir,num){
+  for(var i=0;i<S.placed.length;i++){
+    var w=S.placed[i];
+    if(w.dir===dir&&w.num===num){
+      S.dir=dir;
+      selectCell(w.r,w.c);
+      return;
+    }
+  }
+}
+function moveArrow(dr,dc){
+  var r=S.selected?S.selected.r:0,c=S.selected?S.selected.c:0;
+  for(var t=0;t<300;t++){
+    r=(r+dr+S.rows)%S.rows;
+    c=(c+dc+S.cols)%S.cols;
+    if(S.grid[r][c]){ selectCell(r,c); return; }
+  }
+}
+
+/* ── the `game` object this template is built around ── */
+var game={
+  newGame:function(diff){
+    var p=buildPuzzle(diff);
+    if(!p)return "Couldn't build a puzzle — the word bank is empty!";
+    S.grid=p.grid; S.placed=p.placed; S.given=p.given;
+    S.rows=p.rows; S.cols=p.cols;
+    S.user=emptyUser();
+    S.selected=null; S.dir=0; S.err=new Set();
+    renderGame();
+    return "Good luck — "+DIFFS[diff].label+" puzzle, "+S.placed.length+" words.";
+  },
+  render:function(){ renderBoard(); renderClues(); },
+  renderHud:function(){
+    if(!S.grid){ progressEl.textContent=""; return; }
+    var total=0,filled=0;
+    for(var r=0;r<S.rows;r++)for(var c=0;c<S.cols;c++){
+      if(!S.grid[r][c])continue;
+      total++;
+      if(S.user[r][c]||S.given.has(key(r,c)))filled++;
+    }
+    progressEl.textContent=filled+"/"+total;
+  },
+  input:placeLetter,
+  erase:eraseCurrent,
+  check:checkFn,
+  clearAll:clearAllFn,
+  hint1:revealLetterFn,
+  hint2:revealWordFn,
+  revealAll:revealAllFn,
+  isComplete:checkWin,
+  winStats:function(){ return [{value:S.placed.length,label:"words"}]; },
+  serialize:function(){
+    return {grid:S.grid,placed:S.placed,given:Array.from(S.given),user:S.user,err:Array.from(S.err)};
+  },
+  deserialize:function(d){
+    if(!d||!d.grid||!d.placed)return false;
+    S.grid=d.grid; S.placed=d.placed;
+    S.rows=d.grid.length; S.cols=d.grid[0].length;
+    S.given=new Set(d.given||[]);
+    S.user=(d.user&&d.user.length===S.rows)?d.user:emptyUser();
+    S.err=new Set(d.err||[]);
+    S.selected=null; S.dir=0;
+    renderGame();
+    return true;
+  },
+  keydown:function(e){
+    if(e.key.startsWith("Arrow")){
+      if(!S.selected){ var f=firstCell(); if(f)selectCell(f.r,f.c); return true; }
+      if(e.key==="ArrowUp")moveArrow(-1,0);
+      else if(e.key==="ArrowDown")moveArrow(1,0);
+      else if(e.key==="ArrowLeft")moveArrow(0,-1);
+      else moveArrow(0,1);
+      return true;
+    }
+    if(e.key==="Tab"||e.key===" "){
+      if(S.selected){ S.dir=S.dir===0?1:0; renderGame(); }
+      return true;
+    }
+    if(e.key==="Escape"){ S.selected=null; renderGame(); return true; }
+    return false;
+  }
+};
+
+/* ══════════════════════════════════════════════════════════
+   §5 DOM REFS, SHELL BUILDING AND BOOT
+   ══════════════════════════════════════════════════════════ */
+var boardEl=document.getElementById("boardEl"),padEl=document.getElementById("padEl");
+var timerEl=document.getElementById("timerEl"),progressEl=document.getElementById("progressEl"),hintsEl=document.getElementById("hintsEl");
+var statusEl=document.getElementById("statusEl"),tipEl=document.getElementById("tipEl");
+var brandEl=document.getElementById("brandEl"),navTagEl=document.getElementById("navTagEl");
+var titleEl=document.getElementById("titleEl"),subEl=document.getElementById("subEl");
+var diffTabsEl=document.getElementById("diffTabsEl");
+var controlsCtn=document.getElementById("controlsCtn");
+var acrossEl=document.getElementById("acrossEl"),downEl=document.getElementById("downEl");
+var cluesPanelEl=document.getElementById("cluesPanelEl");
+var winOverlay=document.getElementById("winOverlay"),winKickerEl=document.getElementById("winKickerEl");
+var winStatsEl=document.getElementById("winStatsEl");
+var winSubmitBox=document.getElementById("winSubmitBox"),winQualifyEl=document.getElementById("winQualifyEl");
+var winNameInput=document.getElementById("winNameInput"),winMsgEl=document.getElementById("winMsgEl"),winPersonalEl=document.getElementById("winPersonalEl");
+var lbPanelEl=document.getElementById("lbPanelEl"),lbListEl=document.getElementById("lbListEl"),lbMsgEl=document.getElementById("lbMsgEl"),lbTabsEl=document.getElementById("lbTabsEl");
+var footerBrandEl=document.getElementById("footerBrandEl");
+var diffBtns=[];
+
+document.getElementById("winPlayAgainBtn").addEventListener("click",function(){ app.newGame(app.diff); });
+document.getElementById("winCloseBtn").addEventListener("click",function(){ winOverlay.hidden=true; });
+document.getElementById("winSubmitBtn").addEventListener("click",app.submitScore);
+
+var exportJsonBtn=document.getElementById("exportJsonBtn"),importJsonBtn=document.getElementById("importJsonBtn"),screenshotBtn=document.getElementById("screenshotBtn");
+var importOverlay=document.getElementById("importOverlay"),importInput=document.getElementById("importInput"),importMsgEl=document.getElementById("importMsgEl");
+var importFileBtn=document.getElementById("importFileBtn"),importFileInput=document.getElementById("importFileInput");
+exportJsonBtn.addEventListener("click",app.exportJSON);
+importJsonBtn.addEventListener("click",function(){ importMsgEl.textContent=""; importInput.value=""; importOverlay.hidden=false; importInput.focus(); });
+screenshotBtn.addEventListener("click",app.screenshot);
+document.getElementById("importOkBtn").addEventListener("click",function(){
+  var msg=app.importJSON(importInput.value);
+  if(msg)importMsgEl.textContent=msg;
+  else importOverlay.hidden=true;
+});
+document.getElementById("importCancelBtn").addEventListener("click",function(){ importOverlay.hidden=true; });
+importFileBtn.addEventListener("click",function(){ importFileInput.click(); });
+importFileInput.addEventListener("change",function(){
+  var f=importFileInput.files&&importFileInput.files[0];
+  if(!f)return;
+  var reader=new FileReader();
+  reader.onload=function(){ importInput.value=reader.result; importMsgEl.textContent="File loaded — press Import."; };
+  reader.readAsText(f);
+  importFileInput.value="";
+});
+
+/* ── help modal ── */
+var helpBtn=document.getElementById("helpBtn"),helpOverlay=document.getElementById("helpOverlay");
+function openHelp(){ if(helpOverlay)helpOverlay.hidden=false; }
+function closeHelp(){ if(helpOverlay)helpOverlay.hidden=true; }
+if(helpBtn)helpBtn.addEventListener("click",openHelp);
+document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+if(helpOverlay)helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key!=="Escape")return;
+  if(helpOverlay&&!helpOverlay.hidden){ helpOverlay.hidden=true; return; }
+  if(importOverlay&&!importOverlay.hidden)importOverlay.hidden=true;
+});
+
+document.addEventListener("keydown",function(e){
+  if(e.target&&/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
+  if(app.status==="won"){ if(e.key==="Enter")app.hideOverlays(); return; }
+  if(app.status!=="playing"){ if(e.key==="Enter")app.hideOverlays(); return; }
+  if(/^[a-zA-Z0-9]$/.test(e.key)&&!e.ctrlKey&&!e.metaKey&&!e.altKey){
+    e.preventDefault();
+    app.input(e.key.toUpperCase());
+    return;
+  }
+  if(e.key==="Backspace"||e.key==="Delete"){ e.preventDefault(); app.erase(); return; }
+  if(typeof game.keydown==="function"){
+    if(game.keydown(e))e.preventDefault();
+  }
+});
+
+window.addEventListener("resize",function(){ if(S.grid)game.render(); });
+
+/* ── boot ── */
+buildShell();
+app.loadLeaderboard();
+if(app.restore()){
+  app.startTimer();
+  app.hideOverlays();
+  app.setStatus("Resumed your "+DIFFS[app.diff].label+" puzzle.");
+}else{
+  app.newGame("easy");
+}
+
+window.__tpl={app:app,game:game,S:S,DIFFS:DIFFS,WORDS:WORDS,boards:boards};
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
