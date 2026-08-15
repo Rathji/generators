@@ -16,6 +16,34 @@ preserved). This repo keeps the rest.
 `q8tgpbvj6l/src/main.js` in particular is referenced by no manifest and no capture will bring it
 back. Treat the repo as a backup of record, not a cache.
 
+## Checking that a capture is complete
+
+`meta.json`'s `srcManifest` declares a **byte size** for every file a generator's `src/` should
+hold. Comparing that number against the file on disk is the only integrity check this repo has,
+and it is worth running after any capture:
+
+```
+node -e '
+const fs=require("fs"),path=require("path");
+for(const slug of fs.readdirSync(".")){
+  const mp=path.join(slug,"meta.json"); if(!fs.existsSync(mp))continue;
+  for(const [n,e] of Object.entries(JSON.parse(fs.readFileSync(mp,"utf8")).srcManifest||{})){
+    const f=path.join(slug,"src",n);
+    const got=fs.existsSync(f)?fs.statSync(f).size:null;
+    if(got!==e.size)console.log(`${f}: ${got===null?"MISSING":got} vs declared ${e.size}`);
+  }
+}'
+```
+
+Silence means every declared file is present at its declared size. **This is not a formality — it
+found a real four-year-shaped hole the first time it was run.** On 2026-08-14 it reported 86
+declared files missing repo-wide, every one of them in a directory captured 2026-08-10, before
+`perchance-fetch.mjs` had `--src`. The manifests had always declared them; nothing had ever
+fetched them, and nothing compared the two. They were backfilled the same day.
+
+The check is why `.gitattributes` pins LF so aggressively: a CRLF conversion changes the size of
+every text file it touches and would break the comparison repo-wide.
+
 Originally captured 2026-08-10. The captures are **snapshots of the day they were taken** — nothing
 re-captures a generator when it changes live, so an old directory reflects that generator as it was,
 not as it is.
@@ -29,7 +57,7 @@ Each `<slug>/` holds the two editor panels plus `meta.json`
 |---|---|---|
 | `lists.txt` + `html.txt` | 32 | the original capture naming |
 | `main.pjs` + `index.html` | 15 | perchance's own export convention, written by `--layout perchance` |
-| `src/<name>` | 11 | files a generator's `srcManifest` declares |
+| `src/<name>` | 34 | files a generator's `srcManifest` declares |
 
 46 directories in total; one (`q8tgpbvj6l`) holds both naming pairs, and there they are not two
 copies of the same thing — see below.

@@ -98,6 +98,17 @@ capture didn't happen; it may mean the capture succeeded and only the tool's own
 
 Commit and push after capturing.
 
+**Then check the capture is complete, which the tool's own output does not tell you.** `--src`
+reports a size mismatch per file rather than aborting, so a run can print `1/1 ok` over a truncated
+or skipped download. `meta.json`'s `srcManifest` declares a byte size for every `src/` file, and
+comparing it against disk is the only integrity check this repo has — see "Checking that a capture
+is complete" in `README.md` for a one-liner that does it repo-wide.
+
+Run it. On 2026-08-14 its first run reported **86 declared files missing across 32 directories**,
+all captured 2026-08-10 — before `--src` existed. The manifests had always declared them; nothing
+had fetched them; nothing had ever compared the two. 79 were backfilled from live the same day. The
+other 7 belong to `top-down-rpg-template`, which is 404, and are gone for good.
+
 ### 2. Edit: change files in this repo
 
 Ordinary git workflow. Edit the panel files or `src/*`, commit, push. Nothing perchance-specific
@@ -274,7 +285,7 @@ This repo currently holds both, on purpose:
 |---|---|
 | directories with `lists.txt`/`html.txt` (old) | 32 (9 template-named ones split to `perchance-templates` on 2026-08-11) |
 | directories with `main.pjs`/`index.html` (new) | 15 (14 of them captured 2026-08-14, plus `q8tgpbvj6l`) |
-| directories with `src/` | 11 |
+| directories with `src/` | 34 |
 | **total directories** | **46** |
 
 `main.pjs`/`index.html` is perchance's own export convention and what `--layout perchance` writes;
