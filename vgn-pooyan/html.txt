@@ -25,10 +25,9 @@
          harder and sway further as rounds climb. Extra life 5,000.
 
      CONTROLS
-       UP/DOWN (or W/S)  move the elevator
-       A/Z/SPACE/LEFT    shoot arrow up-left
-       X/D/RIGHT         shoot arrow up-right
-       ENTER start · P pause · M mute · (gamepad: A=left, B=right)
+       UP/DOWN (or W/S)   move the elevator
+       SPACE/A/Z/X/D      shoot an arrow (up and to the right)
+       ENTER start · P pause · M mute · (gamepad: A/B/X/Y all fire)
        1P or 2P (alternating) on the title screen.
 
      NETWORK
@@ -396,7 +395,7 @@ self.rpc = {
   }
   window.addEventListener("keyup", function(e){ reflectPad(e.key, false); });
 
-  VGN.hints("UP/DOWN MOVE · A/Z SHOOT LEFT · X/D SHOOT RIGHT · ENTER START · P PAUSE · M MUTE");
+  VGN.hints("UP/DOWN MOVE · SPACE/A/Z/X SHOOT RIGHT · ENTER START · P PAUSE · M MUTE");
 
   /* ══════════════════════════════════════════════════════════
      THE GAME — POOYAN. Fork me!
@@ -416,9 +415,9 @@ self.rpc = {
       tagline: "SAVE THE PIGLETS",
       lives: 3,
       playerSpeed: 270,               // elevator px/sec
-      fireCooldown: 0.26,             // sec between shots (per direction)
+      fireCooldown: 0.26,             // sec between shots
       arrowSpeedX: 460, arrowSpeedY: 300, arrowGravity: 300,
-      maxArrowsPerSide: 5,
+      maxArrows: 6,
       balloonR: 15,
       fallSpeed: 90,                  // wolf fall speed on balloon pop
       rockTimerBase: 4.5, rockTimerMin: 2.2, rockSpeed: 240, rockGravity: 300,
@@ -551,7 +550,7 @@ self.rpc = {
     var twoPlayer = false, curPlayer = 0;
     try{ hiScore = parseInt(localStorage.getItem("vgn-poy-hi")||"0", 10)||0; }catch(e){}
 
-    var pig = { y: H - 110, fireL: 0, fireR: 0, invuln: 0 };
+    var pig = { y: H - 110, fire: 0, invuln: 0 };
     var piglets = [], wolves = [], arrows = [], falling = [], bonusWolves = [];
     var particles = [], popups = [];
     var rocks = [], rockTimer = 3.5;
@@ -644,7 +643,7 @@ self.rpc = {
       meat.active = false; meatThrow = null; hasMeat = false;
       meat.timer = 12;
       spawnTimer = 1.1;
-      pig.y = H - 110; pig.invuln = 0; pig.fireL = 0; pig.fireR = 0;
+      pig.y = H - 110; pig.invuln = 0; pig.fire = 0;
     }
     function buildBonus(){
       bonusWolves = [];
@@ -657,7 +656,7 @@ self.rpc = {
     }
     function spawnWolf(){
       var tree = piglets.filter(function(p){ return p.state === "tree"; });
-      var w = { x:rnd(60, W-120), y:-24, vy:wolfSpeed(),
+      var w = { x:rnd(120, W-120), y:-24, vy:wolfSpeed(),
         amp:Math.min(CONFIG.swayAmpBase + (round-1)*CONFIG.swayAmpPerRound, CONFIG.swayAmpMax),
         freq:1.1+Math.random()*0.9, ph:Math.random()*6.283, color:randBalloon(),
         pop:false, fallen:false, exit:false, carry:null, rot:0 };
@@ -771,16 +770,14 @@ self.rpc = {
     }
 
     /* ── shooting ── */
-    function fireArrow(dir){
-      var count = 0;
-      for(var i=0;i<arrows.length;i++) if(arrows[i].dir === dir) count++;
-      if(count >= CONFIG.maxArrowsPerSide) return;
+    function fireArrow(){
+      if(arrows.length >= CONFIG.maxArrows) return;
       if(hasMeat){
         var any = false;
         for(var j=0;j<wolves.length;j++){ var wj=wolves[j]; if(!wj.fallen && !wj.exit && !wj.climb) any = true; }
         if(any){
           hasMeat = false;
-          meatThrow = { x:TRACK_X + dir*14, y:pig.y - 16, vx:dir*CONFIG.arrowSpeedX*0.75, vy:-CONFIG.arrowSpeedY*0.5, dir:dir };
+          meatThrow = { x:TRACK_X + 14, y:pig.y - 16, vx:CONFIG.arrowSpeedX*0.75, vy:-CONFIG.arrowSpeedY*0.5, dir:1 };
           for(j=wolves.length-1;j>=0;j--){
             var w = wolves[j];
             if(w.fallen || w.exit || w.climb) continue;
@@ -790,7 +787,7 @@ self.rpc = {
           return;
         }
       }
-      arrows.push({x:TRACK_X + dir*14, y:pig.y - 16, vx:dir*CONFIG.arrowSpeedX, vy:-CONFIG.arrowSpeedY, dir:dir});
+      arrows.push({x:TRACK_X + 14, y:pig.y - 16, vx:CONFIG.arrowSpeedX, vy:-CONFIG.arrowSpeedY, dir:1});
       SFX.shoot();
     }
     function popWolf(w){
@@ -929,14 +926,12 @@ self.rpc = {
       pig.y += mv * CONFIG.playerSpeed * dt;
       pig.y = Math.max(ELEV_TOP, Math.min(ELEV_BOT, pig.y));
       pig.invuln = Math.max(0, pig.invuln - dt);
-      pig.fireL -= dt; pig.fireR -= dt;
+      pig.fire -= dt;
 
-      /* fire */
-      var fireL = !!(keys[" "] || keys["a"] || keys["A"] || keys["z"] || keys["Z"] || keys["ArrowLeft"] || keys["c"] || keys["C"]);
-      var fireR = !!(keys["x"] || keys["X"] || keys["d"] || keys["D"] || keys["ArrowRight"] || keys["y"] || keys["Y"]);
-      if(touch.active){ if(touch.x < W/2) fireL = true; else fireR = true; }
-      if(fireL && pig.fireL <= 0){ fireArrow(-1); pig.fireL = CONFIG.fireCooldown; }
-      if(fireR && pig.fireR <= 0){ fireArrow(1); pig.fireR = CONFIG.fireCooldown; }
+      /* fire (up and to the right) */
+      var firing = !!(keys[" "] || keys["a"] || keys["A"] || keys["z"] || keys["Z"] || keys["x"] || keys["X"] || keys["d"] || keys["D"] || keys["ArrowRight"] || keys["y"] || keys["Y"] || keys["c"] || keys["C"]);
+      if(touch.active) firing = true;
+      if(firing && pig.fire <= 0){ fireArrow(); pig.fire = CONFIG.fireCooldown; }
 
       /* arrows */
       for(i=arrows.length-1;i>=0;i--){
@@ -1464,7 +1459,7 @@ self.rpc = {
       }
       ctx.font = "9px 'Press Start 2P', monospace";
       ctx.fillStyle = "#8a93a5";
-      ctx.fillText("UP/DOWN MOVE · A/Z SHOOT LEFT · X/D SHOOT RIGHT", W/2, H-116);
+      ctx.fillText("UP/DOWN MOVE · SPACE/A/Z/X SHOOT RIGHT", W/2, H-116);
       ctx.fillText("P PAUSE · M MUTE", W/2, H-94);
       ctx.fillStyle = "#dce6f0";
       ctx.fillText("HI-SCORE " + pad(hiScore), W/2, H-62);

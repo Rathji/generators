@@ -82,7 +82,7 @@ body {
 
 label { display: block; font-size: .82rem; color: var(--text-muted); margin-bottom: .3rem; letter-spacing: .4px; }
 
-textarea.input, select, input[type=number] {
+textarea, select, input:not([type=checkbox]):not([type=radio]) {
   width: 100%;
   padding: .55rem .65rem;
   background: var(--input-bg);
@@ -93,7 +93,7 @@ textarea.input, select, input[type=number] {
   font-family: inherit;
   transition: box-shadow 0.25s ease, border-color 0.25s ease;
 }
-textarea.input:focus, select:focus, input[type=number]:focus {
+textarea:focus, select:focus, input:not([type=checkbox]):not([type=radio]):focus {
   box-shadow: 0 0 10px var(--accent-glow);
   border-color: var(--accent-2);
   outline: none;
@@ -171,6 +171,13 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
 .field { display: flex; flex-direction: column; gap: .25rem; }
 .field select, .field input { min-width: 108px; width: 108px; }
 #advancedToggle { margin-left: auto; }
+.preset-row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: stretch; margin-bottom: 1rem; }
+.preset-row input { flex: 1 1 130px; min-width: 0; }
+.preset-row select { width: auto; flex: 1 1 120px; }
+.batch-field { justify-content: center; }
+.batch-field input { width: auto; min-width: 0; }
+.batch-label { display: flex; align-items: center; gap: .45rem; margin: 0; padding: .15rem 0 .3rem; font-size: .92rem; color: var(--text-main); cursor: pointer; }
+.batch-label input { accent-color: var(--accent-2); }
 
 #advancedPanel { margin-top: .8rem; padding-top: .8rem; border-top: 1px dashed var(--panel-border); }
 .preview-row { display: flex; gap: .5rem; align-items: flex-end; }
@@ -197,7 +204,7 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
   overflow: hidden;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
 }
-.thumb { position: relative; aspect-ratio: 1/1; background: #0d0f16; }
+.thumb { position: relative; aspect-ratio: 1/1; background: #0d0f16; cursor: zoom-in; }
 .thumb canvas, .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 .thumb.skeleton::after {
   content: ''; position: absolute; inset: 0;
@@ -261,6 +268,17 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
   padding: .4rem .6rem; font-size: .8rem; color: var(--text-muted);
   background: rgba(0,0,0,.25); border-top: 1px solid var(--panel-border);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lightbox {
+  background: var(--panel-solid); border: 1px solid var(--panel-border);
+  border-radius: var(--radius); padding: .6rem; max-width: min(92vw, 760px);
+  position: relative; box-shadow: 0 8px 40px rgba(0,0,0,.6);
+}
+.lightbox img { display: block; max-width: 100%; max-height: 70vh; margin: 0 auto; border-radius: 8px; }
+.lightbox .lightbox-close { position: absolute; top: .7rem; right: .7rem; z-index: 2; background: rgba(10,12,20,.85); }
+.lightbox-prompt {
+  margin-top: .6rem; font-size: .78rem; color: var(--text-muted);
+  word-break: break-word; white-space: pre-wrap; max-height: 90px; overflow-y: auto;
 }
 
 /* Community gallery */
@@ -357,6 +375,7 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
 
     <section class="section">
       <div class="feat-grid">
+        <div class="feat"><label for="compositionChips">Composition</label><select id="compositionChips"></select></div>
         <div class="feat"><label for="hairColorChips">Hair Color</label><select id="hairColorChips"></select></div>
         <div class="feat"><label for="hairLengthChips">Hair Style</label><select id="hairLengthChips"></select></div>
         <div class="feat"><label for="eyeColorChips">Eyes</label><select id="eyeColorChips"></select></div>
@@ -371,6 +390,14 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
     <div class="action-row">
       <button id="randomBtn" type="button" class="ghost">🎲 Surprise me</button>
       <button id="resetBtn" type="button" class="ghost">↺ Reset</button>
+    </div>
+
+    <div class="preset-row">
+      <input id="presetNameInput" class="input" maxlength="40" placeholder="Preset name…">
+      <button id="savePresetBtn" type="button" class="ghost">💾 Save preset</button>
+      <select id="presetSelect" title="Saved presets"></select>
+      <button id="loadPresetBtn" type="button" class="ghost">Load</button>
+      <button id="deletePresetBtn" type="button" class="ghost">Delete</button>
     </div>
 
     <button id="generateBtn" type="button">✦ Bring your dream to life</button>
@@ -393,6 +420,15 @@ button[disabled] { opacity: .55; cursor: not-allowed; transform: none; }
       <div class="field">
         <label for="guidanceInput">Guidance</label>
         <input id="guidanceInput" type="number" min="1" max="30" step="1" value="7">
+      </div>
+      <div class="field">
+        <label for="seedInput">Seed</label>
+        <input id="seedInput" type="number" min="0" placeholder="random">
+      </div>
+      <div class="field batch-field">
+        <label class="batch-label" title="Same seed + same look for every image; only the scene elements (setting, mood, pose, time, season, weather) change per image.">
+          <input type="checkbox" id="batchToggle"> Same girl × N scenes
+        </label>
       </div>
       <button id="advancedToggle" type="button" class="ghost">Advanced ▸</button>
     </div>
@@ -556,6 +592,7 @@ var BASE_QUALITY    = root.baseQuality ? String(ev(root.baseQuality.evaluateItem
 var NEGATIVE_PROMPT = root.negativePrompt ? String(ev(root.negativePrompt.evaluateItem)).trim() : '';
 
 var CATS = [
+  { cid: 'compositionChips', list: 'composition' },
   { cid: 'styleChips',     list: 'artStyle' },
   { cid: 'hairColorChips', list: 'hairColor' },
   { cid: 'hairLengthChips',list: 'hairLength' },
@@ -627,6 +664,8 @@ var STYLE_MOVEMENTS = STD_STYLES.map(function(m){
 });
 var STYLE_ITEMS = ITEMS['artStyle'].concat(STYLE_MOVEMENTS);
 
+var SCENE_CIDS = ['poseChips', 'settingChips', 'timeChips', 'seasonChips', 'weatherChips', 'moodChips'];
+
 function itemsFor(c){
   if (c.list === 'artStyle') return STYLE_ITEMS;
   var banned = [];
@@ -640,10 +679,11 @@ function itemsFor(c){
   }
   return ITEMS[c.list];
 }
-function findItem(cid){
+function findItem(cid, val){
   var c = CATS.filter(function(x){ return x.cid === cid; })[0];
   var items = itemsFor(c);
-  var hit = items.filter(function(x){ return x.id === sel[cid]; })[0];
+  var v = val !== undefined ? val : sel[cid];
+  var hit = items.filter(function(x){ return x.id === v; })[0];
   return hit || null;
 }
 (function normalizeModeSensitive(){
@@ -665,18 +705,20 @@ function findItem(cid){
 // ============================
 // Prompt composition
 // ============================
-function compose(){
+function compose(opts){
+  opts = opts || {};
   var picks = {};
   function resolve(cid){
     if (picks[cid]) return picks[cid];
-    if (sel[cid] === RANDOM) {
+    var v = (opts.randomScenes && SCENE_CIDS.indexOf(cid) !== -1) ? RANDOM : sel[cid];
+    if (v === RANDOM) {
       var c = CATS.filter(function(x){ return x.cid === cid; })[0];
       var items = itemsFor(c);
       var pick = items[Math.floor(Math.random() * items.length)];
       picks[cid] = pick || items[0] || null;
       return picks[cid];
     }
-    picks[cid] = findItem(cid);
+    picks[cid] = findItem(cid, v);
     return picks[cid];
   }
   function resolveOutfit(){
@@ -695,6 +737,7 @@ function compose(){
   if (st && st.painting && st.frag) parts.push(st.frag);
   var dream = byId('dreamInput').value.trim();
   if (dream) parts.push(dream);
+  var comp = resolve('compositionChips'); if (comp && comp.frag) parts.push(comp.frag);
   var age = resolve('ageChips'); if (age && age.frag) parts.push(age.frag);
   ['hairColor', 'hairLength', 'eyeColor', 'skinTone', 'bodyType'].forEach(function(cid){
     var f = resolve(cid + 'Chips'); if (f && f.frag) parts.push(f.frag);
@@ -702,17 +745,16 @@ function compose(){
   var outfit = resolveOutfit(); if (outfit && outfit.frag) parts.push(outfit.frag);
   var mode = currentMode();
   if (mode && mode.promptSuffix) parts.push(mode.promptSuffix);
-  var pose = resolve('poseChips'); if (pose && pose.frag) parts.push(pose.frag);
-  var set = resolve('settingChips'); if (set && set.frag) parts.push(set.frag);
-  ['timeChips', 'seasonChips', 'weatherChips'].forEach(function(cid){
-    var f = resolve(cid); if (f && f.frag) parts.push(f.frag);
+  var sceneLabels = [];
+  SCENE_CIDS.forEach(function(cid){
+    var f = resolve(cid);
+    if (f && f.frag) { parts.push(f.frag); if (f.label) sceneLabels.push(f.label); }
   });
-  var mood = resolve('moodChips'); if (mood && mood.frag) parts.push(mood.frag);
   if (st && !st.painting && st.frag) parts.push(st.frag);
   if (BASE_QUALITY && !(st && st.painting)) parts.push(BASE_QUALITY);
   var neg = (st && st.neg) ? st.neg : NEGATIVE_PROMPT;
   if (mode && mode.negativeSuffix) neg = neg ? neg + ', ' + mode.negativeSuffix : mode.negativeSuffix;
-  return { prompt: parts.join(', '), negative: neg };
+  return { prompt: parts.join(', '), negative: neg, scene: sceneLabels.join(' · ') };
 }
 
 function updatePrompt(){
@@ -881,6 +923,101 @@ function resetAll(){
 }
 
 // ============================
+// Presets
+// ============================
+var PRESETS_KEY = LS_KEY + 'presets';
+function loadPresets(){
+  try { return JSON.parse(localStorage.getItem(PRESETS_KEY)) || []; } catch (e) { return []; }
+}
+function savePresets(list){
+  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function refreshPresetSelect(){
+  var selEl = byId('presetSelect');
+  if (!selEl) return;
+  var cur = selEl.value;
+  selEl.innerHTML = '';
+  var presets = loadPresets();
+  if (!presets.length) {
+    var o = document.createElement('option');
+    o.value = ''; o.textContent = 'No presets saved';
+    selEl.appendChild(o);
+  } else {
+    presets.forEach(function(p, i){
+      var op = document.createElement('option');
+      op.value = String(i); op.textContent = p.name;
+      selEl.appendChild(op);
+    });
+    if (presets[cur]) selEl.value = cur; else selEl.value = '0';
+  }
+}
+function savePreset(){
+  var name = (byId('presetNameInput').value || '').trim();
+  if (!name) { setStatus('Give the preset a name first.', 'error'); return; }
+  var presets = loadPresets();
+  var data = {
+    sel: JSON.parse(JSON.stringify(sel)),
+    mode: selMode,
+    dream: byId('dreamInput').value,
+    size: byId('sizeSelect').value,
+    count: byId('countInput').value,
+    guidance: byId('guidanceInput').value,
+    seed: byId('seedInput').value,
+    ts: Date.now()
+  };
+  var hit = -1;
+  for (var i = 0; i < presets.length; i++) {
+    if (presets[i].name.toLowerCase() === name.toLowerCase()) hit = i;
+  }
+  if (hit >= 0) presets[hit] = { name: name, data: data };
+  else presets.push({ name: name, data: data });
+  savePresets(presets);
+  refreshPresetSelect();
+  setStatus('Preset "' + name + '" saved.', 'success');
+}
+function loadPreset(){
+  var idx = parseInt(byId('presetSelect').value, 10);
+  var presets = loadPresets();
+  if (isNaN(idx) || !presets[idx]) { setStatus('No preset selected.', 'error'); return; }
+  var d = presets[idx].data || {};
+  if (d.sel) {
+    for (var cid in d.sel) {
+      if (Object.prototype.hasOwnProperty.call(sel, cid)) {
+        sel[cid] = d.sel[cid];
+        save(cid, sel[cid]);
+      }
+    }
+  }
+  if (d.mode && MODES.some(function(m){ return m.id === d.mode; })) {
+    selMode = d.mode;
+    save('mode', selMode);
+  }
+  if (typeof d.dream === 'string') setDream(d.dream);
+  if (d.size) byId('sizeSelect').value = d.size;
+  if (d.count) byId('countInput').value = d.count;
+  if (d.guidance) byId('guidanceInput').value = d.guidance;
+  byId('seedInput').value = d.seed != null ? d.seed : '';
+  save('size', byId('sizeSelect').value);
+  save('count', byId('countInput').value);
+  save('guidance', byId('guidanceInput').value);
+  save('seed', byId('seedInput').value);
+  renderControls();
+  renderFilterSeg();
+  renderCommunityGallery();
+  setStatus('Preset "' + presets[idx].name + '" loaded.', 'success');
+}
+function deletePreset(){
+  var idx = parseInt(byId('presetSelect').value, 10);
+  var presets = loadPresets();
+  if (isNaN(idx) || !presets[idx]) { setStatus('No preset selected.', 'error'); return; }
+  var name = presets[idx].name;
+  presets.splice(idx, 1);
+  savePresets(presets);
+  refreshPresetSelect();
+  setStatus('Preset "' + name + '" deleted.', 'success');
+}
+
+// ============================
 // Generation
 // ============================
 function setStatus(txt, cls){
@@ -998,7 +1135,7 @@ function openSaveModal(card){
     '<button id="saveMyBtn" type="button" class="ghost">Save to My Dreams</button>' +
     '</div>' +
     '<div class="save-modal-body"></div>' +
-    '<div class="save-modal-hint">Community saves are public by default — the save dialog there lets you pick private instead.</div>' +
+    '<div class="save-modal-hint">Community save: wait for the image to finish, click the ♥ at its bottom-left, then 📮 send to gallery. First time, it asks for a gallery name — use <b>public</b> for the community gallery everyone sees, or a long unguessable name for a private gallery.</div>' +
     '</div>';
   document.body.appendChild(overlay);
   overlay.querySelector('.save-close').addEventListener('click', function(){ overlay.remove(); });
@@ -1120,6 +1257,7 @@ function makeCard(prompt, neg, size, guidance){
     '<div class="thumb skeleton"></div>' +
     '<div class="card-actions">' +
     '<button class="mini-btn save" title="Add to gallery">♡</button>' +
+    '<button class="mini-btn" title="Copy prompt">⧉</button>' +
     '<button class="mini-btn" title="Download">⬇</button>' +
     '<button class="mini-btn" title="Re-roll (new seed)">↻</button>' +
     '<button class="mini-btn" title="Remove">✕</button>' +
@@ -1127,12 +1265,43 @@ function makeCard(prompt, neg, size, guidance){
     '<div class="seed"></div>' +
     '<div class="caption"></div>';
   card.querySelector('.thumb').appendChild(spinnerEl());
+  card.querySelector('.thumb').addEventListener('click', function(){ openLightbox(card); });
   var btns = card.querySelectorAll('.mini-btn');
   btns[0].addEventListener('click', function(){ openSaveModal(card); });
-  btns[1].addEventListener('click', function(){ downloadCard(card); });
-  btns[2].addEventListener('click', function(){ reroll(card); });
-  btns[3].addEventListener('click', function(){ removeCard(card); });
+  btns[1].addEventListener('click', function(){ copyCardPrompt(card); });
+  btns[2].addEventListener('click', function(){ downloadCard(card); });
+  btns[3].addEventListener('click', function(){ reroll(card); });
+  btns[4].addEventListener('click', function(){ removeCard(card); });
   return card;
+}
+
+function openLightbox(card){
+  var url = card.dataset.url || card.dataset.dataUrl;
+  if (!url) return;
+  var prompt = card.dataset.prompt || '';
+  var overlay = document.createElement('div');
+  overlay.className = 'save-overlay';
+  overlay.innerHTML =
+    '<div class="lightbox">' +
+    '<button type="button" class="save-close lightbox-close">✕</button>' +
+    '<img src="' + url + '" alt="">' +
+    '<div class="lightbox-prompt mono"></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('.save-close').addEventListener('click', function(){ overlay.remove(); });
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('.lightbox-prompt').textContent = prompt;
+}
+
+function copyCardPrompt(card){
+  var v = card.dataset.prompt || '';
+  if (!v) return;
+  try {
+    navigator.clipboard.writeText(v);
+    setStatus('Prompt copied.', 'success');
+  } catch (e) {
+    setStatus('Copy failed.', 'error');
+  }
 }
 
 function fillCard(card, res){
@@ -1172,13 +1341,13 @@ function withTimeout(p, ms){
   });
 }
 
-function genOne(card){
+function genOne(card, seedOverride){
   return IMAGE({
     prompt: card.dataset.prompt,
     negativePrompt: card.dataset.neg,
     resolution: card.dataset.size,
     guidanceScale: Number(card.dataset.guidance) || 7,
-    seed: Math.floor(Math.random() * 1000000000),
+    seed: seedOverride != null ? seedOverride : Math.floor(Math.random() * 1000000000),
     hideGalleryButtons: true
   });
 }
@@ -1202,7 +1371,19 @@ async function start(){
   var size = byId('sizeSelect').value;
   var count = Math.max(1, Math.min(8, parseInt(byId('countInput').value, 10) || 1));
   var guidance = Math.max(1, Math.min(30, parseInt(byId('guidanceInput').value, 10) || 7));
+  var batch = !!(byId('batchToggle') && byId('batchToggle').checked);
+  var seedVal = String(byId('seedInput').value || '').trim();
+  var fixedSeed = seedVal === '' ? null : Math.max(0, parseInt(seedVal, 10) || 0);
   save('size', size); save('count', count); save('guidance', guidance);
+  if (batch) {
+    if (fixedSeed == null) {
+      fixedSeed = Math.floor(Math.random() * 1000000000);
+      byId('seedInput').value = String(fixedSeed);
+    }
+    save('seed', String(fixedSeed));
+  } else {
+    if (fixedSeed != null) save('seed', String(fixedSeed)); else save('seed', '');
+  }
 
   var composed = compose();
   var prompt = composed.prompt;
@@ -1223,16 +1404,24 @@ async function start(){
 
   var firstDone = false;
   try {
-    await Promise.all(cards.map(function(card){
-      return withTimeout(genOne(card), 180000).then(
+    await Promise.all(cards.map(function(card, i){
+      var c = batch ? compose({ randomScenes: true }) : composed;
+      card.dataset.prompt = c.prompt;
+      card.dataset.neg = c.negative;
+      var seedFor = batch ? fixedSeed : (fixedSeed == null ? null : fixedSeed + i);
+      return withTimeout(genOne(card, seedFor), 180000).then(
         function(res){
           fillCard(card, res);
           if (!firstDone) { firstDone = true; tryFavicon(res); }
+          if (c.scene) {
+            var cap = card.querySelector('.caption');
+            if (cap && !cap.textContent) cap.textContent = c.scene;
+          }
         },
         function(err){ failCard(card, err); }
       );
     }));
-    setStatus('Done — ' + count + (count > 1 ? ' dreams' : ' dream') + ' brought to life.', 'success');
+    setStatus('Done — ' + count + (count > 1 ? ' dreams' : ' dream') + ' brought to life.' + (batch ? ' Same girl, new scenes.' : ''), 'success');
     gallery.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (err) {
     console.error(err);
@@ -1468,7 +1657,7 @@ function suggestFixes(){
   lines.push('favicon = {import:favicon-plugin}');
   lines.push('kv      = {import:kv-plugin}');
   lines.push('');
-  lines.push('// Customizable lists: contentMode, artStyle, hairColor, hairLength, eyeColor, skinTone,');
+  lines.push('// Customizable lists: contentMode, artStyle, standardStyles, composition, hairColor, hairLength, eyeColor, skinTone,');
   lines.push('// bodyType, attire, setting, mood, age, clothingTop/Bottom/Footwear/Accessories,');
   lines.push('// pose, timeOfDay, season, weather, dreamPrompt, userPrompt, negativePrompt, baseQuality');
   lines.push('// Each option item:  Label');
@@ -1531,12 +1720,19 @@ function init(){
   byId('sizeSelect').value = load('size', '768x768');
   byId('countInput').value = load('count', '1');
   byId('guidanceInput').value = load('guidance', '7');
+  byId('seedInput').value = load('seed', '');
 
   byId('generateBtn').addEventListener('click', start);
   byId('inspireBtn').addEventListener('click', inspireDream);
   byId('enhanceBtn').addEventListener('click', enhanceDream);
   byId('randomBtn').addEventListener('click', surprise);
   byId('resetBtn').addEventListener('click', resetAll);
+  byId('savePresetBtn').addEventListener('click', savePreset);
+  byId('loadPresetBtn').addEventListener('click', loadPreset);
+  byId('deletePresetBtn').addEventListener('click', deletePreset);
+  refreshPresetSelect();
+  byId('batchToggle').checked = load('batch', '') === '1';
+  byId('batchToggle').addEventListener('change', function(){ save('batch', byId('batchToggle').checked ? '1' : '0'); });
   byId('copyPromptBtn').addEventListener('click', copyPrompt);
   byId('clearBtn').addEventListener('click', clearGallery);
   byId('chatSendBtn').addEventListener('click', chatSend);
@@ -1564,6 +1760,7 @@ function init(){
     var el = byId(id);
     el.addEventListener('change', function(){ save(id, el.value); });
   });
+  byId('seedInput').addEventListener('change', function(){ save('seed', byId('seedInput').value); });
 
   wireDiagnostics();
   updatePrompt();

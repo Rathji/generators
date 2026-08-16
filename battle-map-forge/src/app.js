@@ -141,6 +141,7 @@ export class App {
     this.camera = { scale: 40, ox: 40, oy: 20 };
     this.hoverId = null;
     this.selectedId = null;
+    this.playerView = false;
     this.drag = null;
     this.pinch = null;
     this.activePointers = new Map();
@@ -264,6 +265,10 @@ export class App {
     if (Array.isArray(doc.chat)) this.syncChat(doc.chat);
     if (typeof doc.enforceLos === "boolean" && doc.enforceLos !== this.state.enforceLos) {
       this.state.enforceLos = doc.enforceLos;
+      if (!doc.enforceLos && this.playerView) {
+        this.playerView = false;
+        if (this.ui.playerViewBtn) this.ui.playerViewBtn.classList.remove("active");
+      }
       this.renderPlayers();
     }
     if (typeof doc.mapImage === "string" && doc.mapImage !== this.state.mapImage) {
@@ -387,7 +392,15 @@ export class App {
   }
 
   recomputeLos() {
-    if (this.isDm() || !this.state.enforceLos) {
+    const dm = this.isDm();
+    if (this.playerView && this.state.enforceLos) {
+      const sel = this.selectedId ? this.tokenById(this.selectedId) : null;
+      const ids = sel ? [sel.id] : this.state.tokens.map(t => t.id);
+      this.vis = computeVisibility(this.state.tokens, this.state.walls, ids, MAP_W, MAP_H);
+      this.buildFog();
+      return;
+    }
+    if (dm || !this.state.enforceLos) {
       this.vis.fill(1);
       return;
     }
@@ -459,6 +472,17 @@ export class App {
     if (this.selectedId === id) return;
     this.selectedId = id;
     if (this.ui.zoomTokenBtn) this.ui.zoomTokenBtn.disabled = !id;
+    if (this.playerView) this.scheduleLos();
+  }
+
+  onPlayerViewToggle() {
+    this.playerView = !this.playerView;
+    if (this.ui.playerViewBtn) this.ui.playerViewBtn.classList.toggle("active", this.playerView);
+    this.scheduleLos();
+    const sel = this.selectedId ? this.tokenById(this.selectedId) : null;
+    this.toast(this.playerView
+      ? "Player view: " + (sel ? "seeing from “" + sel.name + "”" : "showing what the party can see") + " — select a token to change the viewpoint"
+      : "Player view off — back to the full DM map");
   }
 
   zoomToSelected() {
@@ -483,12 +507,15 @@ export class App {
     ui.zoomOutBtn.addEventListener("click", () => this.zoomAt(this.canvas.clientWidth / 2, this.canvas.clientHeight / 2, 0.77));
     ui.fitBtn.addEventListener("click", () => this.fit());
     ui.zoomTokenBtn.addEventListener("click", () => this.zoomToSelected());
+    if (ui.playerViewBtn) ui.playerViewBtn.addEventListener("click", () => this.onPlayerViewToggle());
     ui.importBtn.addEventListener("click", () => this.onImport());
     ui.chatSendBtn.addEventListener("click", () => this.onChatSend());
     ui.chatInput.addEventListener("keydown", e => { if (e.key === "Enter") this.onChatSend(); });
     ui.nameSaveBtn.addEventListener("click", () => this.onNameSave());
     for (const b of ui.tabBtns) b.addEventListener("click", () => this.setTab(b.dataset.tab));
-    ui.sidebarToggle.addEventListener("click", () => ui.sidebar.classList.toggle("open"));
+    ui.sidebarToggle.addEventListener("click", () => this.toggleSidebar());
+    ui.sidebarFloatBtn.addEventListener("click", () => this.openSidebar());
+    ui.sidebarBackdrop.addEventListener("click", () => this.closeSidebar());
     ui.initAddBtn.addEventListener("click", () => this.onInitAdd());
     ui.initNextBtn.addEventListener("click", () => this.rpc("initNext", {}).catch(e => this.toast("Initiative: " + ((e && e.message) || e))));
     ui.initSortBtn.addEventListener("click", () => {
@@ -540,8 +567,14 @@ export class App {
   }
 
   updateDmUi() {
-    document.body.classList.toggle("isDm", this.isDm());
-    if (!this.isDm() && this.mode !== "move") this.mode = "move";
+    const dm = this.isDm();
+    document.body.classList.toggle("isDm", dm);
+    if (!dm && this.playerView) {
+      this.playerView = false;
+      if (this.ui.playerViewBtn) this.ui.playerViewBtn.classList.remove("active");
+      this.scheduleLos();
+    }
+    if (!dm && this.mode !== "move") this.mode = "move";
     this.updateModeUi();
     this.updateMapUi();
   }
@@ -550,6 +583,10 @@ export class App {
     for (const b of this.ui.tabBtns) b.classList.toggle("active", b.dataset.tab === name);
     for (const p of this.ui.panels) p.classList.toggle("active", p.id === "panel-" + name);
   }
+
+  openSidebar() { this.ui.sidebar.classList.add("open"); this.ui.sidebarBackdrop.hidden = false; }
+  closeSidebar() { this.ui.sidebar.classList.remove("open"); this.ui.sidebarBackdrop.hidden = true; }
+  toggleSidebar() { this.ui.sidebar.classList.toggle("open"); this.ui.sidebarBackdrop.hidden = !this.ui.sidebar.classList.contains("open"); }
 
   onPointerDown(e) {
     const rect = this.canvas.getBoundingClientRect();
@@ -1231,10 +1268,11 @@ export class App {
 
     const enforce = this.state.enforceLos === true;
     const dm = this.isDm();
+    const asPlayer = !dm || this.playerView === true;
     const drawList = [];
     for (const t of this.state.tokens) {
       if (this.drag && this.drag.kind === "token" && this.drag.id === t.id) continue;
-      if (!dm && enforce && !this.tokenVisible(t)) continue;
+      if (asPlayer && enforce && !this.tokenVisible(t)) continue;
       drawList.push(t);
     }
     if (this.drag && this.drag.kind === "token") {
@@ -1293,7 +1331,7 @@ export class App {
       ctx.restore();
     }
 
-    if (!dm && enforce) {
+    if (asPlayer && enforce) {
       if (!this.fogBuilt) this.buildFog();
       ctx.imageSmoothingEnabled = true;
       ctx.drawImage(this.fog, fx0, fy0, fw, fh);

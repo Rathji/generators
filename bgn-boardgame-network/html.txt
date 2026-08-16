@@ -115,10 +115,11 @@
   .btn-gold:hover{transform:translateY(-3px);box-shadow:0 14px 40px rgba(212,175,55,.5), inset 0 1px 0 rgba(255,255,255,.5)}
   .btn-ghost{color:var(--cream);border-color:rgba(212,175,55,.4);background:rgba(20,17,32,.35);backdrop-filter:blur(6px)}
   .btn-ghost:hover{border-color:var(--gold);color:var(--gold2);transform:translateY(-3px)}
+  .btn-sm{padding:10px 18px;font-size:.68rem}
   /* slideshow controls */
   .s-arrow{
     position:absolute;top:50%;transform:translateY(-50%);z-index:4;width:48px;height:48px;
-    border-radius:50%;border:1px solid rgba(212,175,55,.35);background:rgba(14,12,24,.45);color:var(--gold2);
+    border-radius:2px;border:1px solid rgba(212,175,55,.35);background:rgba(14,12,24,.45);color:var(--gold2);
     font-size:1.4rem;cursor:pointer;backdrop-filter:blur(6px);transition:all .3s;display:flex;align-items:center;justify-content:center;
   }
   .s-arrow:hover{background:rgba(212,175,55,.18);border-color:var(--gold)}
@@ -180,8 +181,9 @@
   .search:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.15)}
   .chips{display:flex;flex-wrap:wrap;gap:8px}
   .chip{
-    border:1px solid var(--line);background:rgba(23,20,40,.5);color:var(--muted);padding:8px 16px;
-    border-radius:999px;cursor:pointer;font-size:.78rem;letter-spacing:.06em;transition:all .25s;font-family:var(--sans);
+    border:1px solid rgba(212,175,55,.4);background:rgba(20,17,32,.35);color:var(--muted);padding:8px 16px;
+    border-radius:2px;cursor:pointer;font-family:var(--serif);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;
+    transition:all .3s;
   }
   .chip:hover{color:var(--gold2);border-color:rgba(212,175,55,.5)}
   .chip.on{background:linear-gradient(180deg,#f2dc8b,#d4af37);color:#221803;border-color:transparent;font-weight:600}
@@ -229,6 +231,19 @@
   .gridfade{animation:gfade .4s ease}
   @keyframes gfade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 
+  /* ── SHELVES (live games grouped by genre on top, coming soon below) ── */
+  #shelves{display:flex;flex-direction:column;gap:38px}
+  .shelf{display:flex;flex-direction:column;gap:18px}
+  .shelf-head{
+    display:flex;align-items:center;gap:14px;margin:0;
+    font-size:.86rem;letter-spacing:.3em;text-transform:uppercase;color:var(--gold2);
+  }
+  .shelf-head .count{
+    font-family:var(--sans);font-size:.62rem;letter-spacing:.1em;color:var(--muted);
+    font-weight:400;text-transform:none;padding:2px 9px;border:1px solid var(--line);border-radius:999px;
+  }
+  .shelf-head::after{content:"";height:1px;flex:1;background:linear-gradient(90deg,rgba(212,175,55,.55),transparent)}
+
   /* ── FOOTER ──────────────────────────────────────────── */
   footer{border-top:1px solid var(--line);padding:44px 0 50px;text-align:center;background:rgba(10,9,18,.6)}
   .ornament{display:flex;align-items:center;gap:16px;justify-content:center;color:var(--gold);opacity:.7;margin-bottom:22px}
@@ -251,25 +266,64 @@
      This block is PUBLIC source (it runs authoritatively on the
      server, but anyone can read it) — keep no secrets in here.
      Durable `state` layout:
-       [0]     version (1)
+       [0]     version (3)
        [1..4]  writeCount (uint32 LE) — messages ever appended
        [5..]   ring of MAX_REC fixed records, REC bytes each
                record: ts(4) nameLen(1) name(64) msgLen(1) msg(512)
+       [SUB_BASE..]  community-submission records, SUB_REC bytes each
+               record: status(1: 0=free 1=pending 2=approved) beta(1)
+                       ts(4) slug(48) title(48) genre(24) players(12)
+                       blurb(160) submitter(24)
+       [BUG_BASE..]  bug reports, BUG_REC bytes each
+               record: status(1: 0=free 1=open 2=resolved) ts(4)
+                       gameSlug(48) gameTitle(48) desc(300) reporter(24)
      GAME_MIN below is authoritative for matchmaking and must stay
      in sync with the `games` list in main.pjs.
      ════════════════════════════════════════════════════════════ -->
 <script type="text/x-server-plugin">
 "use strict";
-var VERSION = 1;
+var VERSION = 3;
 var REC = 4 + 1 + 64 + 1 + 512;
 var MAX_REC = Math.floor((state.length - 5) / REC);
 if (MAX_REC > 1500) MAX_REC = 1500;
 
+// ── Community submissions (the review shelf) ─────────────
+// Fixed-record region AFTER the lobby ring. Each record:
+//   status(1: 0=free 1=pending 2=approved) beta(1: 0/1) ts(4)
+//   slug(48) title(48) genre(24) players(12) blurb(160) submitter(24)
+var SUB_BASE = 5 + MAX_REC * REC;
+var SUB_REC  = 1 + 1 + 4 + 48 + 48 + 24 + 12 + 160 + 24;   // 322 bytes
+var SUB_LIMIT = Math.floor((state.length - SUB_BASE) / SUB_REC);
+if (SUB_LIMIT > 1000) SUB_LIMIT = 1000;
+if (SUB_LIMIT < 0) SUB_LIMIT = 0;
+var SUB_FREE = 0, SUB_PENDING = 1, SUB_APPROVED = 2;
+
+// ── Bug reports (Beta-game issues) ──────────────────────
+// Region AFTER the submission records.
+//   status(1: 1=open 2=resolved) ts(4) gameSlug(48) gameTitle(48)
+//   desc(300) reporter(24)
+var BUG_BASE = SUB_BASE + SUB_LIMIT * SUB_REC;
+var BUG_REC  = 1 + 4 + 48 + 48 + 300 + 24;                 // 425 bytes
+var BUG_LIMIT = Math.floor((state.length - BUG_BASE) / BUG_REC);
+if (BUG_LIMIT > 500) BUG_LIMIT = 500;
+if (BUG_LIMIT < 0) BUG_LIMIT = 0;
+var BUG_OPEN = 1, BUG_DONE = 2;
+
+// Admin review desk. Only the SHA-256 of the review password lives
+// here (generated at build time; the plaintext was given to the hub
+// owner). Never put the plaintext password anywhere in this source.
+var ADMIN_SHA256 = "f2f6b7ee9e8d6af2e63495ac327ad147c1d8b8eb5fc49524105c6061c4a240c2";
+var adminIds = new Set();
+var authRate = {};
+var subRateConn = {}, subRateNet = {}, bugRateConn = {}, bugRateNet = {};
+
 var GAME_MIN = {
+  "bgn-dnd-character-manager": 2, "battle-map-forge": 2, "bgn-tic-tac-toe": 2, "bng-sudoku": 2,
   "bgn-checkers": 2, "bgn-chess": 2, "bgn-scrabble": 2, "bgn-splendor": 2,
   "bgn-carcassonne": 2, "bgn-flux": 2, "bgn-risk": 2,
   "bgn-cover-your-assets": 2, "bgn-skull-king": 2, "bgn-golf": 2, "bgn-supremacy": 2,
-  "bgn-crossword": 2, "bgn-word-search": 2, "bgn-hearts": 4, "bgn-go-fish": 2
+  "bgn-crossword": 2, "bgn-word-search": 2, "bgn-hearts": 4, "bgn-go-fish": 2,
+  "battletech": 2
 };
 
 var BANNED = ["nigger", "nigga", "faggot", "kys", "kill yourself", "retard", "heil hitler", "tranny"];
@@ -280,13 +334,17 @@ var rateConn = {}, rateNet = {};
 var lastSweep = Date.now();
 
 self.onopen = function({conn}){
-  try{ conn.subscribe("lobby"); conn.subscribe("presence"); }catch(e){}
+  try{ conn.subscribe("lobby"); conn.subscribe("presence"); conn.subscribe("subs"); }catch(e){}
 };
 
 function writeU32(o, v){ state[o]=v&255; state[o+1]=(v>>>8)&255; state[o+2]=(v>>>16)&255; state[o+3]=(v>>>24)&255; }
 function readU32(o){ return ((state[o]|state[o+1]<<8|state[o+2]<<16|state[o+3]<<24)>>>0); }
 
-if (state[0] !== VERSION){ state[0] = VERSION; writeU32(1, 0); }
+if (state[0] === 0){ state[0] = VERSION; writeU32(1, 0); }
+else if (state[0] < VERSION){
+  if (state[0] === 2) migrateSubs(); // v2→v3: add beta byte (iterate slots in decreasing order — new records are 1 byte wider and would clobber the next old slot)
+  state[0] = VERSION;
+}
 
 function u8(s){
   var out=[], i, c; s=String(s);
@@ -317,6 +375,156 @@ function d8(a, o, l){
 function clean(s, max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").slice(0, max); }
 function isBanned(t){ var s=t.toLowerCase(); for(var i=0;i<BANNED.length;i++){ if(s.indexOf(BANNED[i])!==-1) return true; } return false; }
 function nowSec(){ return Math.floor(Date.now()/1000); }
+
+/* ── SHA-256 (synchronous pure-JS; the server has no crypto API) ── */
+function rotr(x,n){ return (x>>>n)|(x<<(32-n)); }
+function sha256hex(msg){
+  var K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  var H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  var l=msg.length, n=(((l+8)>>6)+1)<<6, m=new Uint8Array(n), i;
+  for(i=0;i<l;i++) m[i]=msg.charCodeAt(i)&255;
+  m[l]=0x80;
+  var bl=l*8;
+  m[n-4]=(bl>>>24)&255; m[n-3]=(bl>>>16)&255; m[n-2]=(bl>>>8)&255; m[n-1]=bl&255;
+  for(var blk=0;blk<n;blk+=64){
+    var w=new Uint32Array(64);
+    for(var t=0;t<16;t++) w[t]=(m[blk+t*4]<<24)|(m[blk+t*4+1]<<16)|(m[blk+t*4+2]<<8)|m[blk+t*4+3];
+    for(t=16;t<64;t++){
+      var s0=rotr(w[t-15],7)^rotr(w[t-15],18)^(w[t-15]>>>3);
+      var s1=rotr(w[t-2],17)^rotr(w[t-2],19)^(w[t-2]>>>10);
+      w[t]=(w[t-16]+s0+w[t-7]+s1)|0;
+    }
+    var a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(t=0;t<64;t++){
+      var S1=rotr(e,6)^rotr(e,11)^rotr(e,25);
+      var ch=(e&f)^(~e&g);
+      var t1=(h+S1+ch+K[t]+w[t])|0;
+      var S0=rotr(a,2)^rotr(a,13)^rotr(a,22);
+      var maj=(a&b)^(a&c)^(b&c);
+      var t2=(S0+maj)|0;
+      h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  var out="";
+  for(i=0;i<8;i++){ var hv=H[i]>>>0; out+=("00000000"+hv.toString(16)).slice(-8); }
+  return out;
+}
+
+/* ── submission storage ── */
+function subOff(slot){ return SUB_BASE + slot*SUB_REC; }
+function putStr(o, s, max){
+  var b=u8(s); if(b.length>max) b=b.slice(0,max);
+  state.set(b, o);
+}
+function subWrite(slot, ts, slug, title, genre, players, blurb, submitter, status, beta){
+  var o=subOff(slot);
+  state.fill(0, o, o+SUB_REC);
+  state[o]=status; state[o+1]=beta?1:0; writeU32(o+2, ts);
+  putStr(o+6, slug, 48); putStr(o+54, title, 48); putStr(o+102, genre, 24);
+  putStr(o+126, players, 12); putStr(o+138, blurb, 160); putStr(o+298, submitter, 24);
+}
+function subFree(slot){ state.fill(0, subOff(slot), subOff(slot)+SUB_REC); }
+function subRead(slot){
+  var o=subOff(slot), status=state[o];
+  if(!status) return null;
+  function f(off,len){ return d8(state, o+off, len).replace(/\u0000+$/,"").trim(); }
+  return {
+    id:slot, status:status, beta:state[o+1]?1:0, ts:readU32(o+2),
+    slug:f(6,48), title:f(54,48), genre:f(102,24),
+    players:f(126,12), blurb:f(138,160), submitter:f(298,24)
+  };
+}
+function migrateSubs(){
+  var oldRec=321, cap=Math.min(1000, Math.floor((state.length-SUB_BASE)/oldRec));
+  for(var i=cap-1;i>=0;i--){
+    var o=SUB_BASE+i*oldRec, st=state[o];
+    if(!st) continue;
+    var slug=d8(state,o+5,48).replace(/\u0000+$/,"").trim();
+    var title=d8(state,o+53,48).replace(/\u0000+$/,"").trim();
+    var genre=d8(state,o+101,24).replace(/\u0000+$/,"").trim();
+    var players=d8(state,o+125,12).replace(/\u0000+$/,"").trim();
+    var blurb=d8(state,o+137,160).replace(/\u0000+$/,"").trim();
+    var submitter=d8(state,o+297,24).replace(/\u0000+$/,"").trim();
+    subWrite(i, readU32(o+1), slug, title, genre, players, blurb, submitter, st, 0);
+  }
+}
+
+/* ── bug reports ── */
+function bugOff(i){ return BUG_BASE + i*BUG_REC; }
+function bugWrite(i, ts, slug, title, desc, reporter, status){
+  var o=bugOff(i);
+  state.fill(0, o, o+BUG_REC);
+  state[o]=status; writeU32(o+1, ts);
+  putStr(o+5, slug, 48); putStr(o+53, title, 48); putStr(o+101, desc, 300); putStr(o+401, reporter, 24);
+}
+function bugRead(i){
+  var o=bugOff(i), st=state[o];
+  if(!st) return null;
+  function f(off,len){ return d8(state, o+off, len).replace(/\u0000+$/,"").trim(); }
+  return { id:i, status:st, ts:readU32(o+1), slug:f(5,48), title:f(53,48), desc:f(101,300), reporter:f(401,24) };
+}
+function findFreeBug(){
+  for(var i=0;i<BUG_LIMIT;i++){ if(state[bugOff(i)]===0) return i; }
+  return -1;
+}
+function listBugs(){
+  var out=[];
+  for(var i=0;i<BUG_LIMIT && out.length<300;i++){
+    var b=bugRead(i);
+    if(b && b.status===BUG_OPEN) out.push(b);
+  }
+  return out;
+}
+function findFreeSub(){
+  for(var i=0;i<SUB_LIMIT;i++){ if(state[subOff(i)]===SUB_FREE) return i; }
+  return -1;
+}
+function listSubs(status){
+  var out=[];
+  for(var i=0;i<SUB_LIMIT && out.length<400;i++){
+    var r=subRead(i);
+    if(r && r.status===status) out.push(r);
+  }
+  return out;
+}
+function findSubBySlug(slug){
+  for(var i=0;i<SUB_LIMIT;i++){
+    var r=subRead(i);
+    if(r && r.slug===slug) return r;
+  }
+  return null;
+}
+function publishSubs(){ try{ pubsub.publish("subs", JSON.stringify({t:"subs", ev:"update"})); }catch(e){} }
+
+/* ── rate limiting for submissions & admin auth ── */
+function subRateAllow(conn){
+  var now=Date.now(), c=subRateConn[conn.id];
+  if(!c || now-c[1]>600000){ subRateConn[conn.id]=[1,now]; }
+  else{ if(c[0]>=2) return false; c[0]++; c[1]=now; }
+  var key="s"+conn.net[2], n=subRateNet[key];
+  if(!n || now-n[1]>3600000){ subRateNet[key]=[1,now]; }
+  else{ if(n[0]>=5) return false; n[0]++; n[1]=now; }
+  return true;
+}
+function bugRateAllow(conn){
+  var now=Date.now(), c=bugRateConn[conn.id];
+  if(!c || now-c[1]>600000){ bugRateConn[conn.id]=[1,now]; }
+  else{ if(c[0]>=5) return false; c[0]++; c[1]=now; }
+  var key="b"+conn.net[2], n=bugRateNet[key];
+  if(!n || now-n[1]>3600000){ bugRateNet[key]=[1,now]; }
+  else{ if(n[0]>=20) return false; n[0]++; n[1]=now; }
+  return true;
+}
+function authRateAllow(conn){
+  var now=Date.now(), b=authRate[conn.id];
+  if(!b || now-b[1]>60000){ authRate[conn.id]=[1,now]; return true; }
+  if(b[0]<5){ b[0]++; return true; }
+  var key="a"+conn.net[1], n=authRate[key];
+  if(!n || now-n[1]>60000){ authRate[key]=[1,now]; return true; }
+  if(n[0]>=25) return false;
+  n[0]++; return true;
+}
 
 function appendMsg(name, text){
   var wc=readU32(1), rec=5+(wc%MAX_REC)*REC;
@@ -372,6 +580,11 @@ function sweep(){
   var now=Date.now(); if(now-lastSweep<60000) return; lastSweep=now;
   for(var k in rateConn){ if(now-rateConn[k][1]>30000) delete rateConn[k]; }
   for(var k2 in rateNet){ if(now-rateNet[k2][1]>120000) delete rateNet[k2]; }
+  for(var k3 in subRateConn){ if(now-subRateConn[k3][1]>1800000) delete subRateConn[k3]; }
+  for(var k4 in subRateNet){ if(now-subRateNet[k4][1]>7200000) delete subRateNet[k4]; }
+  for(var k5 in authRate){ if(now-authRate[k5][1]>120000) delete authRate[k5]; }
+  for(var k6 in bugRateConn){ if(now-bugRateConn[k6][1]>1800000) delete bugRateConn[k6]; }
+  for(var k7 in bugRateNet){ if(now-bugRateNet[k7][1]>7200000) delete bugRateNet[k7]; }
 }
 
 self.onmessage = function({conn, data}){
@@ -445,6 +658,103 @@ self.rpc = {
       for(var i=q.length-1;i>=0;i--){ if(q[i].conn.id===conn.id){ q.splice(i,1); try{ conn.unsubscribe("q:"+g); }catch(e){} broadcastQueue(g); } }
     }
     return JSON.stringify({t:"left", ok:true});
+  },
+  submit: function({conn}, data){
+    if(!rateAllow(conn)) return JSON.stringify({ok:false, err:"You're sending too fast — slow down a moment."});
+    if(!subRateAllow(conn)) return JSON.stringify({ok:false, err:"You've submitted recently — one game at a time please."});
+    var d; try{ d=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false, err:"bad request"}); }
+    var slug=clean(d.slug,48).toLowerCase().replace(/[^a-z0-9-]/g,"");
+    if(!/^[a-z0-9][a-z0-9-]{1,47}$/.test(slug)){
+      return JSON.stringify({ok:false, err:"That generator name doesn't look valid (lowercase letters, numbers, hyphens)."});
+    }
+    var title=clean(d.title,48), blurb=clean(d.blurb,160);
+    var genre=clean(d.genre,24)||"Other";
+    var players=clean(d.players,12), submitter=clean(d.submitter||d.name,24)||"Anonymous";
+    var beta=(d.beta===1||d.beta===true||d.beta==="1")?1:0;
+    if(!title || !blurb) return JSON.stringify({ok:false, err:"Title and blurb are required."});
+    if(isBanned(title+" "+blurb+" "+submitter)) return JSON.stringify({ok:false, err:"That text isn't allowed here."});
+    var dup=findSubBySlug(slug);
+    if(dup) return JSON.stringify({ok:false, err: dup.status===SUB_APPROVED ? "That game is already on the shelf." : "That game is already awaiting review."});
+    for(var g in GAME_MIN){ if(g.toLowerCase()===slug) return JSON.stringify({ok:false, err:"That game is already on the shelf."}); }
+    var slot=findFreeSub();
+    if(slot<0) return JSON.stringify({ok:false, err:"The review shelf is full right now — try again later."});
+    subWrite(slot, nowSec(), slug, title, genre, players, blurb, submitter, SUB_PENDING, beta);
+    publishSubs();
+    return JSON.stringify({ok:true, id:slot});
+  },
+  adminLogin: function({conn}, data){
+    if(!authRateAllow(conn)) return "denied";
+    var pw=String(data||""); if(pw.length>200) return "denied";
+    if(sha256hex(pw)!==ADMIN_SHA256) return "denied";
+    adminIds.add(conn.id);
+    return "ok";
+  },
+  approvedSubs: function({conn}, data){
+    return JSON.stringify({t:"subs", list:listSubs(SUB_APPROVED)});
+  },
+  pendingSubs: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    return JSON.stringify({t:"subs", list:listSubs(SUB_PENDING)});
+  },
+  approveSub: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    var id=parseInt(String(data),10);
+    if(isNaN(id) || id<0 || id>=SUB_LIMIT) return JSON.stringify({ok:false, err:"bad id"});
+    var r=subRead(id);
+    if(!r || r.status!==SUB_PENDING) return JSON.stringify({ok:false, err:"not pending"});
+    subWrite(id, r.ts, r.slug, r.title, r.genre, r.players, r.blurb, r.submitter, SUB_APPROVED, r.beta);
+    publishSubs();
+    return JSON.stringify({ok:true});
+  },
+  rejectSub: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    var id=parseInt(String(data),10);
+    if(isNaN(id) || id<0 || id>=SUB_LIMIT) return JSON.stringify({ok:false, err:"bad id"});
+    var r=subRead(id);
+    if(!r || r.status!==SUB_PENDING) return JSON.stringify({ok:false, err:"not pending"});
+    subFree(id);
+    publishSubs();
+    return JSON.stringify({ok:true});
+  },
+  removeSub: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    var id=parseInt(String(data),10);
+    if(isNaN(id) || id<0 || id>=SUB_LIMIT) return JSON.stringify({ok:false, err:"bad id"});
+    var r=subRead(id);
+    if(!r || r.status!==SUB_APPROVED) return JSON.stringify({ok:false, err:"not approved"});
+    subFree(id);
+    publishSubs();
+    return JSON.stringify({ok:true});
+  },
+  reportBug: function({conn}, data){
+    if(!rateAllow(conn)) return JSON.stringify({ok:false, err:"You're sending too fast — slow down a moment."});
+    if(!bugRateAllow(conn)) return JSON.stringify({ok:false, err:"You've sent a few reports recently — give us a moment to catch up."});
+    var d; try{ d=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false, err:"bad request"}); }
+    var slug=clean(d.game,48).toLowerCase().replace(/[^a-z0-9-]/g,"");
+    if(!/^[a-z0-9][a-z0-9-]{1,47}$/.test(slug)) return JSON.stringify({ok:false, err:"That game name doesn't look right."});
+    var desc=clean(d.desc,300);
+    if(desc.length<10) return JSON.stringify({ok:false, err:"Tell us a little more — at least a sentence about what happened."});
+    var title=clean(d.title,48)||slug, reporter=clean(d.name,24)||"Anonymous";
+    if(isBanned(desc+" "+reporter)) return JSON.stringify({ok:false, err:"That text isn't allowed here."});
+    var slot=findFreeBug();
+    if(slot<0) return JSON.stringify({ok:false, err:"The bug inbox is full right now — try again later."});
+    bugWrite(slot, nowSec(), slug, title, desc, reporter, BUG_OPEN);
+    publishSubs();
+    return JSON.stringify({ok:true, id:slot});
+  },
+  bugs: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    return JSON.stringify({t:"bugs", list:listBugs()});
+  },
+  resolveBug: function({conn}, data){
+    if(!adminIds.has(conn.id)) throw new Error("unauthorized");
+    var id=parseInt(String(data),10);
+    if(isNaN(id) || id<0 || id>=BUG_LIMIT) return JSON.stringify({ok:false, err:"bad id"});
+    var b=bugRead(id);
+    if(!b || b.status!==BUG_OPEN) return JSON.stringify({ok:false, err:"not open"});
+    bugWrite(id, b.ts, b.slug, b.title, b.desc, b.reporter, BUG_DONE);
+    publishSubs();
+    return JSON.stringify({ok:true});
   }
 };
 </script>
@@ -465,8 +775,23 @@ self.rpc = {
     <div class="nav-links">
       <a href="#about">About</a>
       <a href="#games">Games</a>
+      <a href="#beta">Beta</a>
+      <a href="#community">Community</a>
       <a href="#templates">Templates</a>
+      <a href="#submit">Submit</a>
+      <a href="#" id="helpLink" title="Reopen the welcome tour">?</a>
       <a href="#top">Home</a>
+    </div>
+    <div class="nav-actions">
+      <button class="lobby-fab" id="lobbyBtn" title="Lobby Lounge" aria-label="Open lobby">
+        <span aria-hidden="true">♟</span>
+        <span class="lobby-fab-label">Lobby</span>
+        <span class="lobby-fab-badge" id="onlineBadge">…</span>
+      </button>
+      <a class="bgn-nav-projects" id="rathjiBackBtn" href="[projectsUrl]" target="_blank" rel="noopener" title="Rathji's Projects" aria-label="Rathji's Projects">
+        <span class="rb-badge">R</span>
+        <span class="rb-label">Rathji's Projects</span>
+      </a>
     </div>
   </div>
 </nav>
@@ -551,7 +876,7 @@ self.rpc = {
       <div class="chips" id="chips"></div>
     </div>
 
-    <div class="grid" id="grid"></div>
+    <div id="shelves"></div>
   </div>
 </section>
 
@@ -567,24 +892,692 @@ self.rpc = {
   </div>
 </section>
 
+<!-- ═══════════ IN BETA SECTION + WELCOME & BUG MODALS ═══════════ -->
+<style>
+  /* ── In Beta section ── */
+  .card-beta-badge{
+    position:absolute;top:10px;left:10px;z-index:2;font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;
+    color:#ffd88a;background:rgba(10,9,18,.72);border:1px solid rgba(255,180,80,.55);padding:4px 9px;border-radius:999px;backdrop-filter:blur(4px);
+  }
+  .beta-card .card-cover{filter:saturate(.85)}
+  .beta-card{cursor:pointer}
+  .beta-card:focus-visible{outline:2px solid var(--gold2);outline-offset:2px}
+  .beta-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px}
+  .bug-btn{
+    font-family:var(--serif);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:var(--gold2);
+    background:rgba(20,17,32,.35);border:1px solid rgba(212,175,55,.4);border-radius:2px;padding:10px 18px;cursor:pointer;transition:all .3s;
+  }
+  .bug-btn:hover{background:rgba(212,175,55,.14);border-color:var(--gold)}
+  .beta-reqs{
+    max-width:760px;margin:0 auto 38px;background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.01));
+    border:1px solid rgba(255,180,80,.25);border-left:3px solid rgba(255,180,80,.6);border-radius:12px;padding:20px 24px;
+  }
+  .beta-reqs h4{margin:0 0 12px;font-size:.86rem;letter-spacing:.24em;text-transform:uppercase;color:#ffd88a;font-family:var(--serif);font-weight:600}
+  .beta-reqs ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:7px}
+  .beta-reqs li{color:var(--muted);font-size:.88rem;line-height:1.5}
+  .beta-reqs .bug-line{margin:14px 0 0;color:var(--muted);font-size:.84rem;padding-top:12px;border-top:1px solid var(--line)}
+  .beta-reqs .bug-line b{color:var(--gold2);font-weight:600}
+  .beta-hint{text-align:center;color:var(--muted);font-size:.82rem;margin-top:28px}
+
+  /* ── welcome modal ── */
+  .welcome-bg{position:fixed;inset:0;z-index:8000;background:rgba(6,5,12,.8);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px}
+  .welcome-bg[hidden]{display:none}
+  .welcome-panel{
+    position:relative;width:min(600px,100%);max-height:92vh;overflow-y:auto;
+    background:linear-gradient(180deg,#1e1933,#120f1f);border:1px solid rgba(212,175,55,.4);
+    border-radius:20px;padding:40px 42px 34px;text-align:center;box-shadow:0 50px 140px rgba(0,0,0,.8),0 0 80px rgba(212,175,55,.12);
+    animation:welcomePop .45s ease;
+  }
+  @keyframes welcomePop{from{opacity:0;transform:scale(.94) translateY(14px)}to{opacity:1;transform:none}}
+  .welcome-x{position:absolute;top:14px;right:16px;background:rgba(20,17,32,.35);border:1px solid rgba(212,175,55,.4);border-radius:2px;color:var(--muted);font-size:1.05rem;cursor:pointer;padding:6px;transition:all .3s}
+  .welcome-x:hover{color:var(--gold2);border-color:var(--gold)}
+  .welcome-mark{font-size:2.6rem;color:var(--gold2);margin-bottom:6px}
+  .welcome-title{font-size:clamp(1.6rem,4vw,2.2rem);margin:10px 0 12px}
+  .welcome-intro{color:var(--muted);font-weight:300;font-size:.95rem;max-width:460px;margin:0 auto 24px;line-height:1.6}
+  .welcome-cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;text-align:left;margin-bottom:26px}
+  .welcome-cols>div{background:rgba(23,20,40,.55);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .welcome-cols b{display:block;color:var(--cream);font-size:.86rem;margin-bottom:4px}
+  .welcome-cols span{color:var(--muted);font-size:.78rem;line-height:1.55;display:block}
+  @media(max-width:620px){.welcome-cols{grid-template-columns:1fr}.welcome-panel{padding:30px 22px 24px}}
+  .welcome-cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;align-items:center}
+  .welcome-skip{font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.68rem;padding:10px 18px;border-radius:2px;border:1px solid rgba(212,175,55,.4);color:var(--cream);background:rgba(20,17,32,.35);cursor:pointer;transition:all .3s}
+  .welcome-skip:hover{color:var(--gold2);border-color:var(--gold)}
+
+  /* ── bug report modal ── */
+  .bug-bg{position:fixed;inset:0;z-index:750;background:rgba(6,5,12,.66);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:18px}
+  .bug-bg[hidden]{display:none}
+  .bug-panel{width:min(520px,100%);display:flex;flex-direction:column;background:linear-gradient(180deg,#1e1933,#141120);border:1px solid rgba(255,180,80,.35);border-radius:18px;box-shadow:0 40px 110px rgba(0,0,0,.7);overflow:hidden}
+  .bug-head{display:flex;align-items:flex-start;justify-content:space-between;padding:20px 22px 14px;border-bottom:1px solid var(--line)}
+  .bug-title{font-size:1.05rem;color:var(--cream)}
+  .bug-sub{font-size:.74rem;color:var(--muted);margin-top:3px}
+  .bug-body{padding:20px 22px 22px;display:flex;flex-direction:column;gap:14px}
+  .bug-body label{display:flex;flex-direction:column;gap:7px;font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .bug-body .opt{text-transform:none;color:#6f6880;letter-spacing:0;font-size:.72rem;font-weight:400}
+  .bug-desc{background:rgba(23,20,40,.7);border:1px solid var(--line);color:var(--text);padding:11px 12px;border-radius:8px;font-family:var(--sans);font-size:.86rem;outline:none;resize:vertical}
+  .bug-desc:focus{border-color:var(--gold)}
+  .bug-status{min-height:1.3em;margin:0;text-align:center;font-size:.86rem;color:var(--muted)}
+  .bug-status.ok{color:var(--green)}
+  .bug-status.err{color:#e08a7a}
+</style>
+
+<!-- ═══════════ WELCOME / INTRO MODAL ═══════════ -->
+<div class="welcome-bg" id="welcomeBg" hidden role="dialog" aria-label="Welcome to the Boardgame Network">
+  <div class="welcome-panel">
+    <button class="welcome-x" id="welcomeCloseBtn" aria-label="Close welcome">✕</button>
+    <div class="welcome-mark" aria-hidden="true">⚄</div>
+    <div class="sec-eyebrow">♟ Welcome</div>
+    <h2 class="welcome-title goldtext">The Boardgame Network</h2>
+    <p class="welcome-intro">One room, many tables. The BGN is a corner of Perchance where game-makers build, share, and play tabletop games together. Every box on the shelf was made by someone in the network.</p>
+    <div class="welcome-cols">
+      <div><b>🕹 The Shelf</b><span>Finished games — tested, polished, ready to play.</span></div>
+      <div><b>⚠ In Beta</b><span>Playable but <b style="color:var(--gold2)">not fully tested</b> — expect rough edges. Found a bug? Every Beta game has a "Report a bug" button; reports go straight to the review desk.</span></div>
+      <div><b>♜ Community</b><span>Games built by members and approved for the network.</span></div>
+      <div><b>🛠 Templates</b><span>Ready-to-fork starting points for building your own game.</span></div>
+    </div>
+    <div class="welcome-cta">
+      <a class="btn btn-gold" href="#games">Enter the Game Room</a>
+      <a class="btn btn-ghost" href="#beta">See In Beta</a>
+      <button class="welcome-skip" id="welcomeSkipBtn">Got it</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ IN BETA SHELF ═══════════ -->
+<section id="beta" style="scroll-margin-top:80px;padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-eyebrow">⚠ In Beta</div>
+      <h2 class="sec-title goldtext">Games Being Forged</h2>
+      <p class="sec-sub">Playable, but NOT fully tested — expect rough edges, half-built features, and the occasional rules collision. Try them, poke at them, and tell us what breaks.</p>
+    </div>
+    <div class="beta-reqs">
+      <h4>To submit a game as Beta</h4>
+      <ul>
+        <li>Saved publicly on perchance.org with a real generator name.</li>
+        <li>Playable end-to-end: you can start, play, and restart without errors.</li>
+        <li>A title, genre, one-line blurb, and player count set.</li>
+        <li>Clear enough for a stranger to start playing — a How-to-Play helps a lot.</li>
+        <li>Made by someone actively finishing it. Rough edges are expected; broken is not.</li>
+      </ul>
+      <p class="bug-line">Found a bug? Every Beta game below has a <b>🐞 Report a bug</b> button — your report goes straight to the network's review desk.</p>
+    </div>
+    <div class="grid" id="betaGrid">
+      <div class="empty-state"><div class="big">⚠</div>No games in Beta right now.</div>
+    </div>
+    <p class="beta-hint">The crew decides what lands here — mention a game in the lobby, or tick the "Beta" box when you submit your game.</p>
+  </div>
+</section>
+
+<!-- ═══════════ BUG REPORT MODAL ═══════════ -->
+<div class="bug-bg" id="bugBg" hidden role="dialog" aria-label="Report a bug">
+  <div class="bug-panel">
+    <header class="bug-head">
+      <div><h3 class="bug-title">Report a Bug</h3><div class="bug-sub">Helps the crew polish Beta games before they reach the shelf.</div></div>
+      <button class="admin-x" id="bugCloseBtn" aria-label="Close">✕</button>
+    </header>
+    <div class="bug-body">
+      <label>Game
+        <select class="search" id="bugGameSel" aria-label="Which game"></select>
+      </label>
+      <label>What went wrong?
+        <textarea class="bug-desc" id="bugDescInput" maxlength="300" rows="4" placeholder="What did you do, what happened, and what did you expect to happen?"></textarea>
+      </label>
+      <label>Your name <span class="opt">(optional)</span>
+        <input class="search" id="bugNameInput" maxlength="24" placeholder="Who's reporting?">
+      </label>
+      <button class="btn btn-gold" id="bugSubmitBtn">Send Bug Report</button>
+      <p class="bug-status" id="bugStatus"></p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ COMMUNITY SHELF (approved submissions) + SUBMIT A GAME ═══════════ -->
+<style>
+  /* ── community shelf ── */
+  .sub-by{font-size:.72rem;color:#7b7490;letter-spacing:.04em;margin-top:2px}
+  /* ── submit form ── */
+  .submit-card{
+    max-width:640px;margin:0 auto;background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.012));
+    border:1px solid var(--line);border-radius:16px;padding:30px 32px;
+  }
+  .submit-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px 18px}
+  .submit-fields label{display:flex;flex-direction:column;gap:7px;font-size:.76rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .submit-fields label.full{grid-column:1/-1}
+  .submit-fields .opt{text-transform:none;color:#6f6880;letter-spacing:0;font-size:.72rem;font-weight:400}
+  .submit-fields .hint{text-transform:none;color:#6f6880;letter-spacing:0;font-size:.7rem;font-weight:400;margin-top:-2px}
+  .beta-check{display:flex;align-items:center;gap:9px;justify-content:center;margin-top:18px;font-size:.84rem;color:var(--muted);cursor:pointer}
+  .beta-check input{width:16px;height:16px;accent-color:#d4af37;cursor:pointer;flex:0 0 auto}
+  .beta-check b{color:#ffd88a;font-weight:600}
+  .submit-fields .search{flex:1}
+  .submit-btn{display:block;margin:26px auto 0}
+  .submit-status{min-height:1.4em;text-align:center;margin:14px 0 0;font-size:.88rem;color:var(--muted)}
+  .submit-status.ok{color:var(--green)}
+  .submit-status.err{color:#e08a7a}
+  .submit-spin{display:inline-block;animation:spin 1s linear infinite;margin-right:6px}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+  @media(max-width:640px){.submit-fields{grid-template-columns:1fr}.submit-fields label.full{grid-column:auto}}
+  /* ── admin review desk ── */
+  .admin-link{font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.68rem;padding:10px 18px;border-radius:2px;border:1px solid rgba(212,175,55,.4);color:var(--cream);background:rgba(20,17,32,.35);cursor:pointer;transition:all .3s}
+  .admin-link:hover{color:var(--gold2);border-color:var(--gold)}
+  .admin-bg{position:fixed;inset:0;z-index:700;background:rgba(6,5,12,.66);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:18px}
+  .admin-bg[hidden]{display:none}
+  .admin-panel{width:min(560px,100%);max-height:min(720px,92vh);display:flex;flex-direction:column;background:linear-gradient(180deg,#1e1933,#141120);border:1px solid rgba(212,175,55,.35);border-radius:18px;box-shadow:0 40px 110px rgba(0,0,0,.7);overflow:hidden}
+  .admin-head{display:flex;align-items:flex-start;justify-content:space-between;padding:20px 22px 14px;border-bottom:1px solid var(--line)}
+  .admin-title{font-size:1.05rem;color:var(--cream)}
+  .admin-sub{font-size:.74rem;color:var(--muted);margin-top:3px}
+  .admin-x{background:rgba(20,17,32,.35);border:1px solid rgba(212,175,55,.4);border-radius:2px;color:var(--muted);font-size:1rem;cursor:pointer;padding:6px;transition:all .3s}
+  .admin-x:hover{color:var(--gold2);border-color:var(--gold)}
+  #adminLogin{padding:22px;display:flex;flex-direction:column;gap:12px}
+  .admin-hint{font-size:.84rem;color:var(--muted);margin:0}
+  .admin-pw{background:rgba(23,20,40,.7);border:1px solid var(--line);color:var(--text);padding:11px 12px;border-radius:8px;font-family:var(--sans);font-size:.9rem;outline:none}
+  .admin-pw:focus{border-color:var(--gold)}
+  .admin-err{min-height:1.2em;margin:0;font-size:.82rem;color:#e08a7a}
+  #adminPanel{display:flex;flex-direction:column;min-height:0;flex:1}
+  .admin-tabs{display:flex;border-bottom:1px solid var(--line)}
+  .admin-tab{flex:1;background:none;border:none;color:var(--muted);padding:11px;font-family:var(--serif);letter-spacing:.12em;text-transform:uppercase;font-size:.72rem;cursor:pointer;border-bottom:2px solid transparent;transition:color .2s}
+  .admin-tab.on{color:var(--gold2);border-bottom-color:var(--gold)}
+  .admin-count{font-family:var(--sans);font-size:.62rem;background:rgba(212,175,55,.15);color:var(--gold2);border-radius:999px;padding:1px 7px;margin-left:4px}
+  .admin-scroll{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;min-height:120px}
+  .admin-item{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:rgba(23,20,40,.4)}
+  .admin-item-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .admin-item-title{color:var(--cream);font-size:.98rem}
+  .admin-item-genre{font-size:.6rem;letter-spacing:.16em;text-transform:uppercase;color:var(--green);border:1px solid rgba(47,174,140,.4);padding:2px 7px;border-radius:2px}
+  .admin-item-genre.beta-chip{color:#ffd88a;border-color:rgba(255,180,80,.5)}
+  .admin-item-by{font-size:.72rem;color:#6f6880}
+  .admin-item-slug{font-size:.74rem;color:var(--gold2);word-break:break-all}
+  .admin-item-blurb{color:var(--muted);font-size:.84rem;margin:8px 0 10px;line-height:1.5}
+  .admin-item-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .admin-act{font-family:var(--serif);font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;padding:10px 18px;border-radius:2px;cursor:pointer;border:1px solid;transition:all .3s;background:rgba(20,17,32,.35)}
+  .admin-act.approve{color:#5fd6b2;border-color:rgba(47,174,140,.55)}
+  .admin-act.approve:hover{background:rgba(47,174,140,.14);border-color:#5fd6b2}
+  .admin-act.reject{color:#e08a7a;border-color:rgba(224,81,47,.5)}
+  .admin-act.reject:hover{background:rgba(224,81,47,.12);border-color:#e08a7a}
+  .admin-act.copy{color:var(--gold2);border-color:rgba(212,175,55,.4)}
+  .admin-act.copy:hover{background:rgba(212,175,55,.12);border-color:var(--gold)}
+  .admin-empty{color:var(--muted);text-align:center;padding:40px 0;font-size:.9rem}
+  .admin-pjs{width:100%;margin-top:8px;background:#0e0b18;border:1px solid var(--line);color:#cfc8b8;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;padding:9px;border-radius:8px;resize:vertical}
+</style>
+
+<section id="community" style="scroll-margin-top:80px;padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-eyebrow">♜ From the Community</div>
+      <h2 class="sec-title goldtext">New Boxes From New Builders</h2>
+      <p class="sec-sub" id="communitySub">Games submitted by the network and approved for the shelf.</p>
+    </div>
+    <div class="grid" id="communityGrid">
+      <div class="empty-state"><div class="big">⚄</div>Checking the shelf…</div>
+    </div>
+  </div>
+</section>
+
+<section id="submit" style="scroll-margin-top:80px;padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head">
+      <div class="sec-eyebrow">✉ Submit Your Game</div>
+      <h2 class="sec-title goldtext">Join the Network</h2>
+      <p class="sec-sub">Built something playable on Perchance? Put it on the BGN shelf. We check that it exists, you tell us about it, and the crew approves it.</p>
+    </div>
+    <div class="submit-card">
+      <div class="submit-fields">
+        <label>Generator name
+          <input class="search" id="subSlugInput" placeholder="my-awesome-game" autocomplete="off" spellcheck="false">
+          <small class="hint">after perchance.org/</small>
+        </label>
+        <label>Title on the shelf
+          <input class="search" id="subTitleInput" placeholder="e.g. My Awesome Game" maxlength="48">
+        </label>
+        <label>Genre
+          <input class="search" id="subGenreInput" list="genreList" placeholder="Strategy, Party, Card, Word…" maxlength="24">
+          <datalist id="genreList"></datalist>
+        </label>
+        <label>Players <span class="opt">(optional)</span>
+          <input class="search" id="subPlayersInput" placeholder="e.g. 2–4 players" maxlength="12">
+        </label>
+        <label class="full">One-line blurb
+          <input class="search" id="subBlurbInput" placeholder="What's the game about?" maxlength="160">
+        </label>
+        <label class="full">Your name <span class="opt">(optional)</span>
+          <input class="search" id="subNameInput" placeholder="How should we credit you?" maxlength="24">
+        </label>
+      </div>
+      <label class="beta-check">
+        <input type="checkbox" id="subBetaInput">
+        <span>This is a <b>Beta</b> — playable but not fully tested. It'll be listed in the In Beta section.</span>
+      </label>
+      <button class="btn btn-gold submit-btn" id="submitBtn">Send to the Review Shelf</button>
+      <p class="submit-status" id="submitStatus"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════ ADMIN REVIEW DESK ═══════════ -->
+<div class="admin-bg" id="adminBg" hidden>
+  <div class="admin-panel" role="dialog" aria-label="BGN review desk">
+    <header class="admin-head">
+      <div>
+        <h3 class="admin-title">BGN Review Desk</h3>
+        <div class="admin-sub" id="adminSub"></div>
+      </div>
+      <button class="admin-x" id="adminCloseBtn" aria-label="Close">✕</button>
+    </header>
+    <div id="adminLogin">
+      <p class="admin-hint">Enter the review password to manage community submissions.</p>
+      <input class="admin-pw" id="adminPwInput" type="password" placeholder="Review password" autocomplete="off" aria-label="Review password">
+      <button class="btn btn-gold" id="adminLoginBtn">Unlock</button>
+      <p class="admin-err" id="adminErr"></p>
+    </div>
+    <div id="adminPanel" hidden>
+      <div class="admin-tabs">
+        <button class="admin-tab on" data-atab="pending">Pending <span class="admin-count" id="pendingCount"></span></button>
+        <button class="admin-tab" data-atab="approved">Approved <span class="admin-count" id="approvedCount"></span></button>
+        <button class="admin-tab" data-atab="bugs">Bugs <span class="admin-count" id="bugCount"></span></button>
+      </div>
+      <div class="admin-scroll" id="adminList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); }
+  function fmtDate(ts){ try{ return new Date(ts*1000).toLocaleDateString(undefined,{month:"short",day:"numeric"}); }catch(e){ return ""; } }
+
+  function nodeVal(n){ return n==null?"":String(typeof n.evaluateItem==="function"?n.evaluateItem:n); }
+  function readGames(name){
+    var out=[];
+    if(window.root && root[name]){
+      out=root[name].selectAll.map(function(g){
+        return {slug:nodeVal(g.slug), title:nodeVal(g.title), genre:nodeVal(g.genre), blurb:nodeVal(g.blurb), players:nodeVal(g.players), beta:nodeVal(g.beta)==="true"};
+      }).filter(function(g){ return g.slug; });
+    }
+    return out;
+  }
+  var GAMES=readGames("games");
+
+  var PALETTE=["#d4af37","#e0512f","#3f7fe0","#a05fe0","#2fae8c","#e0893f","#e04f8c","#59a3d9"];
+  var GLYPHS=["♟","♞","♜","♝","♛","♚","♠","♦","⚄","✚","✦","✠"];
+  function h(str){ var s=0; for(var i=0;i<str.length;i++) s=(s*31+str.charCodeAt(i))>>>0; return s; }
+  function autoColor(slug){ return PALETTE[h(slug)%PALETTE.length]; }
+  function autoGlyph(slug){ return GLYPHS[h(slug)%GLYPHS.length]; }
+  function shade(hex, amt){
+    var c=hex.replace("#",""); if(c.length===3)c=c.split("").map(function(x){return x+x;}).join("");
+    var n=parseInt(c,16), r=n>>16, g=(n>>8)&255, b=n&255;
+    r=Math.max(0,Math.min(255,Math.round(r*amt))); g=Math.max(0,Math.min(255,Math.round(g*amt))); b=Math.max(0,Math.min(255,Math.round(b*amt)));
+    return "#"+(r<16?"0":"")+r.toString(16)+(g<16?"0":"")+g.toString(16)+(b<16?"0":"")+b.toString(16);
+  }
+
+  var socket=null, retryDelay=1000, approved=[], approvedById={}, pending=[], bugs=[], adminPw=null, adminTab="pending";
+  var communityGrid=$("communityGrid"), communitySub=$("communitySub");
+
+  /* ── socket lifecycle ── */
+  function connect(){
+    if(!window.root || !root.createServerSocket) return;
+    var s=root.createServerSocket();
+    s.binaryType="arraybuffer";
+    s.addEventListener("open",function(){ onOpen(s); });
+    s.addEventListener("message",function(ev){ onMessage(ev.data); });
+    s.addEventListener("close",function(ev){ onClose(ev); });
+    socket=s;
+  }
+  function onOpen(s){
+    retryDelay=1000;
+    refreshApproved();
+    if(adminPw){ s.rpc.adminLogin(adminPw).then(function(r){ if(r==="ok") refreshPending(); }).catch(function(){}); }
+  }
+  function onMessage(data){
+    if(typeof data!=="string") return;
+    var m; try{ m=JSON.parse(data); }catch(e){ return; }
+    if(!m || !m.t) return;
+    if(m.t==="subs"){ refreshApproved(); if(adminPw && !$("adminPanel").hidden) refreshBugs(); }
+  }
+  function onClose(ev){
+    socket=null;
+    if(ev && ev.code===4403) return;
+    setTimeout(connect, retryDelay);
+    retryDelay=Math.min(retryDelay*2,15000);
+  }
+  function refreshApproved(){
+    if(!socket || socket.readyState!==1) return;
+    socket.rpc.approvedSubs("").then(function(r){
+      var m; try{ m=JSON.parse(r); }catch(e){ return; }
+      approved=(m&&m.list)||[];
+      approvedById={};
+      approved.forEach(function(g){ approvedById[g.id]=g; });
+      renderCommunity();
+      if(!$("adminPanel").hidden) renderApproved();
+    }).catch(function(){});
+  }
+
+  /* ── community shelf ── */
+  function renderCommunity(){
+    if(communitySub) communitySub.textContent = approved.length
+      ? approved.length+" game"+(approved.length===1?"":"s")+" submitted by the community and approved for the shelf."
+      : "No community games yet — submit yours below and be the first.";
+    if(!communityGrid) return;
+    if(!approved.length){
+      communityGrid.innerHTML='<div class="empty-state"><div class="big">⚄</div>No community games on the shelf yet.</div>';
+      return;
+    }
+    communityGrid.innerHTML=approved.map(cardHtml).join("");
+  }
+  function cardHtml(g){
+    var color=autoColor(g.slug), glyph=autoGlyph(g.slug);
+    return '<a class="card gridfade" href="https://perchance.org/'+encodeURIComponent(g.slug)+'" target="_blank" rel="noopener">'+
+      '<div class="card-cover" style="background:linear-gradient(155deg,'+color+' 0%,'+shade(color,0.35)+' 55%,'+shade(color,0.16)+' 100%)">'+
+        (g.beta?'<span class="card-beta-badge">In Beta</span>':"")+
+        '<span class="cover-glyph">'+glyph+'</span>'+
+        (g.players?'<span class="card-players">'+esc(g.players)+'</span>':"")+
+      '</div>'+
+      '<div class="card-body">'+
+        '<h3 class="card-title">'+esc(g.title)+'</h3>'+
+        (g.genre?'<span class="genre-chip">'+esc(g.genre)+'</span>':"")+
+        '<p class="card-blurb">'+esc(g.blurb)+'</p>'+
+        '<span class="play-link">Play <span aria-hidden="true">→</span></span>'+
+        (g.submitter && g.submitter!=="Anonymous"?'<span class="sub-by">by '+esc(g.submitter)+'</span>':"")+
+      '</div></a>';
+  }
+
+  /* ── submit form ── */
+  var slugInput=$("subSlugInput"), titleInput=$("subTitleInput"), genreInput=$("subGenreInput"),
+      playersInput=$("subPlayersInput"), blurbInput=$("subBlurbInput"), nameInput=$("subNameInput"),
+      betaInput=$("subBetaInput"),
+      submitBtn=$("submitBtn"), submitStatus=$("submitStatus");
+  try{ nameInput.value=localStorage.getItem("bgn_name")||""; }catch(e){}
+  var genres=["Other"];
+  GAMES.forEach(function(g){ if(g.genre && genres.indexOf(g.genre)===-1) genres.push(g.genre); });
+  var dl=$("genreList");
+  genres.forEach(function(ge){ var o=document.createElement("option"); o.value=ge; dl.appendChild(o); });
+
+  function setStatus(txt, cls){ submitStatus.textContent=txt||""; submitStatus.className="submit-status"+(cls?" "+cls:""); }
+  function alreadyOnShelf(slug){
+    for(var i=0;i<GAMES.length;i++) if(GAMES[i].slug.toLowerCase()===slug) return true;
+    for(var j=0;j<approved.length;j++) if(approved[j].slug===slug) return true;
+    return false;
+  }
+  submitBtn.addEventListener("click", function(){
+    var slug=slugInput.value.trim().toLowerCase();
+    var title=titleInput.value.trim(), genre=genreInput.value.trim()||"Other",
+        players=playersInput.value.trim(), blurb=blurbInput.value.trim(), name=nameInput.value.trim();
+    if(!/^[a-z0-9][a-z0-9-]*$/.test(slug) || slug.length<2 || slug.length>48){
+      setStatus("That doesn't look like a valid generator name — lowercase letters, numbers, and hyphens only.","err"); return;
+    }
+    if(!title){ setStatus("Give the game a title for the shelf.","err"); return; }
+    if(!blurb){ setStatus("Tell us what the game is about in one line.","err"); return; }
+    if(alreadyOnShelf(slug)){ setStatus("That game is already on the network shelf.","err"); return; }
+    submitBtn.disabled=true;
+    setStatus("Checking that the generator exists…");
+    var exists=null;
+    var respP=fetch("https://perchance.org/api/getGeneratorsAndDependencies?generatorNames="+encodeURIComponent(slug))
+      .then(function(r){ return r.ok?r.json():null; }).then(function(j){
+        exists=!!(j && j.success && j.generators && j.generators[slug]);
+      }).catch(function(){ exists=null; });
+    respP.then(function(){
+      if(exists===false){
+        submitBtn.disabled=false;
+        setStatus("No generator named \""+slug+"\" exists yet — save & publish it on perchance.org first, then come back.","err");
+        return;
+      }
+      if(!socket || socket.readyState!==1){
+        submitBtn.disabled=false;
+        setStatus("The review desk is offline right now — try again in a few seconds.","err");
+        return;
+      }
+      socket.rpc.submit(JSON.stringify({slug:slug,title:title,genre:genre,players:players,blurb:blurb,name:name,beta:betaInput.checked?1:0})).then(function(out){
+        var res; try{ res=JSON.parse(out); }catch(e){ res={ok:false,err:"Something went wrong."}; }
+        if(res.ok){
+          setStatus("Sent! Your game is on the review shelf — the crew will take a look soon.","ok");
+          slugInput.value=""; titleInput.value=""; genreInput.value=""; playersInput.value=""; blurbInput.value="";
+          try{ if(name) localStorage.setItem("bgn_name",name); }catch(e){}
+        } else {
+          setStatus(res.err||"Something went wrong.","err");
+        }
+        submitBtn.disabled=false;
+      }).catch(function(){
+        submitBtn.disabled=false;
+        setStatus("Couldn't reach the review desk — try again in a moment.","err");
+      });
+    });
+  });
+
+  /* ── welcome / intro modal ── */
+  var welcomeBg=$("welcomeBg");
+  function openWelcome(){ if(welcomeBg) welcomeBg.hidden=false; }
+  function closeWelcome(){ if(welcomeBg) welcomeBg.hidden=true; try{ localStorage.setItem("bgn_welcomed","1"); }catch(e){} }
+  if(welcomeBg){
+    var welcomed=false; try{ welcomed=localStorage.getItem("bgn_welcomed")==="1"; }catch(e){}
+    if(!welcomed) openWelcome();
+    var wc=$("welcomeCloseBtn"), ws=$("welcomeSkipBtn"), hl=$("helpLink");
+    if(wc) wc.addEventListener("click",closeWelcome);
+    if(ws) ws.addEventListener("click",closeWelcome);
+    welcomeBg.addEventListener("click",function(e){ if(e.target===welcomeBg) closeWelcome(); });
+    if(hl) hl.addEventListener("click",function(e){ e.preventDefault(); openWelcome(); });
+  }
+
+  /* ── bug report modal ── */
+  var bugBg=$("bugBg"), bugGameSel=$("bugGameSel"), bugDesc=$("bugDescInput"),
+      bugName=$("bugNameInput"), bugSubmitBtn=$("bugSubmitBtn"), bugStatus=$("bugStatus");
+  var betaGames=GAMES.filter(function(g){ return g.beta; });
+  if(bugGameSel){
+    betaGames.forEach(function(g){
+      var o=document.createElement("option");
+      o.value=g.slug; o.textContent=g.title;
+      bugGameSel.appendChild(o);
+    });
+  }
+  function bugStatusMsg(txt,cls){ if(bugStatus){ bugStatus.textContent=txt||""; bugStatus.className="bug-status"+(cls?" "+cls:""); } }
+  function openBug(slug){
+    if(!bugBg) return;
+    if(bugGameSel){
+      var set=false;
+      Array.prototype.forEach.call(bugGameSel.options,function(o){ if(o.value===slug){ bugGameSel.value=slug; set=true; } });
+      if(!set && bugGameSel.options.length) bugGameSel.selectedIndex=0;
+    }
+    bugStatusMsg(""); bugDesc.value="";
+    try{ bugName.value=localStorage.getItem("bgn_name")||""; }catch(e){}
+    bugBg.hidden=false;
+  }
+  function closeBug(){ if(bugBg) bugBg.hidden=true; }
+  var bugGrid=$("betaGrid");
+  if(bugGrid){
+    bugGrid.addEventListener("click",function(e){
+      var b=e.target.closest && e.target.closest(".bug-btn");
+      if(!b) return;
+      openBug(b.dataset.slug||"");
+    });
+  }
+  if(bugSubmitBtn) bugSubmitBtn.addEventListener("click",function(){
+    var game=bugGameSel?bugGameSel.value:"";
+    var desc=bugDesc.value.trim(), name=bugName.value.trim();
+    if(!game){ bugStatusMsg("Pick a game first.","err"); return; }
+    if(desc.length<10){ bugStatusMsg("Tell us a little more — at least a sentence about what happened.","err"); return; }
+    if(!socket || socket.readyState!==1){ bugStatusMsg("The bug inbox is offline right now — try again in a few seconds.","err"); return; }
+    bugSubmitBtn.disabled=true;
+    var title=bugGameSel&&bugGameSel.selectedOptions[0]?bugGameSel.selectedOptions[0].textContent:"";
+    socket.rpc.reportBug(JSON.stringify({game:game,title:title,desc:desc,name:name})).then(function(out){
+      var res; try{ res=JSON.parse(out); }catch(e){ res={ok:false,err:"Something went wrong."}; }
+      if(res.ok){
+        bugStatusMsg("Report sent — thanks! The crew will take a look.","ok");
+        bugDesc.value="";
+        try{ if(name) localStorage.setItem("bgn_name",name); }catch(e){}
+        setTimeout(closeBug,1400);
+      } else bugStatusMsg(res.err||"Something went wrong.","err");
+      bugSubmitBtn.disabled=false;
+    }).catch(function(){
+      bugSubmitBtn.disabled=false;
+      bugStatusMsg("Couldn't reach the bug inbox — try again in a moment.","err");
+    });
+  });
+  var bc=$("bugCloseBtn");
+  if(bc) bc.addEventListener("click",closeBug);
+  if(bugBg) bugBg.addEventListener("click",function(e){ if(e.target===bugBg) closeBug(); });
+
+  /* ── admin review desk ── */
+  var adminBg=$("adminBg"), adminLoginEl=$("adminLogin"), adminPanel=$("adminPanel"),
+      adminPwInput=$("adminPwInput"), adminLoginBtn=$("adminLoginBtn"), adminErr=$("adminErr"),
+      adminList=$("adminList"), adminSub=$("adminSub"),
+      pendingCount=$("pendingCount"), approvedCount=$("approvedCount"), bugCount=$("bugCount");
+
+  $("adminBtn").addEventListener("click",function(){ adminBg.hidden=false; if(!adminPanel.hidden) refreshAdmin(); });
+  $("adminCloseBtn").addEventListener("click",closeAdmin);
+  adminBg.addEventListener("click",function(e){ if(e.target===adminBg) closeAdmin(); });
+  function closeAdmin(){ adminBg.hidden=true; adminPwInput.value=""; adminErr.textContent=""; }
+  function doLogin(){
+    var pw=adminPwInput.value;
+    if(!pw || !socket || socket.readyState!==1) return;
+    adminLoginBtn.disabled=true; adminErr.textContent="";
+    socket.rpc.adminLogin(pw).then(function(r){
+      if(r==="ok"){
+        adminPw=pw; adminPwInput.value="";
+        adminLoginEl.hidden=true; adminPanel.hidden=false;
+        refreshAdmin();
+      } else adminErr.textContent="That password didn't work.";
+    }).catch(function(){ adminErr.textContent="Couldn't reach the review desk."; })
+    .finally(function(){ adminLoginBtn.disabled=false; });
+  }
+  adminLoginBtn.addEventListener("click",doLogin);
+  adminPwInput.addEventListener("keydown",function(e){ if(e.key==="Enter") doLogin(); });
+
+  var adminTabs=document.querySelectorAll(".admin-tab");
+  Array.prototype.forEach.call(adminTabs,function(t){
+    t.addEventListener("click",function(){
+      adminTab=t.dataset.atab;
+      Array.prototype.forEach.call(adminTabs,function(x){ x.classList.toggle("on",x===t); });
+      refreshAdmin();
+    });
+  });
+  function refreshAdmin(){
+    if(adminTab==="pending") refreshPending();
+    else if(adminTab==="approved") renderApproved();
+    else refreshBugs();
+  }
+  function refreshBugs(){
+    if(!socket || socket.readyState!==1 || !adminPw) return;
+    socket.rpc.bugs("").then(function(r){
+      var m; try{ m=JSON.parse(r); }catch(e){ return; }
+      bugs=(m&&m.list)||[];
+      renderBugs();
+    }).catch(function(){});
+  }
+  function setAdminCounts(){
+    pendingCount.textContent=pending.length||"";
+    approvedCount.textContent=approved.length||"";
+    bugCount.textContent=bugs.length||"";
+    adminSub.textContent="Reviewing the community shelf · Pending: "+pending.length+" · Approved: "+approved.length+" · Bugs: "+bugs.length;
+  }
+  function renderBugs(){
+    setAdminCounts();
+    if(adminTab!=="bugs") return;
+    if(!bugs.length){ adminList.innerHTML='<div class="admin-empty">No open bug reports. 🐞</div>'; return; }
+    adminList.innerHTML=bugs.map(bugItemHtml).join("");
+  }
+  function bugItemHtml(b){
+    return '<div class="admin-item">'+
+      '<div class="admin-item-head">'+
+        '<span class="admin-item-title">'+esc(b.title)+'</span>'+
+        '<span class="admin-item-genre">🐞 Bug</span>'+
+        '<span class="admin-item-by">by '+esc(b.reporter||"Anonymous")+' · '+fmtDate(b.ts)+'</span>'+
+      '</div>'+
+      '<div class="admin-item-slug">perchance.org/'+esc(b.slug)+'</div>'+
+      '<div class="admin-item-blurb">'+esc(b.desc)+'</div>'+
+      '<div class="admin-item-actions"><button class="admin-act approve" data-act="resolve" data-id="'+b.id+'">Resolve ✓</button></div>'+
+    '</div>';
+  }
+  function refreshPending(){
+    if(!socket || socket.readyState!==1 || !adminPw) return;
+    socket.rpc.pendingSubs("").then(function(r){
+      var m; try{ m=JSON.parse(r); }catch(e){ return; }
+      pending=(m&&m.list)||[];
+      renderPending();
+    }).catch(function(){});
+  }
+  function renderPending(){
+    setAdminCounts();
+    if(adminTab!=="pending") return;
+    if(!pending.length){ adminList.innerHTML='<div class="admin-empty">Nothing waiting for review. 🎉</div>'; return; }
+    adminList.innerHTML=pending.map(function(g){ return adminItemHtml(g,true); }).join("");
+  }
+  function renderApproved(){
+    setAdminCounts();
+    if(adminTab!=="approved") return;
+    if(!approved.length){ adminList.innerHTML='<div class="admin-empty">No approved community games yet.</div>'; return; }
+    adminList.innerHTML=approved.map(function(g){ return adminItemHtml(g,false); }).join("");
+  }
+  function pjsBlock(g){
+    var lines=["  game","    slug = "+g.slug,"    title = "+g.title,"    genre = "+g.genre];
+    if(g.players) lines.push("    players = "+g.players);
+    lines.push("    blurb = "+g.blurb);
+    lines.push("    color = "+autoColor(g.slug));
+    lines.push("    icon = "+autoGlyph(g.slug));
+    if(g.beta) lines.push("    beta = true");
+    return lines.join("\n");
+  }
+  function adminItemHtml(g, isPending){
+    return '<div class="admin-item">'+
+      '<div class="admin-item-head">'+
+        '<span class="admin-item-title">'+esc(g.title)+'</span>'+
+        (g.genre?'<span class="admin-item-genre">'+esc(g.genre)+'</span>':"")+
+        (g.beta?'<span class="admin-item-genre beta-chip">Beta</span>':"")+
+        '<span class="admin-item-by">by '+esc(g.submitter||"Anonymous")+' · '+fmtDate(g.ts)+'</span>'+
+      '</div>'+
+      '<div class="admin-item-slug">perchance.org/'+esc(g.slug)+'</div>'+
+      '<div class="admin-item-blurb">'+esc(g.blurb)+(g.players?" · "+esc(g.players):"")+'</div>'+
+      '<div class="admin-item-actions">'+
+        (isPending
+          ? '<button class="admin-act approve" data-act="approve" data-id="'+g.id+'">Approve ✓</button>'+
+            '<button class="admin-act reject" data-act="reject" data-id="'+g.id+'">Reject ✕</button>'
+          : '<button class="admin-act copy" data-act="copy" data-id="'+g.id+'">Copy pjs block</button>'+
+            '<button class="admin-act reject" data-act="remove" data-id="'+g.id+'">Remove</button>')+
+      '</div>'+
+      (isPending?"":'<textarea class="admin-pjs" readonly onclick="this.select()">'+esc(pjsBlock(g))+'</textarea>')+
+    '</div>';
+  }
+  adminList.addEventListener("click",function(e){
+    var b=e.target.closest && e.target.closest(".admin-act");
+    if(!b) return;
+    var id=parseInt(b.dataset.id,10), act=b.dataset.act;
+    if(act==="approve"){ socket.rpc.approveSub(String(id)).then(function(){ refreshAdmin(); }).catch(function(){}); }
+    else if(act==="reject"){ socket.rpc.rejectSub(String(id)).then(function(){ refreshAdmin(); }).catch(function(){}); }
+    else if(act==="remove"){ socket.rpc.removeSub(String(id)).then(function(){ refreshAdmin(); }).catch(function(){}); }
+    else if(act==="resolve"){ socket.rpc.resolveBug(String(id)).then(function(){ refreshAdmin(); }).catch(function(){}); }
+    else if(act==="copy"){
+      var rec=approvedById[id];
+      if(rec && navigator.clipboard){ navigator.clipboard.writeText(pjsBlock(rec)).catch(function(){}); }
+    }
+  });
+
+  connect();
+})();
+</script>
+
 <!-- ═══════════ LOBBY (chat + matchmaking) ═══════════ -->
 <style>
-  /* ── BGN LOBBY ── */
+  /* ── BGN LOBBY (nav pill; bottom-left square on small screens) ── */
+  .nav-actions{display:flex;align-items:center;gap:10px;flex:none}
   .lobby-fab{
-    position:fixed;right:22px;bottom:22px;z-index:500;width:58px;height:58px;border-radius:50%;
-    border:1px solid rgba(212,175,55,.5);cursor:pointer;
-    background:linear-gradient(150deg,#6a4a1c,#3a2210 60%,#2b1a0c);
-    box-shadow:0 10px 30px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.18);
-    color:var(--gold2);font-size:1.6rem;display:flex;align-items:center;justify-content:center;
-    transition:transform .3s ease,box-shadow .3s ease;
+    display:inline-flex;align-items:center;gap:8px;
+    padding:8px 16px 8px 10px;border-radius:2px;
+    border:1px solid rgba(212,175,55,.4);cursor:pointer;
+    background:rgba(20,17,32,.35);
+    color:var(--cream);font-family:var(--serif);font-size:.68rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+    transition:all .3s ease;
   }
-  .lobby-fab:hover{transform:translateY(-3px);box-shadow:0 16px 40px rgba(0,0,0,.6),0 0 24px rgba(212,175,55,.25)}
+  .lobby-fab:hover{transform:translateY(-3px);border-color:var(--gold);color:var(--gold2);background:rgba(212,175,55,.08)}
   .lobby-fab-badge{
-    position:absolute;top:-6px;right:-6px;min-width:22px;height:22px;padding:0 6px;border-radius:999px;
-    background:var(--green);color:#06130e;font-size:.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;
+    position:static;min-width:20px;height:20px;padding:0 5px;border-radius:999px;
+    background:var(--green);color:#06130e;font-size:.7rem;font-weight:700;
+    display:inline-flex;align-items:center;justify-content:center;
     font-family:var(--sans);opacity:.55;
   }
   .lobby-fab-badge.on{opacity:1;background:var(--gold2);color:#221803;box-shadow:0 0 12px rgba(212,175,55,.7)}
+  @media(max-width:560px){
+    .nav-actions{position:fixed;left:16px;bottom:16px;z-index:450;flex-direction:column-reverse;align-items:flex-start;gap:12px}
+    .lobby-fab{width:58px;height:58px;padding:0;border-radius:2px;justify-content:center;font-size:1.6rem;gap:0;position:relative}
+    .lobby-fab-label{display:none}
+    .lobby-fab-badge{position:absolute;top:-6px;right:-6px;min-width:22px;height:22px;padding:0 6px}
+  }
   .lobby-backdrop{position:fixed;inset:0;z-index:480;background:rgba(6,5,12,.55);backdrop-filter:blur(3px)}
   .lobby-panel{
     position:fixed;right:18px;bottom:92px;z-index:490;width:min(380px,calc(100vw - 36px));
@@ -598,8 +1591,8 @@ self.rpc = {
   .lobby-online{font-size:.72rem;color:var(--muted);margin-top:3px;letter-spacing:.06em}
   .lobby-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#5a5468;margin-right:6px;vertical-align:1px}
   .lobby-dot.on{background:var(--green);box-shadow:0 0 8px rgba(47,174,140,.8)}
-  .lobby-close{background:none;border:none;color:var(--muted);font-size:1rem;cursor:pointer;padding:4px}
-  .lobby-close:hover{color:var(--gold2)}
+  .lobby-close{background:rgba(20,17,32,.35);border:1px solid rgba(212,175,55,.4);border-radius:2px;color:var(--muted);font-size:1rem;cursor:pointer;padding:6px;transition:all .3s}
+  .lobby-close:hover{color:var(--gold2);border-color:var(--gold)}
   .lobby-tabs{display:flex;border-bottom:1px solid var(--line)}
   .lobby-tab{
     flex:1;background:none;border:none;color:var(--muted);padding:11px;font-family:var(--serif);
@@ -621,8 +1614,8 @@ self.rpc = {
   .lobby-name:focus{border-color:var(--gold)}
   .lobby-msg-input{flex:1;background:rgba(23,20,40,.7);border:1px solid var(--line);color:var(--text);padding:9px 12px;border-radius:8px;font-size:.84rem;outline:none}
   .lobby-msg-input:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(212,175,55,.12)}
-  .lobby-send{width:38px;height:38px;border-radius:8px;border:none;cursor:pointer;color:#221803;font-size:.9rem;
-    background:linear-gradient(180deg,#f2dc8b,#d4af37 55%,#b8912a)}
+  .lobby-send{width:38px;height:38px;border-radius:2px;border:none;cursor:pointer;color:#221803;font-size:.9rem;
+    background:linear-gradient(180deg,#f2dc8b,#d4af37 55%,#b8912a);transition:all .3s}
   .lobby-send:hover{filter:brightness(1.08)}
   .lobby-hint{font-size:.78rem;color:var(--muted);line-height:1.5}
   .lobby-select{
@@ -631,21 +1624,22 @@ self.rpc = {
   }
   .lobby-select:focus{border-color:var(--gold)}
   .lobby-find{
-    font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.76rem;cursor:pointer;
-    padding:12px 16px;border-radius:2px;border:none;color:#221803;
+    font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.8rem;cursor:pointer;
+    padding:15px 30px;border-radius:2px;border:1px solid transparent;color:#221803;
     background:linear-gradient(180deg,#f2dc8b,#d4af37 55%,#b8912a);
     box-shadow:0 8px 26px rgba(212,175,55,.3), inset 0 1px 0 rgba(255,255,255,.5);transition:all .3s;
   }
-  .lobby-find:hover{transform:translateY(-2px);box-shadow:0 12px 32px rgba(212,175,55,.45), inset 0 1px 0 rgba(255,255,255,.5)}
+  .lobby-find:hover{transform:translateY(-3px);box-shadow:0 14px 40px rgba(212,175,55,.5), inset 0 1px 0 rgba(255,255,255,.5)}
   .lobby-queue{border-top:1px solid var(--line);padding-top:12px;display:flex;flex-direction:column;gap:7px}
   .lobby-queue[hidden]{display:none}
   .lobby-queue-line{font-family:var(--serif);color:var(--gold2);font-size:.85rem;letter-spacing:.05em}
   .lobby-queue-names{font-size:.76rem;color:var(--muted);word-break:break-word}
   .lobby-cancel{
-    align-self:flex-start;background:none;border:1px solid rgba(224,81,47,.5);color:#e08a7a;font-size:.74rem;
-    letter-spacing:.1em;text-transform:uppercase;padding:7px 14px;border-radius:6px;cursor:pointer;transition:all .25s;
+    align-self:flex-start;font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.68rem;
+    padding:10px 18px;border-radius:2px;border:1px solid rgba(224,81,47,.5);color:#e08a7a;
+    background:rgba(20,17,32,.35);cursor:pointer;transition:all .3s;
   }
-  .lobby-cancel:hover{background:rgba(224,81,47,.12);border-color:#e0512f}
+  .lobby-cancel:hover{background:rgba(224,81,47,.14);border-color:#e0512f;color:#e08a7a}
 
   /* match modal */
   .lobby-match-bg{position:fixed;inset:0;z-index:600;background:rgba(6,5,12,.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px}
@@ -662,14 +1656,10 @@ self.rpc = {
   .lobby-match-sub{color:var(--muted);margin:12px 0 4px;font-size:.92rem}
   .lobby-match-players{color:var(--gold2);font-size:.9rem;margin:0 0 24px}
   .lobby-match-open{display:inline-block;text-decoration:none}
-  .lobby-match-later{background:none;border:none;color:var(--muted);font-size:.78rem;margin-top:14px;cursor:pointer;letter-spacing:.06em}
-  .lobby-match-later:hover{color:var(--gold2)}
+  .lobby-match-later{font-family:var(--serif);letter-spacing:.14em;text-transform:uppercase;font-size:.68rem;margin-top:14px;padding:10px 18px;border-radius:2px;border:1px solid rgba(212,175,55,.4);color:var(--cream);background:rgba(20,17,32,.35);cursor:pointer;transition:all .3s}
+  .lobby-match-later:hover{color:var(--gold2);border-color:var(--gold)}
 </style>
 
-<button class="lobby-fab" id="lobbyBtn" title="Lobby Lounge" aria-label="Open lobby">
-  <span aria-hidden="true">♟</span>
-  <span class="lobby-fab-badge" id="onlineBadge">…</span>
-</button>
 
 <div class="lobby-backdrop" id="lobbyBackdrop" hidden></div>
 <aside class="lobby-panel" id="lobbyPanel" aria-label="Lobby" hidden>
@@ -726,6 +1716,7 @@ self.rpc = {
     <div class="ornament">✦</div>
     <p>© <span id="year"></span> <b style="color:var(--gold2)">The Boardgame Network</b></p>
     <p>Made on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a> by the BGN community.</p>
+    <p><button class="admin-link" id="adminBtn" aria-label="Open the BGN review desk">🛠 Admin — review desk</button></p>
     <p class="footnote">Maintaining the hub? Add or edit entries in the <code>games</code> list at the top of <code>main.pjs</code>.</p>
   </div>
 </footer>
@@ -835,7 +1826,9 @@ self.rpc = {
           blurb:nodeVal(g.blurb), players:nodeVal(g.players), icon:nodeVal(g.icon),
           img:nodeVal(g.img),
           color:nodeVal(g.color)||PALETTE[i%PALETTE.length],
-          comingSoon:nodeVal(g.comingSoon)==="true"
+          comingSoon:nodeVal(g.comingSoon)==="true",
+          beta:nodeVal(g.beta)==="true",
+          matchmaking:nodeVal(g.matchmaking)==="true"
         };
       }).filter(function(g){return g.slug;});
     }
@@ -849,11 +1842,12 @@ self.rpc = {
   /* ── stats ── */
   var genres = [];
   GAMES.forEach(function(g){if(g.genre&&genres.indexOf(g.genre)===-1)genres.push(g.genre);});
-  var liveCount = GAMES.filter(function(g){return !g.comingSoon;}).length;
-  var soonCount = GAMES.length - liveCount;
+  var liveCount = GAMES.filter(function(g){return !g.comingSoon && !g.beta;}).length;
+  var betaCount = GAMES.filter(function(g){return !g.comingSoon && g.beta;}).length;
+  var soonCount = GAMES.filter(function(g){return g.comingSoon;}).length;
   document.getElementById("stats").innerHTML =
     '<div class="stat"><b class="goldtext">'+liveCount+'</b><small>Games on the shelf</small></div>'+
-    '<div class="stat"><b class="goldtext">'+soonCount+'</b><small>Coming soon</small></div>'+
+    '<div class="stat"><b class="goldtext">'+betaCount+'</b><small>In beta</small></div>'+
     '<div class="stat"><b class="goldtext">'+genres.length+'</b><small>Genres to explore</small></div>';
 
   /* ── filter bar ── */
@@ -874,21 +1868,16 @@ self.rpc = {
   });
 
   /* ── render grids ── */
-  var gridEl = document.getElementById("grid");
+  var shelvesEl = document.getElementById("shelves");
   var tplGridEl = document.getElementById("templateGrid");
-  function makeCard(g, fork, idx){
+  function makeCardHtml(g, fork, idx){
     var soon = !!g.comingSoon;
-    var card = document.createElement(soon ? "div" : "a");
-    card.className = "card gridfade" + (soon ? " card-soon" : "");
-    if (!soon) {
-      card.href = "https://perchance.org/" + encodeURIComponent(g.slug);
-      card.target = "_blank"; card.rel = "noopener";
-    }
-    card.style.setProperty("--accent", g.color);
+    var tag = soon ? "div" : "a";
+    var href = soon ? "" : ' href="https://perchance.org/'+encodeURIComponent(g.slug)+'" target="_blank" rel="noopener"';
     var cover = g.img
       ? 'background:linear-gradient(180deg,rgba(8,7,14,.05),rgba(8,7,14,.68)),url('+g.img+') center/cover no-repeat'
       : 'background:linear-gradient(155deg,'+g.color+' 0%,'+shade(g.color,0.35)+' 55%,'+shade(g.color,0.16)+' 100%)';
-    card.innerHTML =
+    return '<'+tag+' class="card gridfade'+(soon?" card-soon":"")+'"'+href+'>'+
       '<div class="card-cover" style="'+cover+'">'+
         (soon ? '<span class="card-soon-badge">Coming Soon</span>' : "")+
         (g.img ? '' : '<span class="cover-glyph">'+esc(g.icon||GLYPHS[idx%GLYPHS.length])+'</span>')+
@@ -899,8 +1888,8 @@ self.rpc = {
         (g.genre ? '<span class="genre-chip">'+esc(g.genre)+'</span>' : "")+
         '<p class="card-blurb">'+esc(g.blurb)+'</p>'+
         (soon ? '<span class="play-link soon">Coming soon</span>' : '<span class="play-link">'+(fork?"Fork this":"Play")+' <span aria-hidden="true">→</span></span>')+
-      '</div>';
-    return card;
+      '</div>'+
+    '</'+tag+'>';
   }
   function render(){
     var rows = GAMES.filter(function(g){
@@ -909,11 +1898,71 @@ self.rpc = {
       var okQ = !state.q||hay.indexOf(state.q)!==-1;
       return okG&&okQ;
     });
-    gridEl.innerHTML = rows.length ? "" : '<div class="empty-state"><div class="big">⚄</div>No games match that roll. Try another search.</div>';
-    rows.forEach(function(g){ gridEl.appendChild(makeCard(g,false,GAMES.indexOf(g))); });
+    if(!rows.length){
+      shelvesEl.innerHTML = '<div class="empty-state"><div class="big">⚄</div>No games match that roll. Try another search.</div>';
+      return;
+    }
+    var live = rows.filter(function(g){ return !g.comingSoon && !g.beta; });
+    var soon = rows.filter(function(g){ return g.comingSoon; });
+    var html = "";
+    var genreOrder = [];
+    live.forEach(function(g){ var gn=g.genre||"Games"; if(genreOrder.indexOf(gn)===-1) genreOrder.push(gn); });
+    genreOrder.forEach(function(gn){
+      var gs = live.filter(function(g){ return (g.genre||"Games")===gn; });
+      html += '<div class="shelf"><h3 class="shelf-head">'+esc(gn)+'<span class="count">'+gs.length+'</span></h3><div class="grid">';
+      gs.forEach(function(g){ html += makeCardHtml(g,false,GAMES.indexOf(g)); });
+      html += '</div></div>';
+    });
+    if(soon.length){
+      html += '<div class="shelf"><h3 class="shelf-head">Coming Soon<span class="count">'+soon.length+'</span></h3><div class="grid">';
+      soon.forEach(function(g){ html += makeCardHtml(g,false,GAMES.indexOf(g)); });
+      html += '</div></div>';
+    }
+    shelvesEl.innerHTML = html;
   }
-  tplGridEl.innerHTML = "";
-  TEMPLATES.forEach(function(t){ tplGridEl.appendChild(makeCard(t,true,TEMPLATES.indexOf(t))); });
+  tplGridEl.innerHTML = TEMPLATES.map(function(t){ return makeCardHtml(t,true,TEMPLATES.indexOf(t)); }).join("");
+
+  /* ── In Beta grid (beta-flagged games get their own section) ── */
+  function betaCardHtml(g, idx){
+    var cover = g.img
+      ? 'background:linear-gradient(180deg,rgba(8,7,14,.05),rgba(8,7,14,.68)),url('+g.img+') center/cover no-repeat'
+      : 'background:linear-gradient(155deg,'+g.color+' 0%,'+shade(g.color,0.35)+' 55%,'+shade(g.color,0.16)+' 100%)';
+    return '<div class="card beta-card gridfade" data-slug="'+esc(g.slug)+'" tabindex="0" role="link" aria-label="Play '+esc(g.title)+'">'+
+      '<div class="card-cover" style="'+cover+'">'+
+        '<span class="card-beta-badge">In Beta</span>'+
+        (g.img?'':'<span class="cover-glyph">'+esc(g.icon||GLYPHS[idx%GLYPHS.length])+'</span>')+
+        (g.players?'<span class="card-players">'+esc(g.players)+'</span>':"")+
+      '</div>'+
+      '<div class="card-body">'+
+        '<h3 class="card-title">'+esc(g.title)+'</h3>'+
+        (g.genre?'<span class="genre-chip">'+esc(g.genre)+'</span>':"")+
+        '<p class="card-blurb">'+esc(g.blurb)+'</p>'+
+        '<div class="beta-actions">'+
+          '<a class="play-link" href="https://perchance.org/'+encodeURIComponent(g.slug)+'" target="_blank" rel="noopener">Play <span aria-hidden="true">→</span></a>'+
+          '<button class="bug-btn" data-slug="'+esc(g.slug)+'" data-title="'+esc(g.title)+'">🐞 Report a bug</button>'+
+        '</div>'+
+      '</div></div>';
+  }
+  var betaGames = GAMES.filter(function(g){ return g.beta && !g.comingSoon; });
+  window.BGN_BETA = betaGames;
+  var betaGridEl = document.getElementById("betaGrid");
+  if(betaGridEl && betaGames.length){
+    betaGridEl.innerHTML = betaGames.map(function(g,i){ return betaCardHtml(g,i); }).join("");
+    betaGridEl.addEventListener("click",function(e){
+      var card = e.target.closest(".beta-card");
+      if(!card || e.target.closest(".bug-btn") || e.target.closest("a")) return;
+      var s = card.getAttribute("data-slug");
+      if(s) window.open("https://perchance.org/"+encodeURIComponent(s), "_blank", "noopener");
+    });
+    betaGridEl.addEventListener("keydown",function(e){
+      if(e.key !== "Enter") return;
+      var card = e.target.closest(".beta-card");
+      if(!card || e.target.closest(".bug-btn") || e.target.closest("a")) return;
+      var s = card.getAttribute("data-slug");
+      if(s) window.open("https://perchance.org/"+encodeURIComponent(s), "_blank", "noopener");
+    });
+  }
+
   buildChips(); render();
 
   document.getElementById("year").textContent = new Date().getFullYear();
@@ -949,7 +1998,7 @@ self.rpc = {
 
   /* ── build game dropdown ── */
   GAMES.forEach(function(g){
-    if(/^1\b/.test(g.players||"")) return; // solo games don't need matchmaking
+    if(!g.matchmaking && /^1\b/.test(g.players||"")) return; // solo games skip matchmaking unless opted in
     var o=document.createElement("option");
     o.value=g.slug; o.textContent=g.title; ui.matchSel.appendChild(o);
   });
@@ -1140,57 +2189,57 @@ self.rpc = {
 })();
 </script>
 
-<!-- ═══════════ BACK TO HUB BUTTON ═══════════
-     Floating pill → https://perchance.org/rathjis-generators
-     (my projects hub). Vanilla JS + scoped styles only. -->
+<!-- ═══════════ RATHJI'S PROJECTS NAV PILL ═══════════
+     Styled like the bgn-blank-template: sits in the top nav on
+     desktop, floats bottom-LEFT on small screens (see .bgn-nav-projects above). -->
 <style>
-  #rathjiBackBtn{
-    position:fixed;left:25%;bottom:18px;z-index:2147483000;
-    transform:translateX(-50%);
-    display:inline-flex;align-items:center;gap:10px;
-    padding:8px 16px 8px 8px;border-radius:999px;
-    background:rgba(13,15,21,.82);
-    -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
-    border:1px solid rgba(255,255,255,.14);
-    box-shadow:0 8px 24px rgba(0,0,0,.35);
-    text-decoration:none;color:#fff;
-    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  .bgn-nav-projects{
+    display:inline-flex;align-items:center;gap:8px;flex:none;
+    padding:6px 14px 6px 6px;border-radius:999px;
+    background:rgba(13,15,21,.82);border:1px solid rgba(255,255,255,.14);
+    box-shadow:0 6px 18px rgba(0,0,0,.3);
+    text-decoration:none;color:#fff;font-family:var(--bgn-sans,system-ui);
     transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease;
   }
-  #rathjiBackBtn:hover{
-    transform:translateX(-50%) translateY(-2px);
-    border-color:rgba(167,139,250,.65);
-    box-shadow:0 12px 30px rgba(0,0,0,.45),0 0 18px rgba(139,92,246,.35);
-  }
-  #rathjiBackBtn .rb-badge{
-    width:28px;height:28px;flex:0 0 28px;border-radius:50%;
+  .bgn-nav-projects:hover{ transform:translateY(-1px); border-color:rgba(167,139,250,.65); box-shadow:0 8px 20px rgba(0,0,0,.4),0 0 14px rgba(139,92,246,.35); }
+  .bgn-nav-projects .rb-badge{
+    width:26px;height:26px;flex:0 0 26px;border-radius:50%;
     display:inline-flex;align-items:center;justify-content:center;
-    background:linear-gradient(135deg,#8b5cf6,#d946ef);
-    color:#fff;font-size:15px;font-weight:700;line-height:1;user-select:none;
+    background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;
+    font-size:14px;font-weight:700;line-height:1;user-select:none;
   }
-  #rathjiBackBtn .rb-label{font-size:14px;font-weight:600;line-height:1;white-space:nowrap}
-  #rathjiBackBtn .rb-arrow{width:14px;height:14px;flex:0 0 14px}
-  @media(max-width:480px){
-    #rathjiBackBtn{padding:8px;gap:0}
-    #rathjiBackBtn .rb-label{display:none}
-    #rathjiBackBtn .rb-arrow{display:none}
+  .bgn-nav-projects .rb-label{ font-size:13px;font-weight:600;line-height:1;white-space:nowrap; }
+  @media(max-width:560px){
+    .bgn-nav-projects{ padding:8px 16px 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.35); }
+    .bgn-nav-projects .rb-label{ font-size:14px; }
   }
 </style>
-<script>
-(function(){
-  if(document.getElementById("rathjiBackBtn")) return;
-  var a = document.createElement("a");
-  a.id = "rathjiBackBtn";
-  a.href = "https://perchance.org/rathjis-generators";
-  a.target = "_blank"; a.rel = "noopener";
-  a.setAttribute("aria-label","Back to my projects");
-  a.setAttribute("title","Back to my projects");
-  a.innerHTML =
-    '<span class="rb-badge">R</span>' +
-    '<span class="rb-label">My projects</span>' +
-    '<svg class="rb-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
-      '<path d="M4 12L12 4M12 4H6M12 4V10" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</svg>';
-  document.body.appendChild(a);
-})();
-</script>
+
+<!-- ═══════════ PLATFORM BUTTON-COLOR FIX ═══════════
+     Perchance injects `button { color: … !important }`, so every
+     <button> ignores its own text color. Re-assert the hub palette
+     with !important on each button class. -->
+<style>
+  .btn-gold,.lobby-send,.lobby-find{color:#221803!important}
+  .lobby-cancel,.admin-act.reject{color:#e08a7a!important}
+  .lobby-cancel:hover{color:#e08a7a!important}
+  .admin-act.approve{color:#5fd6b2!important}
+  .admin-act.approve:hover{color:#5fd6b2!important}
+  .admin-act.reject:hover{color:#e08a7a!important}
+  .admin-act.copy,.admin-tab.on,.lobby-tab.on{color:var(--gold2)!important}
+  .admin-act.copy:hover{color:var(--gold2)!important}
+  .s-arrow{color:var(--gold2)!important}
+  .lobby-fab{color:var(--cream)!important}
+  .lobby-fab:hover{color:var(--gold2)!important}
+  .bug-btn,.welcome-x,.admin-x,.lobby-close{color:var(--gold2)!important}
+  .welcome-x:hover,.admin-x:hover,.lobby-close:hover{color:var(--gold2)!important}
+  .welcome-skip,.admin-link,.lobby-match-later{color:var(--cream)!important}
+  .welcome-skip:hover,.admin-link:hover,.lobby-match-later:hover{color:var(--gold2)!important}
+  .lobby-tab,.admin-tab{color:var(--muted)!important}
+  .lobby-tab.on,.admin-tab.on{color:var(--gold2)!important}
+  .bgn-lounge-btn{color:#eef!important}
+  .bgn-lounge-close{color:#fff!important}
+  .chip{color:var(--muted)!important}
+  .chip:hover{color:var(--gold2)!important}
+  .chip.on{color:#221803!important}
+</style>
