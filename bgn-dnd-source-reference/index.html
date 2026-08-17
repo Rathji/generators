@@ -9,9 +9,338 @@
 
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system -->
 
-<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized). Sound starts muted. -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── BGN table server ─────────────────────────────────────────────
+   Generic two-player rooms: host + guest, 5-letter codes. The
+   server sequences turns (host first unless a rematch flips it),
+   stores ONE full-game snapshot per room (opaque string submitted
+   by whichever player is on turn), and tracks winner/reason for
+   resign, forfeit and end-of-game. No game logic here — the
+   snapshot is whatever the game decides it should be.
+   Durable state in the plugin `state` bytes (versioned layout).  */
+const SLOT=1024;
+const STATE_VERSION=4;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=2000;
+
+/* ── durable leaderboard (top ~50 scores) ──
+   Rooms use the first MAX_ROOMS*SLOT bytes; the leaderboard reserves the
+   last LB_BYTES of `state` so the two never collide. Ranks by higher score;
+   the top 10 are served by getScores. Survives restarts (durable bytes). */
+const LB_VERSION=1, LB_CAP=50, LB_NAME_MAX=24, LB_EXTRA_MAX=11, LB_ENTRY=44, LB_HEAD=2;
+const LB_BYTES=LB_HEAD+LB_CAP*LB_ENTRY;
+const LB_BASE=Math.max(state.length-LB_BYTES, 1+MAX_ROOMS*SLOT);
+const lbTimes=new Map(), lbNets=new Map();   // rate-limit trackers (per conn / per network group)
+function cleanField(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function lbInit(){ if(state[LB_BASE]!==LB_VERSION){ state.fill(0,LB_BASE,state.length); state[LB_BASE]=LB_VERSION; } }
+function lbRead(){
+  const a=[];
+  for(let i=0;i<LB_CAP;i++){
+    const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+    if(state[e]!==1)continue;
+    let name=""; for(let k=1;k<=LB_NAME_MAX;k++){ const c=state[e+k]; if(!c)break; name+=String.fromCharCode(c); }
+    let extra=""; for(let k=0;k<LB_EXTRA_MAX;k++){ const c=state[e+33+k]; if(!c)break; extra+=String.fromCharCode(c); }
+    a.push({i,
+      name,
+      score:((state[e+25]<<24)|(state[e+26]<<16)|(state[e+27]<<8)|state[e+28])>>>0,
+      ts:((state[e+29]<<24)|(state[e+30]<<16)|(state[e+31]<<8)|state[e+32])>>>0,
+      extra});
+  }
+  return a;
+}
+function lbWriteSlot(i,name,score,ts,extra){
+  const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+  state.fill(0,e,e+LB_ENTRY);
+  state[e]=1;
+  const nb=[]; for(let k=0;k<name.length&&k<LB_NAME_MAX;k++)nb.push(name.charCodeAt(k));
+  for(let k=0;k<nb.length;k++)state[e+1+k]=nb[k];
+  const xb=[]; for(let k=0;k<extra.length&&k<LB_EXTRA_MAX;k++)xb.push(extra.charCodeAt(k));
+  for(let k=0;k<xb.length;k++)state[e+33+k]=xb[k];
+  state[e+25]=(score>>>24)&255; state[e+26]=(score>>>16)&255; state[e+27]=(score>>>8)&255; state[e+28]=score&255;
+  state[e+29]=(ts>>>24)&255; state[e+30]=(ts>>>16)&255; state[e+31]=(ts>>>8)&255; state[e+32]=ts&255;
+}
+function lbBetter(asc,a,b){ if(asc)return a.score<b.score||(a.score===b.score&&a.ts<b.ts); return a.score>b.score||(a.score===b.score&&a.ts<b.ts); }
+function lbSubmit(name,score,ts,extra,asc){
+  lbInit();
+  const a=lbRead();
+  if(a.length<LB_CAP){
+    for(let i=0;i<LB_CAP;i++){ if(state[LB_BASE+LB_HEAD+i*LB_ENTRY]!==1){ lbWriteSlot(i,name,score,ts,extra); return; } }
+    return;
+  }
+  let wi=-1; const w={score:0,ts:0};
+  for(const en of a){ if(wi===-1||lbBetter(asc,w,en)){ wi=en.i; w.score=en.score; w.ts=en.ts; } }
+  if(lbBetter(asc,{score,ts},w))lbWriteSlot(wi,name,score,ts,extra);
+}
+
+let rooms=new Map();           // code -> room object (live cache)
+const conns=new Map();         // conn.id -> {code, role}
+const moveTimes=new Map();     // conn.id -> last move ms (rate limit)
+const chatTimes=new Map();     // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   slot +1..+8: room code (8 ASCII, zero padded)
+   slot +9: first (0=host moves first, 1=guest; rematch flips)
+   slot +10: state version
+   slot +11: reserved
+   slot +12..+15: uint32 lastActive (unix secs)
+   slot +16: winner 0=none 1=host 2=guest 3=draw
+   slot +17: reason 0=none 1=resign 2=forfeit 3=end
+   slot +18..+19: uint16 turn counter (completed turns)
+   slot +20..+21: uint16 snapshot bytes length
+   slot +22..+23: reserved
+   slot +24..: snapshot bytes (utf8, latest only)                */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const tn=Math.max(0,Math.min(0xFFFF,room.turn));
+  state[o+18]=(tn>>8)&255; state[o+19]=tn&255;
+  const mb=room.snapshot?utf8Encode(room.snapshot):[];
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+20]=(len>>8)&255; state[o+21]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+const REASON=["","resign","forfeit","end"];
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const snapLen=(state[o+20]<<8)|state[o+21];
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      first:state[o+9], hostId:-1, guestId:-1,
+      turn:(state[o+18]<<8)|state[o+19],
+      snapshot:snapLen?utf8Decode(state.slice(o+24,o+24+snapLen)):null,
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,snapshot:room.snapshot,first:room.first,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,first:0,hostId:conn.id,guestId:-1,turn:0,snapshot:null,winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.turn,room.first)!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number"||obj.evt!==room.turn)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length<1||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.snapshot=obj.data;
+    room.turn++;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snapshot=null; room.winner=null; room.reason=null;
+    room.first=1-room.first;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  submitScore({conn},data){
+    let p; try{ p=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const now=Date.now();
+    if(now-(lbTimes.get(conn.id)||0)<1200)return JSON.stringify({ok:false,err:"rate"});   // per connection
+    lbTimes.set(conn.id,now);
+    if(now-(lbNets.get(conn.net[3])||0)<6000)return JSON.stringify({ok:false,err:"rate"}); // per network group
+    lbNets.set(conn.net[3],now);
+    const name=cleanField(p.name,24)||"Player";
+    const score=Math.max(0,Math.min(0xffffffff,Math.floor(Number(p.score)||0)));
+    const extra=cleanField(p.extra,11);
+    lbSubmit(name,score,Math.floor(now/1000),extra,false);
+    return JSON.stringify({ok:true});
+  },
+  getScores({conn},data){
+    lbInit();
+    const a=lbRead().sort(function(x,y){ return lbBetter(false,x,y)?-1:1; }).slice(0,10);
+    return JSON.stringify({scores:a});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  chatTimes.delete(conn.id);
+  if(!info)return;
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+lbInit();
+</script>
 
 <!-- ═══ NAV: back to the hub ═══ -->
 <nav class="bgn-nav">
@@ -87,6 +416,15 @@
       </div>
     </div>
 
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last session</h3>
+      <p class="muted small" id="continueInfoEl">A saved session was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
     <p class="muted small" id="statusEl" style="min-height:1.3em"></p>
 
     <!-- ═══ POPULAR LOOKUPS ═══ -->
@@ -116,6 +454,8 @@
         <div id="resultsEl"></div>
       </div>
       <div class="panel ref-detail">
+        <button class="fs-open-btn" id="fsOpenBtn" hidden title="Full screen reader">⛶ Full screen</button>
+        <div class="bgn-banner" id="bannerEl" hidden></div>
         <div id="detailEmpty" class="detail-empty muted">
           <div style="font-size:2.6rem;margin-bottom:6px">⚔</div>
           Pick a result to read it here — spells, stat blocks, rules and more, with a copy button that takes the reference along.
@@ -123,6 +463,50 @@
         <div id="detailEl" hidden></div>
       </div>
     </div>
+
+    <!-- ═══ TABLE / SESSION PANEL ═══ -->
+    <section class="bgn-table" id="tablePanel">
+      <div class="panel bgn-stagepanel">
+        <div class="bgn-turn" id="turnEl">Ready to look up</div>
+        <p class="muted small" style="margin:8px 0 0">Every lookup, copy and save lands in the session log — and the session code lets anyone rejoin the exact same lookup.</p>
+        <div class="bgn-rejoin">
+          <label for="joinCodeInput">Rejoin a session by code</label>
+          <div class="flex center" style="gap:8px; justify-content:center; flex-wrap:nowrap">
+            <input id="joinCodeInput" maxlength="512" placeholder="Paste a session code" autocomplete="off" spellcheck="false">
+            <button class="btn btn-ghost btn-sm" id="joinRoomBtn">Rejoin</button>
+          </div>
+          <p class="muted small" id="onlineMsg"></p>
+        </div>
+      </div>
+      <div class="panel bgn-side">
+        <div id="roomBox" class="bgn-room">
+          <div class="bgn-room-code"><span>Session code</span><b id="roomCodeEl">—</b></div>
+          <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:8px;">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+          </div>
+          <p class="muted small" id="connEl">Local table — no opponent needed.</p>
+        </div>
+        <div class="bgn-chat" id="chatBox">
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+        <h3 id="sideTitleEl">Session log</h3>
+        <div class="bgn-log" id="logEl"></div>
+        <div class="bgn-actions">
+          <button class="btn btn-gold btn-sm" id="newGameBtn">New session</button>
+          <button class="btn btn-ghost btn-sm" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost btn-sm" id="menuBtn">Menu</button>
+          <button class="btn btn-ghost btn-sm" id="saveBtn" title="Save this session">💾 Save</button>
+          <button class="btn btn-ghost btn-sm" id="shareBtn" title="Download this session as JSON or a PNG">📤 Share</button>
+          <button class="btn btn-ghost btn-sm" id="helpBtn">❓ How to use</button>
+        </div>
+      </div>
+    </section>
   </section>
 
 </main>
@@ -280,6 +664,31 @@
   </div>
 </div>
 
+<!-- ═══ FULLSCREEN READER (maximized entry) ═══
+     Opened by the ⛶ Full screen button in the detail panel. The
+     current entry's body, action buttons and reference footer are
+     MOVED in here live — never cloned — so copy/favorite still work
+     while maximized. Closed via ✕ Exit or Escape. -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span class="fs-status" id="fsStatusEl"></span>
+    <span class="fs-actions" id="fsActionsCtn"></span>
+    <button class="btn btn-gold btn-sm" id="fsExitBtn" title="Exit full screen">✕ Exit</button>
+  </div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
 <!-- ═══ FOOTER ═══ -->
 <footer class="bgn-footer">
   <div class="ornament">✦</div>
@@ -287,6 +696,43 @@
   <p class="footnote">D&D 5E is © Wizards of the Coast. Content is the free System Reference Document — SRD 5.2 (2024) under CC-BY-4.0 and SRD 5.1 (2014) via dnd5eapi.co. Fan reference tool, not affiliated with WotC.</p>
   <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
+
+<!-- BGN Lounge: one shared chat across every BGN game.
+     Standard floating-button layout (shared with the hub):
+       Lounge pill          #loungeBtn               right:22px; bottom:94px;  z-index:9000
+       modal overlay                                z-index:9100+ -->
+<style>
+.bgn-lounge-btn{position:fixed;right:22px;bottom:94px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
 
 <style>
 /* ═══ D&D RULES & STATS — app styles ═══ */
@@ -431,6 +877,77 @@
 .modal-group{ flex:1; min-width:160px; }
 .modal-actions{ display:flex; gap:8px; }
 .modal-status{ min-height:1.3em; margin:10px 0 0; }
+
+/* ═══ BGN table / session panel ═══ */
+.bgn-table{ display:grid; grid-template-columns:minmax(0,1fr) 330px; gap:18px; align-items:start; margin-top:26px; }
+@media (max-width:900px){ .bgn-table{ grid-template-columns:minmax(0,1fr); } }
+.bgn-stagepanel{ text-align:center; padding:22px; }
+.bgn-turn{ font-size:.95rem; font-weight:600; color:var(--bgn-accent2); }
+.bgn-rejoin{ margin-top:18px; padding-top:14px; border-top:1px solid var(--bgn-line); }
+.bgn-rejoin label{ display:block; font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--bgn-muted); margin-bottom:8px; }
+.bgn-rejoin input{ flex:1 1 160px; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.82rem; outline:none; font-family:inherit; text-align:center; }
+.bgn-rejoin input:focus{ border-color:var(--bgn-accent); }
+.bgn-banner{ min-height:1.4em; margin-bottom:14px; font-weight:600; color:#f6e6a4; font-size:.9rem; text-align:center; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:.92rem; letter-spacing:.5px; color:#f6e6a4; opacity:1; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; word-break:break-all; max-width:100%; line-height:1.35; }
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-side h3{ font-family:var(--bgn-serif); font-size:.95rem; color:var(--bgn-accent2); margin:16px 0 8px; letter-spacing:.04em; }
+.bgn-chat h3{ margin:0 0 8px; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi — this chat is shared by everyone at the table."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-accent2); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green); }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent); }
+.bgn-log{ max-height:240px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item b{ color:var(--bgn-accent2); margin-right:6px; }
+.log-item .resp{ opacity:.75; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+
+/* ══════ fullscreen reader ══════ */
+.ref-detail{ position:relative; }
+.ref-detail .detail-title{ padding-right:132px; }
+@media (max-width:700px){ .ref-detail .detail-title{ padding-right:8px; } }
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72); color:#fff;
+  border:1px solid rgba(255,255,255,.28); border-radius:8px;
+  padding:6px 11px; cursor:pointer;
+  font:700 12.5px/1 system-ui; letter-spacing:.02em;
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  transition:border-color .12s, background .12s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent); background:rgba(20,26,42,.85); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid rgba(255,255,255,.08); }
+.fs-status{ font-size:.85rem; color:var(--bgn-accent2); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fs-actions{ display:flex; gap:8px; align-items:center; }
+.fs-board{ flex:1; min-height:0; position:relative; padding:12px; }
+.fs-board .blocks{ position:absolute; inset:0; width:100%; height:100%; overflow:auto; padding:22px 28px 70px; max-width:880px; margin:0 auto; }
+.fs-tile{ position:absolute; top:14px; right:22px; z-index:10; width:auto; max-width:min(92vw,300px); }
+.fs-tile:empty{ display:none; }
+.fs-tile .detail-actions{ flex-direction:column; align-items:stretch; }
+.fs-meeple{ position:absolute; right:22px; bottom:22px; z-index:10; width:min(90vw,340px); max-width:min(90vw,340px); background:rgba(10,14,24,.92); border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:12px; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); box-shadow:0 8px 32px rgba(0,0,0,.55); }
+.fs-meeple:empty{ display:none; }
+.fs-meeple .ref-foot{ margin:0; padding:0; border-top:none; }
+
+/* ══════ help modal ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9600; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help-overlay[hidden]{ display:none; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif); margin:18px 0 4px; color:var(--bgn-accent2); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream); font-weight:600; }
+.bgn-help code{ background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.1); border-radius:5px; padding:1px 6px; font-size:.8rem; color:#f2dc8b; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
 </style>
 
 <script src="src/app.js"></script>

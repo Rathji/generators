@@ -50,7 +50,8 @@ const ui = {
   guestSubEl: document.getElementById("guestSubEl"),
   turnEl: document.getElementById("turnEl"),
   roomCodeEl: document.getElementById("roomCodeEl"),
-  newGameBtn: document.getElementById("newGameBtn")
+  newGameBtn: document.getElementById("newGameBtn"),
+  logEl: document.getElementById("logEl")
 };
 
 window.__ui = ui;

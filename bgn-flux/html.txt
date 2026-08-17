@@ -35,10 +35,12 @@
      window.bgnDeck) for building your own card games in this file.
      ════════════════════════════════════════════════════════════════ -->
 
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{text-align:left}</style>
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
-<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3" };</script>
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). Starts muted (autoplay + BGN standard). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 <script src="https://user.uploads.dev/file/9d516fcdb94e4414444cd6fae716ff50.js"></script> <!-- BGN shared SVG card engine (bgn-deck.js) -->
 <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
@@ -760,6 +762,7 @@ loadRooms();
     <div class="bgn-table cya-table">
 
       <div class="panel bgn-boardpanel cya-boardpanel">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
 
         <!-- opponent -->
         <div class="cya-playerrow" id="oppRow">
@@ -830,6 +833,7 @@ loadRooms();
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
           <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
           <button class="btn btn-ghost" id="hintBtn" hidden>💡 Hint</button>
+          <button class="btn btn-ghost" id="helpBtn">❓ Help</button>
         </div>
 
         <div class="cya-chatwrap" id="chatBox" hidden>
@@ -899,6 +903,48 @@ loadRooms();
   <div class="lb-rows" id="lbRowsEl"><div class="lb-empty">Loading…</div></div>
   <div class="over-btns">
     <button class="btn btn-gold" id="lbDoneBtn">Done</button>
+  </div>
+</div>
+
+<!-- ═══ HELP OVERLAY ═══ -->
+<div class="promo" id="helpOverlay" hidden>
+  <div class="promo-title">❓ How to play</div>
+  <div class="muted small" style="max-width:380px; text-align:left; line-height:1.55">
+    <b class="goldtext">1 · Draw</b> — draw cards at the start of each turn; how many is decided by the rules in play.<br>
+    <b class="goldtext">2 · Play</b> — start rows or add matching cards to your own rows for points.<br>
+    <b class="goldtext">3 · Cover &amp; steal</b> — play a matching card onto an opponent's row to take the whole pile.<br>
+    <b class="goldtext">4 · Rift the law</b> — play a ⚡ Rift card and a rule changes on the spot. Click a Rift twice to play it.<br>
+    <b class="goldtext">5 · Score</b> — most points when the deck runs out wins. Wild cards play as any element.
+  </div>
+  <button class="btn btn-gold" style="margin-top:14px" id="helpCloseBtn">Got it</button>
+</div>
+
+<!-- ═══ BGN FULLSCREEN BOARD ═══ -->
+<style>
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 16px; border-bottom:1px solid rgba(255,255,255,.1); color:var(--bgn-muted,#c9d3e5); font-size:13px; }
+.fs-board{ flex:1; min-height:0; position:relative; overflow:auto; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+.fs-board .bgn-table{ max-width:100%; margin:0 auto; }
+body.fsopen .promo{ z-index:9600; }
+.fs-tile{ position:absolute; top:12px; right:12px; z-index:3; }
+.fs-tile:empty{ display:none; }
+.fs-meeple{ position:absolute; bottom:12px; right:12px; z-index:3; }
+.fs-meeple:empty{ display:none; }
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.28); color:#fff; border-radius:8px; padding:6px 12px; font:600 12px/1.4 system-ui,sans-serif; cursor:pointer; box-shadow:0 4px 14px rgba(0,0,0,.4); transition:border-color .15s,transform .15s; }
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); transform:translateY(-1px); }
+.cya-boardpanel{ position:relative; }
+</style>
+
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div id="fsTileCtn" class="fs-tile"></div>
+    <div id="fsMeepleCtn" class="fs-meeple"></div>
   </div>
 </div>
 
@@ -994,31 +1040,18 @@ loadRooms();
 .diff-btns{ display:flex; gap:8px; }
 .diff-btns .btn.on{ background:var(--bgn-gold2,#d4af37); color:#12101c; border-color:transparent; }
 .cya-card .em{ font-size:clamp(1.7rem,4vw,2.3rem); line-height:1; filter:drop-shadow(0 3px 5px rgba(0,0,0,.45)); }
-.cya-card .nm{ font-size:.6rem; letter-spacing:.04em; text-transform:uppercase; opacity:.95; font-weight:800; text-shadow:0 1px 2px rgba(0,0,0,.55); text-align:center; max-width:100%; padding:0 2px; }
-.cya-card .vl{ position:absolute; top:5px; right:6px; font-size:.68rem; font-weight:800; color:#221803; background:linear-gradient(180deg,#f6e6a4,#d4af37); border-radius:999px; padding:0 6px; line-height:1.5; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+.cya-card .nm{ font-size:.56rem; letter-spacing:.05em; text-transform:uppercase; opacity:.9; font-weight:700; }
+.cya-card .vl{ position:absolute; top:5px; right:6px; font-size:.68rem; font-weight:800; color:#221803; background:linear-gradient(180deg,#f6e6a4,#d4af37); border-radius:999px; padding:0 5px; line-height:1.5; box-shadow:0 1px 3px rgba(0,0,0,.4); }
 .cya-card .dc{ position:absolute; top:2px; left:3px; width:18px; height:18px; border-radius:50%; background:rgba(0,0,0,.55); color:#ff9d9d; font-size:.72rem; line-height:18px; text-align:center; opacity:0; transition:opacity .12s; }
 .cya-card:hover .dc{ opacity:1; }
 .cya-card.dead .dc{ opacity:1; background:rgba(255,80,60,.22); }
-.cya-card .tybadge{ position:absolute; bottom:5px; left:5px; font-size:.5rem; letter-spacing:.08em; text-transform:uppercase; opacity:.7; background:rgba(0,0,0,.45); border:1px solid rgba(255,255,255,.22); border-radius:999px; padding:1px 5px; color:#fff; }
+.cya-card .tybadge{ font-size:.5rem; letter-spacing:.06em; text-transform:uppercase; opacity:.65; }
 .cya-card.face-down{ background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 6px); border-color:rgba(212,175,55,.45); cursor:default; }
 .cya-card.face-down::after{ content:"🔒"; font-size:1.4rem; }
 .cya-card.face-down:hover{ transform:none; }
 
-/* card hover zoom — a floating enlarged preview of the card under the cursor */
-.cya-zoom{ position:fixed; z-index:9999; pointer-events:none; display:none; }
-.cya-zoom.show{ display:block; animation:zoomIn .14s ease; }
-@keyframes zoomIn{ from{ opacity:0; transform:scale(.86);} to{ opacity:1; transform:scale(1);} }.cya-card.zoom-card{ width:212px; height:318px; flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px 12px 58px; border:3px solid rgba(255,255,255,.35); cursor:default; box-shadow:0 22px 60px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.4), 0 0 34px rgba(143,123,255,.22); }
-.cya-card.zoom-card:hover{ transform:none; }
-.cya-card.zoom-card .em{ font-size:5.2rem; filter:drop-shadow(0 8px 14px rgba(0,0,0,.5)); }
-.cya-card.zoom-card .nm{ font-size:1.08rem; letter-spacing:.09em; }
-.cya-card.zoom-card .vl{ top:9px; right:11px; font-size:1.05rem; padding:1px 10px; }
-.cya-card.zoom-card.rift .rfb{ top:9px; right:11px; font-size:.68rem; padding:2px 9px; }
-.cya-card.zoom-card.rift .rfx{ bottom:40px; font-size:1.05rem; }
-.cya-card.zoom-card .tybadge{ bottom:10px; left:10px; font-size:.62rem; padding:2px 8px; }
-.cya-card.zoom-card .zsub{ position:absolute; bottom:11px; left:8px; right:8px; text-align:center; font-size:.74rem; color:rgba(255,255,255,.68); letter-spacing:.03em; line-height:1.35; }
-
 /* card type tints: generated at runtime for the deck's card types
-   (a <style id="bgn-tints"> element is injected by the client script) */
+   (the client script injects a <style> element carrying the bgn-tints id) */
 
 /* the law of the table: current rules + played rifts */
 .cya-law{ max-width:640px; margin:14px auto 0; padding:10px 12px; border:1px solid rgba(143,123,255,.4); border-radius:12px; background:linear-gradient(180deg, rgba(143,123,255,.08), rgba(143,123,255,.02)); }
@@ -1040,8 +1073,7 @@ loadRooms();
 .cya-rift-empty{ font-size:.72rem; color:rgba(255,255,255,.35); font-style:italic; padding:4px 0 2px; }
 
 /* rift cards (rewrite a rule when played) */
-.cya-card.rift{ border-color:rgba(143,123,255,.65); background:linear-gradient(160deg,#4a3578,#2b1d52 55%,#190f38); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 0 14px rgba(143,123,255,.22), 0 0 0 1px rgba(143,123,255,.18); justify-content:center; gap:5px; padding-bottom:24px; }
-.cya-card.zoom-card.rift{ justify-content:center; gap:12px; padding:20px 12px 58px; }
+.cya-card.rift{ border-color:rgba(143,123,255,.65); background:linear-gradient(160deg,#4a3578,#2b1d52 55%,#190f38); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 0 14px rgba(143,123,255,.22), 0 0 0 1px rgba(143,123,255,.18); }
 .cya-card.rift:hover{ border-color:#cfc3ff; }
 .cya-card.rift.selected{ border-color:#cfc3ff; box-shadow:0 0 0 2px rgba(143,123,255,.65), 0 14px 26px rgba(0,0,0,.55), inset 0 0 18px rgba(143,123,255,.4); }
 .cya-card.rift .rfb{ position:absolute; top:4px; right:4px; font-size:.44rem; font-weight:900; letter-spacing:.1em; color:#17102e; background:linear-gradient(180deg,#e0d7ff,#b9a9ff); border-radius:999px; padding:1px 5px; }
@@ -1100,6 +1132,66 @@ loadRooms();
   .promo{ padding:14px 14px; }
 }
 </style>
+
+<script>
+/* ═══ BGN FULLSCREEN BOARD — window.bgnFullscreen (per the network standard) ═══
+   The game registers its table (and optionally tile/meeple/resize) via
+   register(); opening MOVES the live elements into the overlay (never
+   clones) and restores them to their exact original spots on close. */
+(function(){
+  "use strict";
+  var fsOverlay=document.getElementById("fsOverlay");
+  var fsBoardWrap=document.getElementById("fsBoardWrap");
+  var fsOpenBtn=document.getElementById("fsOpenBtn");
+  var fsExitBtn=document.getElementById("fsExitBtn");
+  var fsTileCtn=document.getElementById("fsTileCtn");
+  var fsMeepleCtn=document.getElementById("fsMeepleCtn");
+  var fsReg=null, fsMoved=[];
+  function fsRefit(){ if(fsReg&&typeof fsReg.resize==="function"){ try{ fsReg.resize(); }catch(e){} } }
+  function fsMove(el,target){
+    el._fsOrig={p:el.parentNode,n:el.nextSibling};
+    target.appendChild(el);
+    fsMoved.push(el);
+  }
+  function openFullscreen(){
+    if(!fsReg||!fsReg.canvas||!fsOverlay.hidden)return;
+    fsMoved=[];
+    fsMove(fsReg.canvas,fsBoardWrap);
+    if(fsReg.tile&&fsTileCtn)fsMove(fsReg.tile,fsTileCtn);
+    if(fsReg.meeple&&fsMeepleCtn)fsMove(fsReg.meeple,fsMeepleCtn);
+    fsOverlay.hidden=false;
+    document.body.classList.add("fsopen");
+    document.body.style.overflow="hidden";
+    try{ var p=fsOverlay.requestFullscreen(); if(p&&p.catch)p.catch(function(){}); }catch(e){}
+    fsRefit();
+  }
+  function closeFullscreen(){
+    if(fsOverlay.hidden)return;
+    fsOverlay.hidden=true;
+    document.body.classList.remove("fsopen");
+    document.body.style.overflow="";
+    if(document.fullscreenElement){ try{ document.exitFullscreen(); }catch(e){} }
+    for(var i=fsMoved.length-1;i>=0;i--){
+      var el=fsMoved[i],o=el._fsOrig;
+      if(o){ if(o.n)o.p.insertBefore(el,o.n); else o.p.appendChild(el); delete el._fsOrig; }
+    }
+    fsMoved=[];
+    fsRefit();
+  }
+  window.bgnFullscreen={
+    register: function(o){ fsReg=o||null; if(o&&o.canvas)fsOpenBtn.hidden=false; },
+    open: openFullscreen,
+    close: closeFullscreen,
+    isOpen: function(){ return !fsOverlay.hidden; }
+  };
+  if(fsOpenBtn)fsOpenBtn.addEventListener("click",openFullscreen);
+  if(fsExitBtn)fsExitBtn.addEventListener("click",closeFullscreen);
+  document.addEventListener("keydown",function(e){
+    if(e.key==="Escape"&&!fsOverlay.hidden){ closeFullscreen(); return; }
+  });
+  window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+})();
+</script>
 
 <script>
 (function(){
@@ -1360,50 +1452,6 @@ const lbNameInput=document.getElementById("lbNameInput");
 const lbRowsEl=document.getElementById("lbRowsEl");
 const lbDoneBtn=document.getElementById("lbDoneBtn");
 
-/* ══════════ card hover zoom (enlarged preview) ══════════ */
-const zoomEl=document.createElement("div");
-zoomEl.className="cya-zoom"; zoomEl.id="cardZoomEl";
-document.body.appendChild(zoomEl);
-function buildPreviewCard(t){
-  const d=document.createElement("div");
-  d.className="cya-card zoom-card t"+t;
-  if(RIFT_T[t]){
-    const e=riftInfo(t);
-    const kt=e.key==="drawPerTurn"?"DRAW":e.key==="playsPerTurn"?"PLAY":e.key==="emptyHandDraw"?"REFILL":"POINTS";
-    const vt=e.key==="scoreMult"?"×"+e.value:(e.key==="playsPerTurn"?e.value+"×":e.value);
-    const sub=e.key==="drawPerTurn"?"cards each turn":e.key==="playsPerTurn"?"plays each turn":e.key==="emptyHandDraw"?"cards when your stacks are empty":(e.value>1?"all points doubled":"points back to normal");
-    d.className+=" rift";
-    d.innerHTML='<div class="em">'+EMO[t]+'</div><div class="nm">'+NAMES[t]+'</div><div class="rfx">'+kt+' '+vt+'</div><div class="rfb">RIFT</div><div class="zsub">'+sub+'</div>';
-  }else{
-    d.innerHTML='<div class="em">'+EMO[t]+'</div><div class="nm">'+NAMES[t]+'</div><div class="vl">'+VAL[t]+'</div><div class="zsub">'+(t===WILD_T?"plays as any element":"points per card")+'</div>';
-  }
-  return d;
-}
-function zoomHide(){ zoomEl.classList.remove("show"); zoomEl.innerHTML=""; }
-function zoomShow(t,ev){
-  zoomEl.innerHTML="";
-  zoomEl.appendChild(buildPreviewCard(t));
-  zoomEl.classList.add("show");
-  const r=zoomEl.getBoundingClientRect();
-  let x=ev.clientX+18, y=ev.clientY-r.height-16;
-  if(x+r.width>window.innerWidth-8)x=ev.clientX-r.width-18;
-  if(y<8)y=ev.clientY+18;
-  zoomEl.style.left=Math.max(8,x)+"px"; zoomEl.style.top=Math.max(8,y)+"px";
-}
-function attachZoom(el,t){
-  if(!el||t==null||t<0)return;
-  el.addEventListener("mouseenter",function(ev){ zoomShow(t,ev); });
-  el.addEventListener("mousemove",function(ev){
-    if(!zoomEl.classList.contains("show"))return;
-    const r=zoomEl.getBoundingClientRect();
-    let x=ev.clientX+18, y=ev.clientY-r.height-16;
-    if(x+r.width>window.innerWidth-8)x=ev.clientX-r.width-18;
-    if(y<8)y=ev.clientY+18;
-    zoomEl.style.left=Math.max(8,x)+"px"; zoomEl.style.top=Math.max(8,y)+"px";
-  });
-  el.addEventListener("mouseleave",zoomHide);
-}
-
 /* ══════════ helpers ══════════ */
 function npName(p){ if(game.mode==="online")return p===game.myPlayer?"You":"Opponent"; if(game.mode==="ai")return p===0?"You":"The Machine"; return "Player "+(p+1); }
 function riftKeyName(k){ return k==="drawPerTurn"?"Draw per turn":k==="playsPerTurn"?"Plays per turn":k==="emptyHandDraw"?"Refill when empty":k==="scoreMult"?"Points multiplier":k; }
@@ -1480,12 +1528,10 @@ function cardEl(id,opts){
     d.innerHTML='<div class="em">'+EMO[t]+'</div><div class="nm">'+NAMES[t]+'</div><div class="rfx">'+kt+' '+vt+'</div><div class="rfb">RIFT</div>';
   }else{
     d.innerHTML='<div class="em">'+EMO[t]+'</div><div class="nm">'+NAMES[t]+'</div><div class="vl">'+cardVal(id)+'</div>';
-    if(t===WILD_T)d.innerHTML+='<div class="tybadge">any element</div>';
   }
   if(opts.dead&&!opts.hideDead)d.classList.add("dead");
   if(opts.dead)d.innerHTML+='<div class="dc">✕</div>';
   if(opts.selected)d.classList.add("selected");
-  attachZoom(d,t);
   return d;
 }
 function renderSlot(container,p,s){
@@ -1521,7 +1567,6 @@ function renderSlot(container,p,s){
       slot.appendChild(row);
     }
     if(can&&game.selected&&selectedLegalSlot(p,s)){ slot.classList.add("playable"); playable=true; }
-    attachZoom(slot,st.type);
   }
   if(playable){
     slot.addEventListener("click",function(){ onSlotClick(p,s); });
@@ -1604,9 +1649,8 @@ function renderLaw(){
       const t=cardType(id), e=riftInfo(t);
       const kt=e.key==="drawPerTurn"?"Draw":e.key==="playsPerTurn"?"Play":e.key==="emptyHandDraw"?"Refill":"Points";
       const vt=e.key==="scoreMult"?"×"+e.value:(e.key==="playsPerTurn"?e.value+"×":e.value);
-      return '<div class="cya-rift-mini t'+t+'" data-t="'+t+'" title="'+esc(NAMES[t])+'"><span class="cya-rift-em">'+EMO[t]+'</span><span class="cya-rift-txt"><b>'+kt+'</b> '+vt+'</span></div>';
+      return '<div class="cya-rift-mini t'+t+'" title="'+esc(NAMES[t])+'"><span class="cya-rift-em">'+EMO[t]+'</span><span class="cya-rift-txt"><b>'+kt+'</b> '+vt+'</span></div>';
     }).join("");
-    riftsEl.querySelectorAll(".cya-rift-mini").forEach(function(m){ attachZoom(m,parseInt(m.dataset.t)); });
   }else{
     riftsEl.innerHTML='<div class="cya-rift-empty">Play a ⚡ Rift card from your hand to rewrite a rule</div>';
   }
@@ -1673,6 +1717,8 @@ function updateBanner(){
     else msg="";
   }
   bannerEl.textContent=msg;
+  fsStatusEl.textContent = bannerEl.textContent;
+  if(!fsOverlay.hidden) fsStatusEl.textContent=msg;
 }
 function renderAll(){
   if(!game.g)return;
@@ -1924,6 +1970,7 @@ function exitOnline(showLobby){
   if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
 }
 function exitToLobby(){
+  if(window.bgnFullscreen&&window.bgnFullscreen.isOpen())window.bgnFullscreen.close();
   if(game.mode==="online"){
     if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
     exitOnline(true);
@@ -2404,6 +2451,9 @@ claimBtn.addEventListener("click",function(){
   }).catch(function(){});
 });
 wildCancelBtn.addEventListener("click",function(){ wildModal.hidden=true; game.selected=null; renderAll(); });
+helpBtn.addEventListener("click",function(){ helpOverlay.hidden=false; });
+helpCloseBtn.addEventListener("click",function(){ helpOverlay.hidden=true; });
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay) helpOverlay.hidden=true; });
 continueBtn.addEventListener("click",continueGame);
 deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
 saveBtn.addEventListener("click",function(){ saveGame(); log("💾 Game saved."); });
@@ -2417,6 +2467,7 @@ lbNameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")closeLb()
 window.__bgn={ game, CFG, newRoom, deal, turnPlayer, legalKinds, applyPlay, applyRift, handHasRift, riftInfo, finishTurn, vaultVal, stackVal, cardType, cardVal, startMode, startGame, endPlayerTurn, doPlay, aiChoosePlay, buildDeck, renderAll, renderLaw, showGameOver, onSlotClick, saveGame, continueGame, deleteSave, lbSubmitScore, openLb };
 refreshContinuePanel();
 renderAll();
+if(window.bgnFullscreen) window.bgnFullscreen.register({canvas:document.querySelector(".bgn-table"),resize:function(){ renderAll(); }});
 
 /* ══════════ share / export (bgn-share.js) ══════════ */
 (function(){
@@ -2495,5 +2546,65 @@ renderAll();
   window.addEventListener("message",function(e){
     if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
   });
+})();
+</script>
+
+<!-- ═══ BACK TO HUB (see src/back-to-hub.html — the same snippet can be pasted into any generator) ═══ -->
+<script>
+(function () {
+  "use strict";
+  if (document.getElementById("rathjiBackBtn")) return;
+
+  var HUB_URL = "https://perchance.org/rathjis-generators";
+
+  var css =
+    "#rathjiBackBtn{" +
+      "position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483000;" +
+      "display:flex;align-items:center;gap:10px;box-sizing:border-box;max-width:calc(100vw - 36px);" +
+      "padding:8px 16px 8px 8px;border-radius:999px;" +
+      "background:rgba(13,15,21,.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);" +
+      "border:1px solid rgba(255,255,255,.16);box-shadow:0 6px 20px rgba(0,0,0,.45);" +
+      "text-decoration:none;" +
+      "transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;" +
+    "}" +
+    "#rathjiBackBtn:hover{transform:translateX(-50%) translateY(-2px);border-color:rgba(167,139,250,.65);box-shadow:0 10px 26px rgba(139,92,246,.38);}" +
+    "#rathjiBackBtn:active{transform:translateX(-50%) translateY(0);}" +
+    "#rathjiBackBtn:focus-visible{outline:2px solid rgba(167,139,250,.8);outline-offset:2px;}" +
+    "#rathjiBackBtn .rb-badge{width:28px;height:28px;flex:none;border-radius:50%;" +
+      "background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;display:flex;align-items:center;justify-content:center;" +
+      "font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-weight:700;font-size:15px;line-height:1;}" +
+    "#rathjiBackBtn .rb-label{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;" +
+      "font-size:14px;font-weight:600;color:#fff;white-space:nowrap;letter-spacing:.01em;}" +
+    "#rathjiBackBtn .rb-arrow{flex:none;width:14px;height:14px;color:rgba(255,255,255,.75);display:block;}" +
+    "@media (max-width:479px){#rathjiBackBtn{padding:0;border-radius:50%;}#rathjiBackBtn .rb-label,#rathjiBackBtn .rb-arrow{display:none;}}";
+
+  var style = document.getElementById("rathjiBackBtnStyle");
+  if (!style) { style = document.createElement("style"); style.id = "rathjiBackBtnStyle"; document.head.appendChild(style); }
+  style.textContent = css;
+
+  var btn = document.createElement("a");
+  btn.id = "rathjiBackBtn";
+  btn.href = HUB_URL;
+  btn.target = "_blank";
+  btn.rel = "noopener";
+  btn.setAttribute("aria-label", "Back to my projects");
+  btn.setAttribute("title", "Back to my projects");
+
+  var badge = document.createElement("span");
+  badge.className = "rb-badge";
+  badge.textContent = "R";
+
+  var label = document.createElement("span");
+  label.className = "rb-label";
+  label.textContent = "My projects";
+
+  btn.appendChild(badge);
+  btn.appendChild(label);
+  btn.insertAdjacentHTML("beforeend",
+    '<svg class="rb-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+      '<path d="M5 11L11 5M11 5H6.5M11 5V9.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>');
+
+  document.body.appendChild(btn);
 })();
 </script>

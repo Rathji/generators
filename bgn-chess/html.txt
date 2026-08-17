@@ -13,7 +13,7 @@
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
@@ -548,6 +548,7 @@ loadRooms();
   <section id="gameCtn" hidden>
     <div class="bgn-table">
       <div class="panel bgn-boardpanel">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
         <div class="bgn-players">
           <div class="bgn-player" id="pWhite">
             <span class="bgn-avatar white"></span>
@@ -614,6 +615,15 @@ loadRooms();
   </div>
 </div>
 
+<!-- ═══ FULLSCREEN BOARD (BGN standard) ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
 <!-- ═══ HELP MODAL ═══ -->
 <div id="helpOverlay" class="bgn-help-overlay" hidden>
   <div class="bgn-help">
@@ -641,7 +651,7 @@ loadRooms();
 
 .bgn-table{ display:grid; grid-template-columns:auto 320px; gap:18px; align-items:start; justify-content:center; }
 @media (max-width:900px){ .bgn-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
-.bgn-boardpanel{ text-align:center; }
+.bgn-boardpanel{ text-align:center; position:relative; }
 
 .bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
 .bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
@@ -720,6 +730,22 @@ loadRooms();
 .promo-row{ display:flex; gap:6px; }
 .promo-btn{ width:46px; height:46px; font-size:1.7rem; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.18); border-radius:8px; color:inherit; cursor:pointer; display:flex; align-items:center; justify-content:center; }
 .promo-btn:hover{ border-color:var(--bgn-gold2,#d4af37); background:rgba(212,175,55,.18); }
+
+/* ══════ fullscreen board (BGN standard) ══════ */
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.35); color:#fff; border-radius:999px; padding:8px 14px; cursor:pointer; font:600 13px/1 system-ui,-apple-system,sans-serif; box-shadow:0 4px 14px rgba(0,0,0,.4); }
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent,#d4af37); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.1); color:#fff; flex:none; }
+#fsStatusEl{ font-weight:600; font-size:.95rem; color:#f6e6a4; }
+#fsActionsCtn{ flex:1; display:flex; justify-content:center; align-items:center; gap:8px; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.fs-tile{ position:absolute; top:10px; right:10px; z-index:5; }
+.fs-meeple{ position:absolute; bottom:10px; right:10px; z-index:5; }
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+#fsOverlay .bgn-board{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); margin:0; --cell: calc(min(88vw, 82vh)/8); box-shadow:0 0 0 5px #241d14, 0 0 0 6px var(--bgn-gold2,#d4af37), 0 14px 34px rgba(0,0,0,.55); }
 </style>
 
 <script>
@@ -1058,6 +1084,14 @@ const joinCodeInput=document.getElementById("joinCodeInput");
 const boardEl=document.getElementById("board");
 const turnEl=document.getElementById("turnEl");
 const bannerEl=document.getElementById("bannerEl");
+const fsOpenBtn=document.getElementById("fsOpenBtn");
+const fsOverlay=document.getElementById("fsOverlay");
+const fsStatusEl=document.getElementById("fsStatusEl");
+const fsActionsCtn=document.getElementById("fsActionsCtn");
+const fsExitBtn=document.getElementById("fsExitBtn");
+const fsBoardWrap=document.getElementById("fsBoardWrap");
+const fsTileCtn=document.getElementById("fsTileCtn");
+const fsMeepleCtn=document.getElementById("fsMeepleCtn");
 const logEl=document.getElementById("logEl");
 const whiteNameEl=document.getElementById("whiteNameEl");
 const blackNameEl=document.getElementById("blackNameEl");
@@ -1212,9 +1246,10 @@ function updateBanner(){
     if(inCheck(game.state))msg=turnName(game.state.turn)+" is in check!";
   }
   bannerEl.textContent=msg;
+  if(!fsOverlay.hidden)fsStatusEl.textContent=msg;
 }
 let bannerTimer=null;
-function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+function flashBanner(msg){ bannerEl.textContent=msg; if(!fsOverlay.hidden)fsStatusEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
 function updateButtons(){
   if(game.mode==="online"){
     newGameBtn.textContent=game.over?"Rematch":"New match";
@@ -1680,7 +1715,12 @@ document.getElementById("helpBtn").addEventListener("click",openHelp);
 document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
 document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
 helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
-document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!helpOverlay.hidden)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
 
 refreshContinuePanel();
 renderAll();
@@ -1710,9 +1750,52 @@ renderAll();
   shareBtn.addEventListener("click",function(){ panel.open(); });
 })();
 
+/* ══════════ fullscreen board (BGN standard) ══════════ */
+const fsCfg={canvas:null,resize:null};
+function fsRefit(){ if(fsCfg.resize)try{ fsCfg.resize(); }catch(e){} renderAll(); }
+function openFullscreen(){
+  if(!fsCfg.canvas||!fsOverlay.hidden)return;
+  const el=fsCfg.canvas;
+  if(!el._fsOrig)el._fsOrig={parent:el.parentNode,next:el.nextSibling};
+  fsBoardWrap.appendChild(el);
+  fsOverlay.hidden=false;
+  fsStatusEl.textContent=bannerEl.textContent||"Full screen map";
+  document.body.style.overflow="hidden";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(document.fullscreenElement)try{ document.exitFullscreen().catch(function(){}); }catch(e){}
+  const el=fsCfg.canvas;
+  if(el&&el._fsOrig){
+    try{ el._fsOrig.parent.insertBefore(el,el._fsOrig.next); }catch(e){ el._fsOrig.parent.appendChild(el); }
+  }
+  fsRefit();
+  renderAll();
+}
+window.bgnFullscreen={
+  register:function(o){
+    if(!o||!o.canvas)return;
+    fsCfg.canvas=o.canvas;
+    if(typeof o.resize==="function")fsCfg.resize=o.resize;
+    if(o.tile)fsTileCtn.appendChild(o.tile);
+    if(o.meeple)fsMeepleCtn.appendChild(o.meeple);
+    fsOpenBtn.hidden=false;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({canvas:boardEl, resize:renderAll});
+
 /* debug/testing handle for browser_eval */
-window.__ck = { game, makeState, makeMove, pseudoMoves, legalMoves, inCheck, isAttacked, stateFromMoves, parseMove, encodeMove, sanMove, evalBoard, aiChoose, capturedStats, WHITE, BLACK, startMode, doCreateRoom, doJoinRoom, continueGame, saveGame, deleteSave, openHelp, closeHelp, sendChat, addChat, refreshContinuePanel };
-})();
+window.__ck = { game, makeState, makeMove, pseudoMoves, legalMoves, inCheck, isAttacked, stateFromMoves, parseMove, encodeMove, sanMove, evalBoard, aiChoose, capturedStats, WHITE, BLACK, startMode, doCreateRoom, doJoinRoom, continueGame, saveGame, deleteSave, openHelp, closeHelp, sendChat, addChat, refreshContinuePanel };})();
 </script>
 
 <!-- BGN Lounge: one shared chat across every BGN game -->

@@ -52,7 +52,7 @@ export function makeLocalSocket({ resume } = {}) {
       if (p && typeof p === "object") doc = p;
     } catch (e) { doc = null; }
   }
-  if (!doc) doc = { walls: [], tokens: [], chat: [], dmId: myId, enforceLos: false, mapImage: "", initCurrent: "" };
+  if (!doc) doc = { walls: [], tokens: [], chat: [], dmId: myId, enforceLos: false, mapImage: "", initCurrent: "", status: 2, winner: null, reason: null };
   doc.dmId = myId;
   if (!Array.isArray(doc.walls)) doc.walls = [];
   if (!Array.isArray(doc.tokens)) doc.tokens = [];
@@ -60,6 +60,9 @@ export function makeLocalSocket({ resume } = {}) {
   if (typeof doc.enforceLos !== "boolean") doc.enforceLos = false;
   if (typeof doc.mapImage !== "string") doc.mapImage = "";
   if (typeof doc.initCurrent !== "string") doc.initCurrent = "";
+  if (typeof doc.status !== "number") doc.status = 2;
+  if (typeof doc.winner !== "string" || doc.winner === "") doc.winner = null;
+  if (typeof doc.reason !== "string" || doc.reason === "") doc.reason = null;
 
   function save() {
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(doc)); } catch (e) {}
@@ -67,7 +70,7 @@ export function makeLocalSocket({ resume } = {}) {
   function emit(obj) {
     socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(obj) }));
   }
-  function emitState() { emit({ t: "state", doc }); }
+  function emitState() { emit({ t: "snap", snap: { code: "LOCAL", status: doc.status, winner: doc.winner, reason: doc.reason, doc } }); }
   function players() { return [{ id: myId, name, isDm: true }]; }
   function genId() {
     let id;
@@ -227,6 +230,18 @@ export function makeLocalSocket({ resume } = {}) {
       doc.mapImage = image;
       save(); emitState(); return Promise.resolve("ok");
     },
+    endGame(data) {
+      const d = safeParse(data);
+      const winner = String((d && d.winner) || "party").slice(0, 40);
+      doc.status = 3; doc.winner = winner; doc.reason = "end";
+      save(); emitState(); return Promise.resolve("ok");
+    },
+    claimWin(data) { return Promise.reject(new Error("dm_present")); },
+    rematch(data) {
+      if (doc.status !== 3) return Promise.reject(new Error("table_running"));
+      doc.status = 2; doc.winner = null; doc.reason = null;
+      save(); emitState(); return Promise.resolve("ok");
+    },
     chat(data) {
       const d = safeParse(data);
       const text = cleanText(d && d.text);
@@ -243,7 +258,7 @@ export function makeLocalSocket({ resume } = {}) {
 
   setTimeout(() => {
     socket.dispatchEvent(new Event("open"));
-    emit({ t: "welcome", code: "LOCAL", yourId: myId, doc, players: players() });
+    emit({ t: "welcome", code: "LOCAL", yourId: myId, doc, players: players(), status: doc.status, winner: doc.winner, reason: doc.reason });
   }, 25);
 
   return socket;

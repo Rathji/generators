@@ -604,6 +604,9 @@
     if (!q && group !== "Favorites") {
       suggestCtn.hidden = false;
       refLayout.hidden = true;
+      fsOpenBtn.hidden = true;
+      bannerEl.hidden = true;
+      turnEl.textContent = "Ready to look up";
       return;
     }
     suggestCtn.hidden = true;
@@ -645,6 +648,14 @@
       } else {
         detailEmpty.innerHTML = 'Nothing matched <b style="color:var(--bgn-accent2)">' + esc(q) + '</b>. Try a shorter word, or check the spelling (e.g. "grapple", "rage", "shield").';
       }
+    }
+    refreshRoomCode();
+    if (merged.length) {
+      turnEl.textContent = merged.length + " result" + (merged.length === 1 ? "" : "s") + " — pick one to read.";
+    } else {
+      fsOpenBtn.hidden = true;
+      turnEl.textContent = "No results for \u201C" + q + "\u201D.";
+      setBanner("Nothing matched \u201C" + q + "\u201D.");
     }
   }
 
@@ -715,9 +726,14 @@
   let currentFavIdent = null;
 
   /* ═══════════ selection + detail ═══════════ */
+  let lastSelectedKey = null;
   function select(group) {
     state.selId = group.key;
     for (const el of resultsEl.children) el.classList.toggle("sel", el.dataset.name === group.key);
+    if (group.key !== lastSelectedKey) {
+      lastSelectedKey = group.key;
+      addLog("you", "Opened \u201C" + group.name + "\u201D.");
+    }
     renderDetail(group);
   }
   function entryFor(group, kind) {
@@ -898,6 +914,12 @@
   /* ═══════════ rendering ═══════════ */
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function escapeHtml(s) {
+    return esc(s);
+  }
+  function cleanText(s, max) {
+    return String(s || "").trim().replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").slice(0, max || 160);
   }
   function inlineText(t) {
     return String(t)
@@ -1212,8 +1234,19 @@
     copyBtn.addEventListener("click", () => {
       const text = group.name.toUpperCase() + (entry.subtitle ? "\n" + inlineText(entry.subtitle) : "") + "\n\n" + blocksToPlain(entry.blocks || []) + "\n\n— Reference: " + fullRef;
       copyText(copyBtn, text, "✓ Copied!");
+      addLog("you", "Copied \u201C" + group.name + "\u201D + references.");
+      flashBanner("Copied \u201C" + group.name + "\u201D + references.");
     });
-    refBtn.addEventListener("click", () => copyText(refBtn, "Reference: " + fullRef, "✓ Copied!"));
+    refBtn.addEventListener("click", () => {
+      copyText(refBtn, "Reference: " + fullRef, "✓ Copied!");
+      addLog("you", "Copied the reference for \u201C" + group.name + "\u201D.");
+    });
+
+    fsOpenBtn.hidden = false;
+    setBanner("Reading " + group.name + (entry.subtitle ? " — " + inlineText(entry.subtitle) : ""));
+    turnEl.textContent = "Reading: " + group.name;
+    refreshRoomCode();
+    window.bgnFullscreen.register({ canvas: body, tile: actions, meeple: foot });
   }
 
   function copyText(btn, text, doneMsg) {
@@ -1281,6 +1314,7 @@
         : (state.sources["24"] && state.sources["14"]);
       c.classList.toggle("on", on);
     });
+    refreshRoomCode();
   }
   async function savePrefs() {
     const kv = HB_KV();
@@ -1751,6 +1785,398 @@
   $("diceBtn").addEventListener("click", () => doRoll(diceInput.value));
   diceInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doRoll(diceInput.value); } });
 
+  /* ═══════════ BGN table / session panel ═══════════ */
+  const bannerEl = $("bannerEl"), turnEl = $("turnEl"), logEl = $("logEl");
+  const roomBox = $("roomBox"), roomCodeEl = $("roomCodeEl"), connEl = $("connEl");
+  const copyCodeBtn = $("copyCodeBtn"), leaveBtn = $("leaveBtn");
+  const newGameBtn = $("newGameBtn"), claimBtn = $("claimBtn"), menuBtn = $("menuBtn");
+  const saveBtn = $("saveBtn"), shareBtn = $("shareBtn"), helpBtn = $("helpBtn");
+  const joinCodeInput = $("joinCodeInput"), joinRoomBtn = $("joinRoomBtn"), onlineMsg = $("onlineMsg");
+  const chatMsgsEl = $("chatMsgsEl"), chatInput = $("chatInput"), chatSendBtn = $("chatSendBtn");
+  const continuePanel = $("continuePanel"), continueInfoEl = $("continueInfoEl");
+  const continueBtn = $("continueBtn"), deleteSaveBtn = $("deleteSaveBtn");
+  const fsOpenBtn = $("fsOpenBtn");
+  const helpOverlay = $("helpOverlay"), helpBody = $("helpBody");
+
+  function sfx(n) { try { if (window.BGN && BGN.sfx) BGN.sfx.play(n); } catch (e) {} }
+
+  const sessionLog = [];
+  function addLog(role, msg) {
+    sessionLog.push({ r: role, m: msg });
+    if (sessionLog.length > 60) sessionLog.shift();
+    renderLog();
+  }
+  function roleName(r) { return r === "you" ? "You" : "Table"; }
+  function renderLog() {
+    logEl.innerHTML = "";
+    if (!sessionLog.length) { logEl.innerHTML = '<div class="muted small">No activity yet — searches, copies and saves land here.</div>'; return; }
+    for (const e of sessionLog) {
+      const d = document.createElement("div");
+      d.className = "log-item";
+      d.innerHTML = "<b>" + esc(roleName(e.r)) + "</b><span class='resp'>" + esc(e.m) + "</span>";
+      logEl.appendChild(d);
+    }
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  /* ═══════════ fullscreen reader ═══════════
+     Maximizes the current entry into a full-window overlay: the
+     body, action buttons and reference footer are MOVED in live
+     (never cloned) so copy/favorite keep working while maximized. */
+  const fsOverlay = $("fsOverlay"), fsExitBtn = $("fsExitBtn"), fsStatusEl = $("fsStatusEl");
+  const fsBoardWrap = $("fsBoardWrap"), fsTileCtn = $("fsTileCtn"), fsMeepleCtn = $("fsMeepleCtn");
+  const fsGame = { canvas: null, tile: null, meeple: null, resize: null };
+  const fsMoved = [];
+  function fsStash(el) { if (el && !el._fsOrig) { el._fsOrig = { p: el.parentNode, n: el.nextSibling }; fsMoved.push(el); } return el; }
+  function fsRestore(el) { if (!el || !el._fsOrig) return; const o = el._fsOrig; if (o.p && o.n && o.n.parentNode === o.p) o.p.insertBefore(el, o.n); else if (o.p) o.p.appendChild(el); el._fsOrig = null; }
+  function fsDefaultResize() {
+    if (!fsGame.canvas) return;
+    const c = fsGame.canvas;
+    if (typeof c.width === "number" && typeof c.height === "number") {
+      const w = c.parentElement.clientWidth || 640, h = c.parentElement.clientHeight || 400, dpr = window.devicePixelRatio || 1;
+      const nw = Math.round(w * dpr), nh = Math.round(h * dpr);
+      if (nw !== c.width || nh !== c.height) { c.width = nw; c.height = nh; }
+    }
+  }
+  function fsResize() { fsDefaultResize(); }
+  function fsRefit() { (fsGame.resize || fsDefaultResize)(); }
+  function openFullscreen() {
+    if (!fsOverlay.hidden) return;
+    const entryBlocks = detailEl.querySelector(".blocks");
+    const entryActions = detailEl.querySelector(".detail-actions");
+    const entryFoot = detailEl.querySelector(".ref-foot");
+    if (entryBlocks) fsGame.canvas = entryBlocks;
+    if (entryActions) fsGame.tile = entryActions;
+    if (entryFoot) fsGame.meeple = entryFoot;
+    fsOverlay.hidden = false;
+    fsStatusEl.textContent = bannerEl.textContent || "Full screen reader";
+    if (fsGame.tile) fsTileCtn.appendChild(fsStash(fsGame.tile));
+    if (fsGame.meeple) fsMeepleCtn.appendChild(fsStash(fsGame.meeple));
+    if (fsGame.canvas) fsBoardWrap.appendChild(fsStash(fsGame.canvas));
+    document.body.style.overflow = "hidden";
+    fsRefit();
+    try { if (fsOverlay.requestFullscreen) fsOverlay.requestFullscreen().catch(() => {}); } catch (e) {}
+  }
+  function closeFullscreen() {
+    if (fsOverlay.hidden) return;
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch (e) {}
+    for (const el of fsMoved) fsRestore(el);
+    fsMoved.length = 0;
+    fsOverlay.hidden = true;
+    document.body.style.overflow = "";
+    fsRefit();
+  }
+  window.bgnFullscreen = {
+    register(o) {
+      if (!o) return;
+      if (o.canvas) { fsGame.canvas = o.canvas; fsOpenBtn.hidden = false; }
+      if (o.tile) fsGame.tile = o.tile;
+      if (o.meeple) fsGame.meeple = o.meeple;
+      if (o.resize) fsGame.resize = o.resize;
+    },
+    open: openFullscreen, close: closeFullscreen, isOpen: () => !fsOverlay.hidden,
+  };
+  window.bgnFullscreen.register({ canvas: null, tile: null, meeple: null, resize: fsResize });
+  fsOpenBtn.addEventListener("click", openFullscreen);
+  fsExitBtn.addEventListener("click", closeFullscreen);
+  window.addEventListener("resize", () => { if (!fsOverlay.hidden) fsRefit(); });
+  new MutationObserver(() => {
+    if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent || "";
+  }).observe(bannerEl, { childList: true, characterData: true, subtree: true });
+
+  let detailBanner = "";
+  function updateBanner() {
+    const msg = detailBanner || "";
+    bannerEl.hidden = !msg;
+    bannerEl.textContent = msg;
+    if (!fsOverlay.hidden) fsStatusEl.textContent = msg;
+  }
+  function setBanner(msg) {
+    detailBanner = msg || "";
+    updateBanner();
+  }
+  let bannerTimer = null;
+  function flashBanner(msg) {
+    bannerEl.hidden = false;
+    bannerEl.textContent = msg;
+    if (!fsOverlay.hidden) fsStatusEl.textContent = msg;
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(updateBanner, 2600);
+  }
+
+  /* ═══════════ session: code, rejoin, save ═══════════ */
+  function b64e(s) { const bytes = new TextEncoder().encode(s); let bin = ""; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]); return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function b64d(s) {
+    let b = String(s).replace(/-/g, "+").replace(/_/g, "/");
+    b += "=".repeat((4 - (b.length % 4)) % 4);
+    const bin = atob(b);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  function sessionCode() {
+    const p = { v: 1, q: state.query.trim(), g: state.group, s: [!!state.sources["24"], !!state.sources["14"], !!state.sources.ex, !!state.sources.hb], b: [...state.books] };
+    let j; try { j = JSON.stringify(p); } catch (e) { return ""; }
+    return "bgn:" + b64e(j);
+  }
+  function refreshRoomCode() { if (roomCodeEl) roomCodeEl.textContent = sessionCode() || "—"; }
+  function setOnlineMsg(t) { if (onlineMsg) onlineMsg.textContent = t || ""; }
+  const GROUPS_ALL = ["All", "Spells", "Monsters", "Rules", "Feats", "Characters", "Equipment", "Homebrew", "Favorites"];
+  function applySessionCode(raw) {
+    const c = String(raw || "").trim().replace(/^bgn:/i, "");
+    let o;
+    try { o = JSON.parse(b64d(c)); } catch (e) { return false; }
+    if (!o || o.v !== 1) return false;
+    state.query = String(o.q || "").slice(0, 120);
+    if (GROUPS_ALL.indexOf(o.g) !== -1) state.group = o.g;
+    if (Array.isArray(o.s)) state.sources = { "24": !!o.s[0], "14": !!o.s[1], ex: !!o.s[2], hb: !!o.s[3] };
+    state.books = new Set(Array.isArray(o.b) ? o.b : []);
+    syncEdChips();
+    savePrefs();
+    searchInput.value = state.query;
+    clearBtn.hidden = !state.query;
+    grpChips.forEach((x) => x.classList.toggle("on", x.dataset.g === state.group));
+    if (state.query.trim()) runSearch(); else { suggestCtn.hidden = false; refLayout.hidden = true; }
+    refreshRoomCode();
+    addLog("table", "Session restored by code.");
+    setBanner("Session restored" + (state.query.trim() ? " — \u201C" + state.query.trim() + "\u201D" : "") + ".");
+    turnEl.textContent = "Session restored";
+    return true;
+  }
+
+  const SAVE_KEY = "bgn_save_dndref";
+  function saveSession() {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify({ v: 1, q: state.query.trim(), g: state.group, s: state.sources, b: [...state.books], log: sessionLog.slice(), savedAt: Date.now() }));
+      return true;
+    } catch (e) { return false; }
+  }
+  function hasSessionSave() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
+  function deleteSessionSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+  function refreshContinuePanel() {
+    if (!continuePanel) return;
+    const s = hasSessionSave();
+    continuePanel.hidden = !s;
+    if (!s) return;
+    let info = "A saved session was found.";
+    try {
+      const o = JSON.parse(localStorage.getItem(SAVE_KEY));
+      if (o && o.savedAt) info = "Saved " + new Date(o.savedAt).toLocaleTimeString() + (o.q ? " · searching \"" + String(o.q).slice(0, 40) + "\"" : "");
+    } catch (e) {}
+    continueInfoEl.textContent = info;
+  }
+  function restoreSessionState(o) {
+    state.query = String(o.q || "").slice(0, 120);
+    if (o.g && GROUPS_ALL.indexOf(o.g) !== -1) state.group = o.g;
+    if (o.s) state.sources = { "24": !!o.s["24"], "14": !!o.s["14"], ex: !!o.s.ex, hb: !!o.s.hb };
+    state.books = new Set(Array.isArray(o.b) ? o.b : []);
+    syncEdChips();
+    savePrefs();
+    searchInput.value = state.query;
+    clearBtn.hidden = !state.query;
+    grpChips.forEach((x) => x.classList.toggle("on", x.dataset.g === state.group));
+    if (sessionLog.length) sessionLog.length = 0;
+    if (Array.isArray(o.log)) for (const e of o.log) sessionLog.push(e);
+    if (state.query.trim()) runSearch(); else { suggestCtn.hidden = false; refLayout.hidden = true; }
+    renderLog();
+    refreshRoomCode();
+  }
+  function continueSession() {
+    let o; try { o = JSON.parse(localStorage.getItem(SAVE_KEY)); } catch (e) { o = null; }
+    if (!o) { flashBanner("No saved session found."); return; }
+    restoreSessionState(o);
+    addLog("table", "Session continued from your saved table.");
+    setBanner("Session continued" + (state.query.trim() ? " — \u201C" + state.query.trim() + "\u201D" : "") + ".");
+    turnEl.textContent = "Session continued";
+    flashBanner("Session restored.");
+    sfx("deal");
+  }
+
+  /* ═══════════ help overlay ═══════════ */
+  const HELP_HTML = '<h2 class="goldtext">How D&amp;D 5E Rules &amp; Stats works</h2>'
+    + '<p class="muted">A quick-reference table for Dungeons &amp; Dragons 5th Edition. Search the free SRD across the <b>2024</b> and <b>2014</b> rule sets, then copy a clean, citation-ready entry straight to your notes.</p>'
+    + '<h3>Lookups</h3>'
+    + '<p>Type into the search box or tap a popular lookup. The <b>Edition</b> chips pick which rule set(s) to search; the <b>Type</b> chips filter by category. Matching entries from both rule sets merge into one result — flip between them with the <b>2024 version / 2014 version</b> tabs.</p>'
+    + '<h3>Copying</h3>'
+    + '<p>Open a result and hit <b>📋 Copy results + references</b> — the full entry plus its book reference, ready to paste. <b>🔗 Reference only</b> copies just the citation.</p>'
+    + '<h3>Your table</h3>'
+    + '<p><b>🎲 GM Tools</b> adds dice, random lookups and favorites. <b>📥 Import</b> mixes your house rules and homebrew into search (browser-only). <b>⚙ Sources</b> picks rule sets and 3rd-party Open5e books.</p>'
+    + '<h3>Session</h3>'
+    + '<p>Lookups and copies land in the <b>session log</b>. <b>Copy code</b> makes a share code for the current lookup — anyone can rejoin it by pasting the code (or a <code>?code=…</code> link). <b>💾 Save</b> keeps it in your browser so <b>Continue</b> brings it back after a reload, and <b>📤 Share</b> exports JSON or a PNG. <b>⛶ Full screen</b> opens the current entry in a distraction-free reader.</p>'
+    + '<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+  function openHelp() {
+    helpBody.innerHTML = HELP_HTML;
+    const done = document.getElementById("helpDoneBtn");
+    if (done) done.addEventListener("click", closeHelp);
+    helpOverlay.hidden = false;
+    sfx("deal");
+  }
+  function closeHelp() { helpOverlay.hidden = true; }
+
+  /* ═══════════ table chat (comments-plugin transport) ═══════════ */
+  let chatCom = null, chatReady = false;
+  function renderChat(c) {
+    if (!c || !chatMsgsEl) return;
+    const text = cleanText(c.message, 160);
+    const nick = (c.user && (c.user.nickname || c.user.visualId)) ? String(c.user.nickname || c.user.visualId) : "Player";
+    const who = c.byCurrentUser ? "You" : cleanText(nick, 40);
+    const last = chatMsgsEl.lastElementChild;
+    if (last && last.classList.contains("mine") && last.lastChild && last.lastChild.textContent === text) return;
+    const row = document.createElement("div");
+    row.className = "chat-item" + (c.byCurrentUser ? " mine" : "");
+    row.innerHTML = "<b>" + escapeHtml(who) + "</b>" + escapeHtml(text);
+    chatMsgsEl.appendChild(row);
+    chatMsgsEl.scrollTop = chatMsgsEl.scrollHeight;
+    if (!c.byCurrentUser) sfx("draw");
+  }
+  function initChat() {
+    const rootRef = window.root || {};
+    if (!rootRef.commentsPlugin || !chatMsgsEl) return;
+    const opts = {
+      channel: "dnd-src-table",
+      channelLabel: "💬 D&D Reference Table",
+      containerStyle: "width:1px;height:1px;opacity:0;position:fixed;top:0;left:0;",
+      hideComments: true, hideSettingsButton: true, hideFullscreenButton: true,
+      forceColorScheme: "dark",
+      onLoad: (comments) => { chatReady = true; if (Array.isArray(comments)) for (const c of comments) renderChat(c); },
+      onComment: (c) => renderChat(c),
+    };
+    try {
+      chatCom = rootRef.commentsPlugin(opts);
+      document.body.insertAdjacentHTML("beforeend", String(chatCom));
+      setTimeout(() => { if (chatCom && !chatReady) chatReady = true; }, 8000);
+    } catch (e) { console.error("chat init failed", e); chatCom = null; }
+  }
+  function sendChat() {
+    const t = cleanText(chatInput.value, 160);
+    if (!t) return;
+    if (!chatCom) { flashBanner("Chat isn't ready yet — try again in a moment."); return; }
+    if (!chatReady) { flashBanner("Chat is still loading — give it a second."); return; }
+    chatInput.value = "";
+    const submitP = chatCom.submit(t);
+    submitP.catch(() => {}); // avoid unhandled rejection if the client-side race wins first
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timed out")), 12000));
+    Promise.race([submitP, timeout]).then(() => {
+      addLog("you", "Chat: " + t);
+      renderChat({ message: t, byCurrentUser: true });
+    }).catch((e) => {
+      const msg = (e && e.message ? e.message : "error");
+      if (msg !== "timed out") chatInput.value = t;
+      addLog("table", "Chat blocked: " + msg);
+      flashBanner("Your message wasn't sent (" + msg + ").");
+    });
+  }
+
+  /* ═══════════ win / claim hooks ═══════════
+     A reference table has no matches to win, but the hook stays
+     wired so an online table could claim a forfeit. */
+  function claimWin() {
+    addLog("table", "Claim win attempted — no match in progress.");
+    flashBanner("Nothing to claim — this is a reference table, not a match.");
+    return false;
+  }
+  window.__bgn_claimWin = claimWin;
+
+  /* ═══════════ session actions ═══════════ */
+  function newSession() {
+    searchInput.value = "";
+    clearBtn.hidden = true;
+    state.query = "";
+    if (sessionLog.length) sessionLog.length = 0;
+    renderLog();
+    suggestCtn.hidden = false;
+    refLayout.hidden = true;
+    fsOpenBtn.hidden = true;
+    turnEl.textContent = "Ready to look up";
+    setBanner("");
+    refreshRoomCode();
+    addLog("table", "New session started.");
+    searchInput.focus();
+    sfx("deal");
+  }
+  function menuBack() {
+    newSession();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    addLog("table", "Back to the menu.");
+  }
+
+  copyCodeBtn.addEventListener("click", () => {
+    const code = sessionCode();
+    if (!code) { flashBanner("Nothing to copy yet — try a lookup first."); return; }
+    copyText(copyCodeBtn, code, "✓ Copied!");
+    addLog("you", "Copied the session code.");
+    flashBanner("Session code copied.");
+  });
+  leaveBtn.addEventListener("click", () => {
+    newSession();
+    setBanner("Left the table.");
+  });
+  newGameBtn.addEventListener("click", newSession);
+  menuBtn.addEventListener("click", menuBack);
+  saveBtn.addEventListener("click", () => {
+    if (saveSession()) { addLog("you", "Session saved."); refreshContinuePanel(); flashBanner("Session saved."); sfx("flip"); }
+    else { flashBanner("Couldn't save — storage unavailable."); }
+  });
+  continueBtn.addEventListener("click", continueSession);
+  deleteSaveBtn.addEventListener("click", () => { deleteSessionSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+  claimBtn.addEventListener("click", claimWin);
+  helpBtn.addEventListener("click", openHelp);
+  helpOverlay.addEventListener("click", (e) => { if (e.target === helpOverlay) closeHelp(); });
+  $("helpCloseBtn").addEventListener("click", closeHelp);
+  joinRoomBtn.addEventListener("click", () => {
+    const c = joinCodeInput.value.trim();
+    if (!c) { setOnlineMsg("Paste a session code first."); return; }
+    if (!applySessionCode(c)) setOnlineMsg("That code doesn't look like a valid session.");
+    else { setOnlineMsg(""); joinCodeInput.value = ""; sfx("deal"); }
+  });
+  joinCodeInput.addEventListener("keydown", (e) => { if (e.key === "Enter") joinRoomBtn.click(); });
+  chatSendBtn.addEventListener("click", sendChat);
+  chatInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!fsOverlay.hidden) { closeFullscreen(); return; }
+    if (!helpOverlay.hidden) closeHelp();
+  });
+
+  /* debug/testing handle for browser_eval */
+  window.__t = {
+    state, applySessionCode, sessionCode, saveSession, continueSession, newSession, menuBack,
+    openHelp, closeHelp, openFullscreen, closeFullscreen, claimWin, sendChat,
+    refreshRoomCode, renderLog, addLog, setBanner, flashBanner, initChat,
+    get chatReady() { return chatReady; }, get chatCom() { return !!chatCom; },
+  };
+
+  /* ═══════════ share / export (bgn-share.js) ═══════════ */
+  (function () {
+    if (!shareBtn || !window.bgnShare) return;
+    function tplName() { return (window.root && root.gameTitle) ? String(root.gameTitle.evaluateItem || root.gameTitle) : "D&D 5E Rules & Stats"; }
+    const panel = window.bgnShare.openPanel({
+      tpl: "bgn-dnd-source-reference",
+      gameName: tplName,
+      exportData() {
+        return { v: 1, q: state.query.trim(), g: state.group, s: state.sources, b: [...state.books], log: sessionLog.slice() };
+      },
+      applySave(o) {
+        if (!o || o.v !== 1) return false;
+        restoreSessionState(o);
+        addLog("table", "Session imported from a share file.");
+        setBanner("Session imported from JSON.");
+        return true;
+      },
+      source() {
+        if (refLayout && !refLayout.hidden) return refLayout;
+        return document.querySelector(".bgn-lobby") || document.body;
+      },
+      title: "D&D 5E RULES & STATS",
+      subtitle() {
+        const ed = (state.sources["14"] && state.sources["24"]) ? "2014+2024 rules" : state.sources["24"] ? "2024 rules" : state.sources["14"] ? "2014 rules" : "2024 rules";
+        return (state.query.trim() ? "\u201C" + state.query.trim() + "\u201D · " : "") + ed;
+      },
+      filenameBase: "dnd-5e-rules-stats",
+    });
+    shareBtn.addEventListener("click", () => panel.open());
+  })();
+
   /* ═══════════ init ═══════════ */
   (async function init() {
     document.body.style.setProperty("--bgn-accent", "#d4af37");
@@ -1786,6 +2212,8 @@
       state.query = q0;
       runSearch();
     }
+    const code0 = (params.get("code") || "").trim().slice(0, 512);
+    if (code0) applySessionCode(code0);
     const impUrl = params.get("import") || "";
     if (impUrl) {
       (async () => {
@@ -1820,5 +2248,9 @@
       setTimeout(() => { if (!idx2014) statusEl.textContent = "2024 ready. The 2014 index is still loading — pick a lookup or start typing."; else statusEl.textContent = "Ready — both rule sets searchable. Try a lookup above."; }, 1200);
       setTimeout(() => { if (idx2014 && !state.query.trim()) statusEl.textContent = "Ready — both rule sets searchable. Try a lookup above."; }, 3000);
     }
+    refreshRoomCode();
+    refreshContinuePanel();
+    renderLog();
+    initChat();
   })();
 })();

@@ -9,7 +9,7 @@
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
@@ -74,10 +74,14 @@ function utf8Decode(bytes, start, end){
 
 /* room persistence: slot = 8-byte header ("MAP2" + u32 length) + UTF-8 JSON {code,lastAct,doc} */
 function saveRoom(room){
-  var bytes = utf8Encode(JSON.stringify({code:room.code, lastAct:room.lastAct, doc:room.doc}));
+  var s = JSON.stringify({code:room.code, lastAct:room.lastAct, status:room.status, winner:room.winner, reason:room.reason, doc:room.doc});
+  room.latestSnapshot = s;
+  var bytes = utf8Encode(s);
   while(bytes.length > SLOT - 8 && room.doc.chat.length > 0){
     room.doc.chat.shift();
-    bytes = utf8Encode(JSON.stringify({code:room.code, lastAct:room.lastAct, doc:room.doc}));
+    s = JSON.stringify({code:room.code, lastAct:room.lastAct, status:room.status, winner:room.winner, reason:room.reason, doc:room.doc});
+    room.latestSnapshot = s;
+    bytes = utf8Encode(s);
   }
   if(bytes.length > SLOT - 8) throw new Error("table too large");
   var o = room.slot * SLOT;
@@ -106,7 +110,10 @@ function loadRooms(){
     if(typeof doc.enforceLos !== "boolean") doc.enforceLos = false;
     if(typeof doc.mapImage !== "string") doc.mapImage = "";
     if(typeof doc.initCurrent !== "string") doc.initCurrent = "";
-    rooms.set(parsed.code, {slot:i, code:parsed.code, doc:doc, conns:new Set(), lastAct:num(parsed.lastAct, nowSec())});
+    var st = typeof parsed.status === "number" ? parsed.status : 2;
+    var wn = (typeof parsed.winner === "string" && parsed.winner) ? parsed.winner : null;
+    var rs = (typeof parsed.reason === "string" && parsed.reason) ? parsed.reason : null;
+    rooms.set(parsed.code, {slot:i, code:parsed.code, doc:doc, conns:new Set(), lastAct:num(parsed.lastAct, nowSec()), status:st, winner:wn, reason:rs, latestSnapshot:""});
   }
 }
 function freeSlot(){
@@ -137,6 +144,15 @@ function connRec(conn){
 function nameOf(conn){ return connRec(conn).name; }
 function isDM(conn, room){ return room.doc.dmId === conn.id && room.conns.has(conn.id); }
 function canMove(conn, room, token){ return isDM(conn, room) || token.owner === nameOf(conn); }
+/* issue 3 — server-side turn order: when an initiative round is active, a
+   non-DM player may only move tokens belonging to the player whose turn it
+   currently is. DM can always act. Throws not_your_turn otherwise. */
+function turnGuard(conn, room, token){
+  if(isDM(conn, room)) return;
+  if(!room.doc.initCurrent) return;
+  var cur = findToken(room, room.doc.initCurrent);
+  if(cur && cur.owner !== token.owner) throw new Error("not_your_turn");
+}
 function presence(room){
   var list = [];
   room.conns.forEach(function(id){
@@ -152,7 +168,7 @@ function broadcastTo(room, msg){
     if(rec) { try { rec.conn.send(s); } catch(e){} }
   });
 }
-function broadcastDoc(room){ broadcastTo(room, {t:"state", doc:room.doc}); }
+function broadcastSnap(room){ broadcastTo(room, {t:"snap", snap:{code:room.code, status:room.status, winner:room.winner, reason:room.reason, doc:room.doc}}); }
 function broadcastPresence(room){ broadcastTo(room, {t:"presence", players:presence(room)}); }
 function rateLimit(conn, key, limit, windowMs){
   var c = connRec(conn);
@@ -225,8 +241,11 @@ function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
 function cleanCode(s){
   return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
 }
+function cleanText(s, max){
+  return String(s || "").trim().replace(/[\u0000-\u001f\u007f]/g, "").replace(/\s+/g, " ").slice(0, max);
+}
 function welcome(conn, room){
-  return {t:"welcome", code:room.code, yourId:conn.id, doc:room.doc, players:presence(room)};
+  return {t:"welcome", code:room.code, yourId:conn.id, doc:room.doc, players:presence(room), status:room.status, winner:room.winner, reason:room.reason};
 }
 
 function join(conn, code){
@@ -254,7 +273,7 @@ self.onclose = function({conn}){
   if(room.doc.dmId === conn.id){
     room.doc.dmId = "";
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
   }
   room.lastAct = nowSec();
   saveRoom(room);
@@ -270,7 +289,7 @@ self.rpc = {
     var slot = freeSlot();
     if(slot < 0) throw new Error("network_full");
     var code = genCode();
-    var room = {slot:slot, code:code, doc:freshDoc(), conns:new Set(), lastAct:nowSec()};
+    var room = {slot:slot, code:code, doc:freshDoc(), conns:new Set(), lastAct:nowSec(), status:2, winner:null, reason:null, latestSnapshot:""};
     room.doc.dmId = conn.id;
     rooms.set(code, room);
     connRec(conn).code = code;
@@ -319,7 +338,7 @@ self.rpc = {
     }
     room.doc.dmId = conn.id;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     broadcastPresence(room);
     return "ok";
   },
@@ -329,7 +348,7 @@ self.rpc = {
     if(room.doc.dmId === conn.id){
       room.doc.dmId = "";
       saveRoom(room);
-      broadcastDoc(room);
+      broadcastSnap(room);
       broadcastPresence(room);
     }
     return "ok";
@@ -369,7 +388,7 @@ self.rpc = {
     }
     if(!made) throw new Error("no_tokens_created");
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok:" + made;
   },
   moveToken: function({conn}, data){
@@ -380,10 +399,11 @@ self.rpc = {
     var t = findToken(room, String(d && d.id));
     if(!t) throw new Error("token_not_found");
     if(!canMove(conn, room, t)) throw new Error("not_allowed");
+    turnGuard(conn, room, t);
     t.x = clamp(num(d.x, t.x), 0, COLS - t.w);
     t.y = clamp(num(d.y, t.y), 0, ROWS - t.h);
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   resizeToken: function({conn}, data){
@@ -393,12 +413,13 @@ self.rpc = {
     var t = findToken(room, String(d && d.id));
     if(!t) throw new Error("token_not_found");
     if(!canMove(conn, room, t)) throw new Error("not_allowed");
+    turnGuard(conn, room, t);
     t.w = clamp(Math.round(num(d.w, t.w)) || 1, 1, 8);
     t.h = clamp(Math.round(num(d.h, t.h)) || 1, 1, 8);
     t.x = clamp(t.x, 0, COLS - t.w);
     t.y = clamp(t.y, 0, ROWS - t.h);
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   deleteToken: function({conn}, data){
@@ -411,7 +432,7 @@ self.rpc = {
     room.doc.tokens = room.doc.tokens.filter(function(k){ return k.id !== t.id; });
     if(room.doc.initCurrent === t.id) room.doc.initCurrent = "";
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   setTokenInit: function({conn}, data){
@@ -423,7 +444,7 @@ self.rpc = {
     if(!canMove(conn, room, t)) throw new Error("not_allowed");
     t.init = clamp(num(d && d.init, 0), 0, 999);
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   initAdd: function({conn}, data){
@@ -437,7 +458,7 @@ self.rpc = {
     t.inTracker = true;
     if(!room.doc.initCurrent) room.doc.initCurrent = t.id;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   initRemove: function({conn}, data){
@@ -451,7 +472,7 @@ self.rpc = {
     t.init = 0;
     if(room.doc.initCurrent === t.id) room.doc.initCurrent = "";
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   initNext: function({conn}, data){
@@ -459,13 +480,13 @@ self.rpc = {
     if(!room) throw new Error("not_at_table");
     if(!isDM(conn, room)) throw new Error("dm_only");
     var list = initsorted(room);
-    if(!list.length){ room.doc.initCurrent = ""; saveRoom(room); broadcastDoc(room); return "ok"; }
+    if(!list.length){ room.doc.initCurrent = ""; saveRoom(room); broadcastSnap(room); return "ok"; }
     var idx = -1;
     for(var i=0;i<list.length;i++) if(list[i].id === room.doc.initCurrent){ idx = i; break; }
     var cur = list[(idx + 1) % list.length];
     room.doc.initCurrent = cur.id;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   initGoto: function({conn}, data){
@@ -478,7 +499,7 @@ self.rpc = {
     t.inTracker = true;
     room.doc.initCurrent = t.id;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   addWall: function({conn}, data){
@@ -493,7 +514,7 @@ self.rpc = {
     if(room.doc.walls.length >= MAX_WALLS) throw new Error("too_many_walls");
     room.doc.walls.push({id:genId(room), x1:x1, y1:y1, x2:x2, y2:y2});
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   deleteWall: function({conn}, data){
@@ -505,7 +526,7 @@ self.rpc = {
     room.doc.walls = room.doc.walls.filter(function(w){ return w.id !== String(d && d.id); });
     if(room.doc.walls.length === before) throw new Error("wall_not_found");
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   clearMap: function({conn}, data){
@@ -516,7 +537,7 @@ self.rpc = {
     room.doc.tokens = [];
     room.doc.initCurrent = "";
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   toggleLos: function({conn}, data){
@@ -527,7 +548,7 @@ self.rpc = {
     if(d && typeof d.on === "boolean") room.doc.enforceLos = d.on;
     else room.doc.enforceLos = !room.doc.enforceLos;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
     return "ok";
   },
   setMap: function({conn}, data){
@@ -540,14 +561,50 @@ self.rpc = {
     if(image && !/^https?:\/\//.test(image)) throw new Error("invalid_image_url");
     room.doc.mapImage = image;
     saveRoom(room);
-    broadcastDoc(room);
+    broadcastSnap(room);
+    return "ok";
+  },
+  endGame: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(room.status !== 2) throw new Error("table_over");
+    if(!isDM(conn, room)) throw new Error("dm_only");
+    var d = safeParse(data);
+    var winner = String((d && d.winner) || "party").slice(0, 40);
+    room.status = 3; room.winner = winner; room.reason = "end";
+    room.lastAct = nowSec();
+    saveRoom(room);
+    broadcastSnap(room);
+    return "ok";
+  },
+  claimWin: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(room.status !== 2) throw new Error("table_over");
+    var dmHere = room.doc.dmId && room.conns.has(room.doc.dmId);
+    if(dmHere) throw new Error("dm_present");
+    room.status = 3; room.winner = nameOf(conn); room.reason = "forfeit";
+    room.lastAct = nowSec();
+    saveRoom(room);
+    broadcastSnap(room);
+    broadcastPresence(room);
+    return "ok";
+  },
+  rematch: function({conn}, data){
+    var room = roomOf(conn);
+    if(!room) throw new Error("not_at_table");
+    if(room.status !== 3) throw new Error("table_running");
+    room.status = 2; room.winner = null; room.reason = null;
+    room.lastAct = nowSec();
+    saveRoom(room);
+    broadcastSnap(room);
     return "ok";
   },
   chat: function({conn}, data){
     var room = roomOf(conn);
     if(!room) throw new Error("not_at_table");
     var d = safeParse(data);
-    var text = String((d && d.text) || "").trim().slice(0, 500);
+    var text = cleanText((d && d.text) || "", 500);
     if(!text) throw new Error("empty_message");
     if(!rateLimit(conn, "chat", 4, 6000)) throw new Error("too_fast");
     var name = nameOf(conn);
@@ -696,6 +753,7 @@ loadRooms();
         <div id="mapWrap">
           <div id="main">
             <canvas id="mapCanvas"></canvas>
+            <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
             <div id="viewCtl">
               <button id="playerViewBtn" title="Preview the map as a player sees it (fog &amp; hidden tokens). Select a token to see from its eyes, or deselect to see the whole party's view.">👁</button>
               <button id="zoomTokenBtn" title="Zoom to selected token (2×)">◎</button>
@@ -805,11 +863,30 @@ loadRooms();
           <button class="btn btn-ghost btn-sm" id="menuBtn">Back to lobby</button>
           <button class="btn btn-ghost btn-sm" id="tableHelpBtn">❓ Help</button>
         </div>
+
+        <div id="logEl" class="bgn-log" style="margin-top:12px"></div>
       </div>
     </div>
   </section>
 
 </main>
+
+<!-- ═══ FULLSCREEN TABLE (maximized board) ═══
+     Opened by the ⛶ Full screen button over the board. The game
+     canvas (and, if registered, the tile-in-hand box + meeple
+     chooser) is MOVED in here live — not cloned — so all gameplay
+     keeps working while maximized. Closed via ✕ Exit or Escape. -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span class="fs-status" id="fsStatusEl"></span>
+    <span class="fs-actions" id="fsActionsCtn"></span>
+    <button class="btn btn-gold btn-sm" id="fsExitBtn" title="Exit full screen">✕ Exit</button>
+  </div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
 
 <!-- ═══ HELP MODAL ═══ -->
 <div id="helpOverlay" class="bgn-help-overlay" hidden>
@@ -875,7 +952,7 @@ body:not(.isDm) #dmCtl { display:none; }
 #mapWrap { display:flex; gap:12px; align-items:stretch; height:clamp(400px, 58vh, 680px); text-align:left; position:relative; }
 #main { flex:1; position:relative; min-width:0; min-height:0; background:#0b0912; border:1px solid var(--bgn-line); border-radius:10px; overflow:hidden; }
 canvas#mapCanvas { position:absolute; inset:0; width:100%; height:100%; display:block; touch-action:none; }
-#viewCtl { position:absolute; right:12px; top:12px; display:flex; flex-direction:column; gap:6px; z-index:5; }
+#viewCtl { position:absolute; right:12px; top:56px; display:flex; flex-direction:column; gap:6px; z-index:5; }
 #viewCtl button {
   width:30px; height:30px; border-radius:8px; background:rgba(16,13,26,.85); color:var(--bgn-cream);
   border:1px solid rgba(212,175,55,.35); cursor:pointer; font-size:15px; backdrop-filter:blur(4px);
@@ -1025,6 +1102,38 @@ body:not(.isDm) #playerViewBtn { display:none; }
   #sidebarFloatBtn { display:inline-flex; left:10px; right:auto; }
   .bgn-nav-title{ max-width:56vw; }
 }
+/* ══════ fullscreen board (maximized playing area) ══════ */
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72); color:#fff;
+  border:1px solid rgba(255,255,255,.28); border-radius:8px;
+  padding:6px 11px; cursor:pointer;
+  font:700 12.5px/1 system-ui; letter-spacing:.02em;
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  transition:border-color .12s, background .12s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); background:rgba(20,26,42,.85); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid rgba(255,255,255,.08); }
+.fs-status{ font-size:.85rem; color:var(--bgn-accent2,#f2dc8b); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fs-actions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.fs-actions #viewCtl{ position:static; flex-direction:row; }
+.fs-board{ flex:1; min-height:0; position:relative; padding:12px; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+.fs-tile{ position:absolute; top:14px; right:22px; z-index:10; width:auto; max-width:min(92vw,300px); }
+.fs-tile:empty{ display:none; }
+.fs-meeple{ position:absolute; right:22px; bottom:22px; z-index:10; width:260px; max-width:min(90vw,330px); display:flex; flex-direction:column; gap:8px; background:rgba(10,14,24,.92); border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:12px; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); box-shadow:0 8px 32px rgba(0,0,0,.55); }
+.fs-meeple:empty{ display:none; }
+
+/* ══════ game log ══════ */
+.bgn-log{ max-height:200px; overflow:auto; background:rgba(0,0,0,.25); border:1px solid var(--bgn-line,rgba(212,175,55,.16)); border-radius:8px; padding:8px 10px; font-size:.82rem; text-align:left; }
+.bgn-log:empty::before{ content:"No table activity yet."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); line-height:1.4; word-break:break-word; }
+.log-item:last-child{ border-bottom:0; }
+.log-item b{ color:var(--bgn-accent2,#f2dc8b); margin-right:6px; font-weight:600; }
+.log-item .resp{ opacity:.85; }
+
 /* ── help / popup instructions modal ── */
 .bgn-help-overlay{
   position:fixed; inset:0; z-index:1000;
@@ -1098,6 +1207,14 @@ function ready(cb){
   setTimeout(function(){ ready(cb); }, 120);
 }
 
+function connectSocket(){
+  if(!rootRef.createServerSocket) return null;
+  var sock = null;
+  try { sock = rootRef.createServerSocket(); } catch(e){ return null; }
+  if(window.__app && window.__app.attachSocket) window.__app.attachSocket(sock);
+  return sock;
+}
+
 function showGame(){
   lobbyCtn.hidden=true;
   gameCtn.hidden=false;
@@ -1121,6 +1238,7 @@ function startOnline(create, code){
     showGame();
     try { window.scrollTo({top:0}); } catch(e){}
     app = window.__createApp({ mode:"online" });
+    connectSocket();
     sfx("deal");
     app.openRoom(create, code).then(function(){
       setOnlineMsg("");
@@ -1216,18 +1334,19 @@ document.getElementById("menuBtn").addEventListener("click", exitToLobby);
 document.getElementById("newGameBtn").addEventListener("click", function(){
   if(!app) return;
   if(!app.isDm()){ app.toast("Only the DM can restart the table."); return; }
-  if(confirm("Remove all tokens and walls?")) app.rpc("clearMap", {}).catch(function(e){ app.toast("Failed: "+e.message); });
+  if(confirm("Remove all tokens and walls?")) app.rpc("clearMap", {}).then(function(){ if(app.addLog) app.addLog("You", "Cleared the map"); }).catch(function(e){ app.toast("Failed: "+e.message); });
 });
-var banner=null;
+var bannerEl=document.getElementById("banner");
 function flash(msg){
   if(window.__app && window.__app.toast && window.__app.ui && window.__app.ui.toast){
     window.__app.toast(msg);
     return;
   }
-  var b=document.getElementById("banner");
-  if(!b) return;
-  b.style.display="block"; b.textContent=msg;
-  setTimeout(function(){ b.style.display="none"; }, 2200);
+  if(!bannerEl) return;
+  bannerEl.style.display="block";
+  bannerEl.textContent=msg;
+  if(!fsOverlay.hidden)fsStatusEl.textContent=msg;
+  setTimeout(function(){ bannerEl.style.display="none"; }, 2200);
 }
 
 /* ── help modal ── */
@@ -1253,7 +1372,6 @@ document.getElementById("helpBtn").addEventListener("click",openHelp);
 document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
 document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
 helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
-document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!helpOverlay.hidden)closeHelp(); });
 
 /* pop-up instructions on first paint */
 setTimeout(openHelp, 500);
@@ -1264,11 +1382,95 @@ setTimeout(openHelp, 500);
   if(!btn||!ov||!fr||!cb)return;
   function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
   function closeL(){ ov.classList.remove("open"); }
+  window.__closeLounge = closeL;
+  window.__loungeIsOpen = function(){ return ov.classList.contains("open"); };
   btn.addEventListener("click",openL);
   cb.addEventListener("click",closeL);
   ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
-  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
 })();
+
+/* ══════════ fullscreen board (maximized map) ══════════
+   The game canvas (and, if registered, tile-in-hand + meeple
+   slots) is MOVED into the overlay live — never cloned — and
+   moved back to its exact original parent/position on close. */
+var fsOverlay=document.getElementById("fsOverlay");
+var fsOpenBtn=document.getElementById("fsOpenBtn");
+var fsExitBtn=document.getElementById("fsExitBtn");
+var fsStatusEl=document.getElementById("fsStatusEl");
+var fsActionsCtn=document.getElementById("fsActionsCtn");
+var fsBoardWrap=document.getElementById("fsBoardWrap");
+var fsTileCtn=document.getElementById("fsTileCtn");
+var fsMeepleCtn=document.getElementById("fsMeepleCtn");
+var fsViewCtl=document.getElementById("viewCtl");
+var fsGame={ canvas:null, tile:null, meeple:null, resize:null };
+function fsStash(el){ if(el&&!el._fsOrig){ el._fsOrig={ p:el.parentNode, n:el.nextSibling }; } return el; }
+function fsRestore(el){
+  if(!el||!el._fsOrig)return;
+  var o=el._fsOrig;
+  if(o.p&&o.n&&o.n.parentNode===o.p)o.p.insertBefore(el,o.n);
+  else if(o.p)o.p.appendChild(el);
+  el._fsOrig=null;
+}
+function fsDefaultResize(){
+  if(!fsGame.canvas)return;
+  var w=fsGame.canvas.parentElement.clientWidth||640;
+  var h=fsGame.canvas.parentElement.clientHeight||400;
+  var dpr=window.devicePixelRatio||1;
+  var nw=Math.round(w*dpr), nh=Math.round(h*dpr);
+  if(nw!==fsGame.canvas.width||nh!==fsGame.canvas.height){ fsGame.canvas.width=nw; fsGame.canvas.height=nh; }
+}
+function fsRefit(){ (fsGame.resize||fsDefaultResize)(); }
+function openFullscreen(){
+  if(!fsOverlay.hidden)return;
+  fsOverlay.hidden=false;
+  fsStatusEl.textContent=bannerEl.textContent||"Full screen map";
+  if(fsGame.tile)fsTileCtn.appendChild(fsStash(fsGame.tile));
+  if(fsGame.meeple)fsMeepleCtn.appendChild(fsStash(fsGame.meeple));
+  if(fsGame.canvas)fsBoardWrap.appendChild(fsStash(fsGame.canvas));
+  if(fsViewCtl)fsActionsCtn.appendChild(fsStash(fsViewCtl));
+  document.body.style.overflow="hidden";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  try{ if(document.fullscreenElement)document.exitFullscreen().catch(function(){}); }catch(e){}
+  fsRestore(fsViewCtl);
+  fsRestore(fsGame.canvas);
+  fsRestore(fsGame.meeple);
+  fsRestore(fsGame.tile);
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  fsRefit();
+}
+window.bgnFullscreen={
+  register:function(o){
+    if(!o)return;
+    if(o.canvas){ fsGame.canvas=o.canvas; fsOpenBtn.hidden=false; }
+    if(o.tile)fsGame.tile=o.tile;
+    if(o.meeple)fsGame.meeple=o.meeple;
+    if(o.resize)fsGame.resize=o.resize;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({
+  canvas: document.getElementById("mapCanvas"),
+  resize: function(){ if(window.__app && window.__app.resize) window.__app.resize(); }
+});
+
+/* Escape closes the fullscreen overlay first, then other modals. */
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+    if(window.__loungeIsOpen && window.__loungeIsOpen())window.__closeLounge();
+  }
+});
 
 /* ── share / export (bgn-share.js) ── */
 (function(){

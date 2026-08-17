@@ -73,6 +73,9 @@ function hexToRgba(hex, a) {
 }
 function hashHue(s) { let x = 0; for (let i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) >>> 0; return x % 360; }
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 function fmtTime(ts) { const d = new Date(ts); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay;
@@ -131,7 +134,7 @@ export class App {
     this.destroyed = false;
     this._raf = 0;
 
-    this.state = { walls: [], tokens: [], dmId: "", chat: [], enforceLos: false, mapImage: "", initCurrent: "" };
+    this.state = { walls: [], tokens: [], dmId: "", chat: [], enforceLos: false, mapImage: "", initCurrent: "", status: 2, winner: null, reason: null };
     this.initSortDir = "desc";
     this._initSig = "";
     this.players = [];
@@ -154,10 +157,14 @@ export class App {
     this.fogBuilt = false;
 
     this.chatLog = [];
+    this.gameLog = [];
+    this._knownPlayers = new Set();
+    this._welcomed = false;
     this.imgCache = new Map();
     this.toastTimer = 0;
 
     this.net = null;
+    this._pendingSocket = null;
     this._openPoll = null;
 
     this.bindUi();
@@ -171,16 +178,32 @@ export class App {
 
   // ---------- networking ----------
 
-  connect() {
-    if (this.destroyed) return;
-    if (this.net) { if (!this.net.connected && !this.net.closed) this.net.connect(); return; }
+  attachSocket(sock) {
+    this._pendingSocket = sock;
+  }
+
+  connectSocket() {
     this.net = new SocketClient({
       create: this.tableMode === "local"
         ? () => makeLocalSocket({ resume: this.resume })
-        : () => (this.root && this.root.createServerSocket ? this.root.createServerSocket() : null),
+        : () => {
+            if (this._pendingSocket) {
+              const s = this._pendingSocket;
+              this._pendingSocket = null;
+              return s;
+            }
+            return (this.root && this.root.createServerSocket ? this.root.createServerSocket() : null);
+          },
       onMessage: (m) => this.onMessage(m),
       onStatus: (s) => this.setStatus(s)
     });
+    return this.net;
+  }
+
+  connect() {
+    if (this.destroyed) return;
+    if (this.net) { if (!this.net.connected && !this.net.closed) this.net.connect(); return; }
+    this.connectSocket();
     this.net.connect();
   }
 
@@ -234,10 +257,12 @@ export class App {
   onMessage(msg) {
     if (this.destroyed) return;
     if (msg.t === "welcome") this.onWelcome(msg);
-    else if (msg.t === "state") {
+    else if (msg.t === "snap") {
+      this.applyServerSnap(msg.snap);
+    } else if (msg.t === "state") {
       this.applyDoc(msg.doc);
     } else if (msg.t === "presence") {
-      this.players = msg.players || [];
+      this.syncPlayers(msg.players || []);
       this.updateDmUi();
       this.renderPlayers();
     } else if (msg.t === "chat") {
@@ -249,11 +274,17 @@ export class App {
 
   onWelcome(msg) {
     this.myId = msg.yourId;
-    this.players = msg.players || [];
-    if (msg.code) this.roomCode = msg.code;
-    this.applyDoc(msg.doc);
-    this.renderPlayers();
-    this.updateRoomUi();
+    const fresh = !this._welcomed;
+    this._welcomed = true;
+    this.applyServerSnap({
+      code: msg.code,
+      status: msg.status,
+      winner: msg.winner,
+      reason: msg.reason,
+      doc: msg.doc,
+      players: msg.players || []
+    });
+    if (fresh) this.addLog(this.tableMode === "online" ? "You" : "Table", "joined table " + (msg.code || "LOCAL"));
     this.net.rpc("setName", { name: this.myName }).catch(() => {});
   }
 
@@ -283,6 +314,78 @@ export class App {
     this.updateDmUi();
     this.renderInit();
     this.scheduleLos();
+  }
+
+  // ---------- server snapshots (durable room state) ----------
+
+  applyServerSnap(s) {
+    if (!s) return;
+    if (s.code && this.tableMode !== "local") this.roomCode = s.code;
+    if (s.winner !== undefined) this.state.winner = s.winner;
+    if (s.reason !== undefined) this.state.reason = s.reason;
+    if (typeof s.status === "number" && s.status !== this.state.status) {
+      const prev = this.state.status;
+      this.state.status = s.status;
+      if (prev === 3 && s.status === 2) this.addLog("Table", "A new session started — the table is open again.");
+      if (s.status === 3) this.addLog("Table", this.endText());
+    }
+    if (s.players) this.syncPlayers(s.players);
+    if (s.doc) this.applyDoc(s.doc);
+    this.updateRoomUi();
+    this.renderPlayers();
+  }
+
+  syncPlayers(list) {
+    const prev = this.players;
+    if (this.tableMode === "online" && this._knownPlayers.size > 0) {
+      const now = new Set(list.map(p => p.id));
+      for (const id of now) if (!this._knownPlayers.has(id)) {
+        const p = list.find(x => x.id === id);
+        if (p) this.addLog(p.name, "joined the table");
+      }
+      for (const id of this._knownPlayers) if (!now.has(id)) {
+        const p = prev.find(x => x.id === id);
+        if (p) this.addLog(p.name, "left the table");
+      }
+      this._knownPlayers.clear();
+      for (const id of now) this._knownPlayers.add(id);
+    } else {
+      this._knownPlayers = new Set(list.map(p => p.id));
+    }
+    this.players = list;
+  }
+
+  endText() {
+    const w = this.state.winner, r = this.state.reason;
+    if (w === "draw") return "The table ended in a draw.";
+    if (r === "forfeit") return (w || "A player") + " takes the win by forfeit — the DM left.";
+    if (r === "end" && w === "party") return "Session wrapped up — the party finished. Great game!";
+    if (r === "end") return (w || "The table") + " takes the win!";
+    return "The table has ended.";
+  }
+
+  // ---------- game log ----------
+
+  addLog(actor, msg) {
+    this.gameLog.push({ actor: actor || "", msg: msg || "", ts: Date.now() });
+    if (this.gameLog.length > 80) this.gameLog.shift();
+    this.renderLog();
+  }
+
+  renderLog() {
+    const log = this.ui.logEl;
+    if (!log) return;
+    log.innerHTML = "";
+    for (const e of this.gameLog) {
+      const div = document.createElement("div");
+      div.className = "log-item";
+      let html = "";
+      if (e.actor) html += "<b>" + escapeHtml(e.actor) + "</b>";
+      html += "<span class='resp'>" + escapeHtml(e.msg) + "</span>";
+      div.innerHTML = html;
+      log.appendChild(div);
+    }
+    log.scrollTop = log.scrollHeight;
   }
 
   mergeTokens(serverTokens) {
@@ -365,6 +468,7 @@ export class App {
       this.updateDmUi();
       this.renderPlayers();
       this.toast("You are now the DM. You see the full map.");
+      this.addLog("You", "became the DM");
     }).catch(e => this.toast("Could not claim DM: " + ((e && e.message) || e)));
   }
   onReleaseDm() {
@@ -604,6 +708,12 @@ export class App {
     const w = this.s2w(sx, sy);
     const dm = this.isDm();
 
+    if (this.state.status === 3) {
+      this.selectToken(null);
+      this.toast("The table has ended — start a new session to keep editing.");
+      return;
+    }
+
     if (dm && this.mode === "wall") {
       this.drag = { kind: "wall", x1: Math.round(w.gx), y1: Math.round(w.gy), curX: Math.round(w.gx), curY: Math.round(w.gy), moved: false };
       return;
@@ -798,6 +908,7 @@ export class App {
     if (!chars.length) { this.toast("No characters found — check the format"); return; }
     this.rpc("importChars", { chars }).then(n => {
       this.toast("Added " + n + " token" + (n === 1 ? "" : "s") + " to the map");
+      this.addLog("You", "Added " + n + " token" + (n === 1 ? "" : "s") + " to the map");
       this.ui.importInput.value = "";
     }).catch(err => this.toast("Import failed: " + ((err && err.message) || err)));
   }
@@ -849,7 +960,7 @@ export class App {
     if (!c) return;
     const v = c[gender];
     this.rpc("importChars", { chars: [{ name: v.name, color: c.color, hp: c.hp, vision: c.vision, img: v.img }] })
-      .then(n => this.toast("Added " + v.name + " (" + c.race + " " + c.klass + ")"))
+      .then(n => { this.toast("Added " + v.name + " (" + c.race + " " + c.klass + ")"); this.addLog("You", "Added " + v.name + " (" + c.race + " " + c.klass + ")"); })
       .catch(e => this.toast("Couldn't add character: " + ((e && e.message) || e)));
   }
 
@@ -878,7 +989,7 @@ export class App {
 
   addLibraryEntry(c) {
     this.rpc("importChars", { chars: [{ name: c.name, color: c.color, hp: c.hp, vision: c.vision, img: c.img, w: c.w, h: c.h }] })
-      .then(n => this.toast("Added " + c.name + " to the map"))
+      .then(n => { this.toast("Added " + c.name + " to the map"); this.addLog("You", "Added " + c.name + " to the map"); })
       .catch(e => this.toast("Couldn't add: " + ((e && e.message) || e)));
   }
 
@@ -1006,6 +1117,7 @@ export class App {
     if (!this.isDm()) { this.toast("Only the DM can change the map"); return; }
     this.rpc("setMap", { image: url || "" }).then(() => {
       this.toast("Map changed");
+      this.addLog("You", "Map changed");
     }).catch(e => this.toast("Couldn't change map: " + ((e && e.message) || e)));
   }
 
@@ -1029,6 +1141,7 @@ export class App {
       if (!result || !result.url) throw new Error("upload returned no url");
       await this.rpc("setMap", { image: result.url });
       this.toast("Map uploaded and applied");
+      this.addLog("You", "Map uploaded and applied");
     } catch (err) {
       this.toast("Upload failed: " + ((err && err.message) || err));
     } finally {
@@ -1075,13 +1188,25 @@ export class App {
     const box = this.ui.dmBox;
     box.innerHTML = "";
     const row = el("div", "dmRow");
+    const over = this.state.status === 3;
     if (this.isDm()) {
       row.appendChild(el("strong", null, "You are the DM"));
-      const rel = el("button", "btn danger", "Release DM");
-      rel.onclick = () => this.onReleaseDm();
-      const clear = el("button", "btn", "Clear map");
-      clear.onclick = () => { if (confirm("Remove all tokens and walls?")) this.rpc("clearMap", {}).catch(e => this.toast("Failed: " + e.message)); };
-      row.append(rel, clear);
+      if (over) {
+        row.appendChild(el("span", "hint", this.endText()));
+        const fresh = el("button", "btn primary", "Start new session");
+        fresh.onclick = () => this.rpc("rematch", {}).catch(e => this.toast("Couldn't restart: " + ((e && e.message) || e)));
+        row.appendChild(fresh);
+      } else {
+        const rel = el("button", "btn danger", "Release DM");
+        rel.onclick = () => this.onReleaseDm();
+        const clear = el("button", "btn", "Clear map");
+        clear.onclick = () => { if (confirm("Remove all tokens and walls?")) this.rpc("clearMap", {}).then(() => this.addLog("You", "Cleared the map")).catch(e => this.toast("Failed: " + e.message)); };
+        row.append(rel, clear);
+        const end = el("button", "btn", "🏁 End session");
+        end.title = "Mark the session as complete";
+        end.onclick = () => this.rpc("endGame", { winner: "party" }).catch(e => this.toast("Couldn't end: " + ((e && e.message) || e)));
+        row.appendChild(end);
+      }
       const losRow = el("label", "losToggle");
       const cb = el("input");
       cb.type = "checkbox";
@@ -1092,15 +1217,26 @@ export class App {
       losRow.append(cb, document.createTextNode("Enforce fog of war (players see only line of sight)"));
       row.appendChild(losRow);
     } else {
-      const dm = this.dmName();
-      if (dm) {
-        row.appendChild(el("strong", null, "DM: " + dm));
-        row.appendChild(el("span", "hint", " (released when the DM disconnects)"));
+      if (over) {
+        row.appendChild(el("span", "hint", this.endText()));
+        const fresh = el("button", "btn primary", "Start new session");
+        fresh.onclick = () => this.rpc("rematch", {}).catch(e => this.toast("Couldn't restart: " + ((e && e.message) || e)));
+        row.appendChild(fresh);
       } else {
-        row.appendChild(el("span", "hint", "First player to claim becomes the DM and sees the whole map."));
-        const claim = el("button", "btn primary", "Claim DM");
-        claim.onclick = () => this.onClaimDm();
-        row.appendChild(claim);
+        const dm = this.dmName();
+        if (dm) {
+          row.appendChild(el("strong", null, "DM: " + dm));
+          row.appendChild(el("span", "hint", " (released when the DM disconnects)"));
+        } else {
+          row.appendChild(el("span", "hint", "First player to claim becomes the DM and sees the whole map."));
+          const claim = el("button", "btn primary", "Claim DM");
+          claim.onclick = () => this.onClaimDm();
+          row.appendChild(claim);
+          const cw = el("button", "btn", "Claim win");
+          cw.title = "Take the win by forfeit — the DM has left";
+          cw.onclick = () => this.rpc("claimWin", {}).catch(e => this.toast("Couldn't claim: " + ((e && e.message) || e)));
+          row.appendChild(cw);
+        }
       }
     }
     box.appendChild(row);
@@ -1116,7 +1252,8 @@ export class App {
     if (u.guestNameEl) u.guestNameEl.textContent = this.myName || "You";
     if (u.guestSubEl) u.guestSubEl.textContent = isDm ? "dungeon master" : "player";
     if (u.turnEl) {
-      u.turnEl.textContent = this.tableMode === "local"
+      if (this.state.status === 3) u.turnEl.textContent = "Table ended";
+      else u.turnEl.textContent = this.tableMode === "local"
         ? "Local table"
         : (this.roomCode ? "Table " + this.roomCode : "Connecting…");
     }
@@ -1137,6 +1274,7 @@ export class App {
     try {
       await this.net.rpc("importChars", { chars });
       this.toast("Demo table loaded — 5 heroes on the meadow.");
+      this.addLog("Table", "Demo table loaded — 5 heroes on the meadow.");
     } catch (e) {
       this.toast("Demo load: " + ((e && e.message) || e));
     }
@@ -1154,10 +1292,13 @@ export class App {
     log.innerHTML = "";
     for (const m of this.chatLog) {
       const row = el("div", "chatRow");
-      const who = el("span", "who", m.n);
+      const who = el("span", "who");
+      who.innerHTML = escapeHtml(m.n);
       who.style.color = `hsl(${hashHue(m.n)} 75% 70%)`;
       const tm = el("span", "tm", fmtTime(m.ts));
-      row.append(who, document.createTextNode(": "), el("span", null, m.t), tm);
+      const body = document.createElement("span");
+      body.innerHTML = escapeHtml(m.t);
+      row.append(who, document.createTextNode(": "), body, tm);
       log.appendChild(row);
     }
     if (nearBottom) log.scrollTop = log.scrollHeight;
@@ -1422,11 +1563,22 @@ export class App {
     }
 
     const banner = this.ui.banner;
-    if (!dm && enforce && this.myViewerCount() === 0) {
+    let bannerText = "";
+    if (this.state.status === 3) {
+      bannerText = this.endText();
+    } else if (!dm && enforce && this.myViewerCount() === 0) {
+      bannerText = "You can't see anything yet — you have no tokens on the map. Import your character (Import tab) or ask the DM.";
+    }
+    if (bannerText) {
       banner.style.display = "block";
-      banner.textContent = "You can't see anything yet — you have no tokens on the map. Import your character (Import tab) or ask the DM.";
+      banner.textContent = bannerText;
     } else {
       banner.style.display = "none";
+    }
+    const fsOv = document.getElementById("fsOverlay");
+    if (fsOv && !fsOv.hidden) {
+      const fse = document.getElementById("fsStatusEl");
+      if (fse) fse.textContent = bannerText || "Full screen map";
     }
   }
 

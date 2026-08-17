@@ -13,6 +13,9 @@
      ════════════════════════════════════════════════════════════════ -->
 
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script> <!-- BGN audio system (bgn-audio.js) -->
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
 <!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
 <script type="text/x-server-plugin">
@@ -35,6 +38,7 @@ const SCHEMA=6;
 const SLOT=8192;
 const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
 const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const CHAT_BANNED=["slur","nigger","nigga","faggot","fag ","kill yourself","kys","retard","rape"];
 
 /* ── cards ── */
 function cardType(id){ for(let t=0;t<NT;t++){ if(id<STARTS[t]+COUNTS[t])return t; } return NT-1; }
@@ -153,6 +157,8 @@ function startNewRound(g){
 }
 function pName(p){ return p===0?"Host":"Guest"; }
 function cardTxt(ty){ return NAMES[ty]+" ("+EMO[ty]+")"; }
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
 
 /* ── durable state helpers (ASCII-JSON per slot) ── */
 function off(i){ return 1+i*SLOT; }
@@ -237,6 +243,7 @@ function genCode(){
 /* ── connection / broadcast ── */
 let rooms=new Map();                 // code -> room
 const conns=new Map();               // conn.id -> {code, role, conn}
+const chatTimes=new Map();           // conn.id -> last chat timestamp
 function topic(code){ return "ch:"+code; }
 function stacksJ(stacks){ return stacks.map(function(st){ return st.map(function(s){ return {type:s.type,cards:s.cards.slice()}; }); }); }
 function challengeJ(ch){ if(!ch)return null; return {challenger:ch.challenger,target:ch.target,toPlay:ch.toPlay,lastShown:ch.lastShown,contested:{type:ch.contested.type,cards:ch.contested.cards.slice()},battle:ch.battle.slice()}; }
@@ -485,11 +492,27 @@ self.rpc={
       room.lastAct=nowSec(); saveBroadcast(room);
     }
     return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    const obj=parseData(data); if(!obj)return JSON.stringify({ok:false,err:"bad_request"});
+    const room=roomOfCode(obj);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    try{ pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()})); }catch(e){}
+    return JSON.stringify({ok:true});
   }
 };
 
 self.onopen=({conn})=>{};
 self.onclose=({conn})=>{
+  chatTimes.delete(conn.id);
   const info=conns.get(conn.id);
   if(!info)return;
   conns.delete(conn.id);
@@ -573,6 +596,7 @@ loadRooms();
         <div class="muted small"><b class="goldtext">4 · Win</b><br>Rounds keep playing until someone passes $1,000,000 in total assets.</div>
       </div>
       <div style="text-align:center; margin-top:16px;">
+        <button class="btn btn-ghost btn-sm" id="helpBtn">❓ How it works</button>
         <button class="btn btn-ghost btn-sm" id="rulesBtn">📜 Full rules</button>
       </div>
     </div>
@@ -625,6 +649,7 @@ loadRooms();
     <div class="bgn-table cya-table">
 
       <div class="panel bgn-boardpanel cya-boardpanel">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
 
         <!-- opponents -->
         <div class="cya-opps" id="oppsCtn"></div>
@@ -681,6 +706,15 @@ loadRooms();
           </div>
         </div>
 
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+
         <div class="cya-actions">
           <button class="btn btn-gold" id="pairBtn" disabled>Pair cards</button>
           <button class="btn btn-gold" id="pairDiscardBtn" disabled>Pair from discard</button>
@@ -693,6 +727,8 @@ loadRooms();
         <div class="cya-utilbtns">
           <button class="btn btn-ghost" id="newGameBtn">New game</button>
           <button class="btn btn-ghost" id="rulesBtn2">Rules</button>
+          <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
+          <button class="btn btn-ghost" id="shareBtn" title="Download this table as JSON or a PNG">📤</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
         </div>
 
@@ -707,8 +743,22 @@ loadRooms();
   </section>
 </main>
 
-<!-- ═══ FULLSCREEN / MAXIMIZE PLAY TOGGLE ═══ -->
-<button id="maxBtn" title="Expand to fullscreen play" aria-pressed="false">⛶</button>
+<!-- ═══ FULLSCREEN BOARD (BGN standard) ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
 
 <!-- ═══ MODALS ═══ -->
 <div class="promo chal-promo" id="chalModal" hidden>
@@ -792,7 +842,7 @@ loadRooms();
 
 .cya-table{ grid-template-columns:minmax(0,1fr) 330px; max-width:1060px; margin:0 auto; }
 @media (max-width:900px){ .cya-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
-.cya-boardpanel{ text-align:center; padding:20px 18px 24px; }
+.cya-boardpanel{ text-align:center; padding:20px 18px 24px; position:relative; }
 
 .cya-playerrow{ display:flex; align-items:center; gap:10px; justify-content:center; margin:4px 0 10px; }
 .cya-playerrow .bgn-avatar.opp{ background:radial-gradient(circle at 35% 30%, #7a5cff, #241840); }
@@ -1015,10 +1065,52 @@ loadRooms();
   .cya-help{ font-size:.72rem; padding:8px 10px; margin-top:10px; }
 }
 
-/* ═══ MAXIMIZE / FULL-SCREEN PLAY ═══ */
-#maxBtn{ position:fixed; top:12px; right:12px; z-index:200; width:44px; height:44px; border-radius:50%; display:none; align-items:center; justify-content:center; font-size:18px; line-height:1; cursor:pointer; touch-action:manipulation; background:rgba(14,11,20,.85); border:1px solid rgba(212,175,55,.5); color:#f6e6a4; box-shadow:0 4px 14px rgba(0,0,0,.5); -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); transition:transform .12s, border-color .12s; }
-#maxBtn:hover{ transform:scale(1.08); border-color:#f6e6a4; }
-body.cya-in-game #maxBtn{ display:flex; }
+/* ═══ MAXIMIZE / FULL-SCREEN PLAY (BGN standard) ═══ */
+body{ text-align:left; }
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.35); color:#fff; border-radius:999px; padding:8px 14px; cursor:pointer; font:600 13px/1 system-ui,-apple-system,sans-serif; box-shadow:0 4px 14px rgba(0,0,0,.4); }
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent,#d4af37); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.1); color:#fff; flex:none; }
+#fsStatusEl{ font-weight:600; font-size:.95rem; color:#f6e6a4; }
+#fsActionsCtn{ flex:1; display:flex; justify-content:center; align-items:center; gap:8px; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.fs-tile{ position:absolute; top:10px; right:10px; z-index:5; }
+.fs-meeple{ position:absolute; bottom:10px; right:10px; z-index:5; }
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+#fsOverlay .bgn-table{ position:absolute; inset:0; width:100%; height:100%; max-width:none; margin:0; overflow:auto; }
+#fsOverlay .fs-open-btn{ display:none; }
+@media (max-width:900px){ #fsOverlay .bgn-table{ grid-template-columns:minmax(0,1fr); } }
+#fsOverlay .cya-boardpanel{ min-height:0; }
+
+/* ═══ HELP OVERLAY (BGN standard) ═══ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help-overlay[hidden]{ display:none; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+/* ═══ TABLE CHAT (BGN standard) ═══ */
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+
+body.cya-in-game .cya-table{ position:relative; }
 
 body.cya-max .bgn-nav, body.cya-max .game-hero{ display:none !important; }
 body.cya-max main.wrap{ max-width:none !important; padding-top:0 !important; }
@@ -1318,7 +1410,7 @@ function renderLog(){
   logEl.innerHTML=game.logLines.join("");
   logEl.scrollTop=logEl.scrollHeight;
 }
-function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ bannerTimer=null; updateBanner(); },2600); }
+function flashBanner(msg){ bannerEl.textContent=msg; if(!fsOverlay.hidden)fsStatusEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ bannerTimer=null; updateBanner(); },2600); }
 function animSet(kind,val){
   const a=game.anim;
   if(kind==="stack")a.stackVal=val;
@@ -1520,6 +1612,7 @@ function updateBanner(){
     else msg="";
   }
   bannerEl.textContent=msg;
+  if(!fsOverlay.hidden)fsStatusEl.textContent=msg;
 }
 function updateHelp(){
   const g=game.g; if(!g){ helpEl.textContent=""; return; }
@@ -1840,6 +1933,7 @@ function startMode(mode,aiPlayers){
   chalModal.hidden=true;
   aiPanel.hidden=true;
   onlinePanel.hidden=true;
+  chatBox.hidden=true;
   document.body.classList.add("cya-in-game");
   startGame();
 }
@@ -1851,7 +1945,7 @@ function exitOnline(showLobby){
 }
 function exitToLobby(){
   document.body.classList.remove("cya-in-game");
-  setMaximized(false);
+  if(window.bgnFullscreen&&window.bgnFullscreen.isOpen())window.bgnFullscreen.close();
   if(game.mode==="online"){
     if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
     exitOnline(true);
@@ -1859,6 +1953,7 @@ function exitToLobby(){
     game.mode=null;
     gameCtn.hidden=true;
     lobbyCtn.hidden=false;
+    chatBox.hidden=true;
   }
 }
 
@@ -2163,6 +2258,7 @@ function onServerMsg(raw){
     if(game.g&&game.mode==="online")game.g.hands[game.myPlayer]=game.hand;
     renderAll();
   }
+  else if(msg.t==="chat"){ addChat(msg.role,msg.text,msg.ts); }
 }
 function applyServerSnap(s){
   const prevLens=game.g?game.g.stacks.map(function(st){ return st.length; }):null;
@@ -2209,6 +2305,7 @@ function enterOnlineGame(){
   lobbyCtn.hidden=true;
   gameCtn.hidden=false;
   roomBox.hidden=false;
+  chatBox.hidden=false;
   roomCodeEl.textContent=game.roomCode;
   game.locked=false;
   document.body.classList.add("cya-in-game");
@@ -2323,7 +2420,13 @@ rulesBtn.addEventListener("click",openRules);
 rulesBtn2.addEventListener("click",openRules);
 rulesCloseBtn.addEventListener("click",closeRules);
 rulesOverlay.addEventListener("click",function(e){ if(e.target===rulesOverlay)closeRules(); });
-document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&!rulesOverlay.hidden)closeRules(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+    if(!rulesOverlay.hidden)closeRules();
+  }
+});
 pairBtn.addEventListener("click",function(){ if(game.mode==="online"){ lastMethod="playPair"; lastPayload={cardA:game.pick[0],cardB:game.pick[1]}; } doPair(); });
 pairDiscardBtn.addEventListener("click",function(){ if(game.mode==="online"){ lastMethod="pairDiscard"; lastPayload={card:game.pick[0]}; } doPairDiscard(); });
 discardBtn.addEventListener("click",function(){ if(game.mode==="online"){ lastMethod="discardDraw"; lastPayload={card:game.pick[0]}; } doDiscardDraw(); });
@@ -2360,36 +2463,160 @@ claimBtn.addEventListener("click",function(){
 });
 let lastMethod=null, lastPayload=null;
 
-/* ══════════ fullscreen / maximize play ══════════ */
-const maxBtn=document.getElementById("maxBtn");
-let nativeFs=false;
-function syncMaxBtn(){
-  const on=document.body.classList.contains("cya-max");
-  if(!maxBtn)return;
-  maxBtn.innerHTML=on?"✕":"⛶";
-  maxBtn.title=on?"Exit fullscreen play":"Expand to fullscreen play";
-  maxBtn.setAttribute("aria-pressed",on?"true":"false");
+/* ══════════ fullscreen board (BGN standard) ══════════ */
+const fsOpenBtn=document.getElementById("fsOpenBtn");
+const fsOverlay=document.getElementById("fsOverlay");
+const fsBoardWrap=document.getElementById("fsBoardWrap");
+const fsStatusEl=document.getElementById("fsStatusEl");
+const fsExitBtn=document.getElementById("fsExitBtn");
+const fsTileCtn=document.getElementById("fsTileCtn");
+const fsMeepleCtn=document.getElementById("fsMeepleCtn");
+const fsCfg={canvas:null,resize:null};
+function fsRefit(){ if(fsCfg.resize)try{ fsCfg.resize(); }catch(e){} renderAll(); }
+function openFullscreen(){
+  if(!fsCfg.canvas||!fsOverlay.hidden)return;
+  const el=fsCfg.canvas;
+  if(!el._fsOrig)el._fsOrig={parent:el.parentNode,next:el.nextSibling};
+  fsBoardWrap.appendChild(el);
+  fsOverlay.hidden=false;
+  document.body.classList.add("cya-max");
+  document.body.style.overflow="hidden";
+  fsStatusEl.textContent=bannerEl.textContent||"Full screen map";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
 }
-function setMaximized(on){
-  document.body.classList.toggle("cya-max",on);
-  syncMaxBtn();
-  if(on){
-    const de=document.documentElement;
-    if(de.requestFullscreen&&!document.fullscreenElement){
-      try{
-        const pr=de.requestFullscreen();
-        if(pr&&pr.then)pr.then(function(){ nativeFs=true; }).catch(function(){ nativeFs=false; });
-      }catch(e){}
-    }
-  }else if(document.fullscreenElement&&document.exitFullscreen){
-    document.exitFullscreen().catch(function(){});
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  fsOverlay.hidden=true;
+  document.body.classList.remove("cya-max");
+  document.body.style.overflow="";
+  if(document.fullscreenElement)try{ document.exitFullscreen().catch(function(){}); }catch(e){}
+  const el=fsCfg.canvas;
+  if(el&&el._fsOrig){
+    try{ el._fsOrig.parent.insertBefore(el,el._fsOrig.next); }catch(e){ el._fsOrig.parent.appendChild(el); }
   }
+  fsRefit();
+  renderAll();
 }
-maxBtn.addEventListener("click",function(){ setMaximized(!document.body.classList.contains("cya-max")); });
-document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&document.body.classList.contains("cya-max"))setMaximized(false); });
-document.addEventListener("fullscreenchange",function(){
-  if(!document.fullscreenElement&&nativeFs){ nativeFs=false; document.body.classList.remove("cya-max"); syncMaxBtn(); }
-});
+window.bgnFullscreen={
+  register:function(o){
+    if(!o||!o.canvas)return;
+    fsCfg.canvas=o.canvas;
+    if(typeof o.resize==="function")fsCfg.resize=o.resize;
+    if(o.tile)fsTileCtn.appendChild(o.tile);
+    if(o.meeple)fsMeepleCtn.appendChild(o.meeple);
+    fsOpenBtn.hidden=false;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({canvas:document.querySelector(".cya-table"),resize:renderAll});
+
+/* ══════════ help modal ══════════ */
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const helpCloseBtn=document.getElementById("helpCloseBtn");
+const HELP_HTML='<h2 class="goldtext">How to play Cover Your Assets</h2>'
+  +'<p class="muted">The 2011 edition of the classic family card game. Pair matching assets onto your stack, then challenge a rival to steal their top set. First to <b>$1,000,000</b> total assets wins. Three ways to sit down:</p>'
+  +'<h3>Three ways to play</h3>'
+  +'<p><b>🛋️ Hotseat</b> — two players share one screen. Player 1 goes first.</p>'
+  +'<p><b>🤖 vs the Machine</b> — you versus 1–4 AI rivals, each scheming on their own turn.</p>'
+  +'<p><b>🌐 Online</b> — create a room and share the 5-letter code. Host plays first, the server validates every action so nobody can cheat, and you can chat at the table.</p>'
+  +'<h3>Your turn</h3>'
+  +'<p>Select <b>two matching cards</b> (or one asset + one wild — Silver &amp; Gold are wild) and tap <b>Pair cards</b> to build a set on top of your stack. Or pair a card with the discard pile&#39;s top card via <b>Pair from discard</b>.</p>'
+  +'<p><b>Challenge</b> a rival&#39;s top set: show a matching card, then you and the rival keep showing cards back and forth — <b>last to show a card keeps the whole pile</b>. Tap a card to defend or stop pressing.</p>'
+  +'<p>Short on options? <b>Discard &amp; draw</b> swaps one card for the top of the deck. When all hands are empty the round scores, and the first player past <b>$1,000,000</b> in total assets wins.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  const done=document.getElementById("helpDoneBtn");
+  if(done)done.addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
+helpCloseBtn.addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+
+/* ══════════ table chat (online rooms) ══════════ */
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function chatName(role){ if(role===game.myRole)return "You"; return role==="host"?"Host":"Guest"; }
+function fmtTime(ts){ if(!ts)return ""; try{ const d=new Date(ts*1000); return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }catch(e){ return ""; } }
+function addChat(role,text,ts){
+  const row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(chatName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole&&window.BGN&&BGN.sfx)BGN.sfx.play("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-cover-your-assets",
+    gameName:function(){ return "Cover Your Assets"; },
+    exportData:function(){
+      if(!game.g||(game.mode!=="local"&&game.mode!=="ai"))return null;
+      return {mode:game.mode,aiPlayers:game.aiPlayers,players:game.players,view:game.view,g:game.g};
+    },
+    applySave:function(o){
+      if(!o||!o.g||(o.mode!=="local"&&o.mode!=="ai"))return false;
+      const g=o.g;
+      if(!g||!g.hands||!g.stacks||!Array.isArray(g.deck))return false;
+      game.mode=o.mode;
+      game.aiPlayers=o.aiPlayers||1;
+      game.players=o.players||g.players||2;
+      game.g=g;
+      game.hand=g.hands[0]||[];
+      game.view=o.view||0;
+      game.pick=[]; game.chPick=-1;
+      game.aiThinking=false; game.locked=false;
+      game.logLines=[];
+      game.anim={ stackVal:-1, discard:false, chal:false, chalopen:false, opp:-1 };
+      myNameEl.textContent=game.mode==="ai"?"You":"Player 1";
+      roomBox.hidden=true; claimBtn.hidden=true; resignBtn.style.display="none";
+      lobbyCtn.hidden=true; gameCtn.hidden=false;
+      passScreen.hidden=true; overModal.hidden=true; roundModal.hidden=true; chalModal.hidden=true;
+      aiPanel.hidden=true; onlinePanel.hidden=true; chatBox.hidden=true;
+      document.body.classList.add("cya-in-game");
+      if(g.over)showGameOver();
+      else if(g.roundPending)showRoundModal();
+      renderAll();
+      return true;
+    },
+    source:function(){
+      var el=document.getElementById("gameCtn");
+      if(el&&!el.hidden)return el;
+      return document.getElementById("lobbyCtn");
+    },
+    title:function(){ return "Cover Your Assets"; },
+    subtitle:function(){ return game.mode==="ai"?"vs the Machine":"hotseat"; },
+    filenameBase:function(){ return "cover-your-assets"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
 
 /* debug/testing handle for browser_eval */
 window.__cya={ game, newRoom, deal, turnPlayer, actorP, isMyTurn, myP, handLenOf, setType, setVal, stackVal,
@@ -2399,6 +2626,40 @@ window.__cya={ game, newRoom, deal, turnPlayer, actorP, isMyTurn, myP, handLenOf
   startMode, startGame, doPair, doPairDiscard, doDiscardDraw, doChallenge, doDefend, doStop, doPass, doContinue,
   aiChooseAction, aiChooseDefense, aiChoosePress, renderAll, showGameOver, showRoundModal, applyServerSnap };
 renderAll();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
 })();
 </script>
 
