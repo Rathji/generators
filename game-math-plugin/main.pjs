@@ -1,0 +1,1027 @@
+// ============================================================================
+//  game-math-plugin  —  game math & probability calculator  —  by Rathji
+//
+//  IMPORT:
+//    gameMath = {import:game-math-plugin}
+//
+//  DICE ENGINE — parse expressions like "3d6", "2d20+3", "4d6dl1" (drop lowest),
+//  "2d20kh1" (keep highest = advantage), "2d8x" (exploding), "2d6rr1" (reroll 1s
+//  once), and success pools "5d6 t4+" (count dice >= 4), t4- (<=4), t4= (==4):
+//    gameMath.roll("4d6dl1")                       // -> { total, rolls, dropped, ... }
+//    gameMath.roll("2d20+3").total                 // -> number
+//    gameMath.roll("5d6 t4+").successes            // -> success count
+//    gameMath.distribution("2d6")                  // full outcome distribution
+//    gameMath.distribution("2d6").pAtLeast(10)     // P(roll >= 10)
+//    gameMath.distribution("5d6 t4+").pBetween(3,5)
+//    gameMath.roll("2d6").into("elId")             // render dice chips + total
+//    gameMath.distribution("2d6").into("elId")     // render chart + stats + table
+//
+//  DECK ODDS (hypergeometric):
+//    gameMath.deck.hyper(40, 4, 7)                 // 40-card deck, 4 copies, 7 drawn
+//      // -> [{k, exact, atLeast, atMost}, ...] for k = 0..min(4,7)
+//    gameMath.deck.pDraw({deck:40, drawn:7, counts:[4,4], need:[1,1]})
+//      // -> { p }  P(hand has >=1 of each of two 4-of cards)
+//
+//  EV & COMPARE:
+//    gameMath.ev("1d12")                           // { mean, std, min, max, mode, ... }
+//    gameMath.compare("1d12", "2d6")               // head-to-head win/tie probabilities
+//
+//  MONTE CARLO SIMULATOR — for mechanics too messy for closed-form math:
+//    gameMath.simulate({ trials: 200000, seed: 42, each: () =>
+//      gameMath.roll("2d6rr1").total >= 7 });       // -> { winRate, ... }
+//    // each() may return a boolean (win), a number (value), or {win, value}
+//
+//  REPRODUCIBLE RNG:
+//    gameMath.setSeed(1234)                        // afterwards roll/d simulate deterministically
+//
+//  SELF-CHECK:  gameMath.selfCheck()  -> { pass, results[] }
+//
+//  NOTE: roll() also does a monte carlo pass for any expression; distribution()
+//  is exact but only for expressions without explode+drop/keep combos (those are
+//  supported by roll()/simulate() — use them for messy mechanics).
+// ============================================================================
+
+$output = [getGM()]
+
+getGM() =>
+  if (globalThis.__gm && globalThis.__gm.api) return globalThis.__gm.api;
+  const GM = globalThis.__gm = globalThis.__gm || {};
+  GM.seed = null;
+  GM.rng = Math.random;
+  GM.cache = Object.create(null);
+
+  const MAX_DICE = 50;
+  const MAX_EXPLODE_DICE = 12;
+  const MAX_SIDES = 1000;
+
+  // ------------------------------------------------------------------
+  // RNG
+  // ------------------------------------------------------------------
+  // XOR-free 32-bit LCG (Numerical Recipes constants). Avoids the ^ and |
+  // bitwise operators because pjs reserves "^" for odds declarations.
+  function mulberry32(a) {
+    let state = (Number(a) >>> 0) || 1;
+    return function() {
+      state = (state * 1664525 + 1013904223) % 4294967296;
+      return state / 4294967296;
+    };
+  }
+  function setSeed(n) {
+    GM.seed = (Number(n) >>> 0) || 1;
+    GM.rng = mulberry32(GM.seed);
+    return GM.seed;
+  }
+  function getSeed() { return GM.seed; }
+  function rng() { return GM.rng(); }
+  function d(sides) {
+    sides = Math.max(1, Math.floor(+sides || 6));
+    return 1 + Math.floor(rng() * sides);
+  }
+
+  // ------------------------------------------------------------------
+  // Parser — expr := term (('+'|'-') term)* ; term := const | dice group
+  // ------------------------------------------------------------------
+  function gmErr(msg, src) {
+    const e = new Error("game-math-plugin: " + msg + (src ? "  (in: \"" + src + "\")" : ""));
+    e.code = "GM_PARSE";
+    return e;
+  }
+
+  function lex(src) {
+    const toks = [];
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+      const c = src[i];
+      if (c === " " || c === "\t" || c === "\n" || c === "\r") { i++; continue; }
+      if (c >= "0" && c <= "9") {
+        let j = i;
+        while (j < n && src[j] >= "0" && src[j] <= "9") j++;
+        toks.push({ t: "num", v: Number(src.slice(i, j)) });
+        i = j; continue;
+      }
+      if (/[a-zA-Z]/.test(c)) {
+        let j = i;
+        while (j < n && /[a-zA-Z]/.test(src[j])) j++;
+        toks.push({ t: "word", v: src.slice(i, j).toLowerCase() });
+        i = j; continue;
+      }
+      if (c === "%") { toks.push({ t: "word", v: "%" }); i++; continue; }
+      if (c === "+" || c === "-" || c === "=") { toks.push({ t: c, v: c }); i++; continue; }
+      throw gmErr("unexpected character '" + c + "'", src);
+    }
+    return toks;
+  }
+
+  function parse(src) {
+    src = String(src == null ? "" : src).trim();
+    if (!src) throw gmErr("empty expression");
+    const toks = lex(src);
+    let pos = 0;
+    const peek = () => toks[pos];
+    const next = () => toks[pos++];
+    const atEnd = () => pos >= toks.length;
+
+    function parseDiceGroup(count) {
+      const t = next();
+      let sides;
+      if (t.t === "word" && t.v === "d") {
+        const s = peek();
+        if (s && s.t === "word" && s.v === "%") { next(); sides = 100; }
+        else if (s && s.t === "num") sides = next().v;
+        else throw gmErr("expected die size after 'd'", src);
+      } else if (t.t === "word" && t.v === "%") {
+        sides = 100;
+      } else {
+        throw gmErr("expected 'd' or '%'", src);
+      }
+      if (!Number.isInteger(sides) || sides < 2 || sides > MAX_SIDES) throw gmErr("die size must be 2.." + MAX_SIDES, src);
+      if (!Number.isInteger(count) || count < 1 || count > MAX_DICE) throw gmErr("dice count must be 1.." + MAX_DICE, src);
+
+      const g = { type: "dice", count, sides, explode: null, rr: null, target: null, drops: [] };
+      while (!atEnd()) {
+        const tk = peek();
+        if (tk.t === "+" || tk.t === "-" || tk.t === "=") break;
+        if (tk.t !== "word") throw gmErr("unexpected token after die spec", src);
+        const w = next().v;
+        if (w === "dl" || w === "dh" || w === "kl" || w === "kh") {
+          const p = peek();
+          let nn = 1;
+          if (p && p.t === "num") nn = next().v;
+          g.drops.push({ op: w, n: nn });
+        } else if (w === "x") {
+          if (g.explode != null) throw gmErr("multiple explode modifiers", src);
+          const p = peek();
+          g.explode = (p && p.t === "num") ? next().v : sides;
+        } else if (w === "rr") {
+          const p = peek();
+          if (!p || p.t !== "num") throw gmErr("rr needs a value, e.g. rr1", src);
+          if (g.rr != null) throw gmErr("multiple rr modifiers", src);
+          g.rr = next().v;
+        } else if (w === "t") {
+          if (g.target) throw gmErr("multiple target modifiers", src);
+          let cmp = "+";
+          let p = peek();
+          if (p && (p.t === "+" || p.t === "-" || p.t === "=")) { cmp = next().v; p = peek(); }
+          if (!p || p.t !== "num") throw gmErr("target needs a number, e.g. t4+", src);
+          const tv = next().v;
+          const q = peek();
+          if (q && (q.t === "+" || q.t === "-" || q.t === "=") && pos === toks.length - 1) cmp = next().v;
+          g.target = { cmp, v: tv };
+        } else {
+          throw gmErr("unknown modifier '" + w + "'", src);
+        }
+      }
+      if (g.explode != null && g.count > MAX_EXPLODE_DICE) throw gmErr("exploding dice limited to " + MAX_EXPLODE_DICE, src);
+      if (g.drops.length > 1) throw gmErr("only one drop/keep modifier per dice group", src);
+      if (g.drops.length) {
+        const dn = g.drops[0].n;
+        if (!Number.isInteger(dn) || dn < 1 || dn >= g.count) throw gmErr("drop/keep count must be 1.." + (g.count - 1), src);
+        if (g.explode != null) throw gmErr("exact math doesn't support explode + drop/keep — use gameMath.simulate() for that", src);
+        if (g.rr != null) throw gmErr("exact math doesn't support reroll + drop/keep — use gameMath.simulate() for that", src);
+      }
+      if (g.target != null && (g.target.v < 1 || g.target.v > sides)) throw gmErr("target out of range 1.." + sides, src);
+      if (g.rr != null && (g.rr < 1 || g.rr > sides)) throw gmErr("rr value out of range 1.." + sides, src);
+      return g;
+    }
+
+    function parseTerm(sign) {
+      const t = peek();
+      if (!t) throw gmErr("expected a dice roll or number", src);
+      if (t.t === "num") {
+        const n = next().v;
+        const nx = peek();
+        if (nx && nx.t === "word" && (nx.v === "d" || nx.v === "%")) {
+          const g = parseDiceGroup(n);
+          g.sign = sign;
+          return g;
+        }
+        return { type: "const", value: n, sign, src };
+      }
+      if (t.t === "word" && (t.v === "d" || t.v === "%")) {
+        const g = parseDiceGroup(1);
+        g.sign = sign;
+        return g;
+      }
+      throw gmErr("expected a dice roll or number, got '" + t.v + "'", src);
+    }
+
+    const terms = [];
+    const first = peek();
+    if (first && (first.t === "-" || first.t === "+")) { const s = next().t; terms.push(parseTerm(s)); }
+    else terms.push(parseTerm("+"));
+    while (!atEnd()) {
+      const tk = next();
+      if (tk.t !== "+" && tk.t !== "-") throw gmErr("unexpected token '" + tk.v + "'", src);
+      terms.push(parseTerm(tk.t));
+    }
+    return { type: "expr", terms, src };
+  }
+
+  function astOf(src) {
+    const key = String(src == null ? "" : src).trim();
+    let a = GM.cache[key];
+    if (!a) { a = parse(key); GM.cache[key] = a; }
+    return a;
+  }
+
+  function cmpSatisfied(t, v) {
+    if (t.cmp === "+") return v >= t.v;
+    if (t.cmp === "-") return v <= t.v;
+    return v === t.v;
+  }
+
+  // ------------------------------------------------------------------
+  // Simulation (used by roll() and inside simulate())
+  // ------------------------------------------------------------------
+  function rollGroup(g) {
+    const sides = g.sides;
+    const rolls = [];
+    const all = [];
+    for (let i = 0; i < g.count; i++) {
+      const v = 1 + Math.floor(rng() * sides);
+      rolls.push(v); all.push(v);
+    }
+    if (g.explode != null) {
+      const ev = g.explode;
+      let i = 0;
+      while (i < rolls.length) {
+        if (rolls[i] === ev) {
+          const nv = 1 + Math.floor(rng() * sides);
+          all.push(nv); rolls.push(nv);
+        }
+        i++;
+      }
+    }
+    if (g.rr != null) {
+      for (let i = 0; i < rolls.length; i++) if (rolls[i] === g.rr) rolls[i] = 1 + Math.floor(rng() * sides);
+    }
+    let dropped = [];
+    if (g.drops.length) {
+      const m = g.drops[0];
+      const arr = rolls.slice();
+      if (m.op === "dl") { arr.sort((a, b) => a - b); dropped = arr.splice(0, m.n); }
+      else if (m.op === "dh") { arr.sort((a, b) => a - b); dropped = arr.splice(arr.length - m.n); }
+      else if (m.op === "kl") { arr.sort((a, b) => a - b); dropped = arr.splice(m.n); }
+      else if (m.op === "kh") { arr.sort((a, b) => b - a); dropped = arr.splice(m.n); }
+      rolls.length = 0; rolls.push.apply(rolls, arr);
+    }
+    let successes = null;
+    let total;
+    if (g.target) {
+      successes = 0;
+      for (let i = 0; i < rolls.length; i++) if (cmpSatisfied(g.target, rolls[i])) successes++;
+      total = successes;
+    } else {
+      total = 0;
+      for (let i = 0; i < rolls.length; i++) total += rolls[i];
+    }
+    return { total, rolls, dropped, all, successes, sides, count: g.count, pool: !!g.target, label: groupLabel(g) };
+  }
+
+  function groupLabel(g) {
+    let s = g.count + "d" + (g.sides === 100 ? "%" : g.sides);
+    if (g.drops.length) s += g.drops[0].op + (g.drops[0].n > 1 ? g.drops[0].n : "");
+    if (g.explode != null) s += "x" + (g.explode === g.sides ? "" : g.explode);
+    if (g.rr != null) s += "rr" + g.rr;
+    if (g.target) s += "t" + g.target.v + g.target.cmp;
+    return s;
+  }
+
+  function rollExpr(src) {
+    const ast = astOf(src);
+    const parts = [];
+    let total = 0;
+    for (const t of ast.terms) {
+      if (t.type === "const") {
+        const sign = t.sign === "-" ? -1 : 1;
+        parts.push({ kind: "const", value: t.value, sign: t.sign, total: sign * t.value });
+        total += sign * t.value;
+      } else {
+        const r = rollGroup(t);
+        const sign = t.sign === "-" ? -1 : 1;
+        r.total = r.total * sign;
+        r.sign = t.sign;
+        parts.push(r);
+        total += r.total;
+      }
+    }
+    const res = {
+      expr: ast.src, total, parts,
+      pool: ast.terms.some(x => x.type === "dice" && x.target),
+      toString() { return String(total); },
+      valueOf() { return total; },
+      html() { return rollHtml(res); },
+      into(elm) { return into(elm, rollHtml(res)); }
+    };
+    return res;
+  }
+
+  // ------------------------------------------------------------------
+  // Exact distributions
+  // ------------------------------------------------------------------
+  function convolve(a, b) {
+    if (!a.length) return b;
+    if (!b.length) return a;
+    const map = new Map();
+    for (const x of a) for (const y of b) {
+      const v = x.v + y.v;
+      map.set(v, (map.get(v) || 0) + x.p * y.p);
+    }
+    const out = [];
+    for (const [v, p] of map) out.push({ v, p });
+    out.sort((x, y) => x.v - y.v);
+    return out;
+  }
+
+  function convolveN(dist, n) {
+    let acc = null;
+    for (let i = 0; i < n; i++) acc = acc ? convolve(acc, dist) : dist;
+    return acc || [];
+  }
+
+  function uniformDist(sides) {
+    const out = new Array(sides);
+    const p = 1 / sides;
+    for (let i = 0; i < sides; i++) out[i] = { v: i + 1, p };
+    return out;
+  }
+
+  function singleExplodingDist(sides, ev) {
+    const out = [];
+    const q = 1 / sides;
+    let a = 0;
+    let massLeft = 1;
+    while (massLeft > 1e-14 && a < 1000) {
+      const pa = Math.pow(q, a + 1);
+      for (let r = 1; r <= sides; r++) if (r !== ev) out.push({ v: a * ev + r, p: pa });
+      massLeft -= Math.pow(q, a) * (sides - 1) / sides;
+      a++;
+    }
+    return out;
+  }
+
+  function explodingSuccessSingleDist(sides, ev, target) {
+    const out = new Map();
+    const q = 1 / sides;
+    const evSucc = cmpSatisfied(target, ev);
+    let a = 0;
+    let massLeft = 1;
+    while (massLeft > 1e-14 && a < 1000) {
+      const pa = Math.pow(q, a + 1);
+      const base = evSucc ? a : 0;
+      for (let r = 1; r <= sides; r++) {
+        if (r === ev) continue;
+        const s = base + (cmpSatisfied(target, r) ? 1 : 0);
+        out.set(s, (out.get(s) || 0) + pa);
+      }
+      massLeft -= Math.pow(q, a) * (sides - 1) / sides;
+      a++;
+    }
+    const arr = [];
+    for (const [v, p] of out) arr.push({ v, p });
+    arr.sort((x, y) => x.v - y.v);
+    return arr;
+  }
+
+  function singleRerollDist(sides, rv) {
+    const out = [];
+    for (let v = 1; v <= sides; v++) {
+      const p = v === rv ? 1 / (sides * sides) : 1 / sides + 1 / (sides * sides);
+      out.push({ v, p });
+    }
+    return out;
+  }
+
+  function successDistOf(single, target) {
+    let ps = 0;
+    for (const x of single) if (cmpSatisfied(target, x.v)) ps += x.p;
+    return [{ v: 0, p: 1 - ps }, { v: 1, p: ps }];
+  }
+
+  function combTable(n) {
+    const C = [];
+    for (let r = 0; r <= n; r++) {
+      const row = new Float64Array(r + 1);
+      row[0] = row[r] = 1;
+      for (let c = 1; c < r; c++) row[c] = C[r - 1][c - 1] + C[r - 1][c];
+      C.push(row);
+    }
+    return C;
+  }
+
+  // Generalized drop/keep DP. Works for any per-face probabilities (uniform,
+  // reroll-modified, ...). mode: sum or success-count.
+  function dropDP(n, faceProbs, dropCount, target) {
+    const S = faceProbs.length - 1;
+    const keep = n - dropCount;
+    const maxVal = target ? n : n * S;
+    let dp = Array.from({ length: n + 1 }, () => Array.from({ length: keep + 1 }, () => new Float64Array(maxVal + 1)));
+    dp[0][0][0] = 1;
+    const C = combTable(n);
+    for (let f = S; f >= 1; f--) {
+      const pf = faceProbs[f];
+      if (!(pf > 0)) continue;
+      const isSucc = target ? cmpSatisfied(target, f) : null;
+      const ndp = dp.map(row => row.map(c => Float64Array.from(c)));
+      for (let a = 0; a < n; a++) {
+        const rem = n - a;
+        for (let k = 0; k <= keep; k++) {
+          const row = dp[a][k];
+          const kLeft = keep - k;
+          for (let s = 0; s <= maxVal; s++) {
+            const w = row[s];
+            if (!(w > 0)) continue;
+            let pcf = pf;
+            for (let c = 1; c <= rem; c++) {
+              const comb = C[rem][c];
+              const na = a + c;
+              if (k + c <= keep) {
+                const nk = k + c;
+                const ns = s + (isSucc ? c : c * f);
+                ndp[na][nk][ns] += w * comb * pcf;
+              } else {
+                const ns = s + (isSucc ? kLeft : kLeft * f);
+                ndp[na][keep][ns] += w * comb * pcf;
+              }
+              pcf *= pf;
+            }
+          }
+        }
+      }
+      dp = ndp;
+    }
+    const res = [];
+    for (let s = 0; s <= maxVal; s++) {
+      const p = dp[n][keep][s];
+      if (p > 1e-18) res.push({ v: s, p });
+    }
+    return res;
+  }
+
+  function dropDist(g, target) {
+    const n = g.count, S = g.sides;
+    const m = g.drops[0];
+    let dropCount, mirror = false;
+    if (m.op === "dl") dropCount = m.n;
+    else if (m.op === "kh") dropCount = n - m.n;
+    else if (m.op === "dh") { dropCount = m.n; mirror = true; }
+    else if (m.op === "kl") { dropCount = n - m.n; mirror = true; }
+    const faceProbs = new Array(S + 1).fill(1 / S);
+    const tgt = mirror && target ? { cmp: target.cmp === "+" ? "-" : target.cmp === "-" ? "+" : "=", v: S + 1 - target.v } : target;
+    let dist = dropDP(n, faceProbs, dropCount, tgt);
+    if (mirror) {
+      dist = dist.map(x => ({ v: target ? x.v : (n - dropCount) * (S + 1) - x.v, p: x.p }));
+    }
+    return dist;
+  }
+
+  function groupDist(g) {
+    const n = g.count, S = g.sides;
+    if (g.drops.length) return dropDist(g, g.target);
+    let single;
+    if (g.explode != null) single = singleExplodingDist(S, g.explode);
+    else if (g.rr != null) single = singleRerollDist(S, g.rr);
+    else single = uniformDist(S);
+    if (g.target) {
+      let perDie;
+      if (g.explode != null) perDie = explodingSuccessSingleDist(S, g.explode, g.target);
+      else perDie = successDistOf(single, g.target);
+      return convolveN(perDie, n);
+    }
+    return convolveN(single, n);
+  }
+
+  function distribution(src) {
+    const ast = astOf(src);
+    let dist = null;
+    for (const t of ast.terms) {
+      let d;
+      if (t.type === "const") d = [{ v: t.value, p: 1 }];
+      else d = groupDist(t);
+      if (t.sign === "-") d = d.map(x => ({ v: -x.v, p: x.p }));
+      dist = dist ? convolve(dist, d) : d;
+    }
+    dist = dist || [{ v: 0, p: 1 }];
+    return makeDist(ast, dist);
+  }
+
+  function makeDist(ast, raw) {
+    const n = raw.length;
+    let totalP = 0;
+    for (let i = 0; i < n; i++) totalP += raw[i].p;
+    const vals = new Array(n);
+    const pref = new Float64Array(n);
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+      vals[i] = raw[i].v;
+      acc += raw[i].p;
+      pref[i] = acc / totalP;
+    }
+    let mean = 0, variance = 0;
+    let min = vals[0], max = vals[n - 1];
+    let mode = vals[0], modeP = 0;
+    for (let i = 0; i < n; i++) {
+      const p = raw[i].p / totalP;
+      mean += vals[i] * p;
+      if (p > modeP) { modeP = p; mode = vals[i]; }
+    }
+    for (let i = 0; i < n; i++) {
+      const p = raw[i].p / totalP;
+      const d = vals[i] - mean;
+      variance += d * d * p;
+    }
+
+    function idxAtLeast(v) {
+      let lo = 0, hi = n;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (vals[mid] >= v) hi = mid; else lo = mid + 1; }
+      return lo;
+    }
+    function idxAtMost(v) {
+      let lo = 0, hi = n - 1, ans = -1;
+      while (lo <= hi) { const mid = (lo + hi) >> 1; if (vals[mid] <= v) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+      return ans;
+    }
+    function pExactly(v) {
+      const i = idxAtLeast(v);
+      if (i < n && vals[i] === v) return pref[i] - (i === 0 ? 0 : pref[i - 1]);
+      return 0;
+    }
+    function pAtLeast(v) {
+      const i = idxAtLeast(v);
+      return i >= n ? 0 : 1 - (i === 0 ? 0 : pref[i - 1]);
+    }
+    function pAtMost(v) {
+      const i = idxAtMost(v);
+      return i < 0 ? 0 : pref[i];
+    }
+    function pBetween(a, b) {
+      const j = idxAtMost(b);
+      const i = idxAtLeast(a);
+      if (i > j) return 0;
+      return (j < 0 ? 0 : pref[j]) - (i === 0 ? 0 : pref[i - 1]);
+    }
+
+    const outcomes = [];
+    for (let i = 0; i < n; i++) {
+      const p = raw[i].p / totalP;
+      outcomes.push({ v: vals[i], p, pExactly: p, pAtLeast: pAtLeast(vals[i]), pAtMost: pAtMost(vals[i]) });
+    }
+
+    const res = {
+      expr: ast.src,
+      isPool: ast.terms.some(x => x.type === "dice" && x.target),
+      outcomes, min, max, mean, variance, std: Math.sqrt(variance), mode,
+      pExactly, pAtLeast, pAtMost, pBetween,
+      toString() { return ast.src + ": mean " + fmtN(mean) + ", σ " + fmtN(res.std); },
+      valueOf() { return mean; },
+      chart() { return chartHTML(res); },
+      table() { return tableHTML(res); },
+      html() { return distHTML(res); },
+      into(elm) { return into(elm, distHTML(res)); }
+    };
+    return res;
+  }
+
+  // ------------------------------------------------------------------
+  // Deck odds (hypergeometric)
+  // ------------------------------------------------------------------
+  function lnChoose(n, k) {
+    if (!Number.isInteger(n) || !Number.isInteger(k) || k < 0 || k > n) return -Infinity;
+    if (k === 0 || k === n) return 0;
+    if (k > n - k) k = n - k;
+    let s = 0;
+    for (let i = 1; i <= k; i++) s += Math.log(n - k + i) - Math.log(i);
+    return s;
+  }
+  function choose(n, k) {
+    const l = lnChoose(n, k);
+    return l === -Infinity ? 0 : Math.exp(l);
+  }
+
+  function deckHyper(deckSize, copies, drawn) {
+    deckSize = Math.floor(+deckSize);
+    copies = Math.floor(+copies);
+    drawn = Math.floor(+drawn);
+    if (!(deckSize >= 1 && copies >= 0 && copies <= deckSize && drawn >= 0 && drawn <= deckSize)) {
+      throw gmErr("deck: need deck >= 1, 0 <= copies <= deck, 0 <= drawn <= deck");
+    }
+    const maxK = Math.min(copies, drawn);
+    const lnDen = lnChoose(deckSize, drawn);
+    const out = [];
+    for (let k = 0; k <= maxK; k++) {
+      const lnNum = lnChoose(copies, k) + lnChoose(deckSize - copies, drawn - k);
+      out.push({ k, exact: Math.exp(lnNum - lnDen), atLeast: 0, atMost: 0 });
+    }
+    let cum = 0;
+    for (let i = out.length - 1; i >= 0; i--) { cum += out[i].exact; out[i].atLeast = cum; }
+    cum = 0;
+    for (let i = 0; i < out.length; i++) { cum += out[i].exact; out[i].atMost = cum; }
+    return out;
+  }
+
+  function deckPDraw(opts) {
+    opts = opts || {};
+    const deck = Math.floor(+opts.deck || 0);
+    const drawn = Math.floor(+opts.drawn || 0);
+    let counts = Array.isArray(opts.counts) ? opts.counts.map(x => Math.floor(+x)) : [];
+    if (!counts.length && opts.copies != null) counts = [Math.floor(+opts.copies)];
+    let need = Array.isArray(opts.need) ? opts.need.map(x => Math.floor(+x)) : [];
+    if (!need.length) need = counts.map(() => 1);
+    if (counts.length !== need.length) need = counts.map(() => 1);
+    const totalWanted = counts.reduce((a, b) => a + b, 0);
+    if (!(deck > 0 && drawn >= 0 && drawn <= deck && totalWanted <= deck)) throw gmErr("deck: bad parameters");
+    for (let i = 0; i < counts.length; i++) if (counts[i] < 0 || need[i] < 0) throw gmErr("deck: counts/need must be >= 0");
+
+    let dp = new Map([[0, 1]]);
+    for (let i = 0; i < counts.length; i++) {
+      const ci = counts[i], ni = need[i];
+      const ndp = new Map();
+      for (const [dd, w] of dp) {
+        for (let a = Math.max(ni, 0); a <= ci; a++) {
+          const w2 = w * choose(ci, a);
+          ndp.set(dd + a, (ndp.get(dd + a) || 0) + w2);
+        }
+      }
+      dp = ndp;
+    }
+    const lnDen = lnChoose(deck, drawn);
+    const other = deck - totalWanted;
+    let p = 0;
+    for (const [dd, w] of dp) {
+      const k = drawn - dd;
+      if (k >= 0 && k <= other) p += w * Math.exp(lnChoose(other, k) - lnDen);
+    }
+    if (p > 1) p = 1;
+    return { p, deck, drawn, counts, need, html() { return deckHtml(this); }, into(elm) { return into(elm, this.html()); } };
+  }
+
+  function deckTableHtml(h, deck, copies, drawn) {
+    let rows = "";
+    for (const r of h) {
+      rows += "<tr><td>" + r.k + "</td><td>" + fmtP(r.exact) + "</td><td>" + fmtP(r.atLeast) + "</td><td>" + fmtP(r.atMost) + "</td></tr>";
+    }
+    return "<div class=\"gm-block\"><div class=\"gm-scroll\"><table class=\"gm-table\"><thead><tr><th>k</th><th>exactly k</th><th>≥ k</th><th>≤ k</th></tr></thead><tbody>" + rows + "</tbody></table></div></div>";
+  }
+
+  // ------------------------------------------------------------------
+  // EV & compare
+  // ------------------------------------------------------------------
+  function ev(src) {
+    return distribution(src);
+  }
+
+  function compare(aSrc, bSrc, opts) {
+    opts = opts || {};
+    const higherWins = !opts.lowerWins;
+    const da = distribution(aSrc);
+    const db = distribution(bSrc);
+    const A = da.outcomes, B = db.outcomes;
+    const nB = B.length;
+    let j = 0, bCumLt = 0, pAWin = 0, pTie = 0;
+    for (const a of A) {
+      while (j < nB && B[j].v < a.v) { bCumLt += B[j].p; j++; }
+      let k = j, bEq = 0;
+      while (k < nB && B[k].v === a.v) { bEq += B[k].p; k++; }
+      pAWin += a.p * bCumLt;
+      pTie += a.p * bEq;
+    }
+    const pBWin = Math.max(0, 1 - pAWin - pTie);
+    let verdict;
+    const wA = higherWins ? pAWin > pBWin : pBWin > pAWin;
+    const wB = higherWins ? pBWin > pAWin : pAWin > pBWin;
+    if (wA) verdict = aSrc + " beats " + bSrc + " (" + fmtP(wA ? (higherWins ? pAWin : pBWin) : pAWin) + " of rolls, " + fmtP(pTie) + " ties)";
+    else if (wB) verdict = bSrc + " beats " + aSrc + " (" + fmtP(higherWins ? pBWin : pAWin) + " of rolls, " + fmtP(pTie) + " ties)";
+    else verdict = aSrc + " and " + bSrc + " are effectively even (mean " + fmtN(da.mean) + " vs " + fmtN(db.mean) + ")";
+    const res = {
+      a: { expr: aSrc, mean: da.mean, std: da.std, min: da.min, max: da.max },
+      b: { expr: bSrc, mean: db.mean, std: db.std, min: db.min, max: db.max },
+      pAWin, pTie, pBWin, higherWins, verdict,
+      da, db,
+      toString() { return verdict; },
+      valueOf() { return pAWin; },
+      html() { return compareHtml(res); },
+      into(elm) { return into(elm, compareHtml(res)); }
+    };
+    return res;
+  }
+
+  // ------------------------------------------------------------------
+  // Monte Carlo simulator
+  // ------------------------------------------------------------------
+  function simulate(opts) {
+    opts = opts || {};
+    const trials = Math.max(1, Math.min(5000000, Math.floor(+opts.trials || 100000)));
+    const each = opts.each;
+    if (typeof each !== "function") throw gmErr("simulate requires opts.each to be a function", "simulate");
+    const s = globalThis.__gm;
+    const oldRng = s.rng;
+    if (opts.seed != null) s.rng = mulberry32(Number(opts.seed) >>> 0);
+    else if (s.seed != null) s.rng = mulberry32(s.seed);
+    let wins = 0, nBool = 0, sum = 0, sumSq = 0, nNum = 0;
+    const counts = new Map();
+    const DISTINCT_CAP = 2000;
+    try {
+      for (let i = 1; i <= trials; i++) {
+        const r = each(i);
+        if (r === true || r === false) { nBool++; if (r) wins++; }
+        else if (typeof r === "number") {
+          nNum++; sum += r; sumSq += r * r;
+          if (Number.isInteger(r)) {
+            if (counts.has(r)) counts.set(r, counts.get(r) + 1);
+            else if (counts.size < DISTINCT_CAP) counts.set(r, 1);
+          }
+        } else if (r && typeof r === "object") {
+          if (r.win === true || r.win === false) { nBool++; if (r.win) wins++; }
+          if (typeof r.value === "number") {
+            nNum++; sum += r.value; sumSq += r.value * r.value;
+            if (Number.isInteger(r.value)) {
+              if (counts.has(r.value)) counts.set(r.value, counts.get(r.value) + 1);
+              else if (counts.size < DISTINCT_CAP) counts.set(r.value, 1);
+            }
+          }
+        }
+        if (opts.onProgress && (i % 20000 === 0 || i === trials)) {
+          try { opts.onProgress(i / trials); } catch (e) {}
+        }
+      }
+    } finally {
+      s.rng = oldRng;
+    }
+    const res = { trials, expr: opts.expr || null, seed: opts.seed != null ? Number(opts.seed) >>> 0 : s.seed };
+    if (nBool) { res.winRate = wins / nBool; res.wins = wins; res.events = nBool; }
+    if (nNum) {
+      res.mean = sum / nNum;
+      res.variance = Math.max(0, sumSq / nNum - res.mean * res.mean);
+      res.std = Math.sqrt(res.variance);
+      if (counts.size) {
+        res.dist = [];
+        for (const [v, c] of counts) res.dist.push({ v, p: c / nNum });
+        res.dist.sort((x, y) => x.v - y.v);
+      }
+    }
+    res.html = () => simulateHtml(res);
+    res.into = elm => into(elm, res.html());
+    return res;
+  }
+
+  function monteCarlo(opts) { return simulate(opts); }
+
+  // ------------------------------------------------------------------
+  // HTML rendering helpers
+  // ------------------------------------------------------------------
+  const GM_STYLE_ID = "gm-style-v1";
+  const GM_CSS =
+    ".gm-block{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;font-size:14px;line-height:1.5;color:inherit;max-width:100%;}" +
+    ".gm-block *{box-sizing:border-box;}" +
+    ".gm-stat-row{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px;}" +
+    ".gm-stat{background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.35);border-radius:10px;padding:6px 12px;min-width:70px;text-align:center;}" +
+    ".gm-stat b{display:block;font-size:15px;color:inherit;}" +
+    ".gm-stat span{font-size:11px;text-transform:uppercase;letter-spacing:.05em;opacity:.7;}" +
+    ".gm-scroll{overflow:auto;max-height:340px;border:1px solid rgba(127,127,127,.25);border-radius:10px;}" +
+    ".gm-table{border-collapse:collapse;width:100%;font-size:13px;}" +
+    ".gm-table th,.gm-table td{padding:5px 12px;text-align:right;border-bottom:1px solid rgba(127,127,127,.15);white-space:nowrap;}" +
+    ".gm-table th{position:sticky;top:0;background:rgba(30,30,46,.97);color:#c4b5fd;text-align:right;}" +
+    ".gm-table td:first-child,.gm-table th:first-child{text-align:left;font-weight:600;}" +
+    ".gm-chart{display:flex;align-items:flex-end;gap:2px;height:130px;padding:6px 4px 0;border-bottom:1px solid rgba(127,127,127,.25);}" +
+    ".gm-chart i{flex:1;background:linear-gradient(180deg,#a78bfa,#7c3aed);border-radius:2px 2px 0 0;min-width:2px;opacity:.92;}" +
+    ".gm-chart i.gm-peak{background:linear-gradient(180deg,#34d399,#059669);}" +
+    ".gm-chart i.gm-query{background:linear-gradient(180deg,#22d3ee,#0891b2);}" +
+    ".gm-roll{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 0;}" +
+    ".gm-group{display:inline-flex;align-items:center;gap:6px;}" +
+    ".gm-group-label{font-size:12px;opacity:.7;}" +
+    ".gm-die{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;background:rgba(139,92,246,.16);border:1px solid rgba(139,92,246,.4);font-weight:700;font-size:13px;margin:0 2px;}" +
+    ".gm-die.gm-drop{opacity:.35;text-decoration:line-through;}" +
+    ".gm-total{font-size:20px;font-weight:800;color:#a78bfa;}" +
+    ".gm-big{font-size:26px;font-weight:800;color:#a78bfa;margin:2px 0 4px;}" +
+    ".gm-muted{font-size:12px;opacity:.65;}" +
+    ".gm-tag{display:inline-block;background:rgba(34,211,238,.14);border:1px solid rgba(34,211,238,.4);color:inherit;border-radius:99px;padding:2px 10px;font-size:12px;margin-right:6px;}" +
+    ".gm-vs{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;margin:8px 0;}" +
+    ".gm-vs .bar{height:10px;border-radius:99px;background:rgba(127,127,127,.18);overflow:hidden;}" +
+    ".gm-vs .bar span{display:block;height:100%;border-radius:99px;}" +
+    ".gm-winrate{display:flex;justify-content:space-between;gap:8px;font-size:12px;opacity:.75;margin-top:4px;}";
+
+  function ensureCSS() {
+    if (typeof document === "undefined") return;
+    if (!document.getElementById(GM_STYLE_ID)) {
+      const st = document.createElement("style");
+      st.id = GM_STYLE_ID;
+      st.textContent = GM_CSS;
+      (document.head || document.documentElement).appendChild(st);
+    }
+  }
+  function into(elm, html) {
+    if (typeof document === "undefined") return null;
+    const e = typeof elm === "string" ? document.getElementById(elm) : elm;
+    if (e) { ensureCSS(); e.innerHTML = html; }
+    return e;
+  }
+
+  function fmtN(x) {
+    if (!isFinite(x)) return String(x);
+    return Math.abs(x) >= 100000 ? x.toExponential(2) : (Math.round(x * 1000) / 1000).toString();
+  }
+  function fmtP(p, digits) {
+    const d = digits == null ? 2 : digits;
+    return (p * 100).toFixed(d) + "%";
+  }
+  function statCell(label, value) {
+    return "<span class=\"gm-stat\"><span>" + label + "</span><b>" + value + "</b></span>";
+  }
+
+  function chartHTML(dist) {
+    const o = dist.outcomes;
+    if (!o.length) return "<div class=\"gm-block gm-muted\">No outcomes.</div>";
+    let maxP = 0;
+    for (const x of o) if (x.p > maxP) maxP = x.p;
+    const bars = [];
+    if (o.length > 80) {
+      const B = 80;
+      const minV = o[0].v, maxV = o[o.length - 1].v;
+      const span = maxV - minV + 1;
+      for (let b = 0; b < B; b++) {
+        const lo = minV + Math.floor(b * span / B);
+        const hi = minV + Math.floor((b + 1) * span / B) - 1;
+        let p = 0;
+        for (const x of o) if (x.v >= lo && x.v <= hi) p += x.p;
+        if (p > 0) bars.push({ v: lo + "–" + hi, p, peak: false });
+      }
+    } else {
+      for (const x of o) bars.push({ v: x.v, p: x.p, peak: x.p === maxP });
+    }
+    let html = "<div class=\"gm-block\"><div class=\"gm-chart\">";
+    for (const b of bars) {
+      const h = Math.max(2, Math.round(b.p / maxP * 100));
+      html += "<i style=\"height:" + h + "%\" class=\"" + (b.peak ? "gm-peak" : "") + "\" title=\"" + (b.v + ": " + fmtP(b.p, 3)) + "\"></i>";
+    }
+    html += "</div></div>";
+    return html;
+  }
+
+  function tableHTML(dist) {
+    const cap = 400;
+    let rows = "";
+    const o = dist.outcomes;
+    const shown = o.length > cap ? o.slice(0, cap) : o;
+    for (const x of shown) {
+      rows += "<tr><td>" + x.v + "</td><td>" + fmtP(x.p) + "</td><td>" + fmtP(x.pAtLeast) + "</td><td>" + fmtP(x.pAtMost) + "</td></tr>";
+    }
+    if (o.length > cap) rows += "<tr><td colspan=\"4\" class=\"gm-muted\">… " + (o.length - cap) + " more outcomes hidden</td></tr>";
+    return "<div class=\"gm-block\"><div class=\"gm-scroll\"><table class=\"gm-table\"><thead><tr><th>value</th><th>P(exactly)</th><th>P(≥)</th><th>P(≤)</th></tr></thead><tbody>" + rows + "</tbody></table></div></div>";
+  }
+
+  function distHTML(dist) {
+    ensureCSS();
+    let html = "<div class=\"gm-block\">";
+    html += "<div class=\"gm-stat-row\">" +
+      statCell("mean", fmtN(dist.mean)) +
+      statCell("σ", fmtN(dist.std)) +
+      statCell("min", dist.min) +
+      statCell("max", dist.max) +
+      statCell("mode", dist.mode) +
+      "</div>";
+    html += chartHTML(dist);
+    html += tableHTML(dist);
+    html += "</div>";
+    return html;
+  }
+
+  function rollHtml(res) {
+    ensureCSS();
+    let inner = "";
+    for (const p of res.parts) {
+      if (p.kind === "const") {
+        inner += "<span class=\"gm-group\"><span class=\"gm-group-label\"></span><span class=\"gm-die\">" + (p.sign === "-" ? "−" : "+") + p.value + "</span></span>";
+        continue;
+      }
+      let dice = "";
+      for (const v of p.rolls) dice += "<span class=\"gm-die\">" + v + "</span>";
+      for (const v of p.dropped) dice += "<span class=\"gm-die gm-drop\">" + v + "</span>";
+      inner += "<span class=\"gm-group\"><span class=\"gm-group-label\">" + p.label + ":</span><span>" + dice + "</span></span>";
+    }
+    return "<div class=\"gm-block gm-roll\">" + inner + "<span class=\"gm-total\">= " + res.total + "</span></div>";
+  }
+
+  function compareHtml(res) {
+    ensureCSS();
+    const total = Math.max(1e-9, res.pAWin + res.pBWin + res.pTie);
+    const wA = res.higherWins ? res.pAWin : res.pBWin;
+    const wB = res.higherWins ? res.pBWin : res.pAWin;
+    const pct = (x) => Math.round(x / total * 100);
+    const stat = (o) =>
+      statCell("mean", fmtN(o.mean)) + statCell("σ", fmtN(o.std)) + statCell("range", o.min + "–" + o.max);
+    let html = "<div class=\"gm-block\">";
+    html += "<div class=\"gm-stat-row\">" + stat(res.a) + "</div>";
+    html += "<div class=\"gm-stat-row\">" + stat(res.b) + "</div>";
+    html += "<div class=\"gm-vs\">" +
+      "<div class=\"bar\"><span style=\"width:" + pct(wA) + "%;background:#a78bfa;\"></span></div>" +
+      "<span class=\"gm-big\">vs</span>" +
+      "<div class=\"bar\"><span style=\"width:" + pct(wB) + "%;background:#22d3ee;\"></span></div>" +
+      "</div>";
+    html += "<div class=\"gm-winrate\"><span>" + res.a.expr + " wins " + fmtP(res.higherWins ? res.pAWin : res.pBWin) + "</span><span>ties " + fmtP(res.pTie) + "</span><span>" + res.b.expr + " wins " + fmtP(res.higherWins ? res.pBWin : res.pAWin) + "</span></div>";
+    html += "<p style=\"margin:8px 0 0;\"><b>" + res.verdict + "</b></p>";
+    html += "</div>";
+    return html;
+  }
+
+  function simulateHtml(res) {
+    ensureCSS();
+    let html = "<div class=\"gm-block\">";
+    if (res.winRate != null) {
+      html += "<div class=\"gm-big\">" + fmtP(res.winRate) + "</div>";
+      html += "<div class=\"gm-muted\">" + res.wins + " of " + res.events + " trials won" + (res.seed != null ? " · seed " + res.seed : "") + "</div>";
+    }
+    if (res.mean != null) {
+      html += "<div class=\"gm-stat-row\">" + statCell("mean", fmtN(res.mean)) + statCell("σ", fmtN(res.std)) + statCell("trials", res.trials) + "</div>";
+      if (res.dist && res.dist.length <= 200) {
+        let maxP = 0;
+        for (const x of res.dist) if (x.p > maxP) maxP = x.p;
+        let bars = "";
+        for (const x of res.dist) {
+          const h = Math.max(2, Math.round(x.p / maxP * 100));
+          bars += "<i style=\"height:" + h + "%\" title=\"" + (x.v + ": " + fmtP(x.p, 3)) + "\"></i>";
+        }
+        html += "<div class=\"gm-chart\">" + bars + "</div>";
+      }
+    }
+    html += "</div>";
+    return html;
+  }
+
+  function deckHtml(d) {
+    ensureCSS();
+    return "<div class=\"gm-block\"><div class=\"gm-stat-row\">" +
+      statCell("P(all requirements)", fmtP(d.p, 3)) +
+      statCell("≈ 1 in", d.p > 0 ? (1 / d.p).toFixed(1) : "—") +
+      "</div></div>";
+  }
+
+  // ------------------------------------------------------------------
+  // Self-check
+  // ------------------------------------------------------------------
+  function selfCheck() {
+    const results = [];
+    const check = (name, cond, detail) => { results.push({ name, pass: !!cond, detail: detail == null ? "" : String(detail) }); return !!cond; };
+    const approx = (a, b, tol) => Math.abs(a - b) <= (tol == null ? 1e-9 : tol);
+    try {
+      const d1 = distribution("1d6");
+      check("1d6 mean 3.5", approx(d1.mean, 3.5), d1.mean);
+      check("1d6 uniform", d1.outcomes.length === 6 && approx(d1.outcomes[0].p, 1 / 6));
+      const d2 = distribution("2d6");
+      check("2d6 mean 7", approx(d2.mean, 7), d2.mean);
+      check("P(2d6=7)=1/6", approx(d2.pExactly(7), 1 / 6), d2.pExactly(7));
+      check("P(2d6>=10)=1/6", approx(d2.pAtLeast(10), 1 / 6), d2.pAtLeast(10));
+      check("probs sum to 1", approx(d2.outcomes.reduce((s, x) => s + x.p, 0), 1));
+      const st = distribution("4d6dl1");
+      check("4d6dl1 mean≈12.2446", approx(st.mean, 12.2445987654321, 1e-9), st.mean);
+      check("4d6dl1 P(18)=21/1296", approx(st.pExactly(18), 21 / 1296, 1e-12), st.pExactly(18));
+      check("4d6dl1 P(3)=1/1296", approx(st.pExactly(3), 1 / 1296, 1e-12), st.pExactly(3));
+      const adv = distribution("2d20kh1");
+      check("2d20kh1 mean≈13.825", approx(adv.mean, 13.825, 1e-9), adv.mean);
+      const pool = distribution("5d6 t4+");
+      check("pool mean 2.5", approx(pool.mean, 2.5), pool.mean);
+      check("pool P(>=3)=0.5", approx(pool.pAtLeast(3), 0.5, 1e-9), pool.pAtLeast(3));
+      const ex = distribution("2d8x");
+      check("2d8x mean≈10.2857", approx(ex.mean, 2 * (8 / 7 + 4), 1e-9), ex.mean);
+      const rr = distribution("2d6rr1");
+      check("2d6rr1 mean≈7.8333", approx(rr.mean, 282 / 36, 1e-9), rr.mean);
+      const h = deckHyper(40, 4, 7);
+      check("hyper P(k>=1)≈0.5523", approx(h[1].atLeast, 0.5523, 1e-3), h[1].atLeast);
+      const cmp = compare("1d12", "2d6");
+      check("1d12 vs 2d6 means", approx(cmp.a.mean, 6.5) && approx(cmp.b.mean, 7));
+      check("compare probs sum to 1", approx(cmp.pAWin + cmp.pTie + cmp.pBWin, 1));
+      const mc = simulate({ trials: 200000, seed: 42, each: () => rollExpr("2d6").total >= 7 });
+      check("MC P(2d6>=7)≈0.5833", approx(mc.winRate, 21 / 36, 0.005), mc.winRate);
+    } catch (e) {
+      check("no exception", false, e && e.message ? e.message : String(e));
+    }
+    return { pass: results.every(r => r.pass), results };
+  }
+
+  // ------------------------------------------------------------------
+  // Public API
+  // ------------------------------------------------------------------
+  const api = {
+    version: "1.0.0",
+    parse,
+    roll: rollExpr,
+    distribution,
+    ev,
+    compare,
+    simulate,
+    monteCarlo,
+    setSeed,
+    getSeed,
+    rng,
+    d,
+    deck: {
+      hyper: deckHyper,
+      pDraw: deckPDraw,
+      table: deckTableHtml
+    },
+    selfCheck,
+    into
+  };
+
+  globalThis.gameMath = api;
+  return api;

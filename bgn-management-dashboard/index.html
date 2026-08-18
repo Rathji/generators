@@ -1,0 +1,1059 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN MANAGEMENT DASHBOARD — index.html
+     Tab 1 · Network Dashboard — scans bgn-* generators in one go.
+     Tab 2 · Bug Triage        — hub bug inbox (page 2).
+     Tab 3 · Template Updates  — drifted forks (page 3).
+     Engine: client-side JS + the perchance public API via superFetch.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style>
+  body{text-align:left}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+
+  /* ── tabs ── */
+  .dash-tabs{display:flex;gap:8px;flex-wrap:wrap;margin:26px 0 18px}
+  .dash-tab{
+    border:1px solid rgba(212,175,55,.28);background:rgba(20,17,32,.5);color:var(--bgn-muted,#a49bb4);
+    font:600 13px var(--bgn-serif,Cinzel,serif);letter-spacing:.06em;padding:11px 18px;border-radius:10px;cursor:pointer;transition:all .25s;
+  }
+  .dash-tab:hover{color:var(--bgn-text,#ece7da);border-color:var(--bgn-accent,#d4af37)}
+  .dash-tab.on{background:linear-gradient(180deg,#f2dc8b,#d4af37);color:#221803;border-color:transparent;box-shadow:0 6px 22px rgba(212,175,55,.28)}
+  .dash-tab .n{font-size:10px;background:rgba(0,0,0,.22);border-radius:20px;padding:1px 6px;margin-left:6px;vertical-align:1px}
+  .dash-tab.on .n{background:rgba(34,24,3,.18)}
+
+  .panel.big{padding:18px 20px}
+
+  /* ── summary cards ── */
+  .sum-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:16px 0}
+  .sum-card{background:rgba(255,255,255,.035);border:1px solid rgba(212,175,55,.16);border-radius:12px;padding:14px 12px;text-align:center}
+  .sum-card b{display:block;font:700 26px/1.1 var(--bgn-serif,Cinzel,serif);color:#f2dc8b}
+  .sum-card small{color:var(--bgn-muted,#a49bb4);font-size:11px;letter-spacing:.05em}
+  .sum-card.warn b{color:#e6b95e}.sum-card.bad b{color:#ef8f8f}.sum-card.good b{color:#3fd3a6}
+
+  /* ── filters ── */
+  .frow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0 12px}
+  .fchip{border:1px solid rgba(212,175,55,.22);background:rgba(20,17,32,.45);color:var(--bgn-muted,#a49bb4);padding:6px 13px;border-radius:20px;cursor:pointer;font-size:12px;transition:all .2s}
+  .fchip:hover{color:#f2dc8b;border-color:rgba(212,175,55,.5)}
+  .fchip.on{background:rgba(212,175,55,.15);color:#f2dc8b;border-color:rgba(212,175,55,.6)}
+
+  /* ── table ── */
+  .net-wrap{overflow-x:auto;border:1px solid rgba(212,175,55,.16);border-radius:14px}
+  table.net{width:100%;border-collapse:collapse;font-size:13px;min-width:900px}
+  table.net th{
+    text-align:left;padding:11px 12px;font:600 11px var(--bgn-serif,Cinzel,serif);letter-spacing:.1em;text-transform:uppercase;
+    color:var(--bgn-muted,#a49bb4);border-bottom:1px solid rgba(212,175,55,.22);background:rgba(23,20,40,.55);cursor:pointer;white-space:nowrap;user-select:none;
+  }
+  table.net th:hover{color:#f2dc8b}
+  table.net th .arr{color:#d4af37;font-size:9px}
+  table.net td{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.045);vertical-align:middle;white-space:nowrap}
+  table.net tr:hover td{background:rgba(255,255,255,.025)}
+  table.net a{color:#f2dc8b;text-decoration:none;font-weight:600}
+  table.net a:hover{text-decoration:underline}
+  .gname{display:flex;align-items:center;gap:8px}
+  .chip{font-size:10px;padding:2px 8px;border-radius:20px;border:1px solid;letter-spacing:.05em;white-space:nowrap}
+  .chip.shelf{color:#3fd3a6;border-color:rgba(47,174,140,.5);background:rgba(47,174,140,.12)}
+  .chip.beta{color:#e6b95e;border-color:rgba(217,164,65,.5);background:rgba(217,164,65,.1)}
+  .chip.tool{color:#cbb7e8;border-color:rgba(167,139,250,.5);background:rgba(167,139,250,.1)}
+  .chip.offhub{color:#ef8f8f;border-color:rgba(224,91,91,.5);background:rgba(224,91,91,.1)}
+  .y{color:#3fd3a6;font-weight:700}.n{color:#ef8f8f;font-weight:700}.mid{color:#e6b95e;font-weight:700}
+  .frame-ok{color:#3fd3a6;font-weight:700}
+  .frame-mid{color:#e6b95e;font-weight:700}
+  .frame-bad{color:#ef8f8f;font-weight:700}
+  .sub{color:var(--bgn-muted,#a49bb4);font-size:11px}
+  .empty-note{color:var(--bgn-muted,#a49bb4);text-align:center;padding:46px 0;font-size:14px}
+  .errnote{color:#ef8f8f;font-size:13px}
+  .hint{margin-top:10px}
+
+  /* ── bug triage ── */
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .bug-group{border:1px solid rgba(212,175,55,.16);border-radius:14px;overflow:hidden;margin-bottom:14px}
+  .bug-group-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;background:rgba(23,20,40,.55);border-bottom:1px solid rgba(212,175,55,.14)}
+  .bug-group-name{font:700 14px var(--bgn-serif,Cinzel,serif);color:#f2dc8b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bug-group-count{font-size:11px;color:var(--bgn-muted,#a49bb4);white-space:nowrap}
+  .bug-item{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .bug-item:last-child{border-bottom:none}
+  .bug-item.dup{opacity:.72;background:rgba(224,91,91,.045)}
+  .bug-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .bug-title{font-weight:600;color:var(--bgn-text,#ece7da)}
+  .bug-meta{margin-left:auto;font-size:11px;color:var(--bgn-muted,#a49bb4);white-space:nowrap}
+  .bug-desc{margin-top:4px;font-size:12.5px;color:#c9c2d4;line-height:1.5}
+  .chip.dup{color:#ef8f8f;border-color:rgba(224,91,91,.5);background:rgba(224,91,91,.1)}
+
+  /* ── template updates ── */
+  .tpl-group{border:1px solid rgba(212,175,55,.16);border-radius:14px;overflow:hidden;margin-bottom:14px}
+  .tpl-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;background:rgba(23,20,40,.55);border-bottom:1px solid rgba(212,175,55,.14)}
+  .tpl-name{font:700 14px var(--bgn-serif,Cinzel,serif);color:#f2dc8b}
+  .tpl-meta{font-size:11px;color:var(--bgn-muted,#a49bb4);white-space:nowrap}
+  .tpl-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 14px;border-bottom:1px solid rgba(255,255,255,.045)}
+  .tpl-row:last-child{border-bottom:none}
+  .tpl-row .gname a{color:#f2dc8b;text-decoration:none;font-weight:600}
+  .tpl-row .gname a:hover{text-decoration:underline}
+  .tpl-row .sub{color:var(--bgn-muted,#a49bb4);font-size:11px}
+  .tpl-row .spacer{flex:1}
+  .tpl-row .meta2{font-size:11px;color:var(--bgn-muted,#a49bb4)}
+  .tpl-missing{font-size:11px;color:#ef8f8f;width:100%}
+  .chip.ok{color:#3fd3a6;border-color:rgba(47,174,140,.5);background:rgba(47,174,140,.12)}
+  .chip.stale{color:#e6b95e;border-color:rgba(217,164,65,.5);background:rgba(217,164,65,.1)}
+  .chip.gap{color:#ef8f8f;border-color:rgba(224,91,91,.5);background:rgba(224,91,91,.1)}
+  .chip.solo{color:#a49bb4;border-color:rgba(164,155,180,.4);background:rgba(164,155,180,.08)}
+
+  .coming{padding:60px 0;text-align:center;color:var(--bgn-muted,#a49bb4)}
+  .coming .big{font-size:34px;margin-bottom:10px}
+
+  /* ── help button + modal ── */
+  .help-btn{
+    position:fixed;right:16px;bottom:16px;z-index:60;
+    width:46px;height:46px;border-radius:50%;border:1px solid rgba(212,175,55,.5);
+    background:linear-gradient(180deg,#2a2540,#1c1930);color:#f2dc8b;cursor:pointer;
+    font:700 22px var(--bgn-serif,Cinzel,serif);box-shadow:0 6px 22px rgba(0,0,0,.4);
+    transition:transform .2s,box-shadow .2s;
+  }
+  .help-btn:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(212,175,55,.25)}
+  .help-overlay{
+    position:fixed;inset:0;z-index:70;display:none;align-items:center;justify-content:center;
+    background:rgba(8,6,14,.72);backdrop-filter:blur(3px);padding:20px;
+  }
+  .help-overlay.open{display:flex}
+  .help-modal{
+    max-width:640px;width:100%;max-height:82vh;overflow-y:auto;
+    background:linear-gradient(180deg,#221e38,#171430);border:1px solid rgba(212,175,55,.35);
+    border-radius:16px;padding:26px 28px;box-shadow:0 20px 60px rgba(0,0,0,.55);
+  }
+  .help-modal h2{font:700 19px var(--bgn-serif,Cinzel,serif);color:#f2dc8b;letter-spacing:.05em;margin:0 0 4px}
+  .help-modal .hsub{color:var(--bgn-muted,#a49bb4);font-size:12px;margin-bottom:16px}
+  .help-sec{margin:14px 0;padding-top:14px;border-top:1px solid rgba(212,175,55,.14)}
+  .help-sec h3{font:700 13px var(--bgn-serif,Cinzel,serif);color:#e6b95e;letter-spacing:.06em;margin:0 0 7px}
+  .help-sec p,.help-sec li{font-size:13px;color:#c9c2d4;line-height:1.55;margin:0 0 6px}
+  .help-sec ul{margin:0;padding-left:18px}
+  .help-sec b{color:var(--bgn-text,#ece7da)}
+  .help-close{
+    float:right;border:none;background:rgba(255,255,255,.06);color:var(--bgn-muted,#a49bb4);
+    font-size:12px;padding:6px 12px;border-radius:8px;cursor:pointer;transition:all .2s;
+  }
+  .help-close:hover{color:#f2dc8b;background:rgba(212,175,55,.15)}
+</style>
+
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="bgnG" x1="4" y1="2" x2="22" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+        <path d="M13 1.5l2.7 7.1 7.6.4-6 4.6 2 7.3-6.3-4.2-6.3 4.2 2-7.3-6-4.6 7.6-.4z" fill="url(#bgnG)" stroke="#8f721d" stroke-width=".8"/>
+      </svg>
+      Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<header class="game-hero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="dash-tabs">
+    <button class="dash-tab on" data-tab="net">🌐 Network Dashboard</button>
+    <button class="dash-tab" data-tab="bugs">🐞 Bug Triage</button>
+    <button class="dash-tab" data-tab="tpl">🔄 Template Updates</button>
+  </div>
+
+  <!-- ═══════════ TAB 1 · NETWORK DASHBOARD ═══════════ -->
+  <section id="tab-net">
+    <div class="panel big">
+      <p style="margin:0 0 4px"><b>Scan the whole network in one go</b> — the hub's shelf, plus anything else bgn-* that exists on Perchance. Every result gets checked for the BGN frame, its hub link, tags, cover image, online support, views and last edit.</p>
+      <div class="btnrow">
+        <button class="btn btn-gold" id="scanBtn">🛰️ Scan the network</button>
+      </div>
+      <input class="field" id="extraNames" style="margin-top:10px" placeholder="Extra names to check, comma-separated (optional)">
+      <p class="muted small" id="scanStatus"></p>
+    </div>
+
+    <div class="sum-grid" id="sumGrid"></div>
+
+    <div class="frow" id="filtersEl"></div>
+
+    <div class="net-wrap" id="netWrap">
+      <table class="net" id="netTable">
+        <thead id="netHead"></thead>
+        <tbody id="netBody"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="netHint"></p>
+  </section>
+
+  <!-- ═══════════ TAB 2 · BUG TRIAGE ═══════════ -->
+  <section id="tab-bugs" hidden>
+    <div class="panel big">
+      <p style="margin:0 0 4px"><b>Pull the hub's bug inbox and triage it here.</b> The dashboard can't reach the hub's server directly, so "Load hub bugs" opens the hub in a small popup with a bridge flag — the hub asks for the review password (same one as the review desk) and pushes its open bug list back. Then it's grouped by game, duplicate reports are flagged, and you can export everything to CSV.</p>
+      <div class="btnrow">
+        <button class="btn btn-gold" id="bugLoadBtn">🐞 Load hub bugs</button>
+        <button class="btn" id="bugCsvBtn" disabled>⬇️ Export CSV</button>
+      </div>
+      <p class="muted small" id="bugStatus"></p>
+    </div>
+
+    <div class="sum-grid" id="bugSum"></div>
+    <div class="frow" id="bugFilters"></div>
+    <div id="bugList"></div>
+  </section>
+
+  <!-- ═══════════ TAB 3 · TEMPLATE UPDATES ═══════════ -->
+  <section id="tab-tpl" hidden>
+    <div class="panel big">
+      <p style="margin:0 0 4px"><b>Flag forked templates that have drifted from the current source.</b> Every game is matched to its template (via its header comment or its plugin/config signature) and compared against the template's current plugin imports and config keys. Missing features = a gap; a template edited after the fork = needs review. Note: the public API doesn't expose a generator's index.html, so index.html-level shell changes are caught via that edit-time staleness signal.</p>
+      <div class="btnrow">
+        <button class="btn btn-gold" id="tplScanBtn">🔍 Scan template forks</button>
+      </div>
+      <input class="field" id="tplExtra" style="margin-top:10px" placeholder="Extra names to check, comma-separated (optional)">
+      <p class="muted small" id="tplStatus"></p>
+    </div>
+
+    <div class="sum-grid" id="tplSum"></div>
+    <div class="frow" id="tplFilters"></div>
+    <div id="tplList"></div>
+  </section>
+</main>
+
+<footer class="bgn-footer">
+  <div class="wrap">
+    <div class="ornament"><span>✦</span></div>
+    <p>Part of <b style="color:var(--bgn-accent2,#f2dc8b)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+    <p class="footnote">Internal ops tool — great for keeping the shelf tidy, but not a game.</p>
+  </div>
+</footer>
+
+<button class="help-btn" id="helpBtn" title="How to use this dashboard" aria-label="How to use this dashboard">?</button>
+
+<div class="help-overlay" id="helpOverlay">
+  <div class="help-modal" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+    <button class="help-close" id="helpClose">✕ Close</button>
+    <h2 id="helpTitle">How to use this dashboard</h2>
+    <p class="hsub">Three desks, one network — here's what each tab does and how to run it.</p>
+
+    <div class="help-sec">
+      <h3>🌐 Tab 1 · Network Dashboard</h3>
+      <ul>
+        <li>Hit <b>🛰️ Scan the network</b> — it fetches the hub's shelf list, adds plausible <b>bgn-*</b> candidates (including recent ones from the generator list), and probes each name against the Perchance API in batches.</li>
+        <li>Every result is checked for the <b>BGN frame</b> (8 chrome keys: <b>hubUrl, gameTitle, gameTagline, gameKicker, gameGenre, gamePlayers, accentColor, heroImage</b>), plus its hub link, tags, cover image, online support, views and last edit.</li>
+        <li>Use the <b>status chips</b> above the table to filter, and click any <b>column header</b> to sort.</li>
+        <li>Optionally list extra names (comma-separated) in the field below the scan button to check games not on the hub.</li>
+      </ul>
+    </div>
+
+    <div class="help-sec">
+      <h3>🐞 Tab 2 · Bug Triage</h3>
+      <ul>
+        <li>The dashboard can't reach the hub's server directly, so <b>🐞 Load hub bugs</b> opens the hub in a small popup with a bridge flag; the hub asks for the review password and pushes its open bug list back.</li>
+        <li>Reports are <b>grouped by game</b> and duplicate titles/descriptions are flagged with a <b>DUP</b> chip.</li>
+        <li>Filter by game or by duplicates-only with the chips, and export everything to CSV with <b>⬇️ Export CSV</b>.</li>
+        <li>If nothing loads, make sure popups are allowed for perchance.org.</li>
+      </ul>
+    </div>
+
+    <div class="help-sec">
+      <h3>🔄 Tab 3 · Template Updates</h3>
+      <ul>
+        <li>Hit <b>🔍 Scan template forks</b> — every game on the hub is matched to its template via its header comment or its plugin/config signature.</li>
+        <li>Missing features show as a <b>FEATURE GAP</b>; a template edited after the fork shows as <b>TEMPLATE UPDATED</b> (a sign the shell may need a review).</li>
+        <li>Note: the public API doesn't expose a generator's index.html, so shell-level changes are caught via that edit-time staleness signal.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ════════════════════════════════════════════════════════════════
+   NETWORK DASHBOARD — scan pipeline
+   ════════════════════════════════════════════════════════════════ */
+const HUB_SLUG = "bgn-boardgame-network";
+const HUB_URL = "https://perchance.org/" + HUB_SLUG;
+const API = "https://perchance.org/api/";
+const REQUIRED_CHROME = ["hubUrl","gameTitle","gameTagline","gameKicker","gameGenre","gamePlayers","accentColor","heroImage"];
+
+function $id(x){ return document.getElementById(x); }
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function cleanVal(v){ return String(v||"").replace(/(^|\s)\/\/.*$/,"$1").trim().replace(/^"|"$/g,""); }
+function slugify(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""); }
+function chunks(arr,n){ var out=[],i; for(i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; }
+function fmtAgo(ms){
+  if(!ms) return "—";
+  var d=Date.now()-ms, m=Math.floor(d/60000);
+  if(m<1) return "just now";
+  if(m<60) return m+"m ago";
+  var h=Math.floor(m/60);
+  if(h<24) return h+"h ago";
+  var days=Math.floor(h/24);
+  if(days<30) return days+"d ago";
+  var mo=Math.floor(days/30.4);
+  if(mo<12) return mo+"mo ago";
+  return Math.floor(mo/12)+"y ago";
+}
+function fmtViews(v){ return v==null?"—":String(v); }
+function sf(url){
+  var f=(typeof superFetch==="function")?superFetch:((typeof window!=="undefined"&&window.root&&root.superFetch)?root.superFetch:null);
+  if(!f) return fetch(url);
+  return f(url);
+}
+function setStatus(t){ var el=$id("scanStatus"); if(el) el.textContent=t||""; }
+
+/* parse the hub's main.pjs games/templates/tools lists */
+function parseHub(code){
+  var entries=[], section=null, cur=null, i, ln, t, m;
+  var lines=String(code||"").split("\n");
+  for(i=0;i<lines.length;i++){
+    ln=lines[i]; t=ln.replace(/\r$/,"");
+    m=t.match(/^([a-z][a-z0-9]*)\s*$/);
+    if(m){ section=m[1]; cur=null; continue; }
+    if(section!=="games" && section!=="templates" && section!=="tools") continue;
+    if(/^\s{2}game\s*$/.test(t)){ cur={section:section,slug:null,title:null,genre:null,beta:false}; entries.push(cur); continue; }
+    if(!cur) continue;
+    m=t.match(/^\s{4}slug = (.+)$/); if(m){ cur.slug=m[1].trim(); continue; }
+    m=t.match(/^\s{4}title = (.+)$/); if(m){ cur.title=m[1].trim(); continue; }
+    m=t.match(/^\s{4}genre = (.+)$/); if(m){ cur.genre=m[1].trim(); continue; }
+    if(/^\s{4}beta = true$/.test(t)){ cur.beta=true; }
+  }
+  var map={}, slugs=[];
+  entries.forEach(function(g){
+    if(!g.slug) return;
+    map[g.slug]={kind:g.section, title:g.title, genre:g.genre, beta:g.beta};
+    if(slugs.indexOf(g.slug)===-1) slugs.push(g.slug);
+  });
+  return {map:map, slugs:slugs, entries:entries};
+}
+
+/* read the $meta block of a main.pjs source */
+function metaKeys(pjs){
+  var out={}, m=String(pjs||"").match(/^\$meta\s*$/m);
+  if(!m) return out;
+  var rest=pjs.slice(m.index+m[0].length), lines=rest.split("\n"), i, ln, kv;
+  for(i=0;i<lines.length;i++){
+    ln=lines[i];
+    if(ln.trim()!=="" && !/^\s/.test(ln)) break;
+    kv=ln.match(/^\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if(kv && out[kv[1]]===undefined) out[kv[1]]=cleanVal(kv[2]);
+  }
+  return out;
+}
+
+/* read top-level config keys of a main.pjs source */
+function chromeKeys(pjs){
+  var out={}, re=/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/gm, m;
+  while((m=re.exec(pjs||""))){ if(out[m[1]]===undefined) out[m[1]]=cleanVal(m[2]); }
+  return out;
+}
+
+/* candidate names to probe: hub lists + roadmap titles + extras */
+function candidatesFromHub(code){
+  var names=[], section=null, i, t, m, lines=String(code||"").split("\n");
+  var road=[];
+  for(i=0;i<lines.length;i++){
+    t=lines[i].replace(/\r$/,"");
+    m=t.match(/^([a-z][a-z0-9]*)\s*$/);
+    if(m){ section=m[1]; continue; }
+    if(section==="roadmap"){
+      m=t.match(/^\s{6,}title = (.+)$/);
+      if(m) road.push(m[1].trim());
+    }
+  }
+  road.forEach(function(x){ var s=slugify(x); if(s.length>3) names.push("bgn-"+s); });
+  return names;
+}
+
+/* static extras that aren't roadmap titles but plausible bgn- names */
+const EXTRA_CANDIDATES = [
+  "bgn-dnd-combat-manager","bgn-dnd-tracker","bgn-dnd-monster-manual","bgn-dnd-spellbook",
+  "bgn-dice-roller","bgn-combat-tracker","bgn-initiative-tracker","bgn-loot-generator",
+  "bgn-npc-generator","bgn-random-encounter","bgn-word-game","bgn-lounge","bgn-hub",
+  "bgn-home","bgn-bug-report","bgn-standards","bgn-template-hub","bgn-roadmap","bgn-sudoku",
+  "bgn-maze","bgn-2048","bgn-dungeon-crawler","bgn-turn-order","bgn-team-splitter",
+  "bgn-tournament","bgn-bracket","bgn-scorekeeper","bgn-leaderboard","bgn-game-math",
+  "bgn-probability-calculator","bgn-tile-forge","bgn-token-forge","bgn-card-designer",
+  "bgn-hex-editor","bgn-odds-calculator","bgn-dice-simulator","bgn-name-generator",
+  "bgn-title-generator","bgn-rulebook","bgn-print-sheet","bgn-save-editor"
+];
+
+function analyze(name, code, imports, lastEdit, views, hubMap){
+  var mk=metaKeys(code), ck=chromeKeys(code);
+  var hub=hubMap[name]||null;
+  var have=0;
+  REQUIRED_CHROME.forEach(function(k){ if(ck[k]!=null && ck[k]!=="") have++; });
+  var hubLink=(ck.hubUrl||"").toLowerCase();
+  var online=/\bcreateServerSocket\s*=/.test(code) || /server-plugin/.test(code);
+  return {
+    name:name,
+    onHub:!!hub,
+    kind:hub?hub.kind:"off-hub",
+    beta:!!(hub&&hub.beta),
+    title:mk.title||ck.gameTitle||(hub&&hub.title)||name,
+    genre:ck.gameGenre||(hub&&hub.genre)||"",
+    frame:have, frameTotal:REQUIRED_CHROME.length,
+    hubLink:ck.hubUrl!=null,
+    hubLinkOk:hubLink.indexOf("bgn-boardgame-network")!==-1,
+    tags:!!(mk.tags&&mk.tags.length>2),
+    image:!!(mk.image&&mk.image.length>8),
+    online:online,
+    projects:!!(ck.projectsUrl&&ck.projectsUrl.indexOf("perchance.org")!==-1),
+    lastEdit:lastEdit||null,
+    views:views==null?null:views
+  };
+}
+
+async function scan(extraRaw){
+  setStatus("Fetching the hub's list…");
+  var hubRes, hubCode="", hub;
+  try{
+    hubRes=await sf(API+"getGeneratorsAndDependencies?generatorNames="+encodeURIComponent(HUB_SLUG)).then(function(r){return r.json();});
+    hubCode=(hubRes.generators&&hubRes.generators[HUB_SLUG]&&hubRes.generators[HUB_SLUG].code)||"";
+  }catch(e){ hubCode=""; }
+  hub=parseHub(hubCode);
+  if(!hubCode){ setStatus("⚠ Couldn't fetch the hub source — scanning with a static candidate list."); }
+
+  var names=hub.slugs.slice();
+  candidatesFromHub(hubCode).forEach(function(n){ if(names.indexOf(n)===-1) names.push(n); });
+  EXTRA_CANDIDATES.forEach(function(n){ if(names.indexOf(n)===-1) names.push(n); });
+  var recent=[];
+  try{
+    var gl=await sf(API+"getGeneratorList?max=2000").then(function(r){return r.json();});
+    (gl.generators||[]).forEach(function(g){
+      if(/^(bgn|bng)-/i.test(g.name) && names.indexOf(g.name)===-1) recent.push(g.name);
+    });
+  }catch(e){}
+  recent.forEach(function(n){ names.push(n); });
+  (String(extraRaw||"")).split(/[\s,;]+/).forEach(function(tok){
+    tok=tok.replace(/perchance\.org\//,"").toLowerCase().trim();
+    if(/^[a-z0-9][a-z0-9-]*$/.test(tok) && tok!==HUB_SLUG && tok!=="bgn-management-dashboard" && names.indexOf(tok)===-1) names.push(tok);
+  });
+
+  setStatus("Checking "+names.length+" names against Perchance…");
+  var found={}, req=names.slice();
+  var batches=chunks(names,55), b, i;
+  for(b=0;b<batches.length;b++){
+    try{
+      var r=await sf(API+"getGeneratorsAndDependencies?generatorNames="+encodeURIComponent(batches[b].join(","))).then(function(x){return x.json();});
+      var gens=r.generators||{};
+      for(var n in gens){
+        if(req.indexOf(n)!==-1 && /^(bgn|bng)-/.test(n)){
+          found[n]={code:gens[n].code||"", imports:gens[n].imports||[], lastEdit:gens[n].lastEditTime||null};
+        }
+      }
+    }catch(e){}
+    setStatus("Checked "+(b+1)+"/"+batches.length+" batches…");
+  }
+
+  var fnames=Object.keys(found);
+  setStatus("Fetching view counts ("+fnames.length+" generators)…");
+  var stats={};
+  var sb=chunks(fnames,40);
+  for(b=0;b<sb.length;b++){
+    try{
+      var s=await sf(API+"getGeneratorStats?names="+encodeURIComponent(sb[b].join(","))).then(function(x){return x.json();});
+      (s.data||[]).forEach(function(d){ stats[d.name]=d.views; });
+    }catch(e){}
+  }
+
+  var rows=fnames
+    .filter(function(n){ return n!==HUB_SLUG && n!=="bgn-management-dashboard"; })
+    .map(function(n){ return analyze(n, found[n].code, found[n].imports, found[n].lastEdit, stats[n], hub.map); });
+
+  setStatus("Done — found "+rows.length+" bgn-* generators.");
+  return {rows:rows, hub:hub};
+}
+
+/* ════════════════════════════════════════════════════════════════
+   RENDER
+   ════════════════════════════════════════════════════════════════ */
+var state={rows:[], filter:"all", sort:"kind", dir:1};
+
+function kindLabel(r){
+  if(r.kind==="off-hub") return '<span class="chip offhub">OFF HUB</span>';
+  if(r.kind==="tool"||r.kind==="template") return '<span class="chip tool">'+(r.kind==="tool"?"TOOL":"TEMPLATE")+'</span>';
+  return r.beta?'<span class="chip beta">BETA</span>':'<span class="chip shelf">SHELF</span>';
+}
+function yok(v){ return v?'<span class="y">✓</span>':'<span class="n">✗</span>'; }
+function frameHtml(r){
+  if(r.frame===r.frameTotal) return '<span class="frame-ok">'+r.frame+'/'+r.frameTotal+'</span>';
+  if(r.frame>=r.frameTotal-2) return '<span class="frame-mid">'+r.frame+'/'+r.frameTotal+'</span>';
+  return '<span class="frame-bad">'+r.frame+'/'+r.frameTotal+'</span>';
+}
+function hubLinkHtml(r){
+  if(!r.hubLink) return '<span class="n">✗</span>';
+  return r.hubLinkOk?'<span class="y">✓</span>':'<span class="mid">~</span>';
+}
+
+var COLUMNS=[
+  {key:"kind", label:"Status", sortable:true},
+  {key:"name", label:"Generator", sortable:true},
+  {key:"frame", label:"Frame", sortable:true, tip:"of "+REQUIRED_CHROME.length+" BGN chrome keys present"},
+  {key:"hubLink", label:"Hub link", sortable:true},
+  {key:"tags", label:"Tags", sortable:true},
+  {key:"image", label:"Cover", sortable:true},
+  {key:"online", label:"Online", sortable:true},
+  {key:"views", label:"Views", sortable:true},
+  {key:"lastEdit", label:"Edited", sortable:true}
+];
+
+function renderHead(){
+  var html="<tr>";
+  COLUMNS.forEach(function(c){
+    var arr=state.sort===c.key?(state.dir>0?" ▲":" ▼"):"";
+    html+='<th data-key="'+c.key+'" title="'+esc(c.tip||"")+'">'+esc(c.label)+'<span class="arr">'+arr+'</span></th>';
+  });
+  html+="</tr>";
+  $id("netHead").innerHTML=html;
+}
+
+function renderBody(){
+  var rows=state.rows.slice();
+  if(state.filter!=="all"){
+    rows=rows.filter(function(r){
+      if(state.filter==="off-hub") return r.kind==="off-hub";
+      if(state.filter==="beta") return r.beta;
+      if(state.filter==="tools-tpl") return r.kind==="tool"||r.kind==="template";
+      if(state.filter==="shelf") return r.kind==="game"&&!r.beta;
+      return true;
+    });
+  }
+  rows.sort(function(a,b){
+    var x=a[state.sort], y=b[state.sort];
+    if(state.sort==="views"){ x=a.views==null?-1:a.views; y=b.views==null?-1:b.views; return (x-y)*state.dir; }
+    if(state.sort==="lastEdit"){ x=a.lastEdit||0; y=b.lastEdit||0; return (x-y)*state.dir; }
+    if(state.sort==="kind"){
+      var order={game:0,template:1,tool:2,"off-hub":3};
+      x=order[a.kind]||0; y=order[b.kind]||0;
+      if(x!==y) return (x-y)*state.dir;
+      x=a.name; y=b.name;
+      return x<y?-1:x>y?1:0;
+    }
+    x=String(x==null?"":x).toLowerCase(); y=String(y==null?"":y).toLowerCase();
+    return (x<y?-1:x>y?1:0)*state.dir;
+  });
+  if(!rows.length){
+    $id("netBody").innerHTML='<tr><td colspan="'+COLUMNS.length+'" class="empty-note">No generators match this filter.</td></tr>';
+    return;
+  }
+  var html="";
+  rows.forEach(function(r){
+    html+="<tr>"+
+      '<td>'+kindLabel(r)+'</td>'+
+      '<td><span class="gname"><a href="https://perchance.org/'+esc(r.name)+'" target="_blank" rel="noopener">'+esc(r.name)+'</a></span><div class="sub">'+esc(r.title)+'</div></td>'+
+      '<td>'+frameHtml(r)+'</td>'+
+      '<td>'+hubLinkHtml(r)+'</td>'+
+      '<td>'+yok(r.tags)+'</td>'+
+      '<td>'+yok(r.image)+'</td>'+
+      '<td>'+yok(r.online)+'</td>'+
+      '<td>'+fmtViews(r.views)+'</td>'+
+      '<td>'+fmtAgo(r.lastEdit)+'</td>'+
+    "</tr>";
+  });
+  $id("netBody").innerHTML=html;
+}
+
+function renderSummary(){
+  var rows=state.rows;
+  var shelf=rows.filter(function(r){return r.kind==="game"&&!r.beta;}).length;
+  var beta=rows.filter(function(r){return r.beta;}).length;
+  var tt=rows.filter(function(r){return r.kind==="tool"||r.kind==="template";}).length;
+  var off=rows.filter(function(r){return r.kind==="off-hub";}).length;
+  var noline=rows.filter(function(r){return !r.onHub;}).length;
+  var badLink=rows.filter(function(r){return r.onHub&&!r.hubLinkOk;}).length;
+  var noFrame=rows.filter(function(r){return r.frame<r.frameTotal-2;}).length;
+  var el=$id("sumGrid");
+  function c(n,l,cls){ return '<div class="sum-card '+cls+'"><b>'+n+'</b><small>'+l+'</small></div>'; }
+  el.innerHTML=
+    c(rows.length,"bgn-* generators found","")+
+    c(shelf,"On the shelf","good")+
+    c(beta,"In beta","")+
+    c(tt,"Tools & templates","")+
+    c(off,"Off the hub","warn")+
+    c(noline,"Missing hub link","bad")+
+    c(badLink,"Wrong hub link","warn")+
+    c(noFrame,"Thin BGN frame","warn");
+}
+
+function renderFilters(){
+  var defs=[
+    ["all","All ("+state.rows.length+")"],
+    ["off-hub","🚨 Off hub"],
+    ["beta","Beta"],
+    ["tools-tpl","Tools & templates"],
+    ["shelf","Shelf"]
+  ];
+  var html="";
+  defs.forEach(function(d){
+    html+='<button class="fchip'+(state.filter===d[0]?" on":"")+'" data-f="'+d[0]+'">'+d[1]+'</button>';
+  });
+  $id("filtersEl").innerHTML=html;
+}
+
+function render(){
+  renderSummary();
+  renderFilters();
+  renderHead();
+  renderBody();
+}
+
+function sortBy(key){
+  if(state.sort===key){ state.dir=-state.dir; }
+  else{ state.sort=key; state.dir=key==="views"||key==="lastEdit"?-1:1; }
+  render();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   TAB 2 · BUG TRIAGE — pull the hub's inbox via the popup bridge
+   ════════════════════════════════════════════════════════════════ */
+const HUB_BUG_EXPORT_URL = "https://perchance.org/bgn-boardgame-network?bgnBugExport=1";
+var bugState = { list: [], filter: "all" };
+var bugMsgHandler = null;
+
+function setBugStatus(t, bad){
+  var el = $id("bugStatus");
+  if(!el) return;
+  el.textContent = t || "";
+  el.className = "muted small" + (bad ? " errnote" : "");
+}
+function bugNormalize(s){ return String(s||"").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+
+function buildBugGroups(list){
+  var byGame = {};
+  (list||[]).forEach(function(b){ (byGame[b.slug] = byGame[b.slug] || []).push(b); });
+  var groups = Object.keys(byGame).map(function(slug){ return { slug: slug, items: byGame[slug] }; });
+  groups.forEach(function(g){
+    var seen = {}, dupIds = {};
+    g.items.forEach(function(b){
+      var key = bugNormalize(b.title) || bugNormalize(b.desc).slice(0, 40);
+      if(!key) return;
+      if(seen[key]) dupIds[b.id] = true;
+      seen[key] = true;
+    });
+    g.dupes = g.items.filter(function(b){ return dupIds[b.id]; });
+  });
+  groups.sort(function(a,b){
+    return (b.items.length - a.items.length) || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
+  });
+  return groups;
+}
+
+function renderBugSummary(){
+  var list = bugState.list, groups = buildBugGroups(list);
+  var dupTotal = groups.reduce(function(n,g){ return n + g.dupes.length; }, 0);
+  var oldest = list.reduce(function(m,b){ return m ? Math.min(m, b.ts) : b.ts; }, null);
+  var el = $id("bugSum");
+  if(!el) return;
+  function c(n,l,cls){ return '<div class="sum-card '+(cls||"")+'"><b>'+n+'</b><small>'+l+'</small></div>'; }
+  el.innerHTML =
+    c(list.length, "Open bug reports", "") +
+    c(groups.length, "Games affected", "") +
+    c(dupTotal, "Duplicate reports", dupTotal ? "warn" : "good") +
+    c(oldest ? fmtAgo(oldest*1000) : "—", "Oldest report", "");
+}
+
+function renderBugFilters(){
+  var groups = buildBugGroups(bugState.list);
+  var defs = [["all", "All ("+bugState.list.length+")"]];
+  if(groups.some(function(g){ return g.dupes.length; })) defs.push(["dupes", "Duplicates only"]);
+  groups.forEach(function(g){ defs.push([g.slug, g.slug + " ("+g.items.length+")"]); });
+  var html = "";
+  defs.forEach(function(d){
+    html += '<button class="fchip'+(bugState.filter===d[0]?" on":"")+'" data-bf="'+esc(d[0])+'">'+esc(d[1])+'</button>';
+  });
+  $id("bugFilters").innerHTML = html;
+}
+
+function renderBugs(){
+  renderBugSummary();
+  renderBugFilters();
+  var el = $id("bugList");
+  if(!el) return;
+  if(!bugState.list.length){
+    el.innerHTML = '<div class="empty-note">No bugs loaded yet — hit “Load hub bugs” to pull the inbox.</div>';
+    return;
+  }
+  var groups = buildBugGroups(bugState.list).filter(function(g){
+    if(bugState.filter === "dupes") return g.dupes.length > 0;
+    if(bugState.filter === "all") return true;
+    return g.slug === bugState.filter;
+  });
+  if(!groups.length){
+    el.innerHTML = '<div class="empty-note">Nothing matches this filter.</div>';
+    return;
+  }
+  var html = "";
+  groups.forEach(function(g){
+    html += '<div class="bug-group">' +
+      '<div class="bug-group-head"><span class="bug-group-name">🎲 '+esc(g.slug)+'</span>' +
+      '<span class="bug-group-count">'+g.items.length+' open'+(g.dupes.length ? ' · '+g.dupes.length+' dup' : '')+'</span></div>';
+    g.items.forEach(function(b){
+      var isDup = g.dupes.some(function(d){ return d.id===b.id; });
+      html += '<div class="bug-item'+(isDup ? ' dup' : '')+'">' +
+        '<div class="bug-head"><span class="bug-title">'+esc(b.title || b.slug)+'</span>' +
+        (isDup ? '<span class="chip dup">DUP</span>' : '') +
+        '<span class="bug-meta">#'+b.id+' · '+esc(b.reporter || "Anonymous")+' · '+fmtAgo(b.ts*1000)+'</span></div>' +
+        '<div class="bug-desc">'+esc(b.desc)+'</div>' +
+      '</div>';
+    });
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function bugsToCsv(list){
+  var rows = [["id","game","title","description","reporter","reportedAt"]];
+  (list||[]).forEach(function(b){
+    rows.push([b.id, b.slug, b.title, b.desc, b.reporter, new Date(b.ts*1000).toISOString()]);
+  });
+  return rows.map(function(r){
+    return r.map(function(c){
+      c = String(c == null ? "" : c);
+      return /[",\n]/.test(c) ? '"'+c.replace(/"/g,'""')+'"' : c;
+    }).join(",");
+  }).join("\n");
+}
+function downloadCsv(filename, text){
+  var blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+function isPerchanceOrigin(origin){
+  return /^https:\/\/([a-z0-9-]+\.)*perchance\.org$/.test(origin || "");
+}
+function onBugMessage(ev){
+  if(!isPerchanceOrigin(ev.origin)) return;
+  var m = ev.data;
+  if(!m || m.t !== "bgnBugExport") return;
+  if(bugMsgHandler) window.removeEventListener("message", bugMsgHandler);
+  bugMsgHandler = null;
+  if(!m.ok){
+    setBugStatus("⚠ "+(m.err || "couldn't load bugs") + " — try again.", true);
+    return;
+  }
+  bugState.list = m.list || [];
+  bugState.filter = "all";
+  renderBugs();
+  $id("bugCsvBtn").disabled = !bugState.list.length;
+  setBugStatus("Loaded "+bugState.list.length+" open bug report"+(bugState.list.length===1?"":"s")+" from the hub" +
+    (m.at ? " · synced at "+new Date(m.at).toLocaleTimeString() : "") + ".");
+}
+function loadBugs(){
+  setBugStatus("Opening the hub to pull the bug inbox…");
+  if(bugMsgHandler) window.removeEventListener("message", bugMsgHandler);
+  bugMsgHandler = onBugMessage;
+  window.addEventListener("message", bugMsgHandler);
+  var w = window.open(HUB_BUG_EXPORT_URL, "bgnBugExport", "popup,width=520,height=680");
+  if(!w){
+    if(bugMsgHandler) window.removeEventListener("message", bugMsgHandler);
+    bugMsgHandler = null;
+    setBugStatus("⚠ Popup blocked — allow popups for perchance.org and try again.", true);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   TAB 3 · TEMPLATE UPDATES — flag forked templates that drifted
+   ════════════════════════════════════════════════════════════════ */
+const TPL_SIGNATURES = [
+  { slug:"bgn-blank-template", aliases:["blank","table"], distinctive:[] },
+  { slug:"bgn-pen-and-paper-template", aliases:["pen and paper","pen-and-paper","pen & paper","paper"], distinctive:["uploadPlugin","leaderboardFileName","leaderboardEditKey","hintPenaltySeconds"] },
+  { slug:"bgn-strategy-template", aliases:["strategy"], distinctive:["kv","templateName","gameSubtitle","tagline","maxPlayers"] },
+  { slug:"bgn-non-standard-deck-template", aliases:["non standard deck","non-standard-deck","non-standard deck","non standard"], distinctive:["cardDeck","deckConfig","rulesConfig"] },
+  { slug:"bgn-standard-deck-cards-template", aliases:["standard deck","standard-deck"], distinctive:["cardDeck"] },
+  { slug:"bgn-hex-template", aliases:["hex"], distinctive:[] }
+];
+const FEATURE_LABELS = {
+  "server-plugin":"online rooms",
+  "kv-plugin":"save/continue",
+  "kv":"save/continue",
+  "upload-plugin":"shared leaderboard",
+  "uploadPlugin":"shared leaderboard",
+  "leaderboardFileName":"leaderboard",
+  "leaderboardEditKey":"leaderboard edit key",
+  "card-deck-plugin":"card deck system",
+  "cardDeck":"card deck",
+  "deckConfig":"deck config",
+  "rulesConfig":"rules config",
+  "templateName":"template name",
+  "gameSubtitle":"subtitle",
+  "tagline":"tagline",
+  "maxPlayers":"max players",
+  "hintPenaltySeconds":"hint timer",
+  "crosswordWordsEasy":"crossword words",
+  "crosswordWordsMedium":"crossword words",
+  "crosswordWordsHard":"crossword words",
+  "crosswordGivensEasy":"crossword givens",
+  "crosswordGivensMedium":"crossword givens",
+  "crosswordGivensHard":"crossword givens"
+};
+function featLabel(k){ return FEATURE_LABELS[k] || k.replace(/-/g," "); }
+function normalizeTplName(s){
+  s = String(s||"").toLowerCase().replace(/\s+/g," ").trim();
+  if(/pen.{0,3}paper/.test(s)) return "bgn-pen-and-paper-template";
+  if(/non.{0,2}standard/.test(s)) return "bgn-non-standard-deck-template";
+  if(/standard.{0,2}deck/.test(s)) return "bgn-standard-deck-cards-template";
+  if(/strategy/.test(s)) return "bgn-strategy-template";
+  if(/hex/.test(s)) return "bgn-hex-template";
+  if(/blank|table/.test(s)) return "bgn-blank-template";
+  return null;
+}
+function commentLineage(code){
+  var txt = String(code||"").split("\n")
+    .filter(function(l){ return l.trim().indexOf("//")===0; })
+    .join(" ").replace(/\/\//g," ");
+  var m = txt.match(/built\s+(?:with|on|using)\s+(?:the\s+)?(?:bgn\s+)?([a-z0-9&'\- ]{2,40}?)(?:\s+template|\s+shell)/i);
+  if(!m) return null;
+  return normalizeTplName(m[1]);
+}
+function signatureOf(tplData, slug){
+  var sig = null;
+  TPL_SIGNATURES.forEach(function(s){ if(s.slug===slug) sig=s; });
+  if(!sig) return null;
+  return { slug: slug, lastEdit: tplData.lastEditTime || tplData.lastEdit || null, imports: tplData.imports||[], distinctive: sig.distinctive, aliases: sig.aliases };
+}
+function analyzeTpl(name, code, imports, lastEdit, tpls){
+  var keys = {}, m, re = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*=/gm;
+  while((m = re.exec(code))) keys[m[1]] = true;
+  var lineage = commentLineage(code);
+  var best = null, bestScore = 0, i;
+  for(i=0;i<tpls.length;i++){
+    var t = tpls[i];
+    var inter = imports.filter(function(x){ return t.imports.indexOf(x)!==-1; }).length;
+    var importScore = inter / Math.max(1, Math.max(t.imports.length, imports.length));
+    var keyHits = t.distinctive.filter(function(k){ return keys[k]; }).length;
+    var keyScore = t.distinctive.length ? keyHits / t.distinctive.length : 1;
+    var score = 0.5*importScore + 0.5*keyScore;
+    if(score > bestScore){ bestScore = score; best = t; }
+  }
+  var tpl = null;
+  if(lineage){ tpl = tpls.filter(function(t){ return t.slug===lineage; })[0] || null; }
+  if(!tpl && bestScore >= 0.7) tpl = best;
+  var missingImports = [], missingKeys = [];
+  if(tpl){
+    missingImports = tpl.imports.filter(function(x){ return imports.indexOf(x)===-1; });
+    missingKeys = tpl.distinctive.filter(function(k){ return !keys[k]; });
+  }
+  var gap = missingImports.length + missingKeys.length > 0;
+  var stale = !!(tpl && tpl.lastEdit > (lastEdit||0));
+  var status = !tpl ? "solo" : (gap ? "gap" : (stale ? "stale" : "ok"));
+  return {
+    name:name, lineage:lineage, tpl: tpl ? tpl.slug : null,
+    status:status, gap:gap, stale:stale,
+    missing: missingImports.concat(missingKeys).map(featLabel),
+    score: Math.round(bestScore*100), lastEdit:lastEdit, title:name
+  };
+}
+var tplState = { rows: [], filter: "all", tplLastEdit: {} };
+function setTplStatus(t, bad){
+  var el = $id("tplStatus");
+  if(!el) return;
+  el.textContent = t || "";
+  el.className = "muted small" + (bad ? " errnote" : "");
+}
+async function scanTemplates(extraRaw){
+  setTplStatus("Fetching the hub's template and game lists…");
+  var hubCode = "";
+  try{
+    var hr = await sf(API+"getGeneratorsAndDependencies?generatorNames="+encodeURIComponent(HUB_SLUG)).then(function(r){ return r.json(); });
+    hubCode = (hr.generators && hr.generators[HUB_SLUG] && hr.generators[HUB_SLUG].code) || "";
+  }catch(e){}
+  var hub = parseHub(hubCode);
+  var tplNames = hub.entries.filter(function(g){ return g.section==="templates" && g.slug; }).map(function(g){ return g.slug; });
+  var gameNames = hub.entries.filter(function(g){ return g.section==="games" && g.slug; }).map(function(g){ return g.slug; });
+  (String(extraRaw||"").split(/[\s,;]+/)).forEach(function(tok){
+    tok = tok.replace(/perchance\.org\//,"").toLowerCase().trim();
+    if(/^[a-z0-9][a-z0-9-]*$/.test(tok) && tok!==HUB_SLUG && tok!=="bgn-management-dashboard" &&
+       tplNames.indexOf(tok)===-1 && gameNames.indexOf(tok)===-1) gameNames.push(tok);
+  });
+  var all = tplNames.concat(gameNames);
+  setTplStatus("Comparing "+gameNames.length+" games against "+tplNames.length+" templates…");
+  var gens = {};
+  try{
+    var r = await sf(API+"getGeneratorsAndDependencies?generatorNames="+encodeURIComponent(all.join(","))).then(function(x){ return x.json(); });
+    gens = r.generators || {};
+  }catch(e){}
+  var tpls = tplNames
+    .filter(function(n){ return gens[n]; })
+    .map(function(n){ return signatureOf(gens[n], n); })
+    .filter(Boolean);
+  tplState.tplLastEdit = {};
+  tpls.forEach(function(t){ tplState.tplLastEdit[t.slug] = t.lastEdit; });
+  var rows = gameNames
+    .filter(function(n){ return gens[n]; })
+    .map(function(n){
+      var g = gens[n];
+      var a = analyzeTpl(n, g.code, g.imports||[], g.lastEditTime, tpls);
+      a.title = (function(){ var mk = metaKeys(g.code); return mk.title || n; })();
+      return a;
+    });
+  setTplStatus("Done — checked "+rows.length+" generators against "+tpls.length+" templates.");
+  return { rows: rows, tpls: tpls };
+}
+function tplChip(r){
+  if(r.status==="ok") return '<span class="chip ok">UP TO DATE</span>';
+  if(r.status==="gap") return '<span class="chip gap">FEATURE GAP</span>';
+  if(r.status==="stale") return '<span class="chip stale">TEMPLATE UPDATED</span>';
+  return '<span class="chip solo">STANDALONE</span>';
+}
+function renderTplSummary(){
+  var rows = tplState.rows;
+  var ok = rows.filter(function(r){ return r.status==="ok"; }).length;
+  var gap = rows.filter(function(r){ return r.status==="gap"; }).length;
+  var stale = rows.filter(function(r){ return r.status==="stale"; }).length;
+  var solo = rows.filter(function(r){ return r.status==="solo"; }).length;
+  var el = $id("tplSum");
+  if(!el) return;
+  function c(n,l,cls){ return '<div class="sum-card '+(cls||"")+'"><b>'+n+'</b><small>'+l+'</small></div>'; }
+  el.innerHTML =
+    c(rows.length, "Generators checked", "") +
+    c(ok, "Up to date", "good") +
+    c(gap, "Feature gap", "bad") +
+    c(stale, "Template updated", "warn") +
+    c(solo, "Standalone", "");
+}
+function renderTplFilters(){
+  var defs = [["all","All ("+tplState.rows.length+")"]];
+  if(tplState.rows.some(function(r){ return r.status==="gap"; })) defs.push(["gap","Feature gaps"]);
+  if(tplState.rows.some(function(r){ return r.status==="stale"; })) defs.push(["stale","Template updated"]);
+  if(tplState.rows.some(function(r){ return r.status==="ok"; })) defs.push(["ok","Up to date"]);
+  if(tplState.rows.some(function(r){ return r.status==="solo"; })) defs.push(["solo","Standalone"]);
+  var html = "";
+  defs.forEach(function(d){
+    html += '<button class="fchip'+(tplState.filter===d[0]?" on":"")+'" data-tf="'+d[0]+'">'+esc(d[1])+'</button>';
+  });
+  $id("tplFilters").innerHTML = html;
+}
+function renderTpls(){
+  renderTplSummary();
+  renderTplFilters();
+  var el = $id("tplList");
+  if(!el) return;
+  if(!tplState.rows.length){
+    el.innerHTML = '<div class="empty-note">No results yet — hit “Scan template forks”.</div>';
+    return;
+  }
+  var rows = tplState.rows.slice().filter(function(r){
+    if(tplState.filter==="all") return true;
+    return r.status===tplState.filter;
+  });
+  var byTpl = {};
+  rows.forEach(function(r){
+    var key = r.tpl || "__solo__";
+    (byTpl[key] = byTpl[key] || []).push(r);
+  });
+  var tplNames = {
+    "bgn-blank-template":"Blank Template",
+    "bgn-pen-and-paper-template":"Pen & Paper Template",
+    "bgn-strategy-template":"Strategy Template",
+    "bgn-non-standard-deck-template":"Non-Standard Deck Template",
+    "bgn-standard-deck-cards-template":"Standard Deck Cards Template",
+    "bgn-hex-template":"Hex Template",
+    "__solo__":"No template match"
+  };
+  var order = ["bgn-blank-template","bgn-pen-and-paper-template","bgn-strategy-template","bgn-non-standard-deck-template","bgn-standard-deck-cards-template","bgn-hex-template"];
+  var html = "";
+  order.forEach(function(k){
+    if(byTpl[k]){
+      var tplData = tplState.tplLastEdit[k];
+      html += '<div class="tpl-group"><div class="tpl-head"><span class="tpl-name">◻ '+tplNames[k]+'</span>'+
+        '<span class="tpl-meta">'+byTpl[k].length+' fork'+(byTpl[k].length===1?"":"s")+(tplData?(" · template edited "+fmtAgo(tplData)):"")+'</span></div>';
+      html += byTpl[k].map(tplRowHtml).join("") + "</div>";
+    }
+  });
+  if(byTpl.__solo__){
+    html += '<div class="tpl-group"><div class="tpl-head"><span class="tpl-name">✦ '+tplNames.__solo__+'</span>'+
+      '<span class="tpl-meta">'+byTpl.__solo__.length+' — hand-built or custom</span></div>' +
+      byTpl.__solo__.map(tplRowHtml).join("") + "</div>";
+  }
+  el.innerHTML = rows.length ? html : '<div class="empty-note">Nothing matches this filter.</div>';
+}
+function tplRowHtml(r){
+  var note = r.missing.length ? '<div class="tpl-missing">missing: '+esc(r.missing.join(" · "))+'</div>' : "";
+  var staleNote = (r.status==="stale" && !r.gap) ? '<div class="tpl-missing">template edited after this fork — review for shell updates</div>' : "";
+  return '<div class="tpl-row">'+
+    '<span class="gname"><a href="https://perchance.org/'+esc(r.name)+'" target="_blank" rel="noopener">'+esc(r.name)+'</a></span>'+
+    '<span class="sub">'+esc(r.title)+'</span>'+
+    '<span class="spacer"></span>'+
+    '<span class="meta2">edited '+fmtAgo(r.lastEdit)+'</span>'+
+    tplChip(r)+
+    note + staleNote +
+  '</div>';
+}
+
+window.Dash={ parseHub:parseHub, metaKeys:metaKeys, chromeKeys:chromeKeys, analyze:analyze, scan:scan, render:render, sortBy:sortBy, state:state,
+  loadBugs:loadBugs, onBugMessage:onBugMessage, renderBugs:renderBugs, bugsToCsv:bugsToCsv, downloadCsv:downloadCsv, buildBugGroups:buildBugGroups, bugState:bugState,
+  analyzeTpl:analyzeTpl, commentLineage:commentLineage, scanTemplates:scanTemplates, renderTpls:renderTpls, tplState:tplState, TPL_SIGNATURES:TPL_SIGNATURES };
+
+document.addEventListener("DOMContentLoaded",function(){
+  $id("scanBtn").addEventListener("click",async function(){
+    var btn=$id("scanBtn"); btn.disabled=true;
+    try{
+      var res=await scan($id("extraNames").value);
+      state.rows=res.rows; state.filter="all"; state.sort="kind"; state.dir=1;
+      render();
+      $id("netHint").textContent=res.rows.length+" generators · sorted by status · click a column to sort.";
+    }catch(e){
+      setStatus("⚠ Scan failed: "+((e&&e.message)||e));
+    }finally{
+      btn.disabled=false;
+    }
+  });
+  $id("netHead").addEventListener("click",function(e){
+    var th=e.target.closest("th"); if(th&&th.dataset.key) sortBy(th.dataset.key);
+  });
+  $id("filtersEl").addEventListener("click",function(e){
+    var b=e.target.closest(".fchip"); if(!b) return;
+    state.filter=b.dataset.f; render();
+  });
+  $id("bugLoadBtn").addEventListener("click",loadBugs);
+  $id("bugCsvBtn").addEventListener("click",function(){
+    downloadCsv("bgn-bugs-"+new Date().toISOString().slice(0,10)+".csv", bugsToCsv(bugState.list));
+  });
+  $id("bugFilters").addEventListener("click",function(e){
+    var b=e.target.closest(".fchip"); if(!b) return;
+    bugState.filter=b.dataset.bf; renderBugs();
+  });
+  $id("tplScanBtn").addEventListener("click",async function(){
+    var btn=$id("tplScanBtn"); btn.disabled=true;
+    try{
+      var res=await scanTemplates($id("tplExtra").value);
+      tplState.rows=res.rows; tplState.filter="all";
+      renderTpls();
+    }catch(e){
+      setTplStatus("⚠ Scan failed: "+((e&&e.message)||e), true);
+    }finally{
+      btn.disabled=false;
+    }
+  });
+  $id("tplFilters").addEventListener("click",function(e){
+    var b=e.target.closest(".fchip"); if(!b) return;
+    tplState.filter=b.dataset.tf; renderTpls();
+  });
+  document.querySelectorAll(".dash-tab").forEach(function(t){
+    t.addEventListener("click",function(){
+      document.querySelectorAll(".dash-tab").forEach(function(x){x.classList.remove("on");});
+      t.classList.add("on");
+      ["net","bugs","tpl"].forEach(function(k){ var el=$id("tab-"+k); if(el) el.hidden = k!==t.dataset.tab; });
+    });
+  });
+
+  var helpBtn=$id("helpBtn"), helpOverlay=$id("helpOverlay"), helpClose=$id("helpClose");
+  function openHelp(){ helpOverlay.classList.add("open"); }
+  function closeHelp(){ helpOverlay.classList.remove("open"); }
+  helpBtn.addEventListener("click",openHelp);
+  helpClose.addEventListener("click",closeHelp);
+  helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay) closeHelp(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&helpOverlay.classList.contains("open")) closeHelp(); });
+});
+</script>
