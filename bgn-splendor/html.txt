@@ -7,7 +7,8 @@
   <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
   <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-  <script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3" };</script>
+  <script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };
+  try { if (!localStorage.getItem('bgn-audio-pref')) localStorage.setItem('bgn-audio-pref', JSON.stringify({ muted: true, vol: 0.5 })); } catch (e) {}</script>
   <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
   <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
@@ -352,6 +353,23 @@ body {
 }
 
 
+/* ── BGN fullscreen board ── */
+.fs-open-btn{position:absolute;top:10px;right:10px;z-index:6;background:rgba(10,14,24,.72);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.25);color:#fff;border-radius:10px;padding:8px 13px;font:600 13px/1 system-ui;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4);transition:border-color .2s ease,transform .2s ease,box-shadow .2s ease;}
+.fs-open-btn:hover{transform:translateY(-1px);border-color:var(--bgn-accent,#d4af37);box-shadow:0 0 14px rgba(212,175,55,.4),0 4px 14px rgba(0,0,0,.4);}
+#fsOverlay{position:fixed;inset:0;z-index:9500;background:#0b0e15;display:flex;flex-direction:column;}
+#fsOverlay[hidden]{display:none;}
+.fs-topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 16px;background:rgba(10,9,18,.72);border-bottom:1px solid rgba(212,175,55,.18);color:var(--gold-bright,#f2dc8b);font-family:var(--font-display,Cinzel,serif);font-weight:700;font-size:.8rem;letter-spacing:1px;}
+#fsStatusEl{flex:1;min-width:0;text-align:left;}
+#fsActionsCtn{flex:1;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;}
+#fsExitBtn{padding:8px 18px;font-size:.7rem;}
+.fs-board{flex:1;min-height:0;position:relative;overflow:auto;padding:16px;}
+.fs-board>canvas{position:absolute;inset:0;width:100%;height:100%;}
+#fsBoardArea>section{position:absolute;inset:0;width:100%;height:100%;border:0;margin:0;overflow:auto;}
+.fs-tile{position:absolute;top:10px;right:10px;z-index:5;}
+.fs-tile:empty{display:none;}
+.fs-meeple{position:absolute;bottom:10px;right:10px;z-index:5;}
+.fs-meeple:empty{display:none;}
+
 /* ── BGN frame integration ── */
 .bgn-nav-right{ display:flex; align-items:center; gap:14px; }
 .sp-toolbar{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding-bottom:10px; border-bottom:1px solid var(--border); margin-bottom:14px; }
@@ -670,6 +688,7 @@ loadRooms();
       </a>
       <span class="bgn-nav-right">
         <span class="bgn-nav-title">[gameTitle]</span>
+        <button class="btn btn-ghost btn-sm bgn-help" id="helpBtn" title="How to play">Help</button>
         <button class="btn btn-ghost btn-sm" id="lbNavBtn">Leaderboard</button>
       </span>
     </div>
@@ -707,7 +726,8 @@ loadRooms();
           <span class="bgn-mode-sub">Live 2-player match on the network</span>
         </button>
       </div>
-      <div style="display:flex; justify-content:center; margin-top:18px">
+      <div style="display:flex; justify-content:center; margin-top:18px; gap:10px; flex-wrap:wrap;">
+        <button class="btn btn-ghost hidden" id="continueBtn" title="Resume your last saved local game">▶ Continue</button>
         <button class="btn btn-ghost" id="shareBtn" title="Download this game as JSON or a PNG">📤 Share</button>
       </div>
       <div id="onlinePanel" class="panel center hidden">
@@ -732,6 +752,7 @@ loadRooms();
             <span id="turn-indicator"></span>
             <span class="sp-actions">
               <button class="btn btn-ghost btn-sm" id="toolbarNewBtn">New Game</button>
+              <button class="btn btn-ghost btn-sm" id="saveBtn" title="Save this local game so you can continue later">Save</button>
               <button class="btn btn-ghost btn-sm" id="toolbarLbBtn">Leaderboard</button>
               <button class="btn btn-ghost btn-sm" id="toolbarBackBtn">Back to lobby</button>
             </span>
@@ -757,6 +778,7 @@ loadRooms();
 
           <div class="game-grid">
             <div class="panel">
+              <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
               <div class="panel-title">Nobles</div>
               <div class="nobles-flex" id="nobles-container"></div>
               <div class="panel-title">Development Cards</div>
@@ -812,8 +834,45 @@ loadRooms();
   <footer class="bgn-footer">
     <div class="ornament">✦</div>
     <p>Part of <b style="color:var(--bgn-accent2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+    <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
     <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
   </footer>
+
+  <!-- Fullscreen board overlay -->
+  <div id="fsOverlay" hidden>
+    <div class="fs-topbar">
+      <span id="fsStatusEl"></span>
+      <span id="fsActionsCtn"></span>
+      <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+    </div>
+    <div class="fs-board" id="fsBoardArea">
+      <div class="fs-tile" id="fsTileCtn"></div>
+      <div class="fs-meeple" id="fsMeepleCtn"></div>
+    </div>
+  </div>
 
   <!-- Setup Modal -->
   <div class="modal-overlay hidden" id="setup-modal">
@@ -873,6 +932,23 @@ loadRooms();
     </div>
   </div>
 
+  <!-- Help Modal -->
+  <div class="modal-overlay hidden" id="help-modal">
+    <div class="modal" style="max-width:540px; text-align:left; max-height:82vh; overflow-y:auto;">
+      <h2 style="color:var(--gold); margin-bottom:12px;">How to Play Splendor</h2>
+      <p style="font-size:.86rem; line-height:1.6; margin-bottom:10px;"><b style="color:var(--gold-bright);">Goal:</b> Be the first player to reach <b>15 prestige points</b>.</p>
+      <p style="font-size:.86rem; line-height:1.6; margin-bottom:10px;"><b style="color:var(--gold-bright);">On your turn</b>, take exactly one of these actions:</p>
+      <ul style="font-size:.85rem; line-height:1.7; padding-left:18px; margin-bottom:10px; color:var(--muted);">
+        <li><b style="color:#fff;">Collect tokens</b> — take 3 different colors, or 2 of one color (only if that pile has 4+). Gold is a wildcard.</li>
+        <li><b style="color:#fff;">Buy a card</b> — pay its token cost (permanent card bonuses reduce costs). Gain its points and bonus.</li>
+        <li><b style="color:#fff;">Reserve a card</b> — hold one face-up card (or a blind deck draw), max 3 reserved. You gain a gold token.</li>
+      </ul>
+      <p style="font-size:.86rem; line-height:1.6; margin-bottom:10px;"><b style="color:var(--gold-bright);">Hand limit:</b> 10 tokens. When a noble visits (you meet their requirements), you gain their points for free.</p>
+      <p style="font-size:.86rem; line-height:1.6; margin-bottom:10px;"><b style="color:var(--gold-bright);">Saving:</b> Your local game auto-saves after every move — hit <b>▶ Continue</b> in the lobby to resume it anytime.</p>
+      <button class="btn btn-primary" style="width:100%;" onclick="closeHelp()">Got it</button>
+    </div>
+  </div>
+
 <script>
 (function() {
 "use strict";
@@ -922,6 +998,9 @@ loadRooms();
     const toolbarLbBtn = document.getElementById('toolbarLbBtn');
     const toolbarBackBtn = document.getElementById('toolbarBackBtn');
     const lbNavBtn = document.getElementById('lbNavBtn');
+    const helpBtn = document.getElementById('helpBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const continueBtn = document.getElementById('continueBtn');
 
     const game = { mode: null, myRole: null, roomCode: null, socket: null, sockOpen: false, wantReconnect: false, retryDelay: 800,
       openResolvers: [], serverTurn: 0, first: 0, status: 'idle', oppPresent: true, over: false, winner: null, reason: '',
@@ -1360,6 +1439,7 @@ function proceedToNextTurn() {
       const nbtn = document.getElementById('gameover-newbtn');
       if (nbtn) nbtn.textContent = (state.mode === 'online') ? 'Rematch' : 'New Game';
       document.getElementById('gameover-modal').classList.remove('hidden');
+      if (state.mode !== 'online') { clearSave(); updateContinueBtn(); }
     }
     function closeGameOver(newGame) {
       document.getElementById('gameover-modal').classList.add('hidden');
@@ -1503,6 +1583,7 @@ function cardCostSum(card) {
       renderGameLog();
       refreshTurn();
       updateBanner();
+      if (game.mode === 'local' && state.mode === 'local' && state.players.length && !state.resultPosted) saveLocalGame();
     }
 function renderNobles() {
       const el = document.getElementById('nobles-container');
@@ -2166,9 +2247,10 @@ function escapeHtml(s) {
         msg = '';
       }
       bannerEl.textContent = msg;
+      if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent;
     }
     let bannerTimer = null;
-    function flashBanner(msg) { bannerEl.textContent = msg; if (bannerTimer) clearTimeout(bannerTimer); bannerTimer = setTimeout(updateBanner, 2600); }
+    function flashBanner(msg) { bannerEl.textContent = msg; if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent; if (bannerTimer) clearTimeout(bannerTimer); bannerTimer = setTimeout(updateBanner, 2600); }
     function refreshTurn() {
       if (game.mode !== 'online') { pHost.classList.remove('on'); pGuest.classList.remove('on'); turnEl.textContent = ''; return; }
       if (game.over) { pHost.classList.remove('on'); pGuest.classList.remove('on'); turnEl.textContent = 'Match over'; return; }
@@ -2182,10 +2264,12 @@ function escapeHtml(s) {
         toolbarNewBtn.textContent = game.over ? 'Rematch' : 'New match';
         toolbarNewBtn.classList.toggle('hidden', !game.over);
         claimBtn.classList.toggle('hidden', !(game.status === 2 && !game.over && !game.oppPresent));
+        saveBtn.classList.add('hidden');
       } else {
         toolbarNewBtn.textContent = 'New Game';
         toolbarNewBtn.classList.remove('hidden');
         claimBtn.classList.add('hidden');
+        saveBtn.classList.remove('hidden');
       }
     }
     function renderAll() {
@@ -2225,12 +2309,14 @@ function escapeHtml(s) {
       renderAll();
     }
     function exitOnline(showLobby) {
+      if (window.bgnFullscreen && window.bgnFullscreen.isOpen()) window.bgnFullscreen.close();
       if (game.socket) { game.wantReconnect = false; try { game.socket.close(1000, 'bye'); } catch (e) {} game.socket = null; }
       game.sockOpen = false;
       game.roomCode = null; game.myRole = null; game.mode = null;
       if (showLobby) { gameCtn.classList.add('hidden'); lobbyCtn.classList.remove('hidden'); hero.classList.remove('hidden'); gameCtn.classList.remove('online'); }
     }
     function exitToLobby() {
+      if (window.bgnFullscreen && window.bgnFullscreen.isOpen()) window.bgnFullscreen.close();
       if (game.mode === 'online') {
         if (game.socket && game.sockOpen) rpc('leave', game.roomCode).catch(function() {});
         exitOnline(true);
@@ -2241,6 +2327,7 @@ function escapeHtml(s) {
         hero.classList.remove('hidden');
         gameCtn.classList.remove('online');
       }
+      updateContinueBtn();
     }
     function openedP() {
       return new Promise(function(res) {
@@ -2483,6 +2570,94 @@ function escapeHtml(s) {
       shareBtn.addEventListener('click', function() { panel.open(); });
     })();
 
+    /* ══════════ Help overlay ══════════ */
+    function openHelp() { document.getElementById('help-modal').classList.remove('hidden'); }
+    function closeHelp() { document.getElementById('help-modal').classList.add('hidden'); }
+    helpBtn.addEventListener('click', openHelp);
+
+    /* ══════════ Save / continue (local games, survives reloads) ══════════ */
+    const SAVE_KEY = 'bgn-splendor-save';
+    function hasSave() { try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; } }
+    function saveLocalGame() {
+      if (game.mode !== 'local' || state.mode !== 'local' || !state.players.length || state.resultPosted) return false;
+      try { localStorage.setItem(SAVE_KEY, JSON.stringify(serializeLocalState())); return true; } catch (e) { return false; }
+    }
+    function clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
+    function updateContinueBtn() { continueBtn.classList.toggle('hidden', !hasSave()); }
+    saveBtn.addEventListener('click', function() {
+      if (saveLocalGame()) flashBanner('Game saved — resume it anytime from the lobby.');
+      else flashBanner('Nothing to save right now.');
+    });
+    continueBtn.addEventListener('click', function() {
+      if (!hasSave()) return;
+      try { if (restoreLocalState(JSON.parse(localStorage.getItem(SAVE_KEY)))) flashBanner('Welcome back — game restored.'); } catch (e) {}
+    });
+    updateContinueBtn();
+
+    /* ══════════ BGN fullscreen board (window.bgnFullscreen) ══════════ */
+    const fsOpenBtn = document.getElementById('fsOpenBtn');
+    const fsOverlay = document.getElementById('fsOverlay');
+    const fsStatusEl = document.getElementById('fsStatusEl');
+    const fsActionsCtn = document.getElementById('fsActionsCtn');
+    const fsBoardArea = document.getElementById('fsBoardArea');
+    const fsTileCtn = document.getElementById('fsTileCtn');
+    const fsMeepleCtn = document.getElementById('fsMeepleCtn');
+    const fsExitBtn = document.getElementById('fsExitBtn');
+    let _fsOpen = false;
+    const _fsOrig = [];
+    const _fsReg = { canvas: null, tile: null, meeple: null, resize: null };
+    function _fsMove(container, el) { _fsOrig.push({ el: el, parent: el.parentNode, next: el.nextSibling }); container.appendChild(el); }
+    function fsRefit() { if (_fsReg.resize) { try { _fsReg.resize(); } catch (e) {} } }
+    function openFullscreen() {
+      if (!_fsReg.canvas || _fsOpen) return;
+      _fsOpen = true;
+      fsStatusEl.textContent = bannerEl.textContent;
+      fsActionsCtn.innerHTML = '';
+      _fsMove(fsBoardArea, _fsReg.canvas);
+      if (_fsReg.tile) _fsMove(fsTileCtn, _fsReg.tile);
+      if (_fsReg.meeple) _fsMove(fsMeepleCtn, _fsReg.meeple);
+      fsOverlay.hidden = false;
+      document.body.style.overflow = "hidden";
+      fsOpenBtn.hidden = true;
+      fsRefit();
+      try { var fsp = fsOverlay.requestFullscreen(); if (fsp && fsp.catch) fsp.catch(function() {}); } catch (e) {}
+    }
+    function closeFullscreen() {
+      if (!_fsOpen) return;
+      _fsOpen = false;
+      while (_fsOrig.length) { var s = _fsOrig.pop(); if (s.parent) s.parent.insertBefore(s.el, s.next); }
+      fsOverlay.hidden = true;
+      document.body.style.overflow = "";
+      fsOpenBtn.hidden = false;
+      fsRefit();
+      try { if (document.fullscreenElement) { var fse = document.exitFullscreen(); if (fse && fse.catch) fse.catch(function() {}); } } catch (e) {}
+    }
+    window.bgnFullscreen = {
+      register: function(o) {
+        if (!o || !o.canvas) return;
+        _fsReg.canvas = o.canvas;
+        _fsReg.tile = o.tile || null;
+        _fsReg.meeple = o.meeple || null;
+        _fsReg.resize = typeof o.resize === 'function' ? o.resize : null;
+        fsOpenBtn.hidden = false;
+      },
+      open: openFullscreen,
+      close: closeFullscreen,
+      isOpen: function() { return _fsOpen; }
+    };
+    fsExitBtn.addEventListener('click', closeFullscreen);
+    fsOpenBtn.addEventListener('click', openFullscreen);
+    window.addEventListener("resize", function() { if (_fsOpen) fsRefit(); });
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        if (!fsOverlay.hidden) { closeFullscreen(); return; }
+        var hm = document.getElementById('help-modal');
+        if (hm && !hm.classList.contains('hidden')) { closeHelp(); return; }
+        if (!document.getElementById('lb-modal').classList.contains('hidden')) closeLeaderboard();
+      }
+    });
+    window.bgnFullscreen.register({ canvas: document.getElementById('gameCtn'), resize: render });
+
     renderAll();
 
     Object.defineProperty(window, 'state', { get: function() { return state; }, configurable: true });
@@ -2502,6 +2677,8 @@ function escapeHtml(s) {
     window.closeGameOver = closeGameOver;
     window.showLeaderboard = showLeaderboard;
     window.closeLeaderboard = closeLeaderboard;
+    window.openHelp = openHelp;
+    window.closeHelp = closeHelp;
     window.runAITurn = runAITurn;
     window.aiThink = aiThink;
     window.endTurn = endTurn;

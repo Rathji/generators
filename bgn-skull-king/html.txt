@@ -19,6 +19,11 @@
 
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
 <!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
 <script type="text/x-server-plugin">
 /* ── Skull King server ────────────────────────────────
@@ -256,6 +261,10 @@ function genCode(){
 /* ── connection / broadcast ── */
 let rooms=new Map();                 // code -> room
 const conns=new Map();               // conn.id -> {code, role, conn}
+const chatTimes=new Map();           // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
 function topic(code){ return "ch:"+code; }
 function snap(g){
   const tr=g.trick;
@@ -442,6 +451,21 @@ self.rpc={
       g.lastAct=nowSec(); saveBroadcast(g);
     }
     return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const g=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!g)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==g)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(g.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
   }
 };
 
@@ -450,6 +474,7 @@ self.onclose=({conn})=>{
   const info=conns.get(conn.id);
   if(!info)return;
   conns.delete(conn.id);
+  chatTimes.delete(conn.id);
   const g=rooms.get(info.code);
   if(!g)return;
   if(info.role==="host")g.hostId=-1; else g.guestId=-1;
@@ -519,6 +544,20 @@ loadRooms();
       </button>
     </div>
 
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last match</h3>
+      <p class="muted small" id="continueInfoEl">A saved match was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
     <div class="panel" id="countPanel" style="margin-top:26px; padding:20px 24px; display:none">
       <div class="sec-eyebrow" style="text-align:center">Players at the table</div>
       <div style="display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:12px">
@@ -558,7 +597,8 @@ loadRooms();
   <!-- ═══ GAME ═══ -->
   <section id="gameCtn" hidden>
     <div class="sk-table">
-      <div class="sk-boardpanel panel">
+      <div class="sk-boardpanel panel bgn-board" id="board">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
         <div class="sk-roundbar">
           <span class="sk-round" id="roundEl">—</span>
           <span class="sk-turn" id="turnEl">Loading…</span>
@@ -588,10 +628,20 @@ loadRooms();
           </div>
         </div>
 
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+
         <div class="sk-actions">
           <button class="btn btn-ghost" id="resignBtn" hidden>Resign</button>
           <button class="btn btn-ghost" id="newGameBtn">New game</button>
           <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
         </div>
 
@@ -646,9 +696,51 @@ loadRooms();
   </div>
 </div>
 
+<!-- ═══ FULLSCREEN BOARD (BGN standard) ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
 <footer class="bgn-footer">
   <div class="ornament">☠</div>
   <p>Skull King — bid your tricks, capture the Skull King, rule the sea.</p>
+  <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
   <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
 
@@ -687,6 +779,7 @@ loadRooms();
 .sk-trick-chip{ font-size:.72rem; color:#ffb0b0; }
 .sk-backs{ display:flex; gap:2px; justify-content:center; margin-top:5px; }
 .sk-back{ width:11px; height:15px; border-radius:2px; background:repeating-linear-gradient(45deg,#3b2f4d,#2a2140 4px); border:1px solid rgba(212,175,55,.4); }
+.sk-back svg{ width:100%; height:100%; display:block; }
 
 /* trick */
 .sk-trickwrap{ min-height:150px; display:flex; flex-direction:column; align-items:center; justify-content:center; margin:10px 0 8px; }
@@ -786,6 +879,46 @@ loadRooms();
   .over-banner{ font-size:1.15rem; }
   .promo{ padding:14px 14px; }
 }
+
+/* ══════ fullscreen board (BGN standard) ══════ */
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.35); color:#fff; border-radius:999px; padding:8px 14px; cursor:pointer; font:600 13px/1 system-ui,-apple-system,sans-serif; box-shadow:0 4px 14px rgba(0,0,0,.4); }
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent,#d4af37); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.1); color:#fff; flex:none; }
+#fsStatusEl{ font-weight:600; font-size:.95rem; color:#f6e6a4; }
+#fsActionsCtn{ flex:1; display:flex; justify-content:center; align-items:center; gap:8px; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.fs-tile{ position:absolute; top:10px; right:10px; z-index:5; }
+.fs-meeple{ position:absolute; bottom:10px; right:10px; z-index:5; }
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+#fsOverlay .bgn-board{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); margin:0; max-width:94vw; max-height:86vh; overflow:auto; box-shadow:0 0 0 5px #241d14, 0 0 0 6px var(--bgn-gold2,#d4af37), 0 14px 34px rgba(0,0,0,.55); }
+
+/* ══════ table chat (aligned with BGN template) ══════ */
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+
+/* ══════ help modal (aligned with BGN template) ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
 </style>
 
 <script>
@@ -809,7 +942,7 @@ a.target="_blank";
 a.rel="noopener";
 a.setAttribute("aria-label","Back to my projects");
 a.title="Back to my projects";
-a.innerHTML='<span class="rbb-badge">R</span><span class="rbb-label">My projects</span><svg class="rbb-arrow" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+a.innerHTML='<span class="rbb-badge">R</span><span class="rbb-label">My projects</span><svg class="rbb-arrow" viewBox="0 0 24 24" fill="none"><path d="M7 17L17 7M17 7H8M17 7V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 document.body.appendChild(a);
 })();
 </script>
@@ -908,6 +1041,7 @@ const trickAreaEl=document.getElementById("trickAreaEl");
 const lastTrickEl=document.getElementById("lastTrickEl");
 const roundEl=document.getElementById("roundEl");
 const turnEl=document.getElementById("turnEl");
+const bannerEl=turnEl;
 const logEl=document.getElementById("logEl");
 const roomBox=document.getElementById("roomBox");
 const roomCodeEl=document.getElementById("roomCodeEl");
@@ -942,8 +1076,29 @@ const overScoresEl=document.getElementById("overScoresEl");
 const overReasonEl=document.getElementById("overReasonEl");
 const playAgainBtn=document.getElementById("playAgainBtn");
 const overMenuBtn=document.getElementById("overMenuBtn");
+const fsOpenBtn=document.getElementById("fsOpenBtn");
+const fsOverlay=document.getElementById("fsOverlay");
+const fsStatusEl=document.getElementById("fsStatusEl");
+const fsActionsCtn=document.getElementById("fsActionsCtn");
+const fsExitBtn=document.getElementById("fsExitBtn");
+const fsBoardWrap=document.getElementById("fsBoardWrap");
+const fsTileCtn=document.getElementById("fsTileCtn");
+const fsMeepleCtn=document.getElementById("fsMeepleCtn");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const saveBtn=document.getElementById("saveBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
 
 /* ══════════ helpers ══════════ */
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+function syncFsStatus(){ if(!fsOverlay.hidden)fsStatusEl.textContent=bannerEl.textContent||""; }
 function npName(p){
   if(game.mode==="online")return p===game.myPlayer?"You":"Opponent";
   if(game.mode==="ai")return p===0?"You":AI_NAMES[p-1];
@@ -964,9 +1119,14 @@ function renderLog(){
   logEl.innerHTML=game.logLines.join("");
   logEl.scrollTop=logEl.scrollHeight;
 }
+function cardDeckBack(){
+  try{ if(typeof rootRef.cardDeck==="function")return rootRef.cardDeck("back","chevrons","navy"); }catch(e){}
+  return "";
+}
 function backs(n){
+  const b=cardDeckBack();
   let s="";
-  for(let i=0;i<Math.min(n,10);i++)s+='<div class="sk-back"></div>';
+  for(let i=0;i<Math.min(n,10);i++)s+='<div class="sk-back">'+b+'</div>';
   if(n>10)s+='<span class="muted small">+'+(n-10)+'</span>';
   return s;
 }
@@ -1146,6 +1306,7 @@ function renderRoundBar(){
   }
   else{ t="Round scored."; }
   turnEl.textContent=t;
+  syncFsStatus();
 }
 function renderHand(){
   handEl.innerHTML="";
@@ -1223,6 +1384,7 @@ function commitPlay(i,role){
   const g=game.g, p=myIdx();
   const nm=cardName(g.hands[p][i],role);
   log(npName(p)+" plays "+nm+".");
+  sfx("turn");
   applyLocalPlay(g,p,i,role);
   if(g.phase===2){ renderAll(); return; }
   renderAll();
@@ -1394,6 +1556,7 @@ function startLocalGame(){
   log("Round 1 — 1 card each. Bid how many tricks you'll take!");
   log("Only the Mermaid can capture the Skull King. Hit your bid to score big.");
   renderAll();
+  sfx("deal");
 }
 function advanceLocalRound(){
   const g=game.g;
@@ -1410,6 +1573,7 @@ function startMode(mode){
   game.mode=mode;
   game.myPlayer=0; game.myRole=null; game.over=false;
   roomBox.hidden=true;
+  chatBox.hidden=true;
   claimBtn.hidden=true;
   resignBtn.style.display="none";
   lobbyCtn.hidden=true;
@@ -1428,6 +1592,8 @@ function exitOnline(showLobby){
   if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
 }
 function exitToLobby(){
+  chatBox.hidden=true;
+  refreshContinuePanel();
   if(game.mode==="online"){
     if(game.socket&&game.sockOpen){ rpc("leave",game.roomCode).catch(function(){}); }
     exitOnline(true);
@@ -1480,6 +1646,7 @@ function showOverModal(){
   else if(g.reason==="forfeit")overReasonEl.textContent=game.mode==="online"?"One player left the match.":"The game ended early.";
   else overReasonEl.textContent="After 10 rounds of tricks, bids and betrayal.";
   playAgainBtn.textContent=game.mode==="online"?"Rematch":"Play again";
+  sfx(g.winner==="draw"?"draw2":(g.winner===myIdx()?"win":"lose"));
   overModal.hidden=false;
 }
 playAgainBtn.addEventListener("click",function(){
@@ -1496,14 +1663,16 @@ function updateButtons(){
   if(online){
     resignBtn.style.display=g.over?"none":"";
     claimBtn.hidden=!(game.status===2&&!g.over&&!game.oppPresent);
+    saveBtn.hidden=true;
   }else{
     resignBtn.style.display="none";
     claimBtn.hidden=true;
+    saveBtn.hidden=!!g.over;
   }
   newGameBtn.textContent=online?(g.over?"Rematch":"Match in progress"):"New game";
 }
 let bannerTimer=null;
-function flashBanner(msg){ turnEl.textContent=msg; turnEl.classList.add("warn"); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderRoundBar(); },2600); }
+function flashBanner(msg){ turnEl.textContent=msg; turnEl.classList.add("warn"); if(!fsOverlay.hidden)fsStatusEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderRoundBar(); },2600); }
 
 /* ══════════ online client ══════════ */
 function openedP(){
@@ -1559,6 +1728,7 @@ function onServerMsg(raw){
   try{ msg=JSON.parse(raw); }catch(e){ return; }
   if(msg.t==="snap")applyServerSnap(msg.snap);
   else if(msg.t==="hand"){ game.hand=msg.hand.slice(); if(game.g&&game.mode==="online")game.g.hands[game.myPlayer]=game.hand; renderAll(); }
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
 }
 function applyServerSnap(s){
   if(!game.g){ game.g=newLocalGame(2); initTotals(game.g); }
@@ -1588,9 +1758,11 @@ function enterOnlineGame(){
   lobbyCtn.hidden=true;
   gameCtn.hidden=false;
   roomBox.hidden=false;
+  chatBox.hidden=false;
   roomCodeEl.textContent=game.roomCode;
   game.locked=false;
   renderAll();
+  sfx("deal");
 }
 async function doCreateRoom(){
   setOnlineMsg("Creating room…");
@@ -1683,6 +1855,133 @@ function sendNextRound(){
   });
 }
 
+/* ══════════ table chat (online) ══════════ */
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function chatName(role){ if(role===game.myRole)return "You"; return "Opponent"; }
+function fmtTime(ts){ if(!ts)return ""; try{ const d=new Date(ts*1000); return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }catch(e){ return ""; } }
+function addChat(role,text,ts){
+  const row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(chatName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ save / continue (hotseat & AI) ══════════ */
+const SAVE_KEY="bgn_save_skullking";
+function saveGame(){
+  if(game.mode!=="local"&&game.mode!=="ai")return;
+  if(game.g&&game.g.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:1,mode:game.mode,view:game.view,bidVal:game.bidVal,g:game.g,savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved match was found.";
+  try{ const o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — round "+(o.g&&o.g.round?o.g.round:1)+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function restoreMatch(o){
+  startLocalGame();
+  game.mode=o.mode==="ai"?"ai":"local";
+  game.g=o.g; game.view=o.view||0; game.bidVal=o.bidVal||0;
+  game.locked=false; game.aiThinking=false;
+  roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+  resignBtn.style.display="none";
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  renderAll();
+  if(game.g.over)showOverModal();
+  else if(game.g.phase===2)showRoundModal();
+  else if(game.mode==="ai")driveAI();
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.g){ flashBanner("No saved match found."); return; }
+  restoreMatch(o);
+}
+
+/* ══════════ help modal ══════════ */
+const HELP_HTML='<h2 class="goldtext">How to play Skull King</h2>'
+  +'<p class="muted">A pirate trick-taking card game. Each round you secretly bid exactly how many tricks you\'ll take — hit the number and you score big, miss and you pay. Ten rounds, growing hands, and only the Mermaid can capture the Skull King.</p>'
+  +'<h3>Three ways to play</h3>'
+  +'<p><b>🛋️ Hotseat</b> — pass the device between players. Hands and bids stay secret.</p>'
+  +'<p><b>🤖 vs the Crew</b> — you against up to three AI pirates.</p>'
+  +'<p><b>🌐 Online</b> — create a room and share the 5-letter code. The server keeps both hands hidden and validates every bid and play.</p>'
+  +'<h3>Card values</h3>'
+  +'<p>Number cards rank 1–13 in each of five suits. <b>Skull King</b> (30) beats everything except the <b>Mermaid</b> (0). <b>Pirates</b> (20) and the <b>Tigress</b> (20, played as Pirate or Escape) beat every number card. <b>Tide</b> cards (10) never win a trick.</p>'
+  +'<h3>Scoring</h3>'
+  +'<p>Bid exactly right: <b>20/trick + 10 bonus</b>, plus 10 per special card captured. Miss the bid: <b>−10 per trick</b> off. A bid of zero scores +10 if you take no tricks, −10 if you take any.</p>'
+  +'<h3>Online extras</h3>'
+  +'<p>Say hi in <b>table chat</b>. If your opponent disconnects they can rejoin with the room code — or you can <b>Claim win</b> once they abandon. 💾 <b>Save</b> captures a hotseat or AI match so you can continue it later.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+
+/* ══════════ fullscreen board (BGN standard) ══════════ */
+const fsCfg={canvas:null,tile:null,meeple:null,resize:null};
+function fsRefit(){ if(fsCfg.resize)try{ fsCfg.resize(); }catch(e){} renderAll(); }
+function fsStash(el){ if(!el||el._fsOrig)return; el._fsOrig={parent:el.parentNode,next:el.nextSibling}; }
+function fsRestore(el){
+  if(!el||!el._fsOrig)return;
+  try{ el._fsOrig.parent.insertBefore(el,el._fsOrig.next); }catch(e){ el._fsOrig.parent.appendChild(el); }
+  el._fsOrig=null;
+}
+function openFullscreen(){
+  if(!fsCfg.canvas||!fsOverlay.hidden)return;
+  const el=fsCfg.canvas;
+  fsStash(el); fsBoardWrap.appendChild(el);
+  if(fsCfg.tile){ fsStash(fsCfg.tile); fsTileCtn.appendChild(fsCfg.tile); }
+  if(fsCfg.meeple){ fsStash(fsCfg.meeple); fsMeepleCtn.appendChild(fsCfg.meeple); }
+  fsOverlay.hidden=false;
+  syncFsStatus();
+  document.body.style.overflow="hidden";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(document.fullscreenElement)try{ document.exitFullscreen().catch(function(){}); }catch(e){}
+  fsRestore(fsCfg.meeple);
+  fsRestore(fsCfg.tile);
+  fsRestore(fsCfg.canvas);
+  fsRefit();
+}
+window.bgnFullscreen={
+  register:function(o){
+    if(!o||!o.canvas)return;
+    fsCfg.canvas=o.canvas;
+    if(typeof o.resize==="function")fsCfg.resize=o.resize;
+    if(o.tile)fsCfg.tile=o.tile;
+    if(o.meeple)fsCfg.meeple=o.meeple;
+    fsOpenBtn.hidden=false;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({canvas:document.getElementById("board"), resize:renderAll});
+
 /* ══════════ wire up UI ══════════ */
 let pendingMode=null;
 document.querySelectorAll(".bgn-mode").forEach(function(btn){
@@ -1758,12 +2057,88 @@ tigEscapeBtn.addEventListener("click",function(){
   tigModal.hidden=true;
   if(game.pendingTigress!==null){ const i=game.pendingTigress; game.pendingTigress=null; commitPlay(i,"escape"); }
 });
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Match saved."); });
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"Skull King"); }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-skull-king",
+    gameName:tplName,
+    exportData:function(){
+      if(game.mode!=="local"&&game.mode!=="ai")return null;
+      return {mode:game.mode, view:game.view, bidVal:game.bidVal, g:game.g};
+    },
+    applySave:function(o){ if(!o||!o.g)return false; try{ restoreMatch(o); return true; }catch(e){ return false; } },
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs the Crew":"hotseat"; },
+    filenameBase:function(){ return "bgn-skull-king"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
 
 /* debug/testing handle for browser_eval */
 window.__sk={ game, newLocalGame, startLocalRound, initTotals, applyLocalPlay, finishLocalRound,
   resolveTrick, legalPlays, trickPower, roundScore, cardType, cardName, buildDeck, pVal,
   aiBid, aiChooseCard, startLocalGame, startMode, revealBids, advanceLocalRound,
-  SUIT_NAMES, SUIT_EMO, SPEC_NAMES, SPEC_EMO, MAXR, DECK_N, isColor, suitOf, numOf, npName };
+  SUIT_NAMES, SUIT_EMO, SPEC_NAMES, SPEC_EMO, MAXR, DECK_N, isColor, suitOf, numOf, npName,
+  saveGame, hasSave, deleteSave, continueGame, restoreMatch, openHelp, closeHelp, sendChat, addChat, refreshContinuePanel,
+  openFullscreen, closeFullscreen };
+refreshContinuePanel();
 renderAll();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
 })();
 </script>

@@ -19,6 +19,10 @@
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+
 <!-- ═══ AUTHORITATIVE GAME SERVER (server-plugin) ═══ -->
 <script type="text/x-server-plugin">
 /* ── BGN Hearts server ─────────────────────────────────────────
@@ -111,6 +115,7 @@ let rooms=new Map();           // code -> room
 const conns=new Map();         // conn.id -> {conn, code, seat}
 const connCreates=new Map();   // conn.id -> count
 const createLog=new Map();     // net[2] -> {n, ts}
+const chatTimes=new Map();     // conn.id -> last chat ms (rate limit)
 
 function newRoom(code,slot){
   return {slot:slot,code:code,status:1,phase:0,handNum:0,passDir:0,
@@ -131,6 +136,9 @@ function cleanName(n){
   let s=n.replace(/[^\x20-\x7E]/g,"").replace(/\s+/g," ").trim().slice(0,12);
   return s||"Player";
 }
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanChat(s){ return String(s==null?"":s).replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,160); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1)return true; } return false; }
 function cleanPid(p){
   if(typeof p==="string"&&/^[a-z0-9]{6,16}$/.test(p))return p.slice(0,16);
   let s="";
@@ -519,6 +527,24 @@ self.rpc={
     saveRoom(room);
     broadcastAll(room);
     return ok({});
+  },
+  chat({conn},data){
+    let obj=parseIn(data); if(!obj)return err("bad_request");
+    const info=conns.get(conn.id);
+    if(!info)return err("not_in_room");
+    const room=rooms.get(info.code);
+    if(!room)return err("no_such_room");
+    if(room.status!==2)return err("not_playing");
+    const text=cleanChat(obj.text);
+    if(!text)return err("empty");
+    if(isChatBanned(text))return err("banned_word");
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<1200)return err("rate_limited");
+    chatTimes.set(conn.id,now);
+    const name=room.seatName[info.seat]||("Player "+(info.seat+1));
+    const raw=JSON.stringify({t:"chat", from:info.seat, name:name, text:text, ts:Math.floor(now/1000)});
+    for(let s=0;s<4;s++)if(room.seats[s]!==-1)sendTo(room,s,raw);
+    return ok({});
   }
 };
 
@@ -593,6 +619,20 @@ loadRooms();
       </button>
     </div>
 
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last game</h3>
+      <p class="muted small" id="continueInfoEl">A saved solo game was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
     <div id="onlinePanel" class="panel center" hidden>
       <h3>Online table</h3>
       <p class="muted small">Create a table and share the 5-letter code with three friends, or join theirs. If someone drops, bots fill in so the game keeps flowing — and a newcomer can take over the empty seat.</p>
@@ -626,7 +666,8 @@ loadRooms();
   <section id="gameCtn" hidden>
     <div class="h-wrap">
       <div class="panel h-tablepanel">
-        <div class="h-table">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+        <div class="h-table bgn-board" id="board">
           <div class="h-seat top" id="seat_top">
             <span class="h-avatar s2" id="seat_top_av"></span>
             <div class="h-seatinfo">
@@ -668,6 +709,7 @@ loadRooms();
                 </div>
               </div>
               <div class="h-hand-right">
+                <b id="turnEl" class="h-turn" hidden></b>
                 <button class="h-chip h-chipcode" id="roomChip" title="Tap to copy the room code" hidden>Room: <b>—</b></button>
                 <div class="h-chip" id="brokenChip">♥ broken</div>
                 <button class="h-menu-btn" id="menuSheetBtn" aria-label="Scores and menu">☰</button>
@@ -684,8 +726,17 @@ loadRooms();
           <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
           <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:6px;">
             <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
           </div>
           <p class="muted small" id="connEl">Connecting…</p>
+        </div>
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
         </div>
         <h3>Scoreboard</h3>
         <div class="h-scorehead"><span>Player</span><span>Hand</span><span>Total</span></div>
@@ -695,6 +746,7 @@ loadRooms();
         <div class="bgn-log" id="logEl"></div>
         <div class="bgn-actions">
           <button class="btn btn-gold" id="newGameBtn">New game</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
         </div>
       </aside>
@@ -707,6 +759,30 @@ loadRooms();
 <footer class="bgn-footer">
   <div class="ornament">♥</div>
   <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+  <a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+  <div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+  <style>
+  #bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+  #bgnAuditOverlay[hidden]{display:none}
+  .bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+  .bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+  </style>
+  <script>
+  function openBgnAudit(){
+    var f=document.getElementById("bgnAuditFrame");
+    f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+    document.getElementById("bgnAuditOverlay").hidden=false;
+    document.body.style.overflow="hidden";
+  }
+  function closeBgnAudit(){
+    document.getElementById("bgnAuditOverlay").hidden=true;
+    document.body.style.overflow="";
+  }
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+  document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+  </script>
   <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
 
@@ -779,8 +855,28 @@ loadRooms();
   </div>
 </div>
 
+<!-- ═══ FULLSCREEN BOARD (BGN standard) ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
 <style>
 /* ═══ BGN HEARTS ═══ */
+
+/* Perchance centre-aligns page content by default — restore left alignment (BGN standard). */
+body{ text-align:left; }
 
 /* base card engine (from the BGN deck template) */
 .bgn-card{ --w:74px; width:var(--w); aspect-ratio:200/280; position:relative; flex:none;
@@ -808,7 +904,7 @@ loadRooms();
 /* table layout */
 .h-wrap{ display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:18px; align-items:start; }
 @media (max-width:980px){ .h-wrap{ grid-template-columns:minmax(0,1fr); } }
-.h-tablepanel{ text-align:center; }
+.h-tablepanel{ text-align:center; position:relative; }
 .h-table{ display:grid; grid-template-areas:"top top top" "left trick right" "bot bot bot";
   grid-template-columns:minmax(0,140px) minmax(0,1fr) minmax(0,140px); grid-template-rows:auto minmax(195px,1fr) auto; gap:10px; }
 
@@ -962,9 +1058,57 @@ loadRooms();
   .h-passrow .bgn-card{ --w:58px; }
   .h-seat.left .h-ssub, .h-seat.right .h-ssub{ max-width:58px; }
 }
+
+/* turn indicator chip */
+.h-turn{ font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--bgn-accent2,#f2dc8b);
+  border:1px solid rgba(212,175,55,.35); padding:4px 10px; border-radius:999px; white-space:nowrap; display:inline-block; }
+#turnEl[hidden]{ display:none; }
+
+/* ══════ table chat (BGN standard) ══════ */
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to the table — everyone sees this."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+
+/* ══════ help modal (BGN standard) ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+/* ══════ fullscreen board (BGN standard) ══════ */
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px); border:1px solid rgba(255,255,255,.35); color:#fff; border-radius:999px; padding:8px 14px; cursor:pointer; font:600 13px/1 system-ui,-apple-system,sans-serif; box-shadow:0 4px 14px rgba(0,0,0,.4); }
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent,#d4af37); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.1); color:#fff; flex:none; }
+#fsStatusEl{ font-weight:600; font-size:.95rem; color:#f6e6a4; }
+#fsActionsCtn{ flex:1; display:flex; justify-content:center; align-items:center; gap:8px; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.fs-tile{ position:absolute; top:10px; right:10px; z-index:5; }
+.fs-meeple{ position:absolute; bottom:10px; right:10px; z-index:5; }
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+#fsOverlay .bgn-board{ position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); margin:0; }
+#fsOverlay .bgn-card{ --w:96px; }
+#fsOverlay .h-fan .bgn-card{ --w:88px; }
+@media (max-width:720px){ #fsOverlay .bgn-card{ --w:64px; } #fsOverlay .h-fan .bgn-card{ --w:56px; } }
 </style>
 
-<script src="https://user.uploads.dev/file/4166609fa079bc2b77e409ff97770415.js"></script> <!-- BGN shared SVG card engine (bgn-deck.js) — keep in sync with the standard-deck template -->
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
 <script>
 (function(){
@@ -1130,24 +1274,33 @@ function engineHandOver(game){
   return {hand:hand, over:false};
 }
 
-/* ══════════ card rendering (shared BGN deck engine — bgn-deck.js) ══════════ */
+/* ══════════ card rendering ══════════ */
+/* ══════════ card SVG rendering (card-deck-plugin) ══════════
+   card-deck-plugin: root.cardDeck(id) -> inline <svg>. Cards are
+   {rank}{suit} ids (AS, 10C, …); backs via cardDeck("back", motif, colourway). */
+var SUIT_LETTER={spades:"S",hearts:"H",clubs:"C",diamonds:"D"};
+function cardId(card){ return card.rank+SUIT_LETTER[card.suit]; }
+function deckFaceSVG(card){ return rootRef.cardDeck(cardId(card)); }
+function deckBackSVG(){ return rootRef.cardDeck("back","rosette","navy"); }
+function deckSuitName(s){ return s.charAt(0).toUpperCase()+s.slice(1); }
+function deckCardName(card){ return card.rank+" of "+deckSuitName(card.suit); }
 function renderCardEl(card,opts){
   opts=opts||{};
   var el=document.createElement("div");
   el.className="bgn-card"+(opts.hover===false?" nohover":"");
   var dim=document.createElement("div"); dim.className="bgn-card-dim";
-  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=bgnDeck.cardFaceSVG(card);
-  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=bgnDeck.cardBackSVG();
+  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=deckFaceSVG(card);
+  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=deckBackSVG();
   dim.appendChild(face); dim.appendChild(back); el.appendChild(dim);
-  el.title=bgnDeck.cardName(card);
+  el.title=deckCardName(card);
   return el;
 }
 function renderCardBackEl(){
   var el=document.createElement("div");
   el.className="bgn-card nohover flipped";
   var dim=document.createElement("div"); dim.className="bgn-card-dim";
-  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=bgnDeck.cardBackSVG();
-  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=bgnDeck.cardBackSVG();
+  var face=document.createElement("div"); face.className="bgn-card-face"; face.innerHTML=deckBackSVG();
+  var back=document.createElement("div"); back.className="bgn-card-back"; back.innerHTML=deckBackSVG();
   dim.appendChild(face); dim.appendChild(back); el.appendChild(dim);
   el.title="Card back";
   return el;
@@ -1175,9 +1328,18 @@ var handModal=q("handModal"), handTitle=q("handTitle"), handSub=q("handSub"), ha
 var newGameBtn=q("newGameBtn"), menuBtn=q("menuBtn");
 var menuSheetBtn=q("menuSheetBtn"), sheetBackdrop=q("sheetBackdrop"), roomChip=q("roomChip");
 var sheetEl=document.querySelector(".h-side");
+var turnEl=q("turnEl"), leaveBtn=q("leaveBtn"), saveBtn=q("saveBtn");
+var chatBox=q("chatBox"), chatMsgsEl=q("chatMsgsEl"), chatInput=q("chatInput"), chatSendBtn=q("chatSendBtn");
+var continuePanel=q("continuePanel"), continueInfoEl=q("continueInfoEl"), continueBtn=q("continueBtn"), deleteSaveBtn=q("deleteSaveBtn");
+var boardEl=q("board");
+var fsOpenBtn=q("fsOpenBtn"), fsOverlay=q("fsOverlay"), fsStatusEl=q("fsStatusEl"), fsActionsCtn=q("fsActionsCtn"), fsExitBtn=q("fsExitBtn"), fsBoardWrap=q("fsBoardWrap"), fsTileCtn=q("fsTileCtn"), fsMeepleCtn=q("fsMeepleCtn");
+var helpOverlay=q("helpOverlay"), helpBody=q("helpBody");
 var SOLO_BOTS=["Bot A","Bot B","Bot C"];
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(m){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];}); }
+function cleanText(s,max){ return String(s==null?"":s).trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+function setBanner(t){ bannerEl.textContent=t; if(fsOverlay&&!fsOverlay.hidden)fsStatusEl.textContent=t; }
 function getPid(){
   try{
     var p=localStorage.getItem("bgnHearts_pid");
@@ -1291,13 +1453,25 @@ function renderBanner(){
       if(G.trick.length===0){
         t=G.heartsBroken?"Your lead — any card (hearts are broken ♥).":"Your lead — any card except hearts.";
       }else{
-        t="Your turn — follow "+bgnDeck.suitName(SUITS[suitOf(G.trick[0].card)])+" if you can.";
+        t="Your turn — follow "+deckSuitName(SUITS[suitOf(G.trick[0].card)])+" if you can.";
       }
     }else{
       t="Waiting for "+seatName(G.turnSeat)+"…";
     }
   }
-  bannerEl.textContent=t;
+  setBanner(t);
+}
+function renderTurn(){
+  var t="";
+  if(G.mode==="lobby"||G.mode===null){ t=""; }
+  else if(G.over){ t="Game over"; }
+  else if(G.mode==="online"&&G.status===1){ t="Waiting for players…"; }
+  else if(G.phase==="pass"){ t=G.passDir===3?"Hold hand — no passing":"Passing…"; }
+  else if(G.phase==="play"){
+    t=G.turnSeat===G.mySeat?"Your turn":"Waiting for "+seatName(G.turnSeat)+"…";
+  }
+  if(t)turnEl.textContent=t;
+  turnEl.hidden=!t;
 }
 function renderSide(){
   scoreBody.innerHTML="";
@@ -1335,12 +1509,116 @@ function renderSide(){
     roomBox.hidden=true;
     roomChip.hidden=true;
   }
+  chatBox.hidden=G.mode!=="online";
+  saveBtn.hidden=G.mode==="online"||G.over;
 }
-function renderAll(){ renderSeats(); renderTrick(); renderMyHand(); renderSide(); renderBanner(); }
+function renderAll(){ renderSeats(); renderTrick(); renderMyHand(); renderSide(); renderBanner(); renderTurn(); }
 function enableHand(){ handFan.classList.add("playable"); }
 function disableHand(){ handFan.classList.remove("playable"); }
-function flashBanner(t){ bannerEl.textContent=t; }
+function flashBanner(t){ setBanner(t); }
 function closeSheet(){ if(sheetEl)sheetEl.classList.remove("open"); if(sheetBackdrop)sheetBackdrop.classList.remove("show"); }
+
+/* ══════════ save / continue (solo) ══════════
+   The solo game is fully serializable, so a reload can pick up
+   exactly where it stopped — mid-hand, mid-trick, even mid-bot-turn. */
+var SAVE_KEY="bgn_save_hearts";
+function saveGame(){
+  if(G.mode!=="solo")return;
+  if(G.over){ deleteSave(); return; }
+  try{
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v:1, mode:"solo",
+      state:{
+        hands:G.hands, scores:G.scores, handNum:G.handNum, passDir:G.passDir, phase:G.phase,
+        passSel:G.passSel, trick:G.trick, leadSeat:G.leadSeat, turnSeat:G.turnSeat,
+        heartsBroken:G.heartsBroken, firstTrick:G.firstTrick, taken:G.taken, takenCounts:G.takenCounts,
+        handScores:G.handScores, shotMoon:G.shotMoon, over:G.over, winnerSeats:G.winnerSeats,
+        lastHand:G.lastHand, handTrickNo:G.handTrickNo, log:G.log
+      },
+      savedAt:Date.now()
+    }));
+  }catch(e){}
+}
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  var s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  var info="A saved solo game was found.";
+  try{ var o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — hand "+((o.state&&o.state.handNum)||1)+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function restoreMatch(o){
+  if(!o||o.mode!=="solo"||!o.state)return false;
+  var s=o.state;
+  G.mode="solo"; G.mySeat=0;
+  G.hands=s.hands; G.scores=s.scores; G.handNum=s.handNum; G.passDir=s.passDir;
+  G.phase=s.phase; G.passSel=s.passSel; G.trick=s.trick||[];
+  G.leadSeat=s.leadSeat; G.turnSeat=s.turnSeat;
+  G.heartsBroken=!!s.heartsBroken; G.firstTrick=!!s.firstTrick;
+  G.taken=s.taken; G.takenCounts=s.takenCounts; G.handScores=s.handScores;
+  G.shotMoon=s.shotMoon; G.over=!!s.over; G.winnerSeats=s.winnerSeats||[];
+  G.lastHand=s.lastHand||null; G.handTrickNo=s.handTrickNo||0;
+  G.log=s.log||[]; G.receivedFlash=[]; G.lastPlay=null;
+  G.locked=false; G.passDone=[false,false,false,false];
+  G.myHand=[]; G.seatsPub=null;
+  closeSheet();
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  _prevTrick=G.trick; _prevPhase=G.phase; _trickSeq=G.handTrickNo||0;
+  renderAll();
+  if(!G.over){
+    if(G.phase==="pass")openPassModal();
+    else if(G.turnSeat===0)enableHand();
+    else scheduleBot();
+  }
+  return true;
+}
+function continueGame(){
+  var o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.state){ flashBanner("No saved match found."); return; }
+  restoreMatch(o);
+}
+
+/* ══════════ table chat (online) ══════════ */
+function fmtTime(ts){ var d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(m){
+  var row=document.createElement("div");
+  row.className="chat-item"+(m.from===G.mySeat?" mine":"");
+  var nm=m.name||("Player "+(m.from+1));
+  row.innerHTML="<b>"+esc(nm)+"</b>"+esc(m.text||"")+'<span class="chat-time">'+fmtTime(m.ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+}
+function sendChat(){
+  var t=cleanText(chatInput.value,160);
+  if(!t||G.mode!=="online"||!G.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:G.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ help modal ══════════ */
+var HELP_HTML='<h2 class="goldtext">How to play BGN Hearts</h2>'
+  +'<p class="muted">Classic hearts for four — pass three, dodge the hearts and the queen of spades, shoot the moon. Two ways to sit down:</p>'
+  +'<h3>Two ways to play</h3>'
+  +'<p><b>🃏 Solo</b> — you against three bots. Pass your three cards, then play whenever the hand is yours.</p>'
+  +'<p><b>🌐 Online</b> — create a table and share the 5-letter code with three friends. The server validates every pass and play so nobody can cheat; dropped players are filled by bots, and a newcomer can take over the empty seat.</p>'
+  +'<h3>The deal</h3>'
+  +'<p>Each hand everyone <b>passes 3 cards</b> — left, right, across, then hold — repeating. The holder of the <b>2 of clubs</b> leads the first trick, and you must <b>follow suit</b> when you can.</p>'
+  +'<p>Every <b>heart is 1 point</b>; the <b>queen of spades is 13</b>. Lowest score wins. Don\u2019t lead hearts until they\u2019re <b>broken</b>, and no points may be dumped on the first trick.</p>'
+  +'<p>Take all 13 hearts <i>and</i> the queen to <b>shoot the moon</b> — everyone else takes 26 instead. When someone passes <b>100 points</b> the game ends; the lowest total wins.</p>'
+  +'<h3>Extras</h3>'
+  +'<p><b>💾 Save</b> captures a solo game so the lobby can continue it later. <b>📤 Share</b> downloads your table as JSON or a branded PNG. Online tables have <b>chat</b> for the four of you.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
 
 /* trick-change detection → log */
 var _prevTrick=null, _prevPhase=null, _trickSeq=0;
@@ -1378,9 +1656,11 @@ function onHandClick(code){
 function soloPlay(code){
   var r=enginePlayCard(G,0,code);
   if(!r.ok)return;
+  sfx("flip");
   if(G.trick.length===4)logTrickComplete();
   var ev=engineAdvance(G);
   renderAll();
+  saveGame();
   if(ev&&ev.hand){ showSoloHandOver(ev); return; }
   if(!G.over){
     if(G.turnSeat===0)enableHand();
@@ -1397,10 +1677,12 @@ function scheduleBot(){
     if(G.turnSeat===0){ enableHand(); return; }
     var card=aiSelectPlay(G.hands[G.turnSeat],G.trick,G.heartsBroken,G.firstTrick);
     if(card==null)return;
+    sfx("turn");
     enginePlayCard(G,G.turnSeat,card);
     if(G.trick.length===4)logTrickComplete();
     var ev=engineAdvance(G);
     renderAll();
+    saveGame();
     if(ev&&ev.hand){ showSoloHandOver(ev); return; }
     if(!G.over)scheduleBot();
   },820);
@@ -1412,9 +1694,11 @@ function soloStart(){
   G.scores=[0,0,0,0]; G.handNum=0; G.over=false; G.winnerSeats=[]; G.lastHand=null;
   G.shotMoon=-1; G.log=[]; G.receivedFlash=[]; G.trick=[]; G.handScores=[0,0,0,0];
   G.locked=false;
+  deleteSave();
   startNextHand(G);
   lobbyCtn.hidden=true; gameCtn.hidden=false; roomBox.hidden=true;
   _prevTrick=null; _prevPhase=null; _trickSeq=0;
+  sfx("deal");
   renderAll();
   if(G.phase==="pass")openPassModal();
 }
@@ -1431,7 +1715,9 @@ function doSoloPass(sel){
   G.receivedFlash=received.slice();
   setTimeout(function(){ G.receivedFlash=[]; renderMyHand(); },3200);
   G.log.push({txt:"Passing done — play begins.", cls:""});
+  sfx("deal");
   renderAll();
+  saveGame();
   if(!G.over){
     if(G.turnSeat===0)enableHand();
     else scheduleBot();
@@ -1492,6 +1778,7 @@ function fillHandModal(hand,over,winners){
 function showSoloHandOver(ev){
   closeSheet();
   fillHandModal(ev.hand,ev.over,ev.winners);
+  if(ev.over)sfx(ev.winners.indexOf(0)!==-1?"win":"lose");
   handMenuBtn.onclick=function(){ handModal.hidden=true; exitToLobby(); };
   handOkBtn.onclick=function(){
     handModal.hidden=true;
@@ -1506,6 +1793,7 @@ function showSoloHandOver(ev){
 function showHandOverServer(hand){
   closeSheet();
   fillHandModal(hand,hand.over,hand.winners||[]);
+  if(hand.over)sfx((hand.winners||[]).indexOf(G.mySeat)!==-1?"win":"lose");
   if(hand.over){
     handOkBtn.onclick=function(){
       handModal.hidden=true;
@@ -1576,6 +1864,7 @@ function onServerMsg(raw){
   try{ m=JSON.parse(raw); }catch(e){ return; }
   if(m.t==="pub")applyPub(m.pub,m.you);
   else if(m.t==="hand")showHandOverServer(m.hand);
+  else if(m.t==="chat")addChat(m);
 }
 function applyPub(pub,you){
   G.status=pub.status;
@@ -1703,6 +1992,7 @@ function exitToLobby(){
     gameCtn.hidden=true;
     lobbyCtn.hidden=false;
   }
+  refreshContinuePanel();
 }
 
 /* ══════════ wire up UI ══════════ */
@@ -1747,12 +2037,105 @@ if(roomChip)roomChip.addEventListener("click",function(){
   try{ navigator.clipboard.writeText(G.roomCode); }catch(e){}
   flashBanner("Room code copied — "+G.roomCode);
 });
+if(leaveBtn)leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+if(saveBtn)saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Match saved."); });
+if(continueBtn)continueBtn.addEventListener("click",continueGame);
+if(deleteSaveBtn)deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+if(chatSendBtn)chatSendBtn.addEventListener("click",sendChat);
+if(chatInput)chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+if(helpOverlay){
+  q("helpBtn").addEventListener("click",openHelp);
+  q("helpCloseBtn").addEventListener("click",closeHelp);
+  helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+}
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
 connectSocket();
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-hearts",
+    gameName:function(){ return val(rootRef.gameTitle,"BGN Hearts"); },
+    exportData:function(){
+      if(G.mode!=="solo")return null;
+      return {mode:"solo", state:{
+        hands:G.hands, scores:G.scores, handNum:G.handNum, passDir:G.passDir, phase:G.phase,
+        passSel:G.passSel, trick:G.trick, leadSeat:G.leadSeat, turnSeat:G.turnSeat,
+        heartsBroken:G.heartsBroken, firstTrick:G.firstTrick, taken:G.taken, takenCounts:G.takenCounts,
+        handScores:G.handScores, shotMoon:G.shotMoon, over:G.over, winnerSeats:G.winnerSeats,
+        lastHand:G.lastHand, handTrickNo:G.handTrickNo, log:G.log
+      }};
+    },
+    applySave:function(o){ if(!o||o.mode!=="solo")return false; return restoreMatch(o); },
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:function(){ return "BGN HEARTS"; },
+    subtitle:function(){ return "solo · hand "+G.handNum; },
+    filenameBase:function(){ return "bgn-hearts"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+
+/* ══════════ fullscreen board (BGN standard) ══════════ */
+var fsCfg={canvas:null,resize:null};
+function fsRefit(){ if(fsCfg.resize)try{ fsCfg.resize(); }catch(e){} renderAll(); }
+function openFullscreen(){
+  if(!fsCfg.canvas||!fsOverlay.hidden)return;
+  var el=fsCfg.canvas;
+  if(!el._fsOrig)el._fsOrig={parent:el.parentNode,next:el.nextSibling};
+  fsBoardWrap.appendChild(el);
+  fsOverlay.hidden=false;
+  fsStatusEl.textContent=bannerEl.textContent||"Full screen map";
+  document.body.style.overflow="hidden";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(document.fullscreenElement)try{ document.exitFullscreen().catch(function(){}); }catch(e){}
+  var el=fsCfg.canvas;
+  if(el&&el._fsOrig){
+    try{ el._fsOrig.parent.insertBefore(el,el._fsOrig.next); }catch(e){ el._fsOrig.parent.appendChild(el); }
+  }
+  fsRefit();
+  renderAll();
+}
+window.bgnFullscreen={
+  register:function(o){
+    if(!o||!o.canvas)return;
+    fsCfg.canvas=o.canvas;
+    if(typeof o.resize==="function")fsCfg.resize=o.resize;
+    if(o.tile)fsTileCtn.appendChild(o.tile);
+    if(o.meeple)fsMeepleCtn.appendChild(o.meeple);
+    fsOpenBtn.hidden=false;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({canvas:boardEl, resize:renderAll});
+
+refreshContinuePanel();
 
 /* ══════════ test hooks ══════════ */
 window.__heartsTest={
   G:G,
-  cardFaceSVG:function(card){ return bgnDeck.cardFaceSVG(card); },
+  cardFaceSVG:function(card){ return deckFaceSVG(card); },
   renderAll:renderAll,
   startSolo:function(){ soloStart(); },
   legalPlays:legalPlays, aiSelectPlay:aiSelectPlay, autoPass:autoPass,
@@ -1780,5 +2163,39 @@ window.__heartsTest={
 };
 
 renderAll();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:72px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
 })();
 </script>

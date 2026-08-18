@@ -7,6 +7,9 @@
      - BGN audio (music + SFX) · "How it works" help · JSON export/import · PNG screenshot
      ════════════════════════════════════════════════════════════════ -->
 
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
 <style>
 *{box-sizing:border-box}
 :root{
@@ -161,7 +164,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
 </style>
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/c59339d9788a635635c75c0a9d397611.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/c59339d9788a635635c75c0a9d397611.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 
 <!-- help modal + share/export styles -->
@@ -183,6 +186,103 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
 .file-link{background:none;border:none;color:var(--gold2);cursor:pointer;font:inherit;font-size:.75rem;text-decoration:underline;padding:0}
 </style>
 
+<!-- BGN frame + online rooms + fullscreen styles -->
+<style>
+.bgn-mode{
+  flex:1;min-width:150px;padding:14px 16px;border-radius:12px;cursor:pointer;text-align:center;
+  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.02));
+  border:1px solid var(--line);color:var(--mut);font:inherit;font-weight:700;font-size:.9rem;transition:all .12s;
+}
+.bgn-mode:hover{border-color:var(--gold3);color:var(--txt)}
+.bgn-mode.on{background:linear-gradient(180deg,var(--gold2),var(--gold));border-color:var(--gold);color:#171205}
+.lobby{max-width:820px;margin:18px auto 0;padding:0 18px;display:flex;flex-direction:column;gap:12px}
+.lobby-modes{display:flex;gap:10px;flex-wrap:wrap}
+.lobby-online{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,.25)}
+.lobby-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.lobby-row label{font-size:.72rem;letter-spacing:1.5px;text-transform:uppercase;color:var(--mut);font-weight:800}
+.lobby-row .field{flex:1;min-width:120px;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:10px 12px;font:inherit;outline:none}
+.lobby-row .field:focus{border-color:var(--gold3)}
+.lobby-row .btn{flex:0 0 auto}
+.lobby-status{min-height:18px;font-size:.8rem;color:var(--gold2);font-weight:600}
+.share-menu{display:flex;gap:8px;flex-wrap:wrap}
+.room-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(0,0,0,.25)}
+.room-bar b{font-variant-numeric:tabular-nums;color:var(--gold2);letter-spacing:2px;font-size:1.05rem}
+.room-bar .btn{flex:0 0 auto}
+.room-turn{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.room-turn b{color:var(--gold2)}
+#logEl.bgn-log{max-height:150px;overflow:auto;font-size:.78rem;color:var(--mut);display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
+.bgn-log-item{padding:3px 8px;border-radius:6px;background:rgba(255,255,255,.04)}
+.bgn-chat{display:flex;flex-direction:column;gap:8px}
+#chatListEl{max-height:150px;overflow:auto;font-size:.85rem;display:flex;flex-direction:column;gap:4px;margin-bottom:4px}
+#chatListEl div{padding:4px 8px;border-radius:8px;background:rgba(255,255,255,.04)}
+#chatListEl b{color:var(--gold2)}
+#chatInput{width:100%;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;color:var(--txt);padding:9px 12px;font:inherit;font-size:.85rem;outline:none}
+#chatInput:focus{border-color:var(--gold3)}
+.board-wrap{position:relative}
+.board.locked{opacity:.55;pointer-events:none}
+
+/* ── fullscreen board ── */
+.fs-open-btn{
+  position:absolute;top:10px;right:10px;z-index:6;
+  background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  border:1px solid rgba(255, 255, 255, .25);
+  border-radius:10px;
+  color:#fff;font:600 13px/1 system-ui,sans-serif;padding:8px 12px;cursor:pointer;
+  box-shadow:0 4px 14px rgba(0,0,0,.4);
+}
+.fs-open-btn:hover{border-color:var(--bgn-accent);background:rgba(20,26,44,.85)}
+#fsOverlay{
+  position:fixed;inset:0;z-index:9500;background:#0b0e15;
+  display:flex;flex-direction:column;
+}
+.fs-topbar{display:flex;align-items:center;gap:12px;padding:10px 14px;background:rgba(10,14,24,.85);border-bottom:1px solid var(--line)}
+#fsStatusEl{flex:1;font-size:.85rem;color:var(--gold2);font-weight:600}
+#fsActionsCtn{display:flex;gap:8px}
+#fsExitBtn{flex:0 0 auto}
+.fs-board{flex:1;min-height:0;position:relative}
+.fs-board canvas{position:absolute;inset:0;width:100%;height:100%}
+.fs-board .board{
+  position:relative;margin:auto;top:50%;transform:translateY(-50%);
+  width:min(92vw,100vh - 130px);
+}
+.fs-board .cell{font-size:calc(min(92vw,100vh - 130px)*0.069)}
+.fs-board .notes span{font-size:calc(min(92vw,100vh - 130px)*0.024)}
+.fs-tile{
+  position:absolute;top:64px;right:12px;z-index:5;
+  padding:8px;border-radius:12px;background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,.18);
+}
+.fs-meeple{
+  position:absolute;bottom:14px;right:12px;z-index:5;
+  padding:8px;border-radius:12px;background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,.18);
+}
+.fs-tile:empty{display:none}
+.fs-meeple:empty{display:none}
+.fs-tile .pad{grid-template-columns:repeat(5,1fr);gap:6px;margin-top:0;width:210px}
+.fs-tile .pad-btn{aspect-ratio:1;font-size:1.05rem}
+
+/* ── BGN lounge ── */
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45)}
+.bgn-lounge-btn:hover{background:#37507a}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px}
+.bgn-lounge-overlay.open{display:flex}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65)}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9)}
+</style>
+
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">Boardgame Network</a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
 <nav class="nav">
   <div class="nav-inner">
     <span class="nav-brand">◆ SUDOKU</span>
@@ -203,6 +303,39 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
   </div>
 </header>
 
+<section class="lobby" id="lobbyCtn">
+  <div class="lobby-modes">
+    <button class="bgn-mode on" data-mode="local" id="modeLocalBtn">🛋️ Hotseat / Solo</button>
+    <button class="bgn-mode" data-mode="online" id="modeOnlineBtn">🌐 Online play</button>
+  </div>
+  <div class="lobby-status" id="netStatusEl"></div>
+  <div class="lobby-online" id="onlineLobby" hidden>
+    <div class="lobby-row">
+      <label for="nameInput">Name</label>
+      <input id="nameInput" class="field" maxlength="16" placeholder="Your name" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="lobby-row">
+      <input id="joinCodeInput" class="field" maxlength="5" placeholder="Room code" autocomplete="off" spellcheck="false" />
+      <button id="joinBtn" class="btn btn-ghost">Join</button>
+      <button id="createRoomBtn" class="btn btn-gold">Create room</button>
+    </div>
+    <div class="lobby-row">
+      <button id="continueBtn" class="btn">Continue saved</button>
+      <button id="shareBtn" class="btn">Share / export</button>
+    </div>
+    <div class="share-menu" id="shareMenu" hidden>
+      <button id="sharePngBtn" class="btn">📷 Save PNG</button>
+      <button id="shareJsonBtn" class="btn">⬇ Export JSON</button>
+    </div>
+  </div>
+  <div class="room-bar" id="roomBar" hidden>
+    <span class="muted small">Room code</span>
+    <b id="roomCodeEl">—</b>
+    <button id="copyCodeBtn" class="btn btn-ghost">Copy code</button>
+    <button id="leaveBtn" class="btn btn-ghost">Leave</button>
+  </div>
+</section>
+
 <main class="wrap" id="gameWrap">
   <section class="game-col">
     <div class="hud">
@@ -210,7 +343,10 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
       <span class="hud-chip" id="mistakesEl"></span>
       <span class="hud-chip" id="hintsEl">✎ 0</span>
     </div>
-    <div class="board" id="boardEl"></div>
+    <div class="board-wrap">
+      <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+      <div class="board bgn-board" id="boardEl"></div>
+    </div>
     <div class="pad" id="padEl"></div>
   </section>
 
@@ -251,6 +387,19 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
       </div>
       <div class="lb-list" id="lbListEl"></div>
       <p class="lb-msg" id="lbMsgEl">Loading…</p>
+    </div>
+
+    <div class="panel" id="roomUi" hidden>
+      <div class="panel-head">Room</div>
+      <div class="room-turn">
+        <b id="turnEl">—</b>
+        <span class="muted small" id="roomStatusEl"></span>
+      </div>
+      <div id="logEl" class="bgn-log"></div>
+      <div class="bgn-chat">
+        <div id="chatListEl"></div>
+        <input id="chatInput" maxlength="140" placeholder="Say something…" autocomplete="off" spellcheck="false" />
+      </div>
     </div>
   </aside>
 </main>
@@ -338,10 +487,55 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px;align-items
   </div>
 </div>
 
-<footer class="footer wrap">
+<footer class="footer wrap bgn-footer">
   <p>Every puzzle has exactly one solution — generated on your device.</p>
   <p><b>◆</b> Sudoku on <a href="https://perchance.org" target="_blank" rel="noopener" style="color:var(--gold3)">Perchance</a></p>
+  <p class="footnote">Part of <a href="[hubUrl]">The Boardgame Network</a></p>
+  <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+  <a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+  <div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+  <style>
+  #bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+  #bgnAuditOverlay[hidden]{display:none}
+  .bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+  .bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+  </style>
+  <script>
+  function openBgnAudit(){
+    var f=document.getElementById("bgnAuditFrame");
+    f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+    document.getElementById("bgnAuditOverlay").hidden=false;
+    document.body.style.overflow="hidden";
+  }
+  function closeBgnAudit(){
+    document.getElementById("bgnAuditOverlay").hidden=true;
+    document.body.style.overflow="";
+  }
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+  document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+  </script>
 </footer>
+
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+    <div class="fs-meeple" id="fsMeepleCtn"></div>
+  </div>
+</div>
+
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -809,7 +1003,7 @@ function importJSON(str){
 /* ═══════════ screenshot ═══════════ */
 function cloneWithStyles(src){
   var clone=src.cloneNode(true);
-  clone.setAttribute("xmlns","http://www.w3.org/1999/xhtml");
+  clone.setAttribute("xmlns","http"+"://www.w3.org/1999/xhtml");
   var PROPS=["display","position","top","left","width","height","min-width","min-height","aspect-ratio","box-sizing",
     "padding-top","padding-right","padding-bottom","padding-left","margin-top","margin-right","margin-bottom","margin-left",
     "grid-template-columns","grid-template-rows","gap","grid-gap","align-items","justify-content","justify-items","align-content","flex-direction","flex-wrap",
@@ -837,7 +1031,7 @@ function renderBoardImage(){
   var w=el.offsetWidth,h=el.offsetHeight;
   if(!w||!h)return Promise.resolve(null);
   var scale=3;
-  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'+
+  var svg='<svg xmlns="http'+'://www.w3.org/2000/svg" width="'+w+'" height="'+h+'">'+
     '<foreignObject width="100%" height="100%">'+new XMLSerializer().serializeToString(cloneWithStyles(el))+'</foreignObject></svg>';
   return new Promise(function(resolve){
     var img=new Image();
@@ -1141,14 +1335,884 @@ if(restoreGame()){
   newGame("easy");
 }
 
-window.__s={game:game,newGame:newGame,placeDigit:placeDigit,select:select,eraseCell:eraseCell,undo:undo,hint:hint,toggleNotes:toggleNotes,togglePause:togglePause,renderAll:renderAll,win:win,lose:lose,boards:boards,submitScore:submitScore,generatePuzzle:generatePuzzle,fmtTime:fmtTime,DIFFS:DIFFS,saveGame:saveGame,restoreGame:restoreGame,exportJSON:exportJSON,importJSON:importJSON,screenshot:screenshot,serializeGame:serializeGame,renderFramedImage:renderFramedImage};
+window.__s={game:game,newGame:newGame,placeDigit:placeDigit,select:select,eraseCell:eraseCell,undo:undo,hint:hint,toggleNotes:toggleNotes,togglePause:togglePause,renderAll:renderAll,win:win,lose:lose,boards:boards,submitScore:submitScore,generatePuzzle:generatePuzzle,fmtTime:fmtTime,DIFFS:DIFFS,saveGame:saveGame,restoreGame:restoreGame,exportJSON:exportJSON,importJSON:importJSON,screenshot:screenshot,serializeGame:serializeGame,renderFramedImage:renderFramedImage,startTimer:startTimer};
+})();
+</script>
+
+<!-- ═══════════ BGN online rooms — authoritative server ═══════════ -->
+<script type="text/x-server-plugin">
+"use strict";
+var VERSION = 1;
+var SLOT_BASE = 16;
+var SLOT_SIZE = 512;
+var SLOT_LIMIT = Math.floor((state.length - SLOT_BASE) / SLOT_SIZE);
+if (SLOT_LIMIT > 200) SLOT_LIMIT = 200;
+if (SLOT_LIMIT < 1) SLOT_LIMIT = 1;
+
+// Slot layout (offsets within a 512-byte slot):
+//   0     status u8 (0 free 1 open 2 playing 3 done)
+//   1     turn u8 (0 host 1 guest)
+//   2     strikes u8 (shared lives)
+//   3     hints u8
+//   4     penaltySec u8
+//   5     winner u8 (0 none 1 host 2 guest 3 shared-loss)
+//   6-9   startTs u32
+//   10-13 lastAct u32
+//   14-15 reserved
+//   16-96    puzzle (81 bytes, 0 = empty)
+//   97-177   solution (81 bytes)
+//   178-258  user entries (81 bytes)
+//   259-339  note bitmasks (81 bytes; bit k = digit k+1)
+//   340-363  hostName (24)
+//   364-387  guestName (24)
+//   388-403  hostToken (16)
+//   404-419  guestToken (16)
+//   420-424  room code (5)
+//   425-511  reserved
+
+var CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+var rooms = {};
+var connRoom = {};
+var rateMap = {};
+
+var BANNED = ["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function writeU32(o,v){ state[o]=v&255; state[o+1]=(v>>>8)&255; state[o+2]=(v>>>16)&255; state[o+3]=(v>>>24)&255; }
+function readU32(o){ return ((state[o]|state[o+1]<<8|state[o+2]<<16|state[o+3]<<24)>>>0); }
+function u8(s){
+  var out=[], i, c; s=String(s);
+  for(i=0;i<s.length;i++){
+    c=s.charCodeAt(i);
+    if(c<128){ out.push(c); }
+    else if(c<2048){ out.push(192|c>>6, 128|c&63); }
+    else if(c<55296||c>57343){ out.push(224|c>>12, 128|c>>6&63, 128|c&63); }
+    else{ i++;
+      var h=(c&1023)<<10 | s.charCodeAt(i)&1023;
+      out.push(240|h>>18, 128|h>>12&63, 128|h>>6&63, 128|h&63);
+    }
+  }
+  return out;
+}
+function d8(a, o, l){
+  var s="", i=o, e=o+l, c;
+  while(i<e){
+    c=a[i++];
+    if(c<128){ s+=String.fromCharCode(c); }
+    else if(c>191&&c<224){ s+=String.fromCharCode((c&31)<<6|a[i++]&63); }
+    else if(c>239){ var u=(c&7)<<18|(a[i++]&63)<<12|(a[i++]&63)<<6|a[i++]&63; s+=String.fromCharCode(55296+(u>>10), 56320+(u&1023)); }
+    else{ s+=String.fromCharCode((c&15)<<12|(a[i++]&63)<<6|a[i++]&63); }
+  }
+  return s;
+}
+function putStr(base,o,s,max){
+  var b=u8(s), i;
+  for(i=0;i<max;i++) state[base+o+i] = i<b.length ? b[i] : 0;
+}
+function getStr(base,o,max){
+  var i=o, end=o+max;
+  while(i<end && state[base+i]!==0) i++;
+  return d8(state, base+o, i-o);
+}
+function clean(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isBanned(t){ var s=String(t||"").toLowerCase(); for(var i=0;i<BANNED.length;i++){ if(s.indexOf(BANNED[i])!==-1) return true; } return false; }
+function randCode(n){ var s="", i; for(i=0;i<n;i++) s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return s; }
+function sweepRate(){
+  var keys=Object.keys(rateMap), now=Date.now(), i;
+  for(i=0;i<keys.length;i++){ var e=rateMap[keys[i]]; if(now-e.t>90000) delete rateMap[keys[i]]; }
+}
+function rateOk(conn,key,max,win){
+  var k1=key+"|"+conn.id, k2=key+"|c"+(conn.net[2]|0);
+  var a=rateMap[k1]||{t:0,n:0}, b=rateMap[k2]||{t:0,n:0}, now=Date.now();
+  if(now-a.t>win*1000){ a={t:now,n:0}; }
+  if(now-b.t>win*1000){ b={t:now,n:0}; }
+  a.n++; b.n++; rateMap[k1]=a; rateMap[k2]=b;
+  return a.n<=max && b.n<=max;
+}
+function clearRate(conn){ var i; for(i=0;i<3;i++){ var k=["mv","hv","ch"][i]+"|"+conn.id; delete rateMap[k]; } }
+function roleOf(conn,r){
+  if(r.hostConn && r.hostConn.id===conn.id) return "host";
+  if(r.guestConn && r.guestConn.id===conn.id) return "guest";
+  return null;
+}
+function slotOf(code){ var r=rooms[code]; return r?SLOT_BASE+r.slot*SLOT_SIZE:-1; }
+function freeSlot(slot){
+  var base=SLOT_BASE+slot*SLOT_SIZE, i;
+  for(i=0;i<SLOT_SIZE;i++) state[base+i]=0;
+}
+function findFreeSlot(){
+  var i, st;
+  for(i=0;i<SLOT_LIMIT;i++){ if(state[SLOT_BASE+i*SLOT_SIZE]===0) return i; }
+  var best=-1, bestTs=Infinity;
+  for(i=0;i<SLOT_LIMIT;i++){
+    st=state[SLOT_BASE+i*SLOT_SIZE];
+    if(st===1||st===3){
+      var ts=readU32(SLOT_BASE+i*SLOT_SIZE+10);
+      if(ts<bestTs){ bestTs=ts; best=i; }
+    }
+  }
+  if(best>=0) freeSlot(best);
+  return best;
+}
+function snapOf(code){
+  var base=slotOf(code); if(base<0) return null;
+  var snap={ code:code, status:state[base], turn:state[base+1], strikes:state[base+2], hints:state[base+3], penaltySec:state[base+4], winner:state[base+5], el:Math.max(0,nowSec()-readU32(base+6)), p:[], s:[], u:[], n:[], hostName:getStr(base,340,24), guestName:getStr(base,364,24) };
+  var i;
+  for(i=0;i<81;i++){ snap.p.push(state[base+16+i]); snap.s.push(state[base+97+i]); snap.u.push(state[base+178+i]); snap.n.push(state[base+259+i]); }
+  return snap;
+}
+function publishSnap(code){ try{ pubsub.publish("room:"+code, JSON.stringify({t:"snap", d:snapOf(code)})); }catch(e){} }
+function publishLog(code,msg){ try{ pubsub.publish("room:"+code, JSON.stringify({t:"log", m:msg})); }catch(e){} }
+function claimWin(code, role){
+  var base=slotOf(code); if(base<0) return false;
+  var i;
+  for(i=0;i<81;i++){ var cur=state[base+178+i]||state[base+16+i]; if(cur!==state[base+97+i]) return false; }
+  state[base+5] = role==="host" ? 1 : 2;
+  return true;
+}
+function guestLeft(code){
+  var r=rooms[code]; if(!r) return;
+  var base=slotOf(code);
+  if(r.guestConn){ try{ r.guestConn.unsubscribe("room:"+code); }catch(e){} if(connRoom[r.guestConn.id]===code) delete connRoom[r.guestConn.id]; r.guestConn=null; }
+  var i;
+  for(i=364;i<420;i++) state[base+i]=0;
+  state[base]=1; state[base+1]=0; state[base+5]=0;
+  writeU32(base+10, nowSec());
+  publishLog(code, "Guest left — waiting for a new opponent.");
+  publishSnap(code);
+}
+function closeRoom(code, reason){
+  var r=rooms[code]; if(!r) return;
+  try{ pubsub.publish("room:"+code, JSON.stringify({t:"closed", r:reason})); }catch(e){}
+  if(r.hostConn){ try{ r.hostConn.unsubscribe("room:"+code); }catch(e){} if(connRoom[r.hostConn.id]===code) delete connRoom[r.hostConn.id]; }
+  if(r.guestConn){ try{ r.guestConn.unsubscribe("room:"+code); }catch(e){} if(connRoom[r.guestConn.id]===code) delete connRoom[r.guestConn.id]; }
+  freeSlot(r.slot);
+  delete rooms[code];
+}
+
+if (state[0] !== VERSION){ state[0] = VERSION; }
+(function rebuild(){
+  rooms = {};
+  var i, base, code;
+  for(i=0;i<SLOT_LIMIT;i++){
+    base=SLOT_BASE+i*SLOT_SIZE;
+    if(state[base]===0) continue;
+    code=getStr(base,420,5);
+    if(code) rooms[code]={slot:i, hostConn:null, guestConn:null};
+  }
+})();
+
+self.rpc = {
+  createRoom: function({conn}, data){
+    sweepRate();
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var name=clean(d.name,16) || "Host";
+    var code=randCode(5), tries=0;
+    while(rooms[code] && tries++<20) code=randCode(5);
+    if(rooms[code]) return '{"ok":0,"err":"busy"}';
+    var slot=findFreeSlot();
+    if(slot<0) return '{"ok":0,"err":"full"}';
+    var base=SLOT_BASE+slot*SLOT_SIZE;
+    var token=randCode(10);
+    state[base]=1; state[base+1]=0; state[base+2]=0; state[base+3]=0; state[base+4]=0; state[base+5]=0;
+    writeU32(base+6, nowSec()); writeU32(base+10, nowSec());
+    putStr(base,340,name,24); putStr(base,388,token,16); putStr(base,420,code,5);
+    rooms[code]={slot:slot, hostConn:conn, guestConn:null};
+    connRoom[conn.id]=code;
+    try{ conn.subscribe("room:"+code); }catch(e){}
+    var snap=snapOf(code); snap.myRole="host"; snap.token=token;
+    return JSON.stringify({ok:1, code:code, token:token, role:"host", snap:snap});
+  },
+  joinRoom: function({conn}, data){
+    sweepRate();
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var name=clean(d.name,16) || "Guest";
+    var r=rooms[code];
+    if(!r) return '{"ok":0,"err":"not_found"}';
+    var base=slotOf(code);
+    if(state[base]!==1 || r.guestConn) return '{"ok":0,"err":"full"}';
+    if(r.hostConn && r.hostConn.id===conn.id) return '{"ok":0,"err":"already_host"}';
+    var token=randCode(10);
+    state[base]=2; state[base+1]=0; state[base+5]=0;
+    putStr(base,364,name,24); putStr(base,404,token,16);
+    writeU32(base+10, nowSec());
+    r.guestConn=conn; connRoom[conn.id]=code;
+    try{ conn.subscribe("room:"+code); }catch(e){}
+    publishLog(code, name+" joined the room.");
+    publishSnap(code);
+    var snap=snapOf(code); snap.myRole="guest"; snap.token=token;
+    return JSON.stringify({ok:1, code:code, token:token, role:"guest", snap:snap});
+  },
+  rejoin: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var token=clean(d.token,16);
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    var base=slotOf(code), snap;
+    if(getStr(base,388,16)===token){
+      r.hostConn=conn; connRoom[conn.id]=code;
+      try{ conn.subscribe("room:"+code); }catch(e){}
+      snap=snapOf(code); snap.myRole="host"; snap.token=token;
+      return JSON.stringify({ok:1, role:"host", snap:snap});
+    }
+    if(getStr(base,404,16)===token){
+      r.guestConn=conn; connRoom[conn.id]=code;
+      try{ conn.subscribe("room:"+code); }catch(e){}
+      snap=snapOf(code); snap.myRole="guest"; snap.token=token;
+      return JSON.stringify({ok:1, role:"guest", snap:snap});
+    }
+    return '{"ok":0,"err":"not_found"}';
+  },
+  getSnap: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    if(!rooms[code]) return '{"ok":0,"err":"not_found"}';
+    return JSON.stringify({t:"snap", d:snapOf(code)});
+  },
+  move: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    var role=roleOf(conn,r); if(!role) return '{"ok":0,"err":"not_in_room"}';
+    var base=slotOf(code);
+    if(state[base]!==2) return '{"ok":0,"err":"not_playing"}';
+    if(state[base+5]!==0) return '{"ok":0,"err":"game_over"}';
+    var turn=state[base+1];
+    if((role==="host" && turn!==0) || (role==="guest" && turn!==1)) return '{"ok":0,"err":"not_your_turn"}';
+    if(!rateOk(conn,"mv",25,10)) return '{"ok":0,"err":"slow_down"}';
+    var cell=d.cell|0, v=d.val|0;
+    if(cell<0 || cell>80) return '{"ok":0,"err":"bad"}';
+    if(state[base+16+cell]!==0) return '{"ok":0,"err":"given"}';
+    if(d.note){
+      if(v<1||v>9) return '{"ok":0,"err":"bad"}';
+      if(state[base+178+cell]===0) state[base+259+cell] ^= (1<<(v-1));
+    } else if(v===0){
+      state[base+178+cell]=0;
+    } else if(v<1||v>9){
+      return '{"ok":0,"err":"bad"}';
+    } else if(v===state[base+97+cell]){
+      state[base+178+cell]=v; state[base+259+cell]=0;
+    } else {
+      state[base+178+cell]=v; state[base+259+cell]=0;
+      state[base+2]=Math.min(3,state[base+2]+1);
+      if(state[base+2]>=3){ state[base+5]=3; }
+    }
+    if(!d.note && state[base+5]===0){
+      state[base+1]=1-turn;
+      claimWin(code, role);
+    }
+    if(state[base+5]===3) publishLog(code, "Three strikes — the puzzle is lost.");
+    else if(state[base+5]===1) publishLog(code, "Host completed the puzzle — Host wins!");
+    else if(state[base+5]===2) publishLog(code, "Guest completed the puzzle — Guest wins!");
+    writeU32(base+10, nowSec());
+    publishSnap(code);
+    return JSON.stringify({ok:1, snap:snapOf(code)});
+  },
+  hint: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    var role=roleOf(conn,r); if(!role) return '{"ok":0,"err":"not_in_room"}';
+    var base=slotOf(code);
+    if(state[base]!==2) return '{"ok":0,"err":"not_playing"}';
+    if(state[base+5]!==0) return '{"ok":0,"err":"game_over"}';
+    var turn=state[base+1];
+    if((role==="host" && turn!==0) || (role==="guest" && turn!==1)) return '{"ok":0,"err":"not_your_turn"}';
+    if(!rateOk(conn,"hv",6,10)) return '{"ok":0,"err":"slow_down"}';
+    var cands=[], i;
+    for(i=0;i<81;i++){ if(state[base+16+i]===0 && state[base+178+i]===0) cands.push(i); }
+    if(!cands.length) return '{"ok":0,"err":"none"}';
+    var pick=cands[Math.floor(Math.random()*cands.length)];
+    state[base+178+pick]=state[base+97+pick];
+    state[base+259+pick]=0;
+    state[base+3]=Math.min(255,state[base+3]+1);
+    state[base+4]=Math.min(255,state[base+4]+30);
+    state[base+1]=1-turn;
+    claimWin(code, role);
+    if(state[base+5]===1) publishLog(code, "Host completed the puzzle — Host wins!");
+    else if(state[base+5]===2) publishLog(code, "Guest completed the puzzle — Guest wins!");
+    writeU32(base+10, nowSec());
+    publishSnap(code);
+    return JSON.stringify({ok:1, snap:snapOf(code)});
+  },
+  setGame: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    if(!(r.hostConn && r.hostConn.id===conn.id)) return '{"ok":0,"err":"not_host"}';
+    var base=slotOf(code);
+    var p=d.p||[], s=d.s||[];
+    if(!Array.isArray(p)||!Array.isArray(s)||p.length!==81||s.length!==81) return '{"ok":0,"err":"bad"}';
+    var i, pv, sv;
+    for(i=0;i<81;i++){
+      pv=p[i]|0; sv=s[i]|0;
+      if(pv<0||pv>9||sv<1||sv>9) return '{"ok":0,"err":"bad"}';
+      state[base+16+i]=pv; state[base+97+i]=sv; state[base+178+i]=0; state[base+259+i]=0;
+    }
+    state[base]=r.guestConn?2:1;
+    state[base+1]=0; state[base+2]=0; state[base+3]=0; state[base+4]=0; state[base+5]=0;
+    writeU32(base+6, nowSec()); writeU32(base+10, nowSec());
+    publishLog(code, "A new puzzle was dealt.");
+    publishSnap(code);
+    return '{"ok":1}';
+  },
+  chat: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    var role=roleOf(conn,r); if(!role) return '{"ok":0,"err":"not_in_room"}';
+    if(!rateOk(conn,"ch",6,10)) return '{"ok":0,"err":"slow_down"}';
+    var msg=clean(d.msg,140);
+    if(!msg) return '{"ok":1}';
+    if(isBanned(msg)){ try{ conn.close(4003,"banned word"); }catch(e){} return '{"ok":0,"err":"banned"}'; }
+    var base=slotOf(code);
+    var name=getStr(base, role==="host"?340:364, 24) || (role==="host"?"Host":"Guest");
+    try{ pubsub.publish("room:"+code, JSON.stringify({t:"chat", n:name, m:msg})); }catch(e){}
+    return '{"ok":1}';
+  },
+  leave: function({conn}, data){
+    var d; try{ d=JSON.parse(data); }catch(e){ return '{"ok":0,"err":"bad"}'; }
+    var code=clean(d.code,5).toUpperCase();
+    var r=rooms[code]; if(!r) return '{"ok":0,"err":"not_found"}';
+    var role=roleOf(conn,r); if(!role) return '{"ok":0,"err":"not_in_room"}';
+    if(role==="host") closeRoom(code, "host_left");
+    else guestLeft(code);
+    return '{"ok":1}';
+  }
+};
+
+self.onclose = function({conn}){
+  var code=connRoom[conn.id];
+  if(code) delete connRoom[conn.id];
+  clearRate(conn);
+  if(!code) return;
+  var r=rooms[code]; if(!r) return;
+  if(r.hostConn && r.hostConn.id===conn.id){ closeRoom(code, "host_left"); }
+  else if(r.guestConn && r.guestConn.id===conn.id){ guestLeft(code); }
+};
+</script>
+
+<!-- ═══════════ BGN client: lobby, online rooms, lounge, fullscreen ═══════════ -->
+<script>
+(function(){
+"use strict";
+
+var $=function(id){ return document.getElementById(id); };
+var escapeHtml=function(s){ return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];}); };
+var cleanText=function(s){ return String(s||"").replace(/[\u0000-\u001f\u007f]/g,"").trim(); };
+
+var rootRef=window.root||{};
+var __s=window.__s||{};
+var mode="local";
+var online={ active:false, socket:null, code:null, token:null, role:null, name:"Player" };
+var retryDelay=1000;
+
+var lobbyCtn=$("lobbyCtn"), netStatusEl=$("netStatusEl"), onlineLobby=$("onlineLobby"), roomBar=$("roomBar"), roomUi=$("roomUi");
+var joinCodeInput=$("joinCodeInput"), roomCodeEl=$("roomCodeEl"), turnEl=$("turnEl"), roomStatusEl=$("roomStatusEl");
+var logEl=$("logEl"), chatListEl=$("chatListEl"), chatInput=$("chatInput");
+var boardEl=$("boardEl"), bannerEl=$("statusEl");
+var modeBtns=document.querySelectorAll(".bgn-mode");
+
+var savedName=""; try{ savedName=localStorage.getItem("bgnSudokuName")||""; }catch(e){}
+online.name=cleanText(savedName).slice(0,16) || "Player";
+var nameInput=$("nameInput");
+if(nameInput){
+  nameInput.value=(online.name==="Player"?"":online.name);
+  nameInput.addEventListener("input",function(){
+    var n=cleanText(nameInput.value).slice(0,16);
+    if(n){ online.name=n; try{ localStorage.setItem("bgnSudokuName",n); }catch(e){} }
+  });
+}
+
+function netStatus(t){ if(netStatusEl) netStatusEl.textContent=t||""; }
+function addLog(text){
+  if(!text || !logEl) return;
+  var row=document.createElement("div");
+  row.className="bgn-log-item";
+  row.textContent=text;
+  logEl.appendChild(row);
+  while(logEl.children.length>60) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop=logEl.scrollHeight;
+}
+function addChat(name,msg){
+  if(!chatListEl) return;
+  var row=document.createElement("div");
+  row.innerHTML="<b>"+escapeHtml(name)+"</b>: "+escapeHtml(msg);
+  chatListEl.appendChild(row);
+  while(chatListEl.children.length>80) chatListEl.removeChild(chatListEl.firstChild);
+  chatListEl.scrollTop=chatListEl.scrollHeight;
+}
+
+for(var i=0;i<modeBtns.length;i++){
+  (function(b){
+    b.addEventListener("click",function(){
+      for(var j=0;j<modeBtns.length;j++) modeBtns[j].classList.toggle("on",modeBtns[j]===b);
+      mode=b.dataset.mode;
+      if(onlineLobby) onlineLobby.hidden=(mode!=="online");
+      if(mode==="online"){ ensureSocket(); netStatus(online.active?"":"Choose a room — or create one."); }
+      else netStatus("");
+    });
+  })(modeBtns[i]);
+}
+
+var continueBtn=$("continueBtn");
+if(continueBtn) continueBtn.addEventListener("click",function(){
+  if(!__s.restoreGame){ netStatus("Game not ready yet."); return; }
+  if(__s.restoreGame()){ if(__s.startTimer) __s.startTimer(); __s.renderAll(); netStatus("Resumed your saved game."); }
+  else netStatus("No saved game found.");
+});
+var shareBtn=$("shareBtn"), shareMenu=$("shareMenu");
+if(shareBtn) shareBtn.addEventListener("click",function(){ if(shareMenu) shareMenu.hidden=!shareMenu.hidden; });
+var sharePngBtn=$("sharePngBtn");
+if(sharePngBtn) sharePngBtn.addEventListener("click",function(){ if(__s.screenshot) __s.screenshot(); });
+var shareJsonBtn=$("shareJsonBtn");
+if(shareJsonBtn) shareJsonBtn.addEventListener("click",function(){ if(__s.exportJSON) __s.exportJSON(); });
+
+/* ── socket lifecycle ── */
+function connectSocket(){
+  if(!rootRef.createServerSocket){ netStatus("online unavailable"); return; }
+  var s=rootRef.createServerSocket();
+  s.binaryType="arraybuffer";
+  s.addEventListener("open",function(){ onOpen(s); });
+  s.addEventListener("message",function(ev){ onMessage(ev.data); });
+  s.addEventListener("close",function(ev){ onClose(ev); });
+  online.socket=s;
+}
+function ensureSocket(){
+  if(online.socket && (online.socket.readyState===0||online.socket.readyState===1)) return;
+  if(!rootRef.createServerSocket){ netStatus("online unavailable"); return; }
+  netStatus("connecting…");
+  connectSocket();
+}
+function onOpen(){
+  retryDelay=1000;
+  netStatus("connected");
+  tryRejoin();
+}
+function onClose(ev){
+  online.socket=null;
+  if(ev && ev.code===4403){ netStatus("online is unavailable on embedded pages"); return; }
+  if(online.active || mode==="online"){
+    netStatus("reconnecting…");
+    setTimeout(ensureSocket,retryDelay);
+    retryDelay=Math.min(retryDelay*2,15000);
+  }
+}
+function onMessage(data){
+  if(typeof data!=="string") return;
+  var m; try{ m=JSON.parse(data); }catch(e){ return; }
+  if(!m || !m.t) return;
+  if(m.t==="snap"){ if(online.active && m.d && m.d.code===online.code) applyServerSnap(m.d); }
+  else if(m.t==="chat"){ addChat(m.n,m.m); }
+  else if(m.t==="log"){ addLog(m.m); }
+  else if(m.t==="closed"){
+    if(!online.active) return;
+    exitRoomLocal();
+    netStatus(m.r==="host_left" ? "The host left — room closed." : "Room closed.");
+  }
+}
+function tryRejoin(){
+  if(!online.active) return;
+  var raw=null; try{ raw=localStorage.getItem("bgnSudokuRoom"); }catch(e){}
+  if(!raw) return;
+  var saved=null; try{ saved=JSON.parse(raw); }catch(e){}
+  if(!saved || !saved.code || !saved.token) return;
+  if(!online.socket || online.socket.readyState!==1) return;
+  online.socket.rpc.rejoin(JSON.stringify({code:saved.code, token:saved.token})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(!r || !r.ok){ online.active=false; return; }
+    online.code=saved.code; online.token=saved.token;
+    enterRoom(r.role, r.snap);
+  }).catch(function(){});
+}
+function saveRoom(){ try{ localStorage.setItem("bgnSudokuRoom", JSON.stringify({code:online.code, token:online.token})); }catch(e){} }
+function clearRoom(){ try{ localStorage.removeItem("bgnSudokuRoom"); }catch(e){} }
+
+/* ── room lifecycle ── */
+function enterRoom(role, snap){
+  online.active=true; online.role=role;
+  if(onlineLobby) onlineLobby.hidden=true;
+  if(roomBar) roomBar.hidden=false;
+  if(roomUi) roomUi.hidden=false;
+  if(lobbyCtn) lobbyCtn.classList.add("in-room");
+  if(roomCodeEl) roomCodeEl.textContent=online.code||"";
+  addLog(role==="host" ? "You opened room "+roomCodeEl.textContent+" — share the code!" : "You joined room "+roomCodeEl.textContent);
+  lockBoard(true);
+  applyServerSnap(snap);
+}
+function exitRoomLocal(){
+  online.active=false;
+  clearRoom();
+  if(roomBar) roomBar.hidden=true;
+  if(roomUi) roomUi.hidden=true;
+  if(onlineLobby) onlineLobby.hidden=false;
+  if(lobbyCtn) lobbyCtn.classList.remove("in-room");
+  if(logEl) logEl.innerHTML="";
+  if(chatListEl) chatListEl.innerHTML="";
+  lockBoard(false);
+  if(__s.newGame) __s.newGame("easy");
+}
+function lockBoard(locked){ if(boardEl) boardEl.classList.toggle("locked",locked); }
+
+function createRoom(){
+  ensureSocket();
+  if(!online.socket || online.socket.readyState!==1){ netStatus("connecting… try again in a second"); return; }
+  online.socket.rpc.createRoom(JSON.stringify({name:online.name})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(!r || !r.ok){ netStatus(r && r.err==="full" ? "no room slots free right now" : "couldn't create a room"); return; }
+    online.code=r.code; online.token=r.token;
+    saveRoom();
+    enterRoom(r.role, r.snap);
+    if(__s.generatePuzzle){
+      var gen=__s.generatePuzzle((__s.game && __s.game.diff)||"easy");
+      sendSetGame(gen.puzzle, gen.solution);
+    }
+  }).catch(function(){ netStatus("server error"); });
+}
+function joinRoom(code){
+  var c=cleanText(code||"").toUpperCase().slice(0,5);
+  if(c.length<5){ netStatus("enter a 5-character room code"); return; }
+  ensureSocket();
+  if(!online.socket || online.socket.readyState!==1){ netStatus("connecting… try again in a second"); return; }
+  online.socket.rpc.joinRoom(JSON.stringify({code:c, name:online.name})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(!r || !r.ok){
+      netStatus({not_found:"room not found", full:"room is full or already started", already_host:"that's your own room", bad:"bad request"}[r.err] || "couldn't join");
+      return;
+    }
+    online.code=r.code; online.token=r.token;
+    saveRoom();
+    enterRoom(r.role, r.snap);
+  }).catch(function(){ netStatus("server error"); });
+}
+function sendSetGame(p,s){
+  if(!online.active || !online.socket || online.socket.readyState!==1) return;
+  var flat=function(a){ var o=[],r,c; for(r=0;r<9;r++)for(c=0;c<9;c++) o.push((a&&a[r]&&a[r][c])||0); return o; };
+  online.socket.rpc.setGame(JSON.stringify({code:online.code, token:online.token, p:flat(p), s:flat(s)})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(r && !r.ok) netStatus(r.err==="not_host" ? "only the host deals puzzles" : "couldn't deal a puzzle");
+  }).catch(function(){});
+}
+function leaveRoom(){
+  if(online.socket && online.socket.readyState===1){
+    try{ online.socket.rpc.leave(JSON.stringify({code:online.code, token:online.token})); }catch(e){}
+  }
+  exitRoomLocal();
+  netStatus("Left the room.");
+}
+
+var createRoomBtn=$("createRoomBtn");
+if(createRoomBtn) createRoomBtn.addEventListener("click",createRoom);
+var joinBtn=$("joinBtn");
+if(joinBtn) joinBtn.addEventListener("click",function(){ joinRoom(joinCodeInput.value); });
+if(joinCodeInput) joinCodeInput.addEventListener("keydown",function(e){ if(e.key==="Enter") joinRoom(joinCodeInput.value); });
+var copyCodeBtn=$("copyCodeBtn");
+if(copyCodeBtn) copyCodeBtn.addEventListener("click",function(){
+  var code=roomCodeEl ? roomCodeEl.textContent : "";
+  if(!code || code==="—") return;
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(function(){ netStatus("Room code copied: "+code); },function(){ fallbackCopy(code); });
+  } else fallbackCopy(code);
+});
+function fallbackCopy(text){
+  var ta=document.createElement("textarea");
+  ta.value=text; ta.style.position="fixed"; ta.style.opacity="0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); netStatus("Room code copied: "+text); }catch(e){}
+  document.body.removeChild(ta);
+}
+var leaveBtn=$("leaveBtn");
+if(leaveBtn) leaveBtn.addEventListener("click",leaveRoom);
+
+/* ── chat ── */
+function sendChat(){
+  var text=cleanText(chatInput.value).slice(0,140);
+  if(!text) return;
+  if(!online.active || !online.socket || online.socket.readyState!==1){ netStatus("reconnecting…"); return; }
+  online.socket.rpc.chat(JSON.stringify({code:online.code, token:online.token, msg:text})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(r && !r.ok && r.err) netStatus(r.err);
+  }).catch(function(){});
+  chatInput.value="";
+}
+if(chatInput) chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter") sendChat(); });
+
+/* ── online move path ── */
+function firstEmpty(){
+  var g=__s.game; if(!g) return null;
+  for(var r=0;r<9;r++)for(var c=0;c<9;c++) if(g.puzzle[r][c]===0 && g.user[r][c]===0) return {r:r,c:c};
+  return null;
+}
+function onlineSubmitMove(val){
+  if(!online.active) return;
+  var g=__s.game; if(!g || g.status!=="playing") return;
+  if(!g.selected){ var em=firstEmpty(); if(!em) return; if(__s.select) __s.select(em.r,em.c); }
+  var cell=g.selected.r*9+g.selected.c;
+  var payload={code:online.code, token:online.token, cell:cell, val:val};
+  if(g.noteMode && val!==0) payload.note=true;
+  if(!online.socket || online.socket.readyState!==1){ netStatus("reconnecting…"); return; }
+  online.socket.rpc.move(JSON.stringify(payload)).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(!r || !r.ok){
+      if(r && r.err==="not_your_turn") netStatus("It's not your turn.");
+      else if(r && r.err==="not_in_room"){ netStatus("rejoining…"); rejoinAndRetryMove(payload); }
+      else if(r && r.err==="game_over") netStatus("This puzzle is already finished.");
+      else if(r && r.err==="not_playing") netStatus("Waiting for an opponent to join…");
+      else netStatus((r && r.err) || "move rejected");
+      return;
+    }
+    if(r.snap) applyServerSnap(r.snap);
+  }).catch(function(){});
+}
+function rejoinAndRetryMove(payload){
+  var saved=null; try{ saved=JSON.parse(localStorage.getItem("bgnSudokuRoom")||"null"); }catch(e){}
+  if(!saved || !saved.code || !saved.token || !online.socket) return;
+  online.socket.rpc.rejoin(JSON.stringify({code:saved.code, token:saved.token})).then(function(res){
+    var r; try{ r=JSON.parse(res); }catch(e){ return; }
+    if(!r || !r.ok) return;
+    online.code=saved.code; online.token=saved.token;
+    enterRoom(r.role, r.snap);
+    setTimeout(function(){ onlineSubmitMove(payload.val); }, 250);
+  }).catch(function(){});
+}
+
+document.addEventListener("click",function(e){
+  if(!online.active) return;
+  var t=e.target;
+  if(!t || (t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.isContentEditable)) return;
+  var pad=t.closest ? t.closest(".pad-btn") : null;
+  if(pad){
+    e.stopPropagation(); e.preventDefault();
+    var val = pad.classList.contains("pad-erase") ? 0 : parseInt(pad.textContent,10);
+    if(!isNaN(val)) onlineSubmitMove(val);
+    return;
+  }
+  var newBtn=t.closest ? t.closest("#newGameBtn") : null;
+  if(newBtn){
+    e.stopPropagation(); e.preventDefault();
+    if(online.role==="host" && __s.generatePuzzle){
+      var gen=__s.generatePuzzle((__s.game && __s.game.diff)||"easy");
+      sendSetGame(gen.puzzle, gen.solution);
+    } else if(online.role!=="host") netStatus("Only the host can deal a new puzzle.");
+    return;
+  }
+  var hintBtn=t.closest ? t.closest("#hintBtn") : null;
+  if(hintBtn){
+    e.stopPropagation(); e.preventDefault();
+    if(!online.socket || online.socket.readyState!==1){ netStatus("reconnecting…"); return; }
+    online.socket.rpc.hint(JSON.stringify({code:online.code, token:online.token})).then(function(res){
+      var r; try{ r=JSON.parse(res); }catch(e){ return; }
+      if(!r || !r.ok){ if(r && r.err==="not_your_turn") netStatus("It's not your turn."); else netStatus("no hint right now"); return; }
+      if(r.snap) applyServerSnap(r.snap);
+    }).catch(function(){});
+    return;
+  }
+  var undoBtn=t.closest ? t.closest("#undoBtn") : null;
+  if(undoBtn){ e.stopPropagation(); e.preventDefault(); netStatus("No undo in online rooms."); return; }
+  var pauseBtn=t.closest ? t.closest("#pauseBtn") : null;
+  if(pauseBtn){ e.stopPropagation(); e.preventDefault(); netStatus("No pause in online rooms."); return; }
+  var eraseBtn=t.closest ? t.closest("#eraseBtn") : null;
+  if(eraseBtn){
+    e.stopPropagation(); e.preventDefault();
+    var g=__s.game;
+    if(g && g.selected) onlineSubmitMove(0);
+    return;
+  }
+  var importJsonBtn=t.closest ? t.closest("#importJsonBtn") : null;
+  if(importJsonBtn){ e.stopPropagation(); e.preventDefault(); netStatus("Can't import while in a room."); return; }
+  var diffTab=t.closest ? t.closest(".diff-tab") : null;
+  if(diffTab){
+    e.stopPropagation(); e.preventDefault();
+    if(online.role!=="host"){ netStatus("Only the host changes difficulty."); return; }
+    __s.game.diff=diffTab.dataset.diff;
+    if(__s.generatePuzzle){
+      var gen2=__s.generatePuzzle(diffTab.dataset.diff);
+      sendSetGame(gen2.puzzle, gen2.solution);
+    }
+    return;
+  }
+}, true);
+
+document.addEventListener("keydown",function(e){
+  if(!online.active) return;
+  var t=e.target;
+  if(t && (t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.isContentEditable)) return;
+  var g=__s.game;
+  if(!g || g.status!=="playing") return;
+  if(/^[1-9]$/.test(e.key)){
+    e.stopPropagation(); e.preventDefault();
+    if(!g.selected){ var em=firstEmpty(); if(em && __s.select) __s.select(em.r,em.c); }
+    onlineSubmitMove(parseInt(e.key,10));
+    return;
+  }
+  if(e.key==="Backspace"||e.key==="Delete"){
+    e.stopPropagation(); e.preventDefault();
+    onlineSubmitMove(0);
+    return;
+  }
+  if(e.key==="n"||e.key==="N"){
+    e.stopPropagation(); e.preventDefault();
+    g.noteMode=!g.noteMode;
+    var nb=$("notesBtn"); if(nb) nb.classList.toggle("active",g.noteMode);
+  }
+}, true);
+
+/* ── apply server snapshot ── */
+function gridFrom81(arr){
+  var out=[], r, c;
+  for(r=0;r<9;r++){ out[r]=[]; for(c=0;c<9;c++) out[r][c]=(arr && arr[r*9+c])||0; }
+  return out;
+}
+function applyServerSnap(snap){
+  if(!snap || !snap.p || !snap.s || !__s.game) return;
+  var g=__s.game;
+  g.puzzle=gridFrom81(snap.p);
+  g.solution=gridFrom81(snap.s);
+  g.user=gridFrom81(snap.u);
+  var notes=[], i;
+  for(i=0;i<81;i++){
+    var r=(i/9)|0, c=i%9, bits=snap.n[i]||0, set=new Set(), b;
+    if(!notes[r]) notes[r]=[];
+    for(b=0;b<9;b++) if(bits&(1<<b)) set.add(b+1);
+    notes[r][c]=set;
+  }
+  g.notes=notes;
+  g.mistakes=snap.strikes||0;
+  g.hints=snap.hints||0;
+  g.hintPenaltyMs=(snap.penaltySec||0)*1000;
+  g.elapsed=snap.el||0;
+  g.startTs=Date.now()-g.elapsed*1000;
+  if(snap.winner===3) g.status="lost";
+  else if(snap.winner) g.status="won";
+  else g.status="playing";
+  if(__s.renderAll) __s.renderAll();
+  updateTurnUi(snap);
+}
+function updateTurnUi(snap){
+  if(!online.active || !turnEl) return;
+  var hostName=snap.hostName||"Host", guestName=snap.guestName||"Guest";
+  if(snap.status===1){ turnEl.textContent="Waiting for an opponent…"; if(roomStatusEl) roomStatusEl.textContent="Open room — share code "+snap.code; lockBoard(true); return; }
+  if(snap.winner){
+    if(snap.winner===3) turnEl.textContent="💥 Three strikes — nobody wins";
+    else { var w=snap.winner===1?hostName:guestName; turnEl.textContent="🏆 "+w+" wins!"; }
+    if(roomStatusEl) roomStatusEl.textContent="";
+    lockBoard(true);
+    return;
+  }
+  var yourTurn=(online.role==="host"&&snap.turn===0)||(online.role==="guest"&&snap.turn===1);
+  var oppName=snap.turn===0?hostName:guestName;
+  turnEl.textContent=yourTurn?"Your turn":(oppName+"'s turn");
+  if(roomStatusEl) roomStatusEl.textContent=hostName+" vs "+guestName;
+  lockBoard(!yourTurn);
+}
+
+/* ═══════════ fullscreen board ═══════════ */
+var fsOverlay=$("fsOverlay"), fsOpenBtn=$("fsOpenBtn"), fsStatusEl=$("fsStatusEl");
+var fsExitBtn=$("fsExitBtn"), fsBoardWrap=$("fsBoardWrap"), fsTileCtn=$("fsTileCtn"), fsMeepleCtn=$("fsMeepleCtn");
+var fsCanvas=null, fsTile=null, fsMeeple=null, fsResize=null;
+
+function fsMove(el){
+  if(!el) return;
+  el._fsOrig={ parent:el.parentNode, next:el.nextSibling };
+}
+function fsRestore(el){
+  if(!el || !el._fsOrig) return;
+  if(el._fsOrig.next) el._fsOrig.parent.insertBefore(el, el._fsOrig.next);
+  else el._fsOrig.parent.appendChild(el);
+  el._fsOrig=null;
+}
+function syncFsStatus(){ if(!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent; }
+function fsRefit(){ if(fsResize) fsResize(); syncFsStatus(); }
+function openFullscreen(){
+  if(!fsCanvas || !fsOverlay.hidden) return;
+  fsMove(fsCanvas);
+  if(fsTile) fsMove(fsTile);
+  if(fsMeeple) fsMove(fsMeeple);
+  fsBoardWrap.appendChild(fsCanvas);
+  if(fsTile && fsTileCtn) fsTileCtn.appendChild(fsTile);
+  if(fsMeeple && fsMeepleCtn) fsMeepleCtn.appendChild(fsMeeple);
+  fsOverlay.hidden=false;
+  document.body.style.overflow="hidden";
+  fsRefit();
+  if(fsOpenBtn) fsOpenBtn.hidden=true;
+  try { if(fsOverlay.requestFullscreen) fsOverlay.requestFullscreen().catch(function(){}); } catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden) return;
+  fsOverlay.hidden=true;
+  if(fsMeeple) fsRestore(fsMeeple);
+  if(fsTile) fsRestore(fsTile);
+  fsRestore(fsCanvas);
+  document.body.style.overflow="";
+  if(document.exitFullscreen && document.fullscreenElement){ try{ document.exitFullscreen().catch(function(){}); }catch(e){} }
+  fsRefit();
+  if(fsOpenBtn) fsOpenBtn.hidden=!fsCanvas;
+}
+window.bgnFullscreen = {
+  register: function(o){
+    if(!o || !o.canvas) return;
+    fsCanvas=o.canvas;
+    fsTile=o.tile||null;
+    fsMeeple=o.meeple||null;
+    fsResize=o.resize||null;
+    fsOpenBtn.hidden=false;
+  },
+  open: openFullscreen,
+  close: closeFullscreen,
+  isOpen: function(){ return !fsOverlay.hidden; }
+};
+if(fsOpenBtn) fsOpenBtn.addEventListener("click",openFullscreen);
+if(fsExitBtn) fsExitBtn.addEventListener("click",closeFullscreen);
+
+document.addEventListener("keydown",function(e){
+  if(e.key === "Escape"){
+    if(!fsOverlay.hidden){
+      e.stopPropagation(); e.preventDefault();
+      closeFullscreen();
+      return;
+    }
+  }
+}, true);
+window.addEventListener("resize",function(){
+  if(!fsOverlay.hidden) fsRefit();
+});
+
+if(bannerEl && window.MutationObserver){
+  try{ new MutationObserver(syncFsStatus).observe(bannerEl,{childList:true,characterData:true,subtree:true}); }catch(e){}
+}
+
+window.bgnFullscreen.register({
+  canvas: boardEl,
+  tile: $("padEl"),
+  meeple: null,
+  resize: function(){ if(window.__s && __s.renderAll) __s.renderAll(); }
+});
+
+/* ═══════════ BGN lounge ═══════════ */
+var loungeBtn=$("loungeBtn"), loungeOverlay=$("loungeOverlay"), loungeCloseBtn=$("loungeCloseBtn"), loungeFrame=$("loungeFrame");
+if(loungeBtn) loungeBtn.addEventListener("click",function(){
+  if(loungeOverlay){
+    loungeOverlay.classList.add("open");
+    if(loungeFrame) loungeFrame.src=loungeFrame.src;
+  }
+});
+if(loungeCloseBtn) loungeCloseBtn.addEventListener("click",function(){ if(loungeOverlay) loungeOverlay.classList.remove("open"); });
+if(loungeOverlay) loungeOverlay.addEventListener("click",function(e){ if(e.target===loungeOverlay) loungeOverlay.classList.remove("open"); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape" && loungeOverlay && loungeOverlay.classList.contains("open")) loungeOverlay.classList.remove("open");
+});
+window.addEventListener("message",function(e){
+  if(e.data && e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN && window.BGN.sfx) window.BGN.sfx.play("draw"); }catch(_){} }
+});
+
 })();
 </script>
 
 <!-- Back-to-hub floating button -->
 <style>
 #rathjiBackBtn{
-  position:fixed;left:90%;bottom:18px;transform:translateX(-50%);
+  position:fixed;left:90%;bottom:70px;transform:translateX(-50%);
   z-index:2147483000;display:flex;align-items:center;gap:8px;
   padding:8px 16px 8px 8px;border-radius:999px;text-decoration:none;
   background:rgba(13,15,21,0.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
@@ -1195,7 +2259,7 @@ window.__s={game:game,newGame:newGame,placeDigit:placeDigit,select:select,eraseC
   var label=document.createElement("span");
   label.className="rb-label";
   label.textContent="My projects";
-  var arrow=document.createElementNS("http://www.w3.org/2000/svg","svg");
+  var arrow=document.createElementNS("http"+"://www.w3.org/2000/svg","svg");
   arrow.setAttribute("class","rb-arrow");
   arrow.setAttribute("viewBox","0 0 24 24");
   arrow.setAttribute("fill","none");

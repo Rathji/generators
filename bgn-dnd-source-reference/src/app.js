@@ -1823,86 +1823,6 @@
      Maximizes the current entry into a full-window overlay: the
      body, action buttons and reference footer are MOVED in live
      (never cloned) so copy/favorite keep working while maximized. */
-  const fsOverlay = $("fsOverlay"), fsExitBtn = $("fsExitBtn"), fsStatusEl = $("fsStatusEl");
-  const fsBoardWrap = $("fsBoardWrap"), fsTileCtn = $("fsTileCtn"), fsMeepleCtn = $("fsMeepleCtn");
-  const fsGame = { canvas: null, tile: null, meeple: null, resize: null };
-  const fsMoved = [];
-  function fsStash(el) { if (el && !el._fsOrig) { el._fsOrig = { p: el.parentNode, n: el.nextSibling }; fsMoved.push(el); } return el; }
-  function fsRestore(el) { if (!el || !el._fsOrig) return; const o = el._fsOrig; if (o.p && o.n && o.n.parentNode === o.p) o.p.insertBefore(el, o.n); else if (o.p) o.p.appendChild(el); el._fsOrig = null; }
-  function fsDefaultResize() {
-    if (!fsGame.canvas) return;
-    const c = fsGame.canvas;
-    if (typeof c.width === "number" && typeof c.height === "number") {
-      const w = c.parentElement.clientWidth || 640, h = c.parentElement.clientHeight || 400, dpr = window.devicePixelRatio || 1;
-      const nw = Math.round(w * dpr), nh = Math.round(h * dpr);
-      if (nw !== c.width || nh !== c.height) { c.width = nw; c.height = nh; }
-    }
-  }
-  function fsResize() { fsDefaultResize(); }
-  function fsRefit() { (fsGame.resize || fsDefaultResize)(); }
-  function openFullscreen() {
-    if (!fsOverlay.hidden) return;
-    const entryBlocks = detailEl.querySelector(".blocks");
-    const entryActions = detailEl.querySelector(".detail-actions");
-    const entryFoot = detailEl.querySelector(".ref-foot");
-    if (entryBlocks) fsGame.canvas = entryBlocks;
-    if (entryActions) fsGame.tile = entryActions;
-    if (entryFoot) fsGame.meeple = entryFoot;
-    fsOverlay.hidden = false;
-    fsStatusEl.textContent = bannerEl.textContent || "Full screen reader";
-    if (fsGame.tile) fsTileCtn.appendChild(fsStash(fsGame.tile));
-    if (fsGame.meeple) fsMeepleCtn.appendChild(fsStash(fsGame.meeple));
-    if (fsGame.canvas) fsBoardWrap.appendChild(fsStash(fsGame.canvas));
-    document.body.style.overflow = "hidden";
-    fsRefit();
-    try { if (fsOverlay.requestFullscreen) fsOverlay.requestFullscreen().catch(() => {}); } catch (e) {}
-  }
-  function closeFullscreen() {
-    if (fsOverlay.hidden) return;
-    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch (e) {}
-    for (const el of fsMoved) fsRestore(el);
-    fsMoved.length = 0;
-    fsOverlay.hidden = true;
-    document.body.style.overflow = "";
-    fsRefit();
-  }
-  window.bgnFullscreen = {
-    register(o) {
-      if (!o) return;
-      if (o.canvas) { fsGame.canvas = o.canvas; fsOpenBtn.hidden = false; }
-      if (o.tile) fsGame.tile = o.tile;
-      if (o.meeple) fsGame.meeple = o.meeple;
-      if (o.resize) fsGame.resize = o.resize;
-    },
-    open: openFullscreen, close: closeFullscreen, isOpen: () => !fsOverlay.hidden,
-  };
-  window.bgnFullscreen.register({ canvas: null, tile: null, meeple: null, resize: fsResize });
-  fsOpenBtn.addEventListener("click", openFullscreen);
-  fsExitBtn.addEventListener("click", closeFullscreen);
-  window.addEventListener("resize", () => { if (!fsOverlay.hidden) fsRefit(); });
-  new MutationObserver(() => {
-    if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent || "";
-  }).observe(bannerEl, { childList: true, characterData: true, subtree: true });
-
-  let detailBanner = "";
-  function updateBanner() {
-    const msg = detailBanner || "";
-    bannerEl.hidden = !msg;
-    bannerEl.textContent = msg;
-    if (!fsOverlay.hidden) fsStatusEl.textContent = msg;
-  }
-  function setBanner(msg) {
-    detailBanner = msg || "";
-    updateBanner();
-  }
-  let bannerTimer = null;
-  function flashBanner(msg) {
-    bannerEl.hidden = false;
-    bannerEl.textContent = msg;
-    if (!fsOverlay.hidden) fsStatusEl.textContent = msg;
-    if (bannerTimer) clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(updateBanner, 2600);
-  }
 
   /* ═══════════ session: code, rejoin, save ═══════════ */
   function b64e(s) { const bytes = new TextEncoder().encode(s); let bin = ""; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]); return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
@@ -2134,14 +2054,16 @@
   chatInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!fsOverlay.hidden) { closeFullscreen(); return; }
+    if (window.bgnFullscreen && window.bgnFullscreen.isOpen()) { window.bgnFullscreen.close(); return; }
     if (!helpOverlay.hidden) closeHelp();
   });
 
   /* debug/testing handle for browser_eval */
   window.__t = {
     state, applySessionCode, sessionCode, saveSession, continueSession, newSession, menuBack,
-    openHelp, closeHelp, openFullscreen, closeFullscreen, claimWin, sendChat,
+    openHelp, closeHelp, openFullscreen: () => window.bgnFullscreen && window.bgnFullscreen.open(),
+    closeFullscreen: () => window.bgnFullscreen && window.bgnFullscreen.close(),
+    claimWin, sendChat,
     refreshRoomCode, renderLog, addLog, setBanner, flashBanner, initChat,
     get chatReady() { return chatReady; }, get chatCom() { return !!chatCom; },
   };

@@ -2036,10 +2036,12 @@ function tileScore(ch) {
   return sc[ch.toLowerCase()] || 0;
 }
 function renderRack() {
+  const used = new Set();
+  S.pending.forEach(p => { if (p.tile) used.add(p.tile); });
   let html = "";
   for (let i = 0; i < RACK_SIZE; i++) {
     const t = S.rack[i];
-    if (t) {
+    if (t && !used.has(t)) {
       const sel = S.selected === i ? " sel" : "";
       html += '<div class="rack-slot' + sel + '" data-i="' + i + '">' +
         '<div class="tile ' + (t.isBlank ? "blank" : "") + '">' + (t.isBlank ? "?" : t.letter.toUpperCase()) +
@@ -2250,23 +2252,26 @@ function onBoardClick(r, c) {
   if (S.selected == null) { flash("Pick a tile from your rack first."); return; }
   const tile = S.rack[S.selected];
   if (!tile) return;
-  if (tile.isBlank) openBlankModal(r, c);
+  if (tile.isBlank) openBlankModal(r, c, tile);
   else {
-    S.pending.set(key, { r, c, letter: tile.letter.toUpperCase(), blank: false });
+    S.pending.set(key, { r, c, letter: tile.letter.toUpperCase(), blank: false, tile });
     S.selected = null;
     render();
     sfx("place");
   }
 }
-function openBlankModal(r, c) {
+let blankTarget = null;
+function openBlankModal(r, c, tile) {
+  blankTarget = { r, c, tile };
   if (!els.blankGrid.childElementCount) {
     els.blankGrid.innerHTML = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map(ch =>
       '<button class="blank-letter" data-ch="' + ch + '">' + ch + '</button>').join("");
     els.blankGrid.addEventListener("click", ev => {
       const b = ev.target.closest(".blank-letter");
-      if (!b) return;
+      if (!b || !blankTarget) return;
       const ch = b.dataset.ch;
-      S.pending.set(r + "," + c, { r, c, letter: ch, blank: true });
+      const t = blankTarget;
+      S.pending.set(t.r + "," + t.c, { r: t.r, c: t.c, letter: ch, blank: true, tile: t.tile });
       S.selected = null;
       els.blankModal.hidden = true;
       render();
@@ -2278,7 +2283,9 @@ function openBlankModal(r, c) {
 function openExchModal() {
   if (!canAct()) return;
   if (S.bag.length < RACK_SIZE) { flash("You can only exchange when at least 7 tiles remain in the bag."); return; }
-  els.exchGrid.innerHTML = S.rack.map((t, i) =>
+  const used = new Set();
+  S.pending.forEach(p => { if (p.tile) used.add(p.tile); });
+  els.exchGrid.innerHTML = S.rack.map((t, i) => used.has(t) ? "" :
     '<button class="exch-chip" data-letter="' + (t.isBlank ? "?" : t.letter.toLowerCase()) + '" data-i="' + i + '">' +
     (t.isBlank ? "?" : t.letter.toUpperCase()) + (t.isBlank ? "" : '<small>' + tileScore(t.letter) + '</small>') + '</button>').join("");
   els.exchGrid.querySelectorAll(".exch-chip").forEach(ch => {
@@ -2467,16 +2474,53 @@ window.__sc = {
     <span id="fsActionsCtn"></span>
     <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
   </div>
-  <div class="fs-board" id="fsBoardWrap">
-    <canvas id="fsBoardCanvas"></canvas>
-    <span class="fs-tile" id="fsTileCtn"></span>
-    <span class="fs-meeple" id="fsMeepleCtn"></span>
+  <div class="fs-body">
+    <div class="fs-board" id="fsBoardWrap">
+      <canvas id="fsBoardCanvas"></canvas>
+      <span class="fs-tile" id="fsTileCtn"></span>
+      <span class="fs-meeple" id="fsMeepleCtn"></span>
+    </div>
+    <aside class="fs-side" id="fsSide">
+      <div class="fs-section fs-score-cards" id="fsScoreEl"></div>
+      <div class="fs-section fs-log-section">
+        <h4>Turn log</h4>
+        <div class="fs-log" id="fsLogEl"></div>
+      </div>
+      <div class="fs-section">
+        <h4>Your rack</h4>
+        <div class="fs-rack" id="fsRackEl"></div>
+      </div>
+    </aside>
   </div>
 </div>
 
 <footer class="bgn-footer">
   <div class="ornament">✦</div>
   <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
   <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
 
@@ -2528,6 +2572,17 @@ window.__sc = {
 .fs-meeple{ position:absolute; bottom:14px; right:14px; z-index:5; }
 .fs-tile:empty{ display:none; }
 .fs-meeple:empty{ display:none; }
+.fs-body{ display:flex; flex:1; min-height:0; }
+.fs-side{ width:min(300px,32vw); min-width:230px; display:flex; flex-direction:column; gap:12px; padding:14px; border-left:1px solid rgba(255,255,255,.08); overflow:auto; background:rgba(255,255,255,.02); }
+.fs-side h4{ margin:0 0 6px; font-size:.85rem; letter-spacing:.12em; text-transform:uppercase; color:var(--gold); opacity:.9; }
+.fs-section{ flex:none; }
+.fs-log-section{ flex:1; min-height:0; display:flex; flex-direction:column; }
+.fs-log{ flex:1; min-height:0; overflow:auto; background:rgba(0,0,0,.28); border-radius:10px; padding:8px; font-size:.85rem; }
+.fs-rack{ display:grid; grid-template-columns:repeat(7,1fr); gap:6px; }
+.fs-rack .tile{ width:100%; height:100%; font-size:clamp(12px,1.6vw,20px); cursor:default; }
+.fs-rack .fs-rack-slot{ aspect-ratio:1/1; border-radius:6px; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.08); position:relative; }
+.fs-rack .fs-rack-slot.empty{ background:rgba(0,0,0,.25); }
+.fs-score-cards{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 </style>
 <script>
 /* Fullscreen board (BGN standard): draws the board to a canvas inside a
@@ -2542,7 +2597,10 @@ window.__sc = {
   var fsBoardCanvas = document.getElementById("fsBoardCanvas");
   var fsStatusEl = document.getElementById("fsStatusEl");
   var fsExitBtn = document.getElementById("fsExitBtn");
-  if (!fsOpenBtn || !fsOverlay || !fsBoardWrap || !fsBoardCanvas || !fsExitBtn) return;
+  var fsScoreEl = document.getElementById("fsScoreEl");
+  var fsLogEl = document.getElementById("fsLogEl");
+  var fsRackEl = document.getElementById("fsRackEl");
+  if (!fsOpenBtn || !fsOverlay || !fsBoardWrap || !fsBoardCanvas || !fsExitBtn || !fsScoreEl || !fsLogEl || !fsRackEl) return;
   var bannerEl = document.getElementById("turnEl");
   var Scr = window.Scr;
   var PREM = { tw:"#e58c8c", dw:"#f2c4b4", tl:"#7aa9d6", dl:"#a9cde6" };
@@ -2616,6 +2674,57 @@ window.__sc = {
     }
   }
 
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (m) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]; }); }
+  function fsTurnIs(idx) {
+    var S = (window.__sc && window.__sc.S) || null;
+    if (!S || S.over || S.serverOver) return false;
+    return (((S.turnSeq + S.first) % 2) === 0 ? 0 : 1) === idx;
+  }
+  function fsRackSub(idx) {
+    var S = (window.__sc && window.__sc.S) || null;
+    if (!S) return "";
+    if (S.mode !== "online") return (idx === 0 ? S.rack.length : S.aiRack.length) + " tiles";
+    if (idx === S.myIdx) return S.rack.length + " tiles";
+    return S.myRole === "host" ? (S.hostIn ? "online" : "away") : (S.guestIn ? "online" : "away");
+  }
+  function fsRefreshSide() {
+    var S = (window.__sc && window.__sc.S) || null;
+    if (!S) return;
+    var meName = "You";
+    var oppName = S.mode === "online" ? (S.myIdx === 0 ? "Guest" : "Host") : S.aiName;
+    fsScoreEl.innerHTML =
+      '<div class="score-card' + (fsTurnIs(0) ? " on" : "") + '">' +
+      '<div class="row1"><span class="pname">' + esc(meName) + '</span><span class="pscore">' + S.scores[0] + '</span></div>' +
+      '<div class="psub">' + esc(fsRackSub(0)) + '</div></div>' +
+      '<div class="score-card' + (fsTurnIs(1) ? " on" : "") + '">' +
+      '<div class="row1"><span class="pname">' + esc(oppName) + '</span><span class="pscore">' + S.scores[1] + '</span></div>' +
+      '<div class="psub">' + esc(fsRackSub(1)) + '</div></div>';
+    if (!S.log || !S.log.length) {
+      fsLogEl.innerHTML = '<div class="log-empty">No plays yet.</div>';
+    } else {
+      fsLogEl.innerHTML = S.log.slice(-40).map(function (l) {
+        return '<div class="log-item"><b>' + esc(l.who) + '</b> <span>' + esc(l.text) + '</span>' +
+          (l.score ? '<span class="log-score">+' + l.score + '</span>' : '') + '</div>';
+      }).join("");
+    }
+    fsLogEl.scrollTop = fsLogEl.scrollHeight;
+    var used = new Set();
+    S.pending.forEach(function (p) { if (p.tile) used.add(p.tile); });
+    var rackHtml = "";
+    for (var i = 0; i < 7; i++) {
+      var t = S.rack[i];
+      if (t && !used.has(t)) {
+        var val = t.isBlank ? "" : (Scr && Scr.LETTER_SCORES ? Scr.LETTER_SCORES[t.letter.toLowerCase()] : "");
+        rackHtml += '<div class="fs-rack-slot"><div class="tile' + (t.isBlank ? " blank" : "") + '">' +
+          (t.isBlank ? "?" : String(t.letter).toUpperCase()) +
+          (t.isBlank ? "" : '<span class="tile-val">' + val + '</span>') + '</div></div>';
+      } else {
+        rackHtml += '<div class="fs-rack-slot empty"></div>';
+      }
+    }
+    fsRackEl.innerHTML = rackHtml;
+  }
+
   window.bgnFullscreen = {
     register: function (o) {
       if (!o || !o.canvas) return;
@@ -2661,6 +2770,7 @@ window.__sc = {
   });
   setInterval(function () {
     if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl ? bannerEl.textContent : "";
+    if (!fsOverlay.hidden) fsRefreshSide();
     if (window.bgnFullscreen.isOpen()) fsRefit();
   }, 600);
 

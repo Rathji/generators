@@ -14,8 +14,9 @@
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/a97b3db01d556b98aee4c8f62b3fef43.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/a97b3db01d556b98aee4c8f62b3fef43.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 <!-- BGN shared SVG card engine (bgn-deck.js) — source: src/bgn-deck.js on the hub (re-upload via upload_file to ship engine updates, then update this URL) -->
 <script src="https://user.uploads.dev/file/4166609fa079bc2b77e409ff97770415.js"></script>
 
@@ -37,6 +38,10 @@ const RANKCH="A23456789TJQK";   // 13 ranks; index 9 = Ten
 
 let rooms=new Map();        // code -> room (live cache)
 const conns=new Map();      // conn.id -> {conn, code, role}
+const chatTimes=new Map();  // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
 
 function rankName(i){ return i===9?"10":RANKCH[i]; }
 function cardFromByte(b){ return {id:b, suit:SUITS[Math.floor(b/13)], rank:rankName(b%13)}; }
@@ -239,6 +244,7 @@ function doAsk(room,fromIdx,rank,toIdx){
 }
 
 /* ── snapshots (personalised — hands stay hidden) ── */
+function topic(code){ return "gf:"+code; }
 function snapFor(room,i){
   const hand=i===0?room.h0:room.h1;
   return {
@@ -274,6 +280,7 @@ self.rpc={
       hostId:conn.id,guestId:-1,lastAction:{seq:0,type:"wait"}};
     rooms.set(code,room);
     conns.set(conn.id,{conn,code,role:"host",lastAsk:0});
+    conn.subscribe(topic(code));
     saveRoom(room);
     return JSON.stringify({ok:true,code,role:"host",snap:snapFor(room,0)});
   },
@@ -291,6 +298,7 @@ self.rpc={
     if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
     if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)deal(room);
     conns.set(conn.id,{conn,code,role,lastAsk:0});
+    conn.subscribe(topic(code));
     room.lastAct=nowSec();
     saveRoom(room);
     broadcast(room);
@@ -374,6 +382,21 @@ self.rpc={
       saveRoom(room); broadcast(room);
     }
     return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    try{ pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()})); }catch(e){}
+    return JSON.stringify({ok:true});
   }
 };
 self.onopen=({conn})=>{};
@@ -381,6 +404,7 @@ self.onclose=({conn})=>{
   const info=conns.get(conn.id);
   if(!info)return;
   conns.delete(conn.id);
+  chatTimes.delete(conn.id);
   const room=rooms.get(info.code);
   if(!room)return;
   if(info.role==="host")room.hostId=-1; else room.guestId=-1;
@@ -450,6 +474,20 @@ loadRooms();
       </button>
     </div>
 
+    <div style="display:flex; justify-content:center; margin-top:18px; flex-wrap:wrap; gap:10px;">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" title="Download this game as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last game</h3>
+      <p class="muted small" id="continueInfoEl">A saved game was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
     <div id="aiPanel" class="panel center" hidden>
       <h3>How many opponents?</h3>
       <div class="flex center mt" style="gap:10px; justify-content:center;">
@@ -480,11 +518,13 @@ loadRooms();
   <!-- ═══ GAME TABLE ═══ -->
   <section id="gameCtn" hidden>
     <div class="bgn-table">
-      <div class="panel bgn-main">
+      <div class="panel bgn-main" id="bgnMainEl">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
         <div class="bgn-opprow" id="oppRow"></div>
         <div class="bgn-pondrow">
           <div id="pondSpot"></div>
           <div class="bgn-pondinfo">
+            <div class="bgn-turn" id="turnEl">Your turn</div>
             <div id="pondCount" class="muted small">— cards in the pond</div>
             <div class="bgn-banner" id="bannerEl"></div>
           </div>
@@ -506,6 +546,15 @@ loadRooms();
           <p class="muted small" id="connEl">Connecting…</p>
         </div>
 
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+
         <details class="bgn-rules">
           <summary>How to play</summary>
           <ol class="bgn-list">
@@ -524,6 +573,8 @@ loadRooms();
           <button class="btn btn-gold" id="newGameBtn">New game</button>
           <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+          <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
         </div>
       </div>
     </div>
@@ -531,10 +582,56 @@ loadRooms();
 
 </main>
 
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ FULLSCREEN BOARD OVERLAY ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div class="fs-board fs-board-area" id="fsBoardArea">
+    <div class="fs-board-wrap" id="fsBoardWrap"></div>
+    <div class="fs-tile" id="fsTileCtn"></div>
+    <div class="fs-meeple" id="fsMeepleCtn"></div>
+  </div>
+</div>
+
 <!-- ═══ FOOTER ═══ -->
 <footer class="bgn-footer">
   <div class="ornament">🐟</div>
   <p>Part of <b style="color:var(--bgn-accent2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
   <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
 
@@ -573,7 +670,7 @@ body{
 /* table layout */
 .bgn-table{ display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:18px; align-items:start; }
 @media (max-width:940px){ .bgn-table{ grid-template-columns:minmax(0,1fr); } }
-.bgn-main{ text-align:center; }
+.bgn-main{ text-align:center; position:relative; }
 
 /* opponents */
 .bgn-opprow{ display:flex; gap:12px; flex-wrap:wrap; justify-content:center; }
@@ -650,6 +747,81 @@ body{
 .bgn-room{ border:1px dashed rgba(53,181,201,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
 .bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
 .bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:var(--bgn-accent2); opacity:1; }
+
+/* turn indicator */
+.bgn-turn{ font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; font-weight:700; color:var(--bgn-accent2); margin-bottom:6px; }
+
+/* ══════ table chat ══════ */
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#9fe6ee); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-accent2,#9fe6ee); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#35b5c9); }
+
+/* ══════ help modal ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(53,181,201,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-accent2,#9fe6ee); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+/* ══════ BGN Lounge ══════ */
+.bgn-lounge-btn{position:fixed;right:16px;bottom:74px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+.bgn-lounge-btn{color:#eef!important}
+.bgn-lounge-close{color:#fff!important}
+
+/* ══════ fullscreen board (BGN house standard) ══════ */
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  border:1px solid rgba(255,255,255,.55);
+  color:#fff; border-radius:8px; padding:8px 13px; cursor:pointer;
+  font:600 13px/1 system-ui; letter-spacing:.02em;
+  transition:border-color .15s, color .15s, box-shadow .15s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#35b5c9); color:var(--bgn-accent2,#9fe6ee); box-shadow:0 0 12px rgba(53,181,201,.35); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{
+  flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:10px 14px; background:rgba(10,14,24,.92); border-bottom:1px solid rgba(255,255,255,.1);
+}
+#fsStatusEl{ flex:1; min-width:0; text-align:left; color:var(--bgn-cream,#f6ecd2); font-weight:600; font-size:.95rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#fsActionsCtn{ display:flex; gap:8px; align-items:center; }
+.fs-board{ flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:10px; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+#fsBoardWrap{ position:relative; width:100%; height:100%; display:flex; }
+#fsBoardWrap .bgn-main{ flex:1; min-width:0; display:flex; flex-direction:column; justify-content:center; gap:12px; margin:0; border:0; border-radius:0; background:transparent; box-shadow:none; }
+.fs-tile{
+  position:absolute; top:14px; right:14px; display:flex; align-items:center; justify-content:center; gap:8px; padding:6px;
+  background:rgba(10,14,24,.55); border:1px dashed rgba(255,255,255,.25); border-radius:10px;
+  min-width:46px; min-height:46px;
+}
+.fs-meeple{
+  position:absolute; bottom:14px; right:14px; display:flex; align-items:center; justify-content:center; gap:8px; padding:6px;
+  background:rgba(10,14,24,.55); border:1px dashed rgba(255,255,255,.25); border-radius:10px;
+  min-width:46px; min-height:46px;
+}
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
 </style>
 
 <script>
@@ -697,8 +869,30 @@ const SUITS = packCfg.suits.slice();
 const DECK = window.bgnDeck.buildDeck(packCfg);
 const deck52 = DECK.filter(c=>!c.joker);              // Go Fish plays the non-joker cards
 const HAND_SIZE = Math.max(3, Math.min(13, cfgNum(rootRef.rulesConfig && rootRef.rulesConfig.handSize, 7)));
-const cardFaceSVG = window.bgnDeck.cardFaceSVG;
-const cardBackSVG = window.bgnDeck.cardBackSVG;
+/* Shared card-deck-plugin (imported in main.pjs) — every BGN game with a standard deck
+   renders from the same plugin, https://perchance.org/card-deck-plugin:
+   root.cardDeck("AS")… root.cardDeck("back", motif, colourway).
+   bgn-deck.js stays as the deck-builder + .bgn-card CSS engine; card art comes from the plugin. */
+const stdDeckList = (rootRef.cardDeck && typeof rootRef.cardDeck==="function") ? (function(){ try{ return rootRef.cardDeck("list"); }catch(e){ return null; } })() : null;
+const DECK_BACK = "lattice_navy";   // shared card back used for the pond + hidden hands
+function cardDeckId(card){
+  if(card.joker)return card.color==="red"?"joker_red":"joker_black";
+  return card.rank+(card.suit?card.suit[0].toUpperCase():"S");
+}
+function cardFaceSVG(card){
+  if(rootRef.cardDeck && typeof rootRef.cardDeck==="function"){
+    const id=cardDeckId(card);
+    if(!stdDeckList || stdDeckList.indexOf(id)!==-1)return rootRef.cardDeck(id);
+  }
+  return window.bgnDeck.cardFaceSVG(card);
+}
+function cardBackSVG(){
+  if(rootRef.cardDeck && typeof rootRef.cardDeck==="function"){
+    const p=DECK_BACK.split("_");
+    return rootRef.cardDeck("back", p[0], p[1]);
+  }
+  return window.bgnDeck.cardBackSVG();
+}
 const cardName = window.bgnDeck.cardName;
 const rulesHandEl=document.getElementById("rulesHandEl");
 if(rulesHandEl)rulesHandEl.textContent=HAND_SIZE;
@@ -733,6 +927,29 @@ const connEl=document.getElementById("connEl");
 const newGameBtn=document.getElementById("newGameBtn");
 const claimBtn=document.getElementById("claimBtn");
 const menuBtn=document.getElementById("menuBtn");
+const turnEl=document.getElementById("turnEl");
+const fsStatusEl=document.getElementById("fsStatusEl");
+const fsOpenBtn=document.getElementById("fsOpenBtn");
+const fsExitBtn=document.getElementById("fsExitBtn");
+const fsOverlay=document.getElementById("fsOverlay");
+const fsBoardWrap=document.getElementById("fsBoardWrap");
+const fsTileCtn=document.getElementById("fsTileCtn");
+const fsMeepleCtn=document.getElementById("fsMeepleCtn");
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const helpCloseBtn=document.getElementById("helpCloseBtn");
+const helpBtn=document.getElementById("helpBtn");
+const tableHelpBtn=document.getElementById("tableHelpBtn");
+const shareBtn=document.getElementById("shareBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const saveBtn=document.getElementById("saveBtn");
 
 /* ══════════ small helpers ══════════ */
 function shuffle(a){ const b=a.slice(); for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));const t=b[i];b[i]=b[j];b[j]=t;} return b; }
@@ -760,6 +977,27 @@ function isMyTurn(){
   if(game.mode==="ai")return game.turn===0&&!game.aiBusy;
   if(game.mode==="online")return game.sockOpen&&game.status===2&&game.turn===game.myIndex&&!game.lockAsk;
   return true;
+}
+
+/* ══════════ table chat (online) ══════════ */
+function roleName(r){ return r==="host"?"Host":"Guest"; }
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function fmtTime(ts){ const d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(role,text,ts){
+  const row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(role===game.myRole?"You":roleName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
 }
 
 /* ══════════ card DOM builders ══════════ */
@@ -976,6 +1214,7 @@ function scheduleAI(){
 
 /* ══════════ rendering ══════════ */
 function renderAll(){
+  if(!game.hands || !game.hands.length)return;   // no game in progress yet
   renderPond();
   renderOpponents();
   renderHand();
@@ -1072,6 +1311,20 @@ function fishFlash(card){
 
 /* ══════════ banner / log / buttons ══════════ */
 let bannerTimer=null;
+function setBanner(msg){
+  bannerEl.textContent=msg;
+  if(!fsOverlay.hidden)fsStatusEl.textContent=msg;
+}
+function turnText(){
+  if(game.over)return "Game over";
+  if(game.mode==="online"){
+    if(game.status===1)return "Waiting for an opponent…";
+    if(game.turn===game.myIndex)return "Your turn";
+    return "Opponent's turn";
+  }
+  if(game.mode==="ai")return game.turn===0?"Your turn":playerName(game.turn)+"'s turn";
+  return playerName(game.turn)+"'s turn";
+}
 function updateBanner(){
   let msg="";
   if(game.over){
@@ -1089,9 +1342,10 @@ function updateBanner(){
   }else{
     msg=game.pendingRank?"Ask "+opponentList()+" for "+game.pendingRank+"s.":"It's "+playerName(game.turn)+"'s turn — pick a card to ask for.";
   }
-  bannerEl.textContent=msg;
+  setBanner(msg);
+  if(turnEl)turnEl.textContent=turnText();
 }
-function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,3200); }
+function flashBanner(msg){ setBanner(msg); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,3200); }
 function winnerText(){
   if(game.mode==="online"){
     if(game.winner===3)return "Draw — even books!";
@@ -1115,12 +1369,99 @@ function updateButtons(){
     newGameBtn.style.display=game.over?"":"none";
     menuBtn.textContent="Exit match";
     claimBtn.hidden=!(game.status===2&&!game.over&&!game.oppIn);
+    saveBtn.hidden=true;
   }else{
     newGameBtn.textContent="New game";
     newGameBtn.style.display="";
     menuBtn.textContent="Main menu";
     claimBtn.hidden=true;
+    saveBtn.hidden=game.over;
   }
+}
+
+/* ══════════ help modal ══════════ */
+const HELP_HTML='<h2 class="goldtext">How to play BGN Go Fish</h2>'
+  +'<p class="muted">The classic card-fishing game. Ask for a rank you hold, collect books of four, and go fish for the rest. The player with the most books when the pond dries up wins.</p>'
+  +'<h3>Rules</h3>'
+  +'<p>On your turn, pick a rank you already hold and ask another player, <i>"got any sevens?"</i>. If they have some, they hand over <b>every one</b> and you keep asking. If not, they say <b>"Go fish!"</b> — draw from the pond. Draw the exact rank you asked for and it\'s lucky: show it and go again.</p>'
+  +'<p>Collect <b>four of a kind</b> and lay it down as a <b>book</b> — books are your points. If your hand runs out, draw to refill. The game ends when all thirteen books are laid, or the pond is empty and no rank can change hands anymore.</p>'
+  +'<h3>Three ways to sit down</h3>'
+  +'<p><b>🛋️ Hotseat</b> — two players share one screen.</p>'
+  +'<p><b>🤖 vs the Machine</b> — fish against 1-3 crafty opponents.</p>'
+  +'<p><b>🌐 Online</b> — create a room, share the 5-letter code, and play a friend. Every ask is validated by the authoritative server; <b>Table chat</b> lets you talk (it is moderated). If your opponent disconnects, they can rejoin with the code, or you can <b>Claim win</b>.</p>'
+  +'<h3>Good to know</h3>'
+  +'<p><b>💾 Save</b> stores a hotseat or vs-AI game locally so you can continue it later from the lobby. <b>📤 Share</b> exports your game as JSON or a branded PNG. The <b>💬 Lounge</b> button opens the whole network\'s chat.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  const done=document.getElementById("helpDoneBtn");
+  if(done)done.addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+
+/* ══════════ save / continue (hotseat & vs-AI) ══════════ */
+const SAVE_KEY="bgn_save_gofish";
+function encCard(c){ return c.joker?{j:1,color:c.color}:{s:SUITS.indexOf(c.suit),r:RANKS.indexOf(c.rank)}; }
+function decCard(c){ return c.joker?{joker:true,color:c.color}:{id:-1,suit:SUITS[c.s]!==undefined?SUITS[c.s]:"spades",rank:RANKS[c.r]!==undefined?RANKS[c.r]:"A"}; }
+function serializeGame(){
+  if(game.mode!=="hotseat"&&game.mode!=="ai")return null;
+  return {
+    v:1, mode:game.mode, numAI:game.numAI, savedAt:Date.now(),
+    hands:game.hands.map(h=>h.map(encCard)),
+    deck:game.deck.map(encCard),
+    books:game.books.map(b=>b.slice()),
+    turn:game.turn, over:game.over,
+    winner:game.winner==null?null:(Array.isArray(game.winner)?game.winner.slice():game.winner),
+    pendingRank:game.pendingRank==null?null:RANKS.indexOf(game.pendingRank)
+  };
+}
+function saveGame(){
+  if(game.mode!=="hotseat"&&game.mode!=="ai")return;
+  if(game.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify(serializeGame())); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved game was found.";
+  try{
+    const o=JSON.parse(localStorage.getItem(SAVE_KEY));
+    if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — "+(o.mode==="ai"?"vs The Machine":"hotseat")+".";
+  }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function restoreGame(o){
+  if(!o||!Array.isArray(o.hands))return false;
+  resetMatch();
+  game.mode=o.mode==="ai"?"ai":"hotseat";
+  game.numAI=Math.max(1,Math.min(3,o.numAI||1));
+  game.hands=(o.hands||[]).map(h=>h.map(decCard));
+  game.deck=(o.deck||[]).map(decCard);
+  game.books=(o.books||[]).map(b=>b.slice());
+  game.turn=o.turn||0;
+  game.over=!!o.over;
+  game.winner=Array.isArray(o.winner)?o.winner.slice():(o.winner==null?null:o.winner);
+  game.pendingRank=o.pendingRank==null?null:RANKS[o.pendingRank];
+  game.aiBusy=false; game.askedFor=[]; game.myIndex=0;
+  game.deckCount=game.deck.length; game.oppIn=true;
+  roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true; saveBtn.hidden=game.over;
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  clearLog();
+  logMsg("<b>Resumed!</b> A saved "+(game.mode==="ai"?"vs The Machine":"hotseat")+" game.");
+  sfx("deal");
+  renderAll();
+  if(game.mode==="ai"&&game.turn!==0&&!game.over)scheduleAI();
+  return true;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!Array.isArray(o.hands)){ flashBanner("No saved game found."); return; }
+  restoreGame(o);
 }
 
 /* ══════════ modes ══════════ */
@@ -1134,6 +1475,7 @@ function startMode(mode){
   lobbyCtn.hidden=true;
   gameCtn.hidden=false;
   roomBox.hidden=true;
+  chatBox.hidden=true;
   claimBtn.hidden=true;
   resetMatch();
   startGame();
@@ -1146,7 +1488,7 @@ function exitOnline(showLobby){
   if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
   game.sockOpen=false;
   game.roomCode=null; game.myRole=null; game.mode=null;
-  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; chatBox.hidden=true; }
 }
 function exitToLobby(){
   if(game.mode==="online"){
@@ -1156,7 +1498,9 @@ function exitToLobby(){
     game.mode=null;
     gameCtn.hidden=true;
     lobbyCtn.hidden=false;
+    chatBox.hidden=true;
   }
+  refreshContinuePanel();
 }
 
 /* ══════════ online client ══════════ */
@@ -1215,6 +1559,7 @@ function onServerMsg(raw){
   let msg;
   try{ msg=JSON.parse(raw); }catch(e){ return; }
   if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
 }
 function cardFromByteServer(id){ return {id:id, suit:SUITS[Math.floor(id/13)], rank:RANKS[id%13]}; }
 function pushServerLog(a){
@@ -1266,6 +1611,7 @@ function enterOnlineGame(){
   lobbyCtn.hidden=true;
   gameCtn.hidden=false;
   roomBox.hidden=false;
+  chatBox.hidden=false;
   roomCodeEl.textContent=game.roomCode;
   game.over=false;
   game.lastSeq=-1;
@@ -1385,9 +1731,138 @@ claimBtn.addEventListener("click",function(){
     if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
   }).catch(function(){});
 });
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Game saved."); });
+helpBtn.addEventListener("click",openHelp);
+tableHelpBtn.addEventListener("click",openHelp);
+helpCloseBtn.addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
+
+refreshContinuePanel();
+
+/* ══════════ fullscreen board (BGN house standard) ══════════
+   window.bgnFullscreen — register(canvas/tile/meeple/resize) then open/close.
+   The board element is MOVED (never cloned) into the overlay and restored
+   to its original parent/position on close. */
+let fsCanvas=null, fsTile=null, fsMeeple=null, fsResize=null;
+const fsStash=[];
+function isOpenFullscreen(){ return !fsOverlay.hidden; }
+function fsRefit(){
+  if(!isOpenFullscreen())return;
+  if(fsResize)fsResize();
+}
+function fsRegister(o){
+  if(!o||!o.canvas)return;
+  fsCanvas=o.canvas;
+  fsTile=o.tile||null;
+  fsMeeple=o.meeple||null;
+  fsResize=o.resize||null;
+  fsOpenBtn.hidden=false;
+}
+function openFullscreen(){
+  if(!fsCanvas||isOpenFullscreen())return;
+  fsStash.length=0;
+  const els=[fsCanvas];
+  if(fsTile&&fsTile.parentNode)els.push(fsTile);
+  if(fsMeeple&&fsMeeple.parentNode)els.push(fsMeeple);
+  for(const el of els){
+    el._fsOrig={parent:el.parentNode,next:el.nextSibling};
+    fsStash.push(el);
+  }
+  fsOverlay.hidden=false;
+  fsRefit();
+  if(fsTile&&fsTileCtn)fsTileCtn.appendChild(fsTile);
+  if(fsMeeple&&fsMeepleCtn)fsMeepleCtn.appendChild(fsMeeple);
+  if(fsBoardWrap)fsBoardWrap.appendChild(fsCanvas);
+  document.body.style.overflow="hidden";
+  if(fsStatusEl)fsStatusEl.textContent=bannerEl.textContent;
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(!isOpenFullscreen())return;
+  for(let i=fsStash.length-1;i>=0;i--){
+    const el=fsStash[i], o=el._fsOrig;
+    if(o&&o.parent)o.parent.insertBefore(el,o.next);
+    delete el._fsOrig;
+  }
+  fsStash.length=0;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(fsResize)fsResize();
+  try{ if(document.fullscreenElement)document.exitFullscreen().catch(function(){}); }catch(e){}
+}
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",fsRefit);
+window.bgnFullscreen={
+  register: function(o){ fsRegister(o); },
+  open: openFullscreen,
+  close: closeFullscreen,
+  isOpen: function(){ return isOpenFullscreen(); }
+};
+window.bgnFullscreen.register({ canvas:document.getElementById("bgnMainEl"), resize:renderAll });
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"BGN Go Fish"); }
+  function importTable(o){
+    if(!o||!Array.isArray(o.hands))return false;
+    if(game.mode==="online")exitOnline(false);
+    return restoreGame(o);
+  }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-go-fish",
+    gameName:tplName,
+    exportData:serializeGame,
+    applySave:importTable,
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs The Machine":"hotseat"; },
+    filenameBase:function(){ return "bgn-go-fish"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
 
 /* debug/testing handle for browser_eval */
-window.__gf = { game, deck52, startMode, startGame, applyAsk, nextTurn, startTurn, cardName, RANKS };
+window.__gf = { game, deck52, startMode, startGame, applyAsk, nextTurn, startTurn, cardName, RANKS, openHelp, closeHelp, saveGame, continueGame, deleteSave, restoreGame, serializeGame, refreshContinuePanel, sendChat, addChat, openFullscreen, closeFullscreen };
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
 })();
 </script>
 

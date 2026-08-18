@@ -23,7 +23,7 @@
 <link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/704005f12d53eda1f95bd43115247f4c.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
@@ -638,7 +638,8 @@ lbInit();
     </div>
 
     <div style="display:flex; justify-content:center; margin-top:18px">
-      <button class="btn btn-ghost" id="lbBtn">🏆 Leaderboard</button>
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="lbBtn" style="margin-left:10px">🏆 Leaderboard</button>
       <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this game as JSON or a PNG">📤 Share</button>
     </div>
 
@@ -667,13 +668,17 @@ lbInit();
 
   <!-- ═══ GAME ═══ -->
   <section id="gameCtn" hidden>
-    <div class="gf-table">
-      <div class="gf-boardpanel panel">
-        <div class="gf-hud">
+    <div class="bgn-board" id="board">
+      <div class="gf-table">
+        <div class="gf-boardpanel panel">
+          <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+          <div class="gf-hud">
           <span class="gf-hole" id="holeEl">—</span>
           <span class="gf-turn" id="turnEl">Loading…</span>
           <span class="gf-timer" id="tmrEl" hidden>⏱ —</span>
         </div>
+
+        <div class="bgn-banner" id="bannerEl"></div>
 
         <div class="gf-rows" id="rowsEl"></div>
 
@@ -708,6 +713,7 @@ lbInit();
           <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
           <button class="btn btn-ghost" id="hintBtn" hidden>💡 Hint</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
+          <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
         </div>
 
         <div class="gf-chatwrap" id="chatBox" hidden>
@@ -723,6 +729,7 @@ lbInit();
           <div class="sec-eyebrow" style="margin-bottom:8px">Scorecard</div>
           <div class="bgn-log" id="logEl"></div>
         </div>
+      </div>
       </div>
     </div>
   </section>
@@ -794,6 +801,78 @@ lbInit();
   </div>
 </div>
 
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ FULLSCREEN BOARD OVERLAY ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div class="fs-board fs-board-area" id="fsBoardArea">
+    <div class="fs-board-wrap" id="fsBoardWrap"></div>
+    <div class="fs-tile" id="fsTileCtn"></div>
+    <div class="fs-meeple" id="fsMeepleCtn"></div>
+  </div>
+</div>
+
+<style>
+/* ══════ help modal ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help-overlay[hidden]{ display:none; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+/* ══════ fullscreen board (BGN house standard) ══════ */
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  border:1px solid rgba(255,255,255,.55);
+  color:#fff; border-radius:8px; padding:8px 13px; cursor:pointer;
+  font:600 13px/1 system-ui; letter-spacing:.02em;
+  transition:border-color .15s, color .15s, box-shadow .15s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent2,#f2dc8b); box-shadow:0 0 12px rgba(212,175,55,.35); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{
+  flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:10px 14px; background:rgba(10,14,24,.92); border-bottom:1px solid rgba(255,255,255,.1);
+}
+#fsStatusEl{ flex:1; min-width:0; text-align:left; color:var(--bgn-cream,#f6ecd2); font-weight:600; font-size:.95rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#fsActionsCtn{ display:flex; gap:8px; align-items:center; }
+.fs-board{ flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:10px; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+#fsBoardWrap{ position:relative; width:min(100%, var(--fs-avail-h, calc(100vh - 100px))); aspect-ratio:1/1; display:none; }
+.fs-tile{
+  position:absolute; top:14px; right:14px; display:flex; align-items:center; justify-content:center; gap:8px; padding:6px;
+  background:rgba(10,14,24,.55); border:1px dashed rgba(255,255,255,.25); border-radius:10px;
+  min-width:46px; min-height:46px;
+}
+.fs-meeple{
+  position:absolute; bottom:14px; right:14px; display:flex; align-items:center; justify-content:center; gap:8px; padding:6px;
+  background:rgba(10,14,24,.55); border:1px dashed rgba(255,255,255,.25); border-radius:10px;
+  min-width:46px; min-height:46px;
+}
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+#fsOverlay #board{ position:absolute; inset:0; width:100%; height:100%; margin:0; max-width:none; }
+</style>
+
 <!-- ═══ FLOATING BACK-TO-HUB BUTTON (rathjiBackBtn) ═══ -->
 <script>
 (function(){
@@ -817,6 +896,30 @@ lbInit();
   <div class="ornament">⛳</div>
   <p>Golf — peek, swap, knock and score the lowest round of your life.</p>
   <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
 </footer>
 
 <style>
@@ -834,6 +937,7 @@ lbInit();
 .gf-boardpanel{ text-align:center; padding:18px; }
 
 .gf-hud{ display:flex; align-items:center; justify-content:center; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+.bgn-banner{ text-align:center; font-size:.82rem; color:var(--bgn-muted); min-height:1.3em; margin:2px 0 10px; }
 .gf-hole{ font-family:var(--bgn-serif); font-size:1.2rem; letter-spacing:.05em; color:#a9e0bc; }
 .gf-turn{ font-size:.85rem; color:var(--bgn-muted); letter-spacing:.02em; }
 .gf-turn.warn{ color:#ffb07a; }
@@ -1064,6 +1168,16 @@ const lbModal=document.getElementById("lbModal");
 const lbNameInput=document.getElementById("lbNameInput");
 const lbRowsEl=document.getElementById("lbRowsEl");
 const lbDoneBtn=document.getElementById("lbDoneBtn");
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const fsOpenBtn=document.getElementById("fsOpenBtn");
+const fsOverlay=document.getElementById("fsOverlay");
+const fsStatusEl=document.getElementById("fsStatusEl");
+const fsExitBtn=document.getElementById("fsExitBtn");
+const fsBoardArea=document.getElementById("fsBoardArea");
+const fsBoardWrap=document.getElementById("fsBoardWrap");
+const fsTileCtn=document.getElementById("fsTileCtn");
+const fsMeepleCtn=document.getElementById("fsMeepleCtn");
 
 /* ══════════ helpers ══════════ */
 function npName(p){
@@ -1220,6 +1334,27 @@ function closeLb(){
   lbNameInput.value=lbName();
   lbModal.hidden=true;
 }
+
+/* ══════════ help modal ══════════ */
+const HELP_HTML='<h2 class="goldtext">How to play BGN Golf</h2>'
+  +'<p class="muted">Grandpa Beck\'s Golf — the low-score card game. Six cards in two rows of three: peek at two in secret, then draw and swap to build the lowest score you can.</p>'
+  +'<h3>Rules</h3>'
+  +'<p><b>Scoring:</b> Aces are 1, 2–10 are face value, Jacks and Queens are 10, and <b>Kings are zero</b>. A matching pair in a column cancels that column out entirely.</p>'
+  +'<p><b>Your turn:</b> Draw from the stock or take the discard top — swap it for a face-down card (the old card goes on the discard), or discard the drawn stock card.</p>'
+  +'<p><b>Knock:</b> Once all six of your cards are face up, knock to end the hole — everyone else gets one final turn, then the hole is scored. Nine holes; the lowest total wins the tournament.</p>'
+  +'<h3>Three ways to sit down</h3>'
+  +'<p><b>🛋️ Hotseat</b> — two to four players share one screen. Peeks stay secret — pass the device between turns.</p>'
+  +'<p><b>🤖 vs the Field</b> — you against up to three AI golfers. Pick Easy/Normal/Hard, and the 💡 Hint button will suggest a good move.</p>'
+  +'<p><b>🌐 Online</b> — create a room, share the 5-letter code, and duel a friend. Hidden layouts stay secret — the server only ever sends you your own cards. If your opponent disconnects, they can rejoin with the code, or you can <b>Claim win</b>.</p>'
+  +'<h3>Good to know</h3>'
+  +'<p><b>💾 Save</b> stores a hotseat or vs-AI game locally so you can continue it later. <b>📤 Share</b> exports your game as JSON or a branded PNG. The <b>💬 Lounge</b> button opens the whole network\'s chat. Turn sound on with the speaker button — music starts on your first click.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
 
 /* ══════════ AI difficulty (Easy/Normal/Hard) ══════════ */
 let AI_DIFF="normal";
@@ -1441,6 +1576,8 @@ function renderHud(){
   }
   else t="Hole scored.";
   turnEl.textContent=t;
+  if(bannerEl)bannerEl.textContent=t;
+  if(fsStatusEl&&!fsOverlay.hidden)fsStatusEl.textContent=t;
 }
 function renderActBar(){
   actBarEl.innerHTML="";
@@ -1540,7 +1677,7 @@ function renderAll(){
   syncTurnTimer();
 }
 let bannerTimer=null;
-function flashBanner(msg){ turnEl.textContent=msg; turnEl.classList.add("warn"); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderHud(); },2600); }
+function flashBanner(msg){ turnEl.textContent=msg; if(bannerEl)bannerEl.textContent=msg; if(fsStatusEl&&!fsOverlay.hidden)fsStatusEl.textContent=msg; turnEl.classList.add("warn"); if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(function(){ turnEl.classList.remove("warn"); renderHud(); },2600); }
 
 /* ══════════ peek modal ══════════ */
 function openPeekModal(p){
@@ -2165,13 +2302,88 @@ lbBtn.addEventListener("click",openLb);
 overLbBtn.addEventListener("click",openLb);
 lbDoneBtn.addEventListener("click",closeLb);
 lbNameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")closeLb(); });
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
+
+/* ══════════ fullscreen board (BGN house standard) ══════════
+   window.bgnFullscreen — register(canvas/tile/meeple/resize) then open/close.
+   The board element is MOVED (never cloned) into the overlay and restored
+   to its original parent/position on close. */
+let fsCanvas=null, fsTile=null, fsMeeple=null, fsResize=null;
+const fsStash=[];
+function isOpenFullscreen(){ return !fsOverlay.hidden; }
+function fsRefit(){
+  if(!isOpenFullscreen())return;
+  const tb=document.querySelector(".fs-topbar");
+  const h=window.innerHeight-(tb?tb.getBoundingClientRect().height:66)-24;
+  document.documentElement.style.setProperty("--fs-avail-h",Math.max(80,h)+"px");
+  if(fsResize)fsResize();
+}
+function fsRegister(o){
+  if(!o||!o.canvas)return;
+  fsCanvas=o.canvas;
+  fsTile=o.tile||null;
+  fsMeeple=o.meeple||null;
+  fsResize=o.resize||null;
+  fsOpenBtn.hidden=false;
+}
+function openFullscreen(){
+  if(!fsCanvas||isOpenFullscreen())return;
+  fsStash.length=0;
+  const els=[fsCanvas];
+  if(fsTile&&fsTile.parentNode)els.push(fsTile);
+  if(fsMeeple&&fsMeeple.parentNode)els.push(fsMeeple);
+  for(const el of els){
+    el._fsOrig={parent:el.parentNode,next:el.nextSibling};
+    fsStash.push(el);
+  }
+  fsOverlay.hidden=false;
+  fsRefit();
+  if(fsTile&&fsTileCtn)fsTileCtn.appendChild(fsTile);
+  if(fsMeeple&&fsMeepleCtn)fsMeepleCtn.appendChild(fsMeeple);
+  if(fsBoardArea)fsBoardArea.appendChild(fsCanvas);
+  document.body.style.overflow="hidden";
+  if(fsStatusEl)fsStatusEl.textContent=turnEl.textContent;
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(!isOpenFullscreen())return;
+  for(let i=fsStash.length-1;i>=0;i--){
+    const el=fsStash[i], o=el._fsOrig;
+    if(o&&o.parent)o.parent.insertBefore(el,o.next);
+    delete el._fsOrig;
+  }
+  fsStash.length=0;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(fsResize)fsResize();
+  try{ if(document.fullscreenElement)document.exitFullscreen().catch(function(){}); }catch(e){}
+}
+if(fsOpenBtn)fsOpenBtn.addEventListener("click",openFullscreen);
+if(fsExitBtn)fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",fsRefit);
+window.bgnFullscreen={
+  register: function(o){ fsRegister(o); },
+  open: openFullscreen,
+  close: closeFullscreen,
+  isOpen: function(){ return isOpenFullscreen(); }
+};
+window.bgnFullscreen.register({ canvas:document.getElementById("board"), resize:renderAll });
 
 /* debug/testing handle for browser_eval */
 window.__golf={ game, newLocalGame, holeLayout, doAct, doKnock, doPass, finishLocalHole,
   holeScore, colScore, cRank, cSuit, cVal, cardName, cardColor, buildDeck, shuffle,
   aiChoose, aiPeek, startLocalGame, startMode, openPeekModal, RANK_NAMES, SUIT_GLYPH,
   HOLES, LAYOUT, allFaceUp, nextPlayer, isMyPlay, myIdx, npName, visibleCard,
-  renderAll, saveGame, continueGame, restoreGame, deleteSave, lbSubmitScore, openLb, onHint, syncTurnTimer };
+  renderAll, saveGame, continueGame, restoreGame, deleteSave, lbSubmitScore, openLb, onHint, syncTurnTimer, flashBanner };
 refreshContinuePanel();
 renderAll();
 

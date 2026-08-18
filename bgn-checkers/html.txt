@@ -504,6 +504,30 @@ loadRooms();
 <footer class="bgn-footer">
   <div class="ornament">✦</div>
   <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
   <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
 </footer>
 
@@ -537,8 +561,8 @@ loadRooms();
 .mini.black{ background:#202024; box-shadow:0 0 0 1px rgba(255,255,255,.35); }
 .bgn-turn{ font-size:.78rem; opacity:.8; text-align:center; white-space:nowrap; }
 
-.bgn-board{ --cell: calc(min(72vw, 500px)/8); width:calc(var(--cell)*8); margin:12px auto 0; display:grid; grid-template-columns:repeat(8,1fr); aspect-ratio:1/1; border-radius:8px; overflow:hidden; box-shadow:0 0 0 5px #241d14, 0 0 0 6px var(--bgn-gold2,#d4af37), 0 14px 34px rgba(0,0,0,.55); }
-.cell{ position:relative; width:var(--cell); height:var(--cell); cursor:pointer; }
+.bgn-board{ --cell: calc(min(72vw, 500px)/8); width:calc(var(--cell)*8); margin:12px auto 0; display:grid; grid-template-columns:repeat(8,1fr); grid-auto-rows:1fr; aspect-ratio:1/1; border-radius:8px; overflow:hidden; box-shadow:0 0 0 5px #241d14, 0 0 0 6px var(--bgn-gold2,#d4af37), 0 14px 34px rgba(0,0,0,.55); }
+.cell{ position:relative; cursor:pointer; }
 .cell.light{ background:#e9dab0; }
 .cell.dark{ background:#4a3b29; }
 .cell:hover .piece{ transform:scale(1.05); }
@@ -624,7 +648,7 @@ loadRooms();
 .fs-board{ flex:1; min-height:0; position:relative; display:flex; align-items:center; justify-content:center; padding:10px; }
 .fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
 #fsBoardWrap{ position:relative; width:min(100%, var(--fs-avail-h, calc(100vh - 100px))); aspect-ratio:1/1; }
-#fsBoardWrap .bgn-board{ position:absolute; inset:0; width:100%; height:100%; margin:0; --cell: calc(min(100%, var(--fs-avail-h, calc(100vh - 100px)))/8); }
+#fsBoardWrap .bgn-board{ position:absolute; inset:0; width:100%; height:100%; margin:0; --cell: calc(min(100vw, var(--fs-avail-h, calc(100vh - 100px)))/8); }
 .fs-tile{
   position:absolute; top:14px; right:14px; display:flex; align-items:center; justify-content:center; gap:8px; padding:6px;
   background:rgba(10,14,24,.55); border:1px dashed rgba(255,255,255,.25); border-radius:10px;
@@ -823,16 +847,27 @@ const fsMeepleCtn=document.getElementById("fsMeepleCtn");
 let cellEls=[];
 
 /* ══════════ board rendering ══════════ */
+let boardFlipNow=false;
+function boardFlipped(){
+  if(game.mode==="online")return game.myColor===RED;   // each online player sees their own side at the bottom
+  return game.mode!=null;                              // local & vs-AI: Red (the player's side) at the bottom
+}
+function refreshBoardFlip(){
+  const want=boardFlipped();
+  if(want!==boardFlipNow){ boardFlipNow=want; buildBoard(); }
+}
 function buildBoard(){
   boardEl.innerHTML="";
   cellEls=[];
-  for(let i=0;i<64;i++){
+  const order=[];
+  for(let i=0;i<64;i++)order.push(boardFlipNow?63-i:i);
+  for(const k of order){   // DOM order = visual position (180° flip when the player sits at the bottom)
     const el=document.createElement("div");
-    el.className="cell "+(((i>>3)+(i&7))&1?"dark":"light");
-    el.dataset.i=i;
+    el.className="cell "+(((k>>3)+(k&7))&1?"dark":"light");
+    el.dataset.i=k;
     el.addEventListener("click",function(){ onCellClick(+this.dataset.i); });
     boardEl.appendChild(el);
-    cellEls.push(el);
+    cellEls[k]=el;         // indexed by logical square, regardless of visual order
   }
 }
 function renderBoard(){
@@ -1083,6 +1118,7 @@ function updateNames(){
   }
 }
 function renderAll(){
+  refreshBoardFlip();
   renderBoard();
   refreshTurn();
   refreshChips();

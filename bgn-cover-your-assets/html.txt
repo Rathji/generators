@@ -254,7 +254,7 @@ function snap(room){
     deckCount:room.deck.length,discardTop:room.discard.length?room.discard[room.discard.length-1]:null,
     stacks:stacksJ(room.stacks),handsLen:room.hands.map(function(h){return h.length;}),
     phase:room.phase,challenge:challengeJ(room.challenge),deckOut:room.deckOut,
-    roundPending:room.roundPending,roundScores:room.roundScores,
+    roundPending:room.roundPending,roundScores:room.roundScores,hostFirst:room.hostFirst,
     winner:room.winner,reason:room.reason,over:room.over,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,
     seq:room.seq,event:room.event||""
   };
@@ -307,13 +307,22 @@ self.rpc={
     const slot=findSlot();
     if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
     const code=genCode();
-    const room=newRoom(0,2);
+    const room=newRoom((String(data||"").indexOf("guestFirst")!==-1)?1:0,2);   // who-goes-first roll from the lobby
     room.slot=slot; room.code=code; room.status=1; room.hostId=conn.id; room.guestId=-1; room.lastAct=nowSec();
     rooms.set(code,room);
     saveRoom(room);
     conn.subscribe(topic(code));
     conns.set(conn.id,{code,role:"host",conn});
     return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  setFirst({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==1)return JSON.stringify({ok:false,err:"not_waiting"});
+    if(roleOf(conn)!=="host")return JSON.stringify({ok:false,err:"host_only"});
+    room.hostFirst=String(data||"")==="guest"?1:0;
+    room.lastAct=nowSec(); saveBroadcast(room);
+    return JSON.stringify({ok:true,first:room.hostFirst});
   },
   joinRoom({conn},data){
     const code=String(data||"").trim().toUpperCase();
@@ -598,6 +607,16 @@ loadRooms();
       <div style="text-align:center; margin-top:16px;">
         <button class="btn btn-ghost btn-sm" id="helpBtn">❓ How it works</button>
         <button class="btn btn-ghost btn-sm" id="rulesBtn">📜 Full rules</button>
+        <button class="btn btn-ghost btn-sm" id="toBtn" title="Who goes first, teams & seats">🎲 Turn order &amp; teams</button>
+      </div>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last table</h3>
+      <p class="muted small" id="continueInfoEl">A saved table was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueSaveBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
       </div>
     </div>
 
@@ -654,31 +673,39 @@ loadRooms();
         <!-- opponents -->
         <div class="cya-opps" id="oppsCtn"></div>
 
-        <!-- tabletop: deck / status / discard -->
-        <div class="cya-tabletop">
-          <div class="cya-pilebox">
-            <div class="cya-pile deck-pile"></div>
-            <div class="muted small" id="deckCountEl">deck</div>
-          </div>
-          <div class="cya-status">
-            <div class="cya-round" id="roundEl"></div>
-            <div class="cya-turn" id="turnEl">Loading…</div>
-            <div class="cya-banner" id="bannerEl"></div>
-          </div>
-          <div class="cya-pilebox">
-            <div class="cya-pile discard-pile" id="discardEl">—</div>
-            <div class="muted small">discard</div>
-          </div>
-        </div>
+        <!-- arena: side players flank the tabletop -->
+        <div class="cya-arena">
+          <div class="cya-side" id="sideLeftCtn"></div>
+          <div class="cya-center">
+            <!-- tabletop: deck / status / discard -->
+            <div class="cya-tabletop">
+              <div class="cya-pilebox">
+                <div class="cya-pile deck-pile"></div>
+                <div class="muted small" id="deckCountEl">deck</div>
+              </div>
+              <div class="cya-status">
+                <div class="cya-round" id="roundEl"></div>
+                <div class="cya-turn" id="turnEl">Loading…</div>
+                <div class="cya-banner" id="bannerEl"></div>
+              </div>
+              <div class="cya-pilebox">
+                <div class="cya-pile discard-pile" id="discardEl">—</div>
+                <div class="muted small">discard</div>
+              </div>
+            </div>
 
-        <!-- me -->
-        <div class="cya-playerrow" id="myRow">
-          <span class="bgn-avatar me" id="myAvatar"></span>
-          <span class="cya-pname" id="myNameEl">You</span>
-          <span class="cya-score" id="myScoreEl">0</span>
-          <span class="cya-handcount" id="myHandCountEl"></span>
+            <!-- me -->
+            <div class="cya-playerrow" id="myRow">
+              <span class="bgn-avatar me" id="myAvatar"></span>
+              <span class="cya-pname" id="myNameEl">You</span>
+              <span class="cya-score" id="myScoreEl">0</span>
+              <span class="cya-handcount" id="myHandCountEl"></span>
+              <span class="cya-psub" id="mySubEl"></span>
+            </div>
+            <div class="cya-stackbox" id="myStackEl"></div>
+          </div>
+          <div class="cya-side" id="sideRightCtn"></div>
         </div>
-        <div class="cya-stackbox" id="myStackEl"></div>
 
         <!-- hand -->
         <div class="cya-handstrip">
@@ -728,6 +755,8 @@ loadRooms();
           <button class="btn btn-ghost" id="newGameBtn">New game</button>
           <button class="btn btn-ghost" id="rulesBtn2">Rules</button>
           <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
+          <button class="btn btn-ghost" id="tableToBtn" title="Who goes first, teams & seats">🎲 Turn order</button>
+          <button class="btn btn-ghost" id="saveBtn" title="Save this table locally">💾 Save</button>
           <button class="btn btn-ghost" id="shareBtn" title="Download this table as JSON or a PNG">📤</button>
           <button class="btn btn-ghost" id="menuBtn">Main menu</button>
         </div>
@@ -742,6 +771,35 @@ loadRooms();
     </div>
   </section>
 </main>
+
+<!-- ═══ TURN ORDER & TEAMS MODAL (BGN standard) ═══ -->
+<div class="to-overlay" id="toModal" hidden>
+  <div class="to-modal">
+    <button class="to-close" id="toCloseBtn" title="Close">✕</button>
+    <div class="to-title">🎲 Turn Order &amp; Teams</div>
+    <p class="muted small" style="margin:2px 0 14px">Randomize the table — who starts, team sides, and seats.</p>
+    <div class="to-grid">
+      <div class="to-card">
+        <div class="to-label">Who goes first?</div>
+        <div class="to-draw" id="toFirstDraw">—</div>
+        <button class="btn btn-gold" id="toFirstBtn">🎲 Roll</button>
+        <div class="to-note" id="toFirstNote"></div>
+      </div>
+      <div class="to-card">
+        <div class="to-label">Team splitter</div>
+        <div class="to-draw" id="toTeamDraw">—</div>
+        <button class="btn btn-ghost" id="toTeamBtn">🎭 Split</button>
+        <div class="to-note" id="toTeamNote"></div>
+      </div>
+      <div class="to-card">
+        <div class="to-label">Seat draw</div>
+        <div class="to-draw" id="toSeatDraw">—</div>
+        <button class="btn btn-ghost" id="toSeatBtn">🪑 Draw</button>
+        <div class="to-note" id="toSeatNote"></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- ═══ FULLSCREEN BOARD (BGN standard) ═══ -->
 <div id="fsOverlay" hidden>
@@ -824,6 +882,30 @@ loadRooms();
   <div class="ornament">◆</div>
   <p>Cover Your Assets — a card game of vaults and heists.</p>
   <p class="footnote">Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+  <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+  <a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+  <div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+  <style>
+  #bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+  #bgnAuditOverlay[hidden]{display:none}
+  .bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+  .bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+  </style>
+  <script>
+  function openBgnAudit(){
+    var f=document.getElementById("bgnAuditFrame");
+    f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+    document.getElementById("bgnAuditOverlay").hidden=false;
+    document.body.style.overflow="hidden";
+  }
+  function closeBgnAudit(){
+    document.getElementById("bgnAuditOverlay").hidden=true;
+    document.body.style.overflow="";
+  }
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+  document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+  </script>
 </footer>
 
 <style>
@@ -848,35 +930,42 @@ loadRooms();
 .cya-playerrow .bgn-avatar.opp{ background:radial-gradient(circle at 35% 30%, #7a5cff, #241840); }
 .cya-playerrow .bgn-avatar.me{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
 .cya-pname{ font-weight:800; font-size:.95rem; letter-spacing:.04em; }
+.cya-psub{ flex-basis:100%; text-align:left; font-size:.72rem; color:var(--bgn-muted,#c8c3c9); margin:-4px 0 2px; }
 .cya-score{ font-family:var(--bgn-serif); color:var(--bgn-accent2); font-weight:700; background:rgba(212,175,55,.1); border:1px solid rgba(212,175,55,.3); border-radius:999px; padding:2px 10px; font-size:.8rem; }
 .cya-handcount{ font-size:.72rem; opacity:.6; letter-spacing:.08em; text-transform:uppercase; }
 
 /* opponents */
 .cya-opps{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin-bottom:18px; }
+.cya-arena{ display:flex; align-items:center; justify-content:center; gap:14px; }
+.cya-arena .cya-center{ flex:1 1 auto; min-width:0; }
+.cya-arena .cya-side{ flex:0 0 auto; display:flex; flex-direction:column; gap:14px; align-items:stretch; }
+.cya-side:empty{ display:none; }
+.cya-side .cya-opp{ min-width:200px; max-width:260px; }
 .cya-opp{ background:rgba(255,255,255,.02); border:1px solid rgba(255,255,255,.08); border-radius:14px; padding:12px 10px 14px; }
 .cya-opp .cya-playerrow{ margin:0 0 6px; }
-.cya-opp .cya-stack{ min-height:60px; }
-.cya-opp .cya-setwrap{ width:56px; height:56px; }
-.cya-opp .cya-set{ width:24px; height:34px; }
+.cya-opp .cya-stack{ min-height:calc(var(--cya-card-w)*1.6 + 22px); }
+.cya-opp .cya-setwrap{ width:calc(var(--cya-card-w)*1.6); height:calc(var(--cya-card-w)*1.6); }
+.cya-opp .cya-set{ width:var(--cya-card-w); aspect-ratio:0.65; }
 .cya-opp .cya-set img{ border-radius:4px; }
-.cya-opp .cya-setwrap.big{ width:64px; height:64px; }
-.cya-opp .cya-setwrap.big .cya-set{ width:34px; height:46px; }
+.cya-opp .cya-setwrap.big{ width:calc(var(--cya-card-w)*2.1); height:calc(var(--cya-card-w)*2.1); }
+.cya-opp .cya-setwrap.big .cya-set{ width:calc(var(--cya-card-w)*1.3); aspect-ratio:0.65; }
 .cya-opp .cya-set-num{ font-size:.52rem; }
 .cya-opp .cya-stackmeta{ font-size:.6rem; }
 @media (max-width:560px){ .cya-opps{ grid-template-columns:1fr; } }
 
 /* stacks of sets */
 .cya-stackbox{ max-width:560px; margin:0 auto; display:flex; justify-content:center; }
-.cya-stack{ position:relative; display:flex; align-items:center; justify-content:center; padding:8px 6px; min-height:116px; min-width:70px; border:1px dashed rgba(255,255,255,.16); border-radius:12px; background:rgba(255,255,255,.02); }
+.cya-stack{ position:relative; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; padding:8px 6px; min-height:calc(var(--cya-card-w)*1.6 + 34px); min-width:calc(var(--cya-card-w)*1.7); border:1px dashed rgba(255,255,255,.16); border-radius:12px; background:rgba(255,255,255,.02); }
+.cya-stack-empty{ justify-content:center; }
 .cya-stack-empty .cya-empty{ display:flex; }
 .cya-empty{ display:none; align-items:center; justify-content:center; min-height:70px; width:100%; font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:rgba(255,255,255,.22); }
-.cya-setwrap{ position:absolute; inset:0; margin:auto; width:78px; height:78px; display:flex; align-items:center; justify-content:center; border-radius:9px; transition:box-shadow .12s, transform .12s, border-color .12s; }
+.cya-setwrap{ position:absolute; top:4px; left:0; right:0; margin:auto; width:calc(var(--cya-card-w)*1.6); height:calc(var(--cya-card-w)*1.6); display:flex; align-items:center; justify-content:center; border-radius:9px; transition:box-shadow .12s, transform .12s, border-color .12s; }
 .cya-setwrap.top{ background:linear-gradient(180deg, rgba(212,175,55,.12), rgba(212,175,55,.03)); box-shadow:inset 0 0 0 1px rgba(212,175,55,.45), 0 0 14px rgba(212,175,55,.15); }
-.cya-setwrap.big{ width:100px; }
-.cya-set{ position:relative; width:34px; height:48px; }
+.cya-setwrap.big{ width:calc(var(--cya-card-w)*2.1); height:calc(var(--cya-card-w)*2.1); }
+.cya-set{ position:relative; width:var(--cya-card-w); aspect-ratio:0.65; }
 .cya-set.rot{ transform:rotate(90deg); }
 .cya-set img{ width:100%; height:100%; object-fit:cover; border-radius:5px; border:1px solid rgba(255,255,255,.45); box-shadow:0 2px 6px rgba(0,0,0,.5); display:block; }
-.cya-setwrap.big .cya-set{ width:56px; height:76px; }
+.cya-setwrap.big .cya-set{ width:calc(var(--cya-card-w)*1.3); aspect-ratio:0.65; }
 .cya-set-num{ position:absolute; bottom:2px; right:2px; background:rgba(0,0,0,.65); color:#f6e6a4; font-size:.6rem; font-weight:700; padding:0 4px; border-radius:6px; line-height:1.5; }
 .cya-setwrap.targetable{ cursor:pointer; animation:cyaPulse 1.4s ease-in-out infinite; }
 .cya-setwrap.targetable:hover{ transform:translateY(-2px) scale(1.03); }
@@ -913,9 +1002,9 @@ loadRooms();
   .cya-tabletop .cya-status{ grid-column:1/-1; order:-1; }
   .cya-turn{ font-size:.95rem; }
   .cya-pilebox{ width:auto; }
-  .cya-stack{ min-height:92px; }
-  .cya-setwrap{ width:62px; height:62px; }
-  .cya-set{ width:28px; height:40px; }
+  .cya-stack{ min-height:calc(var(--cya-card-w)*1.6 + 30px); }
+  .cya-setwrap{ width:calc(var(--cya-card-w)*1.55); height:calc(var(--cya-card-w)*1.55); }
+  .cya-set{ width:var(--cya-card-w); }
   .cya-boardpanel{ padding:14px 8px 18px; }
 }
 
@@ -923,8 +1012,9 @@ loadRooms();
 .cya-handstrip{ margin-top:18px; }
 .cya-hand{ display:flex; justify-content:center; gap:6px; flex-wrap:wrap; min-height:132px; padding:10px 4px; align-items:flex-end; }
 @media (min-width:640px){ .cya-hand{ flex-wrap:nowrap; overflow-x:auto; justify-content:flex-start; padding-bottom:6px; } }
-.cya-card{ width:clamp(66px,9vw,88px); aspect-ratio:0.65; border-radius:11px; position:relative; flex:none; cursor:pointer; border:2px solid rgba(255,255,255,.22); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.3); overflow:hidden; padding:0; transition:transform .12s, box-shadow .12s, border-color .12s; user-select:none; }
-@media (max-width:640px){ .cya-card{ width:clamp(56px,8vw,72px); } }
+:root{ --cya-card-w:clamp(66px,9vw,88px); }
+.cya-card{ width:var(--cya-card-w); aspect-ratio:0.65; border-radius:11px; position:relative; flex:none; cursor:pointer; border:2px solid rgba(255,255,255,.22); box-shadow:0 6px 16px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.3); overflow:hidden; padding:0; transition:transform .12s, box-shadow .12s, border-color .12s; user-select:none; }
+@media (max-width:640px){ :root{ --cya-card-w:clamp(56px,8vw,72px); } }
 .cya-card .art{ width:100%; height:100%; object-fit:cover; display:block; }
 .cya-card:hover{ transform:translateY(-8px); border-color:#f6e6a4; }
 .cya-card.selected{ transform:translateY(-12px); border-color:var(--bgn-accent2); box-shadow:0 0 0 2px rgba(212,175,55,.55), 0 14px 26px rgba(0,0,0,.55); }
@@ -1025,7 +1115,21 @@ loadRooms();
 /* ═══ MOBILE (≤700px) ═══ */
 .cya-utilbtns{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
 .cya-utilbtns .btn{ flex:1; padding:12px 10px; font-size:.72rem; white-space:nowrap; }
+
+/* ══════ turn order & teams modal (BGN standard) ══════ */
+.to-overlay{ position:fixed; inset:0; z-index:9600; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.to-overlay[hidden]{ display:none; }
+.to-modal{ position:relative; width:min(780px,100%); max-height:min(86vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:24px 22px 20px; text-align:center; }
+.to-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.to-close:hover{ background:rgba(0,0,0,.65); }
+.to-title{ font-family:var(--bgn-serif,serif); font-size:1.3rem; color:var(--bgn-accent2,#f2dc8b); }
+.to-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-top:8px; }
+.to-card{ background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:14px 12px; display:flex; flex-direction:column; gap:10px; align-items:center; }
+.to-label{ font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--bgn-muted,#c8c3c9); }
+.to-draw{ min-height:44px; display:flex; align-items:center; justify-content:center; font-size:1.02rem; font-weight:700; color:#f6e6a4; }
+.to-note{ font-size:.72rem; color:var(--bgn-muted,#c8c3c9); min-height:30px; }
 @media (max-width:700px){
+  :root{ --cya-card-w:clamp(62px,11vw,80px); }
   body{ -webkit-tap-highlight-color:transparent; }
   .btn,.cya-card,.cya-setwrap.targetable,.bgn-mode,.ai-pick,.rules-close{ touch-action:manipulation; }
 
@@ -1047,9 +1151,14 @@ loadRooms();
   .cya-opps{ display:flex; flex-wrap:nowrap; overflow-x:auto; gap:10px; -webkit-overflow-scrolling:touch; margin-bottom:14px; padding-bottom:4px; }
   .cya-opp{ flex:none; width:min(250px,80vw); }
 
+  /* arena: sides stack below the tabletop on small screens */
+  .cya-arena{ flex-direction:column; align-items:stretch; gap:10px; }
+  .cya-arena .cya-side{ flex-direction:row; justify-content:center; flex-wrap:wrap; gap:10px; }
+  .cya-side .cya-opp{ min-width:0; max-width:250px; }
+
   /* hand: one overlapping row with bigger cards */
   .cya-hand{ flex-wrap:nowrap; justify-content:center; gap:0; overflow:visible; padding:14px 8px 8px; min-height:132px; }
-  .cya-hand .cya-card{ width:clamp(62px,11vw,80px); margin-left:-16px; }
+  .cya-hand .cya-card{ width:var(--cya-card-w); margin-left:-16px; }
   .cya-hand .cya-card:first-child{ margin-left:0; }
   .cya-card.selected{ z-index:6; }
 
@@ -1120,18 +1229,19 @@ body.cya-max .bgn-boardpanel{ display:flex; flex-direction:column; min-height:ca
 body.cya-max .cya-opps{ grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); }
 body.cya-max .cya-tabletop{ max-width:680px; margin:14px auto; }
 body.cya-max .cya-stackbox{ max-width:none; flex:1 1 auto; display:flex; align-items:center; justify-content:center; min-height:0; }
-body.cya-max .cya-stack{ min-height:170px; padding:16px 10px; }
-body.cya-max .cya-setwrap{ width:104px; height:104px; }
-body.cya-max .cya-set{ width:46px; height:64px; }
-body.cya-max .cya-setwrap.big{ width:134px; }
-body.cya-max .cya-setwrap.big .cya-set{ width:74px; height:102px; }
-body.cya-max .cya-opp .cya-setwrap{ width:64px; height:64px; }
-body.cya-max .cya-opp .cya-set{ width:28px; height:40px; }
-body.cya-max .cya-opp .cya-setwrap.big{ width:72px; height:72px; }
-body.cya-max .cya-opp .cya-setwrap.big .cya-set{ width:38px; height:52px; }
+body.cya-max .cya-stack{ min-height:calc(var(--cya-card-w)*1.6 + 44px); padding:16px 10px; }
+body.cya-max .cya-setwrap{ width:calc(var(--cya-card-w)*1.6); height:calc(var(--cya-card-w)*1.6); }
+body.cya-max .cya-set{ width:var(--cya-card-w); }
+body.cya-max .cya-setwrap.big{ width:calc(var(--cya-card-w)*2.1); height:calc(var(--cya-card-w)*2.1); }
+body.cya-max .cya-setwrap.big .cya-set{ width:calc(var(--cya-card-w)*1.3); }
+body.cya-max .cya-opp .cya-setwrap{ width:calc(var(--cya-card-w)*1.6); height:calc(var(--cya-card-w)*1.6); }
+body.cya-max .cya-opp .cya-set{ width:var(--cya-card-w); }
+body.cya-max .cya-opp .cya-setwrap.big{ width:calc(var(--cya-card-w)*2.1); height:calc(var(--cya-card-w)*2.1); }
+body.cya-max .cya-opp .cya-setwrap.big .cya-set{ width:calc(var(--cya-card-w)*1.3); }
 body.cya-max .cya-handstrip{ margin-top:12px; }
 body.cya-max .cya-hand{ min-height:180px; padding:16px 8px; }
-body.cya-max .cya-card{ width:clamp(72px,10vw,116px); }
+body.cya-max{ --cya-card-w:clamp(72px,10vw,116px); }
+body.cya-max .cya-card{ width:var(--cya-card-w); }
 body.cya-max .bgn-log{ max-height:36vh; }
 </style>
 
@@ -1294,6 +1404,7 @@ function cardFace(t){ return FACE[t]; }
 const game={ mode:null, g:null, view:0, hand:[], pick:[], chPick:-1,
   aiThinking:false, locked:false, aiPlayers:0, players:2,
   myPlayer:0, myRole:null, status:"idle", oppPresent:true,
+  first:0, teams:null, localNames:null,
   lastSeq:-1, logLines:[],
   anim:{ stackVal:-1, discard:false, chal:false, chalopen:false, opp:-1 },
   socket:null, sockOpen:false, wantReconnect:false, retryDelay:800, roomCode:null, openResolvers:[] };
@@ -1311,6 +1422,8 @@ const joinCodeInput=document.getElementById("joinCodeInput");
 const handEl=document.getElementById("handEl");
 const myStackEl=document.getElementById("myStackEl");
 const oppsCtn=document.getElementById("oppsCtn");
+const sideLeftCtn=document.getElementById("sideLeftCtn");
+const sideRightCtn=document.getElementById("sideRightCtn");
 const turnEl=document.getElementById("turnEl");
 const bannerEl=document.getElementById("bannerEl");
 const roundEl=document.getElementById("roundEl");
@@ -1374,6 +1487,8 @@ const overMenuBtn=document.getElementById("overMenuBtn");
 
 /* ══════════ helpers ══════════ */
 function npName(p){ if(game.mode==="online")return p===game.myPlayer?"You":"Opponent"; if(game.mode==="ai")return p===0?"You":(game.aiPlayers>1?"Machine "+(p):"The Machine"); return "Player "+(p+1); }
+function turnRoleFor(n){ return ((n+(game.first?1:0))%2)===0?"host":"guest"; }
+function aiPassTurn(){ maybeAi(); }
 function myP(){ return game.mode==="online"?game.myPlayer:(game.mode==="ai"?0:game.view); }
 function myHand(){ return game.mode==="online"?game.hand:(game.g?game.g.hands[myP()]:[]); }
 function actorP(){ const g=game.g; if(!g)return -1;
@@ -1475,24 +1590,35 @@ function renderStack(ctn,stack,opts){
   ctn.appendChild(wrap);
 }
 function renderOpps(){
-  oppsCtn.innerHTML="";
+  oppsCtn.innerHTML=""; sideLeftCtn.innerHTML=""; sideRightCtn.innerHTML="";
   const g=game.g; if(!g)return;
   const me=myP();
   const targets=challengeTargets();
-  for(let p=0;p<g.players;p++){
-    if(p===me)continue;
+  function panelFor(p){
     const panel=document.createElement("div"); panel.className="cya-opp";
     if(game.anim.opp===p)panel.classList.add("acting");
     const head=document.createElement("div"); head.className="cya-playerrow";
     const av=document.createElement("span"); av.className="bgn-avatar opp";
-    const nm=document.createElement("span"); nm.className="cya-pname"; nm.textContent=npName(p);
+    const nm=document.createElement("span"); nm.className="cya-pname"; nm.textContent=(game.mode==="local"&&game.localNames&&game.localNames[p===0?"host":"guest"])||npName(p);
     const sc=document.createElement("span"); sc.className="cya-score"; sc.textContent=money(scoreOf(p));
-    const hc=document.createElement("span"); hc.className="cya-handcount"; hc.textContent=handCount(p)+" card"+(handCount(p)===1?"":"s");
+    const hc=document.createElement("span"); hc.className="cya-handcount"; hc.textContent=handCount(p)+" card"+(handCount(p)===1?"": "s");
     head.appendChild(av); head.appendChild(nm); head.appendChild(sc); head.appendChild(hc);
+    const sub=document.createElement("span"); sub.className="cya-psub"; sub.dataset.role=p===0?"host":"guest";
+    head.appendChild(sub);
     const st=document.createElement("div");
     renderStack(st,g.stacks[p],{player:p,targetable:targets.indexOf(p)>=0});
     panel.appendChild(head); panel.appendChild(st);
-    oppsCtn.appendChild(panel);
+    return panel;
+  }
+  let seat=0;
+  const useSides=window.matchMedia("(min-width:701px)").matches;
+  for(let k=1;k<g.players;k++){
+    const p=(me+k)%g.players;
+    const panel=panelFor(p);
+    if(useSides&&seat===2)sideLeftCtn.appendChild(panel);
+    else if(useSides&&seat===3)sideRightCtn.appendChild(panel);
+    else oppsCtn.appendChild(panel);
+    seat++;
   }
 }
 function renderMyStack(){
@@ -1711,6 +1837,7 @@ function renderAll(){
   updateScores();
   updateBanner();
   updateHelp();
+  renderSeats();
   showPassIfNeeded();
 }
 
@@ -1851,6 +1978,7 @@ function doContinue(){
   log("Round "+g.round+" begins — "+npName(turnPlayer(g))+" goes first.");
   game.pick=[]; game.chPick=-1;
   renderAll();
+  if(game.mode==="local"||game.mode==="ai")saveGame();
   if(game.mode==="ai")maybeAi();
 }
 function postAction(evt){
@@ -1858,6 +1986,7 @@ function postAction(evt){
   if(g.over){ showGameOver(); renderAll(); return; }
   if(g.roundPending){ showRoundModal(); renderAll(); return; }
   if(game.mode==="online"){ sendRpcQueued(evt); return; }
+  if(game.mode==="local"||game.mode==="ai")saveGame();
   maybeAi();
   renderAll();
 }
@@ -1899,7 +2028,7 @@ function sendRpcQueued(evt){
 
 /* ══════════ game flow (local / AI) ══════════ */
 function startGame(){
-  const g=newRoom(0,game.players||2);
+  const g=newRoom(game.first,game.players||2);
   deal(g);
   game.g=g;
   game.hand=g.hands[0];
@@ -1913,7 +2042,7 @@ function startGame(){
   log("Deal — "+g.handSize+" cards each, "+g.players+" players. "+npName(turnPlayer(g))+" goes first.");
   log("Goal: first to "+money(MILLION)+" total assets across rounds. Pair to build, challenge to steal!");
   renderAll();
-  if(game.mode==="ai"&&actorP()!==0)maybeAi();
+  if(game.mode==="ai"&&turnRoleFor(g.turnIndex)==="guest")aiPassTurn();
 }
 function startMode(mode,aiPlayers){
   if(game.mode==="online"&&game.socket){ exitOnline(false); }
@@ -1955,6 +2084,7 @@ function exitToLobby(){
     lobbyCtn.hidden=false;
     chatBox.hidden=true;
   }
+  refreshContinuePanel();
 }
 
 /* ══════════ game over / round end ══════════ */
@@ -2267,6 +2397,8 @@ function applyServerSnap(s){
   if(!game.g)game.g=newRoom(s.hostFirst||0,s.players||2);
   const g=game.g;
   g.players=s.players||2;
+  g.hostFirst=s.hostFirst||0;
+  game.first=g.hostFirst===1?1:0;
   g.handSize=s.handSize||4;
   g.round=s.round||1;
   g.scores=(s.scores||[0,0]).slice();
@@ -2316,7 +2448,7 @@ async function doCreateRoom(){
   const ok=await openedP();
   if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
   try{
-    const r=await rpc("createRoom","");
+    const r=await rpc("createRoom",game.first===1?"guestFirst":"");
     if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
     game.mode="online";
     game.myRole=r.role; game.myPlayer=r.role==="host"?0:1;
@@ -2423,6 +2555,7 @@ rulesOverlay.addEventListener("click",function(e){ if(e.target===rulesOverlay)cl
 document.addEventListener("keydown",function(e){
   if(e.key==="Escape"){
     if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!toModal.hidden)closeToModal();
     if(!helpOverlay.hidden)closeHelp();
     if(!rulesOverlay.hidden)closeRules();
   }
@@ -2516,6 +2649,180 @@ fsExitBtn.addEventListener("click",closeFullscreen);
 window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
 window.bgnFullscreen.register({canvas:document.querySelector(".cya-table"),resize:renderAll});
 
+/* ══════════ turn order & teams (BGN standard: who goes first / team splitter / seat draw) ══════════
+   Three randomizers for the table. "Who goes first" drives the REAL
+   turn order: local/AI set game.first directly (the turn pill and
+   banner follow it); online, the host sets it server-side before the
+   match starts — a lobby roll is honored by createRoom, and setFirst
+   covers a waiting room. Teams and seats are table-side labels shown
+   on the player cards, with a 🎯 starts marker on the starting player. */
+const toModal=document.getElementById("toModal");
+const toFirstDraw=document.getElementById("toFirstDraw");
+const toTeamDraw=document.getElementById("toTeamDraw");
+const toSeatDraw=document.getElementById("toSeatDraw");
+const toFirstNote=document.getElementById("toFirstNote");
+const toTeamNote=document.getElementById("toTeamNote");
+const toSeatNote=document.getElementById("toSeatNote");
+const mySubEl=document.getElementById("mySubEl");
+const toBtn=document.getElementById("toBtn");
+const tableToBtn=document.getElementById("tableToBtn");
+const TEAM_PAIRS=[["🦁 Lions","🐉 Dragons"],["☀️ Sun","🌙 Moon"],["🥇 Gold","🥈 Silver"],["🔴 Red","🔵 Blue"],["🌹 Rose","🌿 Vine"]];
+function spinRoll(opts, el, done){
+  const target=opts[Math.floor(Math.random()*opts.length)];
+  let i=0;
+  const iv=setInterval(function(){
+    if(i<opts.length*5){ el.textContent=opts[i%opts.length]; i++; }
+    else{ clearInterval(iv); el.textContent=target; done(target); }
+  },70);
+}
+function renderSeats(){
+  function one(subEl, role){
+    let t="";
+    if(game.teams&&game.teams[role])t="Team "+game.teams[role];
+    if(game.mode&&game.mode!=="idle"&&!(game.g&&game.g.over)){
+      const starts=game.first?role==="guest":role==="host";
+      if(starts)t=(t?t+" · ":"")+"🎯 starts";
+    }
+    subEl.textContent=t;
+  }
+  const role=myP()===0?"host":"guest";
+  if(game.mode==="local"&&game.localNames&&game.localNames[role])myNameEl.textContent=game.localNames[role];
+  one(mySubEl,role);
+  document.querySelectorAll(".cya-psub[data-role]").forEach(function(el){ one(el,el.dataset.role); });
+}
+function toSyncState(){
+  toFirstDraw.textContent=game.first?"Guest":"Host";
+  toTeamDraw.textContent=game.teams?game.teams.host+" vs "+game.teams.guest:"—";
+  toSeatDraw.textContent=game.localNames?game.localNames.host+" · "+game.localNames.guest:"—";
+  toFirstNote.textContent=(game.mode==="online"&&game.myRole!=="host")?"Turn order is set by the host."
+    :((game.first?"Guest":"Host")+" is set to go first"+(game.mode==="online"?".":" for this table."));
+  toTeamNote.textContent=game.teams?"Team "+game.teams.host+" (left) · Team "+game.teams.guest+" (right)":"Draw two team sides for the seats.";
+  if(game.mode==="local")toSeatNote.textContent=game.localNames?("Sit: "+game.localNames.host+" (left) · "+game.localNames.guest+" (right)"):"Draw who sits on each side of a shared screen.";
+  else if(!game.mode)toSeatNote.textContent=game.localNames?"Drawn — applies when you start a Local table.":"Draw who sits on each side of a Local table.";
+  else toSeatNote.textContent=(game.mode==="ai"?"Seats are fixed vs the bot — you are Host.":"Seats are fixed online — the host is the room creator.")+" Seat draws apply to Local tables.";
+}
+function applyFirst(role){
+  const who=role==="guest"?"Guest":"Host";
+  if(game.mode==="online"&&game.sockOpen){
+    if(game.myRole==="host"&&game.status===1&&!(game.g&&game.g.over)){
+      rpc("setFirst",role==="guest"?"guest":"").then(function(r){
+        if(r&&r.ok){ game.first=r.first; if(game.g)game.g.hostFirst=game.first; renderAll(); flashBanner("🎲 "+who+" goes first!"); }
+        else flashBanner("Couldn't set turn order ("+(r&&r.err?r.err:"error")+").");
+        toSyncState();
+      }).catch(function(){ flashBanner("Couldn't reach the server."); });
+    }else{
+      flashBanner("🎲 "+who+" would go first — it applies to the next match.");
+      toSyncState();
+    }
+  }else{
+    game.first=role==="guest"?1:0;
+    if(game.g)game.g.hostFirst=game.first;
+    renderAll();
+    flashBanner("🎲 "+who+" goes first!");
+    toSyncState();
+  }
+}
+function rollFirst(){ spinRoll(["Host","Guest"], toFirstDraw, function(w){ applyFirst(w==="Guest"?"guest":"host"); }); }
+function splitTeams(){
+  const pair=TEAM_PAIRS[Math.floor(Math.random()*TEAM_PAIRS.length)];
+  const flip=Math.random()<0.5;
+  game.teams={host:flip?pair[1]:pair[0], guest:flip?pair[0]:pair[1]};
+  spinRoll([pair[0]+" · "+pair[1], pair[1]+" · "+pair[0]], toTeamDraw, function(){
+    toTeamDraw.textContent=game.teams.host+" vs "+game.teams.guest;
+    renderAll();
+    flashBanner("🎭 Teams: Team "+game.teams.host+" vs Team "+game.teams.guest);
+    toSyncState();
+  });
+}
+function drawSeats(){
+  const names=["Player 1","Player 2"];
+  const flip=Math.random()<0.5;
+  game.localNames={host:flip?names[0]:names[1], guest:flip?names[1]:names[0]};
+  spinRoll(names, toSeatDraw, function(){
+    toSeatDraw.textContent=game.localNames.host+" · "+game.localNames.guest;
+    if(game.mode==="local"){
+      toSeatNote.textContent="Sit: "+game.localNames.host+" (left) · "+game.localNames.guest+" (right)";
+      flashBanner("🪑 Seats drawn — "+game.localNames.host+" left, "+game.localNames.guest+" right");
+    }else if(!game.mode){
+      toSeatNote.textContent="Drawn — applies when you start a Local table.";
+    }else{
+      toSeatNote.textContent=(game.mode==="ai"?"Seats are fixed vs the bot — you are Host.":"Seats are fixed online — the host is the room creator.")+" This draw applies to Local tables.";
+    }
+    renderAll();
+  });
+}
+function openToModal(){ toSyncState(); toModal.hidden=false; }
+function closeToModal(){ toModal.hidden=true; }
+toBtn.addEventListener("click",openToModal);
+tableToBtn.addEventListener("click",openToModal);
+document.getElementById("toCloseBtn").addEventListener("click",closeToModal);
+document.getElementById("toFirstBtn").addEventListener("click",rollFirst);
+document.getElementById("toTeamBtn").addEventListener("click",splitTeams);
+document.getElementById("toSeatBtn").addEventListener("click",drawSeats);
+toModal.addEventListener("click",function(e){ if(e.target===toModal)closeToModal(); });
+
+/* ══════════ save / continue (local & AI tables; first/teams/seats persist) ══════════ */
+const SAVE_KEY="bgn_save_cya2011";
+function saveGame(){
+  if((game.mode!=="local"&&game.mode!=="ai")||!game.g)return;
+  if(game.g.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:1,mode:game.mode,aiPlayers:game.aiPlayers,players:game.players,view:game.view,first:game.first,teams:game.teams,localNames:game.localNames,g:game.g,logLines:game.logLines.slice(),savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved table was found.";
+  try{
+    const o=JSON.parse(localStorage.getItem(SAVE_KEY));
+    if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — round "+(o.g?o.g.round:1)+" · "+(o.first?"Guest":"Host")+" first.";
+  }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.g){ flashBanner("No saved table found."); return; }
+  const g=o.g;
+  if(!g.hands||!g.stacks||!Array.isArray(g.deck)){ flashBanner("Saved table is invalid."); return; }
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  game.mode=o.mode==="ai"?"ai":"local";
+  game.aiPlayers=o.aiPlayers||1;
+  game.players=o.players||g.players||2;
+  game.first=o.first===1?1:0;
+  game.teams=o.teams||null;
+  game.localNames=o.localNames||null;
+  game.g=g;
+  g.hostFirst=game.first;
+  game.hand=g.hands[0]||[];
+  game.view=o.view||0;
+  game.pick=[]; game.chPick=-1;
+  game.aiThinking=false; game.locked=false;
+  game.logLines=(o.logLines||[]).slice();
+  game.anim={ stackVal:-1, discard:false, chal:false, chalopen:false, opp:-1 };
+  modalOpen=false;
+  myNameEl.textContent=game.mode==="ai"?"You":"Player 1";
+  roomBox.hidden=true; claimBtn.hidden=true; resignBtn.style.display="none";
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  passScreen.hidden=true; overModal.hidden=true; roundModal.hidden=true; chalModal.hidden=true;
+  aiPanel.hidden=true; onlinePanel.hidden=true; chatBox.hidden=true;
+  document.body.classList.add("cya-in-game");
+  if(g.over)showGameOver();
+  else if(g.roundPending)showRoundModal();
+  renderAll();
+  if(game.mode==="ai"&&turnRoleFor(g.turnIndex)==="guest")aiPassTurn();
+}
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueSaveBtn=document.getElementById("continueSaveBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const saveBtn=document.getElementById("saveBtn");
+continueSaveBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Table saved."); });
+
 /* ══════════ help modal ══════════ */
 const helpOverlay=document.getElementById("helpOverlay");
 const helpBody=document.getElementById("helpBody");
@@ -2579,7 +2886,7 @@ chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat();
     gameName:function(){ return "Cover Your Assets"; },
     exportData:function(){
       if(!game.g||(game.mode!=="local"&&game.mode!=="ai"))return null;
-      return {mode:game.mode,aiPlayers:game.aiPlayers,players:game.players,view:game.view,g:game.g};
+      return {mode:game.mode,aiPlayers:game.aiPlayers,players:game.players,view:game.view,first:game.first,teams:game.teams,localNames:game.localNames,g:game.g};
     },
     applySave:function(o){
       if(!o||!o.g||(o.mode!=="local"&&o.mode!=="ai"))return false;
@@ -2588,7 +2895,11 @@ chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat();
       game.mode=o.mode;
       game.aiPlayers=o.aiPlayers||1;
       game.players=o.players||g.players||2;
+      game.first=o.first===1?1:0;
+      game.teams=o.teams||null;
+      game.localNames=o.localNames||null;
       game.g=g;
+      g.hostFirst=game.first;
       game.hand=g.hands[0]||[];
       game.view=o.view||0;
       game.pick=[]; game.chPick=-1;
@@ -2624,7 +2935,10 @@ window.__cya={ game, newRoom, deal, turnPlayer, actorP, isMyTurn, myP, handLenOf
   applyPairHand, applyPairDiscard, applyDiscardDraw, beginChallenge, applyDefend, stopChallenge, replenish,
   finishAction, advanceTurn, endRound, startNewRound, cardType, cardVal, isWild, money, buildDeck, VAL, NAMES, EMO,
   startMode, startGame, doPair, doPairDiscard, doDiscardDraw, doChallenge, doDefend, doStop, doPass, doContinue,
-  aiChooseAction, aiChooseDefense, aiChoosePress, renderAll, showGameOver, showRoundModal, applyServerSnap };
+  aiChooseAction, aiChooseDefense, aiChoosePress, renderAll, showGameOver, showRoundModal, applyServerSnap,
+  turnRoleFor, aiPassTurn, applyFirst, rollFirst, splitTeams, drawSeats, openToModal, closeToModal, toSyncState,
+  renderSeats, saveGame, continueGame, deleteSave, hasSave, refreshContinuePanel };
+refreshContinuePanel();
 renderAll();
 })();
 </script>

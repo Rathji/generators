@@ -37,8 +37,6 @@ button.small{padding:3px 8px;font-size:12px}
 .actRow{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0}
 #zoneinfo{padding:9px 12px;border-bottom:1px solid var(--line);font-size:13px;min-height:70px}
 #zoneinfo h4{margin:0 0 4px;font-size:13px;color:var(--gold);letter-spacing:1px;font-family:var(--bgn-serif)}
-#log{flex:1;overflow-y:auto;padding:8px 12px;font-size:12px;line-height:1.45}
-#log div{padding:2px 0;border-bottom:1px solid rgba(43,74,112,.25)}
 .lt{color:var(--dim);margin-right:6px}
 .lw{color:var(--gold);font-weight:bold}
 .lbad{color:#e07f6a}
@@ -74,16 +72,40 @@ button.small{padding:3px 8px;font-size:12px}
 input[type=checkbox]{accent-color:var(--gold)}
 .zoneBtn{display:inline-flex;align-items:center;gap:5px;margin:2px}
 </style>
+<style>
+/* ── BGN standard chrome: nav/footer, mode cards, fullscreen map overlay ── */
+#turnEl{font-size:13px;color:var(--gold);white-space:nowrap}
+#logEl{flex:1;overflow-y:auto;padding:8px 12px;font-size:12px;line-height:1.45}
+#logEl div{padding:2px 0;border-bottom:1px solid rgba(43,74,112,.25)}
+.bgn-mode{display:flex;flex-direction:column;align-items:flex-start;gap:3px;flex:1;min-width:190px;text-align:left;background:#1d3a5f;color:#fff;border:1px solid #3b6aa0;padding:13px 15px;border-radius:8px;cursor:pointer;font:600 15px/1.2 var(--bgn-sans),system-ui;transition:border-color .2s,background .2s}
+.bgn-mode:hover{border-color:var(--gold);background:#28507f}
+.bgn-mode-sub{font-size:11px;font-weight:400;color:var(--dim)}
+.fs-open-btn{position:absolute;top:10px;right:10px;z-index:6;background:rgba(10,14,24,.72);color:var(--bgn-cream);border:1px solid rgba(255,255,255,.22);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:9px 15px;border-radius:10px;cursor:pointer;font:600 13px/1 var(--bgn-sans),system-ui;box-shadow:0 4px 16px rgba(0,0,0,.4);transition:border-color .2s,box-shadow .2s}
+.fs-open-btn:hover{border-color:var(--bgn-accent);box-shadow:0 4px 16px rgba(0,0,0,.4),0 0 12px rgba(212,175,55,.4)}
+#fsOverlay{position:fixed;inset:0;z-index:9500;background:#0b0e15;display:flex;flex-direction:column}
+#fsOverlay[hidden]{display:none}
+.fs-topbar{display:flex;align-items:center;gap:12px;padding:10px 14px;background:#12161f;border-bottom:1px solid rgba(212,175,55,.16);color:var(--bgn-cream);font:500 13px/1.4 var(--bgn-sans),system-ui;flex-wrap:wrap}
+#fsStatusEl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fsOverlay .btn{padding:8px 16px;font-size:.7rem}
+#fsBoardWrap{flex:1;min-height:0;position:relative}
+#fsBoardWrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.fs-tile{position:absolute;top:14px;right:14px;z-index:8;pointer-events:none}
+.fs-tile:empty{display:none}
+.fs-meeple{position:absolute;bottom:14px;right:14px;z-index:8;pointer-events:none}
+.fs-meeple:empty{display:none}
+</style>
 
 <!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
-<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/d12bdc015888e3a692b5d233aadf3951.mp3" };</script>
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/d12bdc015888e3a692b5d233aadf3951.mp3", muted: true };</script>
 <script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
 <script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
 
 <div id="app">
+  <nav class="bgn-nav"><div class="wrap"><a class="bgn-nav-brand" href="https://perchance.org/bgn-boardgame-network">Boardgame Network</a><span class="bgn-nav-title" id="navTitleEl"></span></div></nav>
   <div id="topbar">
     <div id="title"></div>
     <div id="status">Loading…</div>
+    <b id="turnEl"></b>
     <div id="topbtns">
       <button id="helpBtn" onclick="openHelp()">?</button>
       <button id="saveBtn" onclick="doSave()">Save</button>
@@ -95,19 +117,124 @@ input[type=checkbox]{accent-color:var(--gold)}
   <div id="main">
     <div id="boardCtn">
       <canvas id="board" width="900" height="450"></canvas>
+      <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
     </div>
     <div id="side">
       <div id="strip"></div>
       <div id="powercard"></div>
       <div id="actions"></div>
       <div id="zoneinfo"></div>
-      <div id="log"></div>
+      <div id="logEl" class="bgn-log"></div>
     </div>
   </div>
 </div>
 <div id="modalCtn" style="display:none"></div>
 <div id="toast"></div>
 <div id="tooltip"></div>
+
+<!-- Fullscreen map overlay (BGN standard) -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div id="fsBoardWrap"></div>
+  <div class="fs-tile" id="fsTileCtn"></div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+<script>
+var fsOverlay = document.getElementById("fsOverlay");
+var fsOpenBtn = document.getElementById("fsOpenBtn");
+var fsStatusEl = document.getElementById("fsStatusEl");
+var fsExitBtn = document.getElementById("fsExitBtn");
+var fsTileCtn = document.getElementById("fsTileCtn");
+var fsMeepleCtn = document.getElementById("fsMeepleCtn");
+var fsBoardWrap = document.getElementById("fsBoardWrap");
+var bannerEl = document.getElementById("status");
+var _fsReg = null;
+function _fsStash(el){ if(!el||!el.parentNode) return null; return {el:el, _fsOrig:el.parentNode, _fsNext:el.nextSibling}; }
+function _fsRestore(st){ if(!st||!st._fsOrig) return; try{ st._fsOrig.insertBefore(st.el, st._fsNext); }catch(e){} }
+function fsRefit(){ if(_fsReg && _fsReg.resize){ try{ _fsReg.resize(true); }catch(e){} } }
+function syncBanner(){ if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent; }
+function openFullscreen(){
+  if(!fsOverlay.hidden) return;
+  if(!_fsReg) return;
+  _fsReg._fsOrig=[];
+  if(_fsReg.canvas && fsBoardWrap){ _fsReg._fsOrig.push(_fsStash(_fsReg.canvas)); fsBoardWrap.appendChild(_fsReg.canvas); }
+  if(_fsReg.tile && fsTileCtn){ _fsReg._fsOrig.push(_fsStash(_fsReg.tile)); fsTileCtn.appendChild(_fsReg.tile); }
+  if(_fsReg.meeple && fsMeepleCtn){ _fsReg._fsOrig.push(_fsStash(_fsReg.meeple)); fsMeepleCtn.appendChild(_fsReg.meeple); }
+  fsOverlay.hidden=false;
+  document.body.style.overflow="hidden";
+  syncBanner();
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen){ var p=fsOverlay.requestFullscreen(); if(p && p.catch) p.catch(function(){}); } }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden) return;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  if(_fsReg && _fsReg._fsOrig){ for(var i=_fsReg._fsOrig.length-1;i>=0;i--) _fsRestore(_fsReg._fsOrig[i]); _fsReg._fsOrig=[]; }
+  if(_fsReg && _fsReg.resize){ try{ _fsReg.resize(false); }catch(e){} }
+  try{ if(document.fullscreenElement){ var p=document.exitFullscreen(); if(p && p.catch) p.catch(function(){}); } }catch(e){}
+}
+window.bgnFullscreen = {
+  register: function(o){
+    if(!o || !o.canvas) throw new Error("bgnFullscreen.register: o.canvas is required");
+    _fsReg={ canvas:o.canvas, tile:o.tile||null, meeple:o.meeple||null, resize:(typeof o.resize==="function")?o.resize:null, _fsOrig:[] };
+    fsOpenBtn.hidden=false;
+  },
+  open: function(){ openFullscreen(); },
+  close: function(){ closeFullscreen(); },
+  isOpen: function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click", openFullscreen);
+fsExitBtn.addEventListener("click", closeFullscreen);
+document.addEventListener("keydown", function(e){
+  if (e.key === "Escape"){
+    if (!fsOverlay.hidden){ closeFullscreen(); e.preventDefault(); return; }
+  }
+});
+window.addEventListener("resize", function(){ if(!fsOverlay.hidden) fsRefit(); });
+document.addEventListener("fullscreenchange", function(){
+  if(!document.fullscreenElement && !fsOverlay.hidden) closeFullscreen();
+});
+if (bannerEl && window.MutationObserver){
+  new MutationObserver(function(){ if(!fsOverlay.hidden) syncBanner(); }).observe(bannerEl, {childList:true, subtree:true, characterData:true});
+}
+</script>
+
+<footer class="bgn-footer">
+  <div class="wrap">
+    <div class="ornament">✦</div>
+    <a href="https://perchance.org/bgn-boardgame-network">The Boardgame Network</a>
+    <p class="footnote">BGN Supremacy — a Boardgame Network template</p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
+  </div>
+</footer>
 
 <script type="text/x-server-plugin">
 // bgn-strategy-template online server - lobby, relay and state cache. All of this is PUBLIC source.
@@ -172,7 +299,7 @@ self.rpc = {
     let code; do { code = makeCode(); } while (rooms.has(code));
     const room = { code, hostId:conn.id, max: Math.max(2, Math.min(6, info.max||6)), // ~cap: bump here too if you raise maxPlayers in main.pjs
       players:[{connId:conn.id, name:String(info.name||"Host").slice(0,20), power:-1}],
-      started:false, lastState:"" };
+      started:false, lastState:"", known:new Map() };
     if (rooms.size > 60) { const first = rooms.keys().next().value; rooms.delete(first); }
     rooms.set(code, room); connRooms.set(conn.id, code);
     conn.subscribe("room:"+code);
@@ -196,7 +323,7 @@ self.rpc = {
     const room = roomOf(conn); if (!room) return "{}";
     let info; try { info = JSON.parse(data); } catch(e){ return "{}"; }
     const pl = room.players.find(p=>p.connId===conn.id);
-    if (pl) { pl.power = (typeof info.power === "number") ? info.power : -1; }
+    if (pl) { pl.power = (typeof info.power === "number") ? info.power : -1; if (pl.power>=0) room.known.set(pl.power, pl.name); }
     broadcast(room, {t:"lobby", players:playerList(room)});
     return "{}";
   },
@@ -220,10 +347,39 @@ self.rpc = {
         pl.power = p;
       }
       used.add(pl.power);
+      room.known.set(pl.power, pl.name);
     }
     room.started = true;
     broadcast(room, {t:"start", players:playerList(room)});
     return JSON.stringify({players:playerList(room)});
+  },
+  rejoinRoom({conn}, data) {
+    let info; try { info = JSON.parse(data); } catch(e){ return '{"error":"bad request"}'; }
+    const code = String(info.code||"").trim().toUpperCase();
+    const room = rooms.get(code);
+    if (!room) return JSON.stringify({error:"Room not found"});
+    const name = String(info.name||"Player").slice(0,20);
+    const power = (typeof info.power === "number") ? info.power : -1;
+    if (room.started){
+      if (power<0 || power>5) return JSON.stringify({error:"Rejoin failed — power unavailable"});
+      if (room.known.has(power) && room.known.get(power)!==name) return JSON.stringify({error:"Rejoin failed — name mismatch"});
+      if (room.players.some(p=>p.connId!==conn.id && p.power===power)) return JSON.stringify({error:"That seat is taken"});
+      let pl = room.players.find(p=>p.power===power);
+      if (pl){ pl.connId=conn.id; pl.name=name; }
+      else { room.players.push({connId:conn.id, name, power}); }
+      room.known.set(power, name);
+      connRooms.set(conn.id, code);
+      conn.subscribe("room:"+code);
+      broadcast(room, {t:"lobby", players:playerList(room)});
+      return JSON.stringify({code, connId:conn.id, host:false, players:playerList(room), rejoined:true, state:room.lastState});
+    }
+    let existing = room.players.find(p=>p.connId===conn.id);
+    if (existing) existing.name = name;
+    else room.players.push({connId:conn.id, name, power});
+    connRooms.set(conn.id, code);
+    conn.subscribe("room:"+code);
+    broadcast(room, {t:"lobby", players:playerList(room)});
+    return JSON.stringify({code, connId:conn.id, host:false, players:playerList(room), rejoined:true, state:""});
   },
   getState({conn}, data) {
     const room = roomOf(conn); if (!room) return "";
@@ -269,6 +425,14 @@ self.onmessage = ({conn, data}) => {
   if (typeof data !== "string") return;
   let msg; try { msg = JSON.parse(data); } catch(e){ return; }
   const room = roomOf(conn); if (!room) return;
+  if (msg.t === "result") {
+    const d = (msg.d && typeof msg.d === "object") ? msg.d : null;
+    let st = null; try { st = room.lastState ? JSON.parse(room.lastState) : null; } catch(e){}
+    if (st && d && typeof d.player === "number" && d.player !== st.phasePlayer) {
+      conn.send(JSON.stringify({t:"err", d:"not_your_turn"}));
+      return;
+    }
+  }
   if (msg.t === "state") room.lastState = (typeof msg.d === "string") ? msg.d : "";
   broadcast(room, {f:conn.id, t:msg.t, d:msg.d});
 };
@@ -346,9 +510,14 @@ const CONFIG = {
   templateName: cfgVal(root.templateName) || "BGN Strategy Template",
   gameTitle:    cfgVal(root.gameTitle) || "Untitled Strategy Game",
   gameSubtitle: cfgVal(root.gameSubtitle) || "",
-  tagline:      cfgVal(root.tagline) || "",
+  tagline:      cfgVal(root.gameTagline) || cfgVal(root.tagline) || "",
+  heroImage:    cfgVal(root.heroImage) || "",
+  gameKicker:   cfgVal(root.gameKicker) || "",
+  gameGenre:    cfgVal(root.gameGenre) || "",
+  gamePlayers:  cfgVal(root.gamePlayers) || "1-6",
   accentColor:  cfgVal(root.accentColor) || "#e6b320",
   maxPlayers:   Math.max(2, Math.min(8, Number(cfgVal(root.maxPlayers)) || 6)),
+  hubUrl:       cfgVal(root.hubUrl) || "https://perchance.org/bgn-boardgame-network",
 };
 CONFIG.powers = root.powers.selectAll.map(n => ({
   key: n.getName,
@@ -426,8 +595,16 @@ function toast(msg){
   const t=el("toast"); t.textContent=msg; t.style.opacity=1;
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>{ t.style.opacity=0; }, 2600);
 }
-function log(msg){ G.log.push(msg); if(G.log.length>300) G.log.splice(0,G.log.length-300); if(el("log")){ renderLog(); } }
-function setStatus(msg){ el("status").innerHTML = msg; }
+function log(msg){ G.log.push(msg); if(G.log.length>300) G.log.splice(0,G.log.length-300); if(el("logEl")){ renderLog(); } }
+function setStatus(msg){
+  el("status").innerHTML = msg;
+  updateTurnEl();
+}
+function updateTurnEl(){
+  const t = el("turnEl"); if (!t) return;
+  if (!G){ t.textContent = ""; return; }
+  t.textContent = G.over ? "Game over" : "Turn "+G.turn+" · "+PHASE_LABEL[G.phase]+" — "+G.powers[G.phasePlayer].short;
+}
 
 function openModal(html){
   el("modalCtn").innerHTML = '<div class="modal"><div class="box">'+html+'</div></div>';
@@ -1042,6 +1219,7 @@ function render(){
   el("endBtn").disabled = !(ctrl==="local");
   el("endBtn").textContent = "End "+PHASE_LABEL[G.phase];
   el("endBtn").style.display = (ctrl==="local") ? "" : "none";
+  updateTurnEl();
 }
 function rr(x,y,w,h,r){
   const ctx=boardCtx;
@@ -1372,7 +1550,7 @@ function renderZoneInfo(){
   el("zoneinfo").innerHTML=h;
 }
 function renderLog(){
-  const lc=el("log");
+  const lc=el("logEl");
   lc.innerHTML = G.log.slice(-160).map(l=>'<div>'+l.replace(/</g,"&lt;")+'</div>').join("");
   lc.scrollTop=lc.scrollHeight;
 }
@@ -1547,6 +1725,12 @@ function confirmQty(){
 
 // ============================== ONLINE ==============================
 let netState={ myConnId:null, roomCode:null, isHost:false, myPowerIdx:-1, myName:"Player" };
+const NET_SESSION_KEY="bgn_supremacy_net_session";
+function saveNetSession(){
+  if (!netState.roomCode) return;
+  try{ localStorage.setItem(NET_SESSION_KEY, JSON.stringify({roomCode:netState.roomCode, name:netState.myName, isHost:netState.isHost, myPowerIdx:netState.myPowerIdx})); }catch(e){}
+}
+function clearNetSession(){ try{ localStorage.removeItem(NET_SESSION_KEY); }catch(e){} }
 
 function netConnect(opts){
   closeModal();
@@ -1562,6 +1746,7 @@ function netConnect(opts){
       let info; try{ info=JSON.parse(reply); }catch(e){ openModal('<h2>Error</h2><p>'+reply+'</p><button onclick="openSetup()">Back</button>'); return; }
       if (info.error){ openModal('<h2>Error</h2><p>'+info.error+'</p><button onclick="openSetup()">Back</button>'); return; }
       netState.myConnId=info.connId; netState.roomCode=info.code; netState.isHost=opts.isHost; netState.myName=name;
+      saveNetSession();
       showLobby(info.players, info);
     }).catch(e=>{ openModal('<h2>Network Error</h2><p>'+(e&&e.message||e)+'</p><button onclick="openSetup()">Back</button>'); });
   });
@@ -1573,8 +1758,37 @@ function netConnect(opts){
     toast("Connection closed"+(ev.code?(" ("+ev.code+")"):""));
   });
 }
+function rejoinNet(){
+  let saved; try{ saved=JSON.parse(localStorage.getItem(NET_SESSION_KEY)||"null"); }catch(e){ saved=null; }
+  if (!saved || !saved.roomCode) return false;
+  closeModal();
+  setStatus("Reconnecting to room "+saved.roomCode+"…");
+  const name = String(saved.name||"Player").slice(0,20);
+  const power = (typeof saved.myPowerIdx==="number") ? saved.myPowerIdx : -1;
+  try { socket = root.createServerSocket(); }
+  catch(e){ setStatus("Ready."); openSetup(); return true; }
+  socket.addEventListener("open", ()=>{
+    socket.rpc.rejoinRoom(JSON.stringify({code:saved.roomCode, name, power})).then(reply=>{
+      let info; try{ info=JSON.parse(reply); }catch(e){ setStatus("Ready."); openSetup(); return; }
+      if (info.error){ setStatus("Ready."); openSetup(); toast(info.error); return; }
+      netState.myConnId=info.connId; netState.roomCode=info.code; netState.isHost=false; netState.myName=name; netState.myPowerIdx=power;
+      saveNetSession();
+      if (info.state){ closeModal(); applyNetState(info.state); }
+      else showLobby(info.players, info);
+    }).catch(()=>{ setStatus("Ready."); openSetup(); });
+  });
+  socket.addEventListener("message", ev=>{
+    let msg; try{ msg=JSON.parse(ev.data); }catch(e){ return; }
+    onNetMessage(msg);
+  });
+  socket.addEventListener("close", ev=>{
+    toast("Connection closed"+(ev.code?(" ("+ev.code+")"):""));
+  });
+  return true;
+}
 function onNetMessage(msg){
   if (msg.f && msg.f===netState.myConnId) return;
+  if (msg.t==="err"){ toast(typeof msg.d==="string"?msg.d:"Move rejected"); return; }
   if (msg.t==="lobby"){ showLobby(msg.players,{host:netState.isHost}); return; }
   if (msg.t==="start"){
     const me = msg.players.find(x=>x.connId===netState.myConnId);
@@ -1626,10 +1840,23 @@ function showLobby(players, info){
     : '<p class="muted">Waiting for the host to start…</p>';
   openModal('<h2>War Room</h2>'+
     '<p>Room code:</p><div class="bigCode">'+netState.roomCode+'</div>'+
+    '<button id="copyCodeBtn" class="btn btn-ghost" onclick="copyRoomCode()">Copy code</button>'+
     '<h3>Players ('+players.length+'/'+CONFIG.maxPlayers+')</h3><div id="lobbyPlayers">'+rows+'</div>'+
     '<h3>Choose your superpower</h3>'+powerBtns+
     '<div style="margin-top:10px">'+hostRow+'</div>'+
-    '<button onclick="leaveRoom()" style="margin-top:8px">Leave Room</button>');
+    '<button id="leaveBtn" class="btn btn-ghost" onclick="leaveRoom()" style="margin-top:8px">Leave</button>');
+}
+function copyRoomCode(){
+  const code = netState.roomCode || "";
+  if (navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(()=>toast("Code copied: "+code)).catch(()=>legacyCopy(code));
+  } else legacyCopy(code);
+  function legacyCopy(c){
+    const t=document.createElement("textarea"); t.value=c; t.style.position="fixed"; t.style.opacity="0";
+    document.body.appendChild(t); t.select();
+    try{ document.execCommand("copy"); toast("Code copied: "+c); }catch(e){ toast("Copy failed — code: "+c); }
+    document.body.removeChild(t);
+  }
 }
 function pickPower(powerIdx){
   if (!netState.roomCode) return;
@@ -1644,6 +1871,7 @@ function hostStart(){
 function leaveRoom(){
   if (socket) socket.rpc.leaveRoom(JSON.stringify({})).then(()=>{});
   try{ socket && socket.close(); }catch(e){}
+  clearNetSession();
   openSetup();
 }
 function requestRematch(){
@@ -1729,6 +1957,7 @@ function saveLbName(){ const i=document.getElementById("lbNameInput"); if(i)setL
 function startOnlineGame(players, me){
   if (!me){ toast("Could not find you in the game!"); return; }
   netState.myPowerIdx = me.power;
+  saveNetSession();
   const remotePowers = players.filter(x=>x.connId!==netState.myConnId).map(x=>x.power);
   const cfg = { mode:"online", isHost:netState.isHost, myPowerIdx:me.power, remote:remotePowers, name:netState.myName };
   newGame(cfg);
@@ -1795,19 +2024,28 @@ function sendState(){
   if (!G || !G.net || !G.net.isHost || !socket || socket.readyState!==1) return;
   try{ socket.send(JSON.stringify({t:"state", d:JSON.stringify(serialize())})); }catch(e){}
 }
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
+  });
+}
+function cleanText(s){
+  return String(s).replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").trim().slice(0,200);
+}
 function sendChat(){
   const inp=el("chatInput"); if (!inp) return;
-  const text=inp.value.trim(); if (!text) return;
+  const text=cleanText(inp.value); if (!text) return;
   inp.value="";
   socket.send(JSON.stringify({t:"chat", d:{name:G?G.net.myName:netState.myName, text}}));
 }
 let chatLog=[];
 function appendChat(d){
   if (!d) return;
+  d = { name: cleanText(d.name), text: cleanText(d.text) };
   chatLog.push(d);
   if (chatLog.length>60) chatLog=chatLog.slice(-60);
   const c=el("chatCtn"); if (!c) return;
-  c.innerHTML = chatLog.map(m=>'<div class="chatLine"><span class="chatName">'+m.name.replace(/</g,"&lt;")+':</span> '+m.text.replace(/</g,"&lt;")+'</div>').join("");
+  c.innerHTML = chatLog.map(m=>'<div class="chatLine"><span class="chatName">'+escapeHtml(m.name)+':</span> '+escapeHtml(m.text)+'</div>').join("");
   c.scrollTop=c.scrollHeight;
 }
 
@@ -1844,15 +2082,25 @@ async function openSetup(){
     (saved?'<h3>Continue</h3>'+
       '<button class="primary" onclick="continueGame()">Continue Saved Game</button> '+
       '<button onclick="deleteSave()">Delete Save</button>':'')+
-    '<h3>New Game</h3>'+
-    '<p class="muted">Single-player: you against five AIs.</p>'+
-    '<button class="powerBtn" onclick="soloMode()" style="background:#1d3a5f;color:#fff;width:100%;padding:8px">🎖 SOLO — pick your superpower</button>'+
-    '<p class="muted" style="margin-top:8px">Hot-seat: two or more humans on this screen.</p>'+
-    '<button class="powerBtn" onclick="hotseatMode()" style="background:#1d3a5f;color:#fff;width:100%;padding:8px">👥 HOT-SEAT — choose human players</button>'+
-    '<p class="muted" style="margin-top:8px">Online: play against friends on perchance.org.</p>'+
-    '<button class="powerBtn" onclick="onlineMode()" style="background:#1d3a5f;color:#fff;width:100%;padding:8px">🌐 ONLINE — multiplayer room</button>'+
-    '<p style="margin-top:10px"><button onclick="showLb()">🏆 Leaderboard</button> <button onclick="openHelp()">How to play</button> <button onclick="openTemplateGuide()">🧩 Template guide</button></p>'
+    '<h3>Play</h3>'+
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 8px">'+
+      '<button class="bgn-mode" data-mode="local" onclick="chooseMode(\'local\')">🎖 Local Play<span class="bgn-mode-sub">Solo vs AI or hot-seat on this screen</span></button>'+
+      '<button class="bgn-mode" data-mode="online" onclick="chooseMode(\'online\')">🌐 Online Play<span class="bgn-mode-sub">Multiplayer room with friends</span></button>'+
+    '</div>'+
+    '<p style="margin-top:10px"><button onclick="showLb()">🏆 Leaderboard</button> <button onclick="openHelp()">How to play</button> <button onclick="openTemplateGuide()">🧩 Template guide</button></p>'+
+    '<p class="muted" style="margin-top:10px">Part of <a href="'+CONFIG.hubUrl+'" target="_blank" rel="noopener">the Boardgame Network</a>.</p>'
   );
+}
+function chooseMode(m){
+  if (m==="local"){
+    openModal('<h2>Local Play</h2>'+
+      '<p class="muted">Play on this screen — solo against AIs, or hot-seat with humans sharing the keyboard.</p>'+
+      '<button class="powerBtn" onclick="soloMode()" style="background:#1d3a5f;color:#fff;width:100%;padding:8px">🎖 SOLO — pick your superpower</button>'+
+      '<button class="powerBtn" onclick="hotseatMode()" style="background:#1d3a5f;color:#fff;width:100%;padding:8px">👥 HOT-SEAT — choose human players</button>'+
+      '<div style="margin-top:8px"><button onclick="openSetup()">Back</button></div>');
+  } else {
+    onlineMode();
+  }
 }
 function soloMode(){
   const btns = POWERS.map((p,i)=>'<button class="powerBtn" onclick="startSolo('+i+')"><span class="swatch" style="background:'+p.color+'"></span> Play as '+p.short+' — '+p.name+'</button>').join("");
@@ -1880,12 +2128,12 @@ function startHotseat(){
 }
 function onlineMode(){
   openModal('<h2>Online Multiplayer</h2>'+
-    '<p class="muted">One player creates a room and hosts the game; friends join with the 4-letter code. Games need all players connected while it runs. The host\'s browser simulates the world.</p>'+
+    '<p class="muted">One player creates a room and hosts the game; friends join with the room code. Games need all players connected while it runs. The host\'s browser simulates the world.</p>'+
     '<h3>Nickname</h3><input type="text" id="netName" placeholder="Your name" value="Commander" maxlength="20">'+
     '<h3>Join a room</h3>'+
-    '<div style="display:flex;gap:6px"><input type="text" id="roomCode" placeholder="Room code (4 letters)" maxlength="4" style="flex:1"><button onclick="joinRoom()">Join</button></div>'+
+    '<div style="display:flex;gap:6px"><input type="text" id="joinCodeInput" placeholder="Room code (4-5 letters)" maxlength="5" style="flex:1;text-transform:uppercase"><button id="joinRoomBtn" class="btn btn-gold" onclick="joinRoom()">Join</button></div>'+
     '<h3>Or create one</h3>'+
-    '<button class="primary" onclick="createRoom()">Create Room</button>'+
+    '<button id="createRoomBtn" class="btn btn-gold" onclick="createRoom()">Create room</button>'+
     '<div style="margin-top:8px"><button onclick="openSetup()">Back</button></div>');
 }
 function createRoom(){
@@ -1893,7 +2141,7 @@ function createRoom(){
   netConnect({isHost:true, name});
 }
 function joinRoom(){
-  const code=(el("roomCode")&&el("roomCode").value.trim().toUpperCase())||"";
+  const code=(el("joinCodeInput")&&el("joinCodeInput").value.trim().toUpperCase())||"";
   const name=(el("netName")&&el("netName").value.trim())||"Player";
   if (!code){ toast("Enter a room code"); return; }
   netConnect({isHost:false, code, name});
@@ -2001,7 +2249,8 @@ Object.assign(window, {
   openModal, closeModal,
   buildArmy, buildNavy, buildNavySea, sellRes, buyRes, research, buildNuke, buildLstar,
   prospectBtn, aidBtn, confirmAid, setMode, qtySync, confirmQty, endPhaseBtn,
-  doSave, openSetup, soloMode, startSolo, hotseatMode, startHotseat, onlineMode, createRoom, joinRoom,
+  doSave, openSetup, chooseMode, soloMode, startSolo, hotseatMode, startHotseat, onlineMode, createRoom, joinRoom,
+  copyRoomCode, rejoinNet,
   setDiff, renderDiffBtns,
   continueGame, deleteSave, openHelp, openTemplateGuide, pickPower, hostStart, leaveRoom, requestRematch, sendChat,
   showLb, saveLbName, showLbRefresh,
@@ -2042,20 +2291,40 @@ function openShare(){
 }
 window.openShare = openShare;
 
+// ============================== FULLSCREEN MAP ==============================
+function fsResize(isOpen){
+  if (isOpen){
+    const area = el("fsBoardWrap");
+    const r = area.getBoundingClientRect();
+    if (r.width > 20 && r.height > 20){
+      const ar = CW/CH;
+      let w = r.width, h = w/ar;
+      if (h > r.height){ h = r.height; w = h*ar; }
+      boardEl.style.width = w+"px";
+      boardEl.style.height = h+"px";
+    }
+    boardEl.style.border = "0";
+    boardEl.style.borderRadius = "0";
+    boardEl.style.boxShadow = "none";
+    boardEl.style.margin = "auto";
+  } else {
+    boardEl.style.width = ""; boardEl.style.height = ""; boardEl.style.border = ""; boardEl.style.borderRadius = ""; boardEl.style.boxShadow = ""; boardEl.style.margin = "";
+  }
+  if (G) render();
+}
+
 // ============================== BOOT ==============================
 (async function boot(){
   el("title").innerHTML = '<span>'+CONFIG.templateName.toUpperCase()+'</span> <small>'+CONFIG.gameTitle+'</small>';
   const rs=document.documentElement.style;
   rs.setProperty("--gold", CONFIG.accentColor);
+  rs.setProperty("--bgn-accent", CONFIG.accentColor);
+  const nt=el("navTitleEl"); if (nt) nt.textContent = CONFIG.gameTitle;
   el("board").width=CW; el("board").height=CH;
+  if (window.bgnFullscreen && boardEl) window.bgnFullscreen.register({canvas: boardEl, resize: fsResize});
   const saved = await hasAutosave();
-  if (saved){
-    setStatus('A saved game was found.');
-    openSetup();
-  } else {
-    setStatus('Ready.');
-    openSetup();
-  }
+  setStatus(saved ? 'A saved game was found.' : 'Ready.');
+  if (!rejoinNet()) openSetup();
 })();
 })();
 </script>
