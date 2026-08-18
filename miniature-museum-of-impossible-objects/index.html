@@ -1,0 +1,270 @@
+
+<div id="museum-container">
+  <h1>MINIATURE MUSEUM of IMPOSSIBLE OBJECTS</h1>
+  <div class="accession-id" id="accession">ACCESSION ID: #0000-B</div>
+
+  <div class="image-frame">
+    <div id="status" class="status">READY</div>
+    <div id="image-grid" class="grid"><!-- tiles are created on Generate --></div>
+  </div>
+
+  <div class="catalog-card">
+    <h3>DIAGNOSTIC DATA</h3>
+    <table class="data-table">
+      <tr><td>CHRONAL DISPLACEMENT:</td><td class="stat"><span id="stat-dis">0</span>s</td></tr>
+      <tr><td>PHOTONIC LUMINOSITY:</td><td class="stat"><span id="stat-lum">0</span> nits</td></tr>
+      <tr><td>CONTAINMENT GRADE:</td><td class="stat">LEVEL <span id="stat-con">1</span></td></tr>
+    </table>
+    <p class="notes"><i id="note">"—"</i></p>
+  </div>
+
+  <div class="controls">
+    <label class="field">
+      <span class="label">Optional detail (appends to prompt)</span>
+      <textarea id="userText" rows="2" placeholder="e.g., etched serial markings, faint dust trails, scaler wrinkles"></textarea>
+    </label>
+
+    <div class="toggles">
+      <label><input type="checkbox" id="aiRefine"> AI REFINE prompt before generation</label>
+    </div>
+
+    <div class="buttons">
+      <button id="btn-scan">INITIALIZE ARCHIVAL SCAN</button>
+      <button id="btn-generate">GENERATE</button>
+    </div>
+
+    <details class="prompt-preview">
+      <summary>Show final prompt</summary>
+      <pre id="promptText"></pre>
+      <pre id="negText" class="neg"></pre>
+    </details>
+  </div>
+</div>
+
+<style>
+  :root { color-scheme: dark; }
+  #museum-container { background:#0a0a0a; color:#b0b0b0; max-width:860px; margin:32px auto; padding:24px; border:1px solid #1a1a1a; border-radius:8px; }
+  h1 { font-family:"Playfair Display", serif; color:#c9a56a; font-size:1rem; letter-spacing:3px; text-align:center; margin:0 0 8px; }
+  .accession-id { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:0.8rem; color:#666; text-align:center; margin-bottom:16px; }
+
+  .image-frame { background:#000; border:1px solid #1a1a1a; min-height:380px; display:flex; align-items:center; justify-content:center; position:relative; padding:8px; border-radius:6px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; width:100%; }
+  .slot { position:relative; background:#0e0e0e; border:1px solid #161616; aspect-ratio:1/1; overflow:hidden; border-radius:4px; display:flex; align-items:center; justify-content:center; }
+  .slot img { width:100%; height:100%; object-fit:cover; display:block; }
+  .overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#d0d0d0; background:rgba(0,0,0,0.45); text-shadow:0 1px 2px #000; font-size:0.9rem; pointer-events:none; }
+
+  .status { position:absolute; top:8px; right:12px; font-size:0.75rem; color:#999; background:#0b0b0b; border:1px solid #1a1a1a; padding:4px 8px; border-radius:4px; }
+
+  .catalog-card { background:#111; padding:16px; margin-top:18px; border-left:3px solid #c9a56a; border-radius:6px; }
+  h3 { font-size:0.75rem; color:#c9a56a; letter-spacing:1px; margin:0 0 8px; }
+  .data-table { width:100%; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:0.85rem; border-top:1px solid #222; padding-top:10px; border-collapse:separate; border-spacing:0; }
+  .data-table td { padding:4px 0; }
+  .stat { text-align:right; color:#eee; }
+  .notes { font-size:0.85rem; margin-top:12px; color:#7a7a7a; line-height:1.5; }
+
+  .controls { margin-top:16px; }
+  .field { display:flex; flex-direction:column; gap:6px; }
+  .label { font-size:0.8rem; color:#c9a56a; }
+  textarea { width:100%; background:#0f0f0f; color:#ddd; border:1px solid #2a2a2a; border-radius:4px; padding:8px; }
+  .toggles { margin-top:8px; font-size:0.85rem; color:#bbb; }
+  .buttons { display:flex; gap:8px; margin-top:12px; }
+  button { flex:1; background:transparent; border:1px solid #c9a56a; color:#c9a56a; padding:10px; cursor:pointer; transition:0.2s; border-radius:4px; }
+  button:hover { background:#c9a56a; color:#000; }
+  button:disabled { opacity:0.4; cursor:wait; background:transparent; color:#c9a56a; }
+
+  .prompt-preview { margin-top:10px; }
+  pre { white-space:pre-wrap; background:#0f0f0f; border:1px solid #1f1f1f; padding:8px; border-radius:4px; font-size:0.8rem; }
+  .neg { color:#a66; }
+</style>
+
+<script>
+// --- Config ---
+const NUM_IMAGES = 4;
+const RESOLUTION = "768x768";        // prefer large res, scale down with CSS
+const GENERATION_TIMEOUT_MS = 150000; // modern plugin hangs on hard server errors — guard with a timeout
+const MAX_ATTEMPTS = 2;              // per tile; the plugin queues concurrent requests itself
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("timed out (" + label + ")")), ms)),
+  ]);
+}
+
+// --- Global state ---
+let currentStats = { lum:50, dis:0, con:1, id:1000 };
+let lastNote = "";
+let busy = false;
+
+// --- Shorthand ---
+const $ = sel => document.querySelector(sel);
+const setStatus = txt => { $("#status").textContent = txt; };
+
+// --- Diagnostics ---
+function updateDiagnostics(){
+  $("#stat-dis").textContent = currentStats.dis;
+  $("#stat-lum").textContent = currentStats.lum;
+  $("#stat-con").textContent = currentStats.con;
+  $("#accession").textContent = `ACCESSION ID: #${currentStats.id}-B`;
+}
+
+function pickCatalogNote(){
+  try { lastNote = String(root.catalog_note.selectOne).trim(); }
+  catch(e){ lastNote = "—"; }
+  $("#note").textContent = `"${lastNote}"`;
+}
+
+// --- Stats + visual overrides ---
+function generateStats(){
+  currentStats.lum = Math.floor(Math.random()*100)+1;
+  currentStats.dis = Math.floor(Math.random()*11)-5;
+  currentStats.con = Math.floor(Math.random()*5)+1;
+  currentStats.id = Math.floor(Math.random()*8999)+1000;
+  return currentStats;
+}
+
+function computeVisualOverrides(stats){
+  const parts = [];
+  if (stats.lum > 80){ parts.push("(extreme lens flare:1.2)","(blinding light:1.1)","glowing bloom"); }
+  else if (stats.lum < 25){ parts.push("(deep shadows:1.15)","(low-key lighting:1.1)","subsurface scattering highlights"); }
+
+  if (Math.abs(stats.dis) > 3){ parts.push("(motion blur:1.2)","(chromatic aberration:1.1)","temporal ghosting"); }
+  else if (Math.abs(stats.dis) <= 1){ parts.push("tripod-stable microsharpness","(tack sharp edges:1.1)"); }
+
+  if (stats.con >= 4){ parts.push("(heavy containment glass:1.3)","laser security grid reflections","industrial hazard tape"); }
+  else if (stats.con <= 2){ parts.push("archival cotton gloves micro-fibers"); }
+
+  return parts.join(", ");
+}
+
+// --- Data Pane sync ---
+function writeStateToRoot(){
+  const userText = ($("#userText").value || "").trim();
+  root.user_input = userText === "" ? "waiting" : userText;
+  root.visual_overrides = computeVisualOverrides(currentStats);
+}
+
+function readStringsFromDataPane(){
+  const finalPrompt = String(root.master_prompt.selectOne).trim();
+  const negPrompt = String(root.neg_selector.selectOne).trim();
+  $("#promptText").textContent = finalPrompt;
+  $("#negText").textContent = `--no ${negPrompt}`;
+  return { finalPrompt, negPrompt };
+}
+
+// --- Dynamic tile creation ---
+function makeTiles(n){
+  const grid = $("#image-grid");
+  grid.innerHTML = "";
+  for (let i=0;i<n;i++){
+    const slot = document.createElement("div");
+    slot.className = "slot";
+    const overlay = document.createElement("div");
+    overlay.className = "overlay";
+    overlay.id = "ov" + i;
+    overlay.textContent = "Preparing…";
+    const img = document.createElement("img");
+    img.id = "img" + i;
+    img.alt = "";
+    img.onload = () => overlay.style.display = "none";
+    img.onerror = () => overlay.textContent = "Load failed";
+    slot.appendChild(overlay);
+    slot.appendChild(img);
+    grid.appendChild(slot);
+  }
+}
+function setOverlay(i, txt){
+  const el = document.getElementById("ov"+i);
+  if (el){ el.textContent = txt; el.style.display = "flex"; }
+}
+
+// --- AI prompt refinement ---
+async function refinePrompt(prompt){
+  const res = await root.generateText({
+    instruction: `You are an expert prompt engineer for a photorealistic macro-photography image generator. A curator drafted a prompt for an exhibit image of a miniature impossible object in a museum. Improve the prompt: make it vivid, precise and photoreal while keeping the subject and style exactly the same. Stay under 120 words. Output ONLY the improved prompt — no labels, quotes or explanations.\n\nDRAFT PROMPT:\n${prompt}`,
+  });
+  const text = String(res).trim();
+  if (!text) throw new Error("empty refinement");
+  return text;
+}
+
+// --- Generate one image with the modern plugin (returns {dataUrl, canvas, inputs}) ---
+async function generateOne(prompt, negPrompt, slotIndex, attempts = MAX_ATTEMPTS){
+  for (let attempt = 0; attempt < attempts; attempt++){
+    try{
+      setOverlay(slotIndex, "Generating…");
+      const res = await withTimeout(root.generateImage({
+        prompt,
+        negativePrompt: negPrompt,
+        resolution: RESOLUTION,
+        hideGalleryButtons: true,
+      }), GENERATION_TIMEOUT_MS, "image generation");
+      const url = (res && res.dataUrl) ? res.dataUrl : String(res);
+      if (!url || !String(url).startsWith("data:image")) throw new Error("unexpected image result");
+      document.getElementById("img"+slotIndex).src = url;
+      return true;
+    }catch(err){
+      console.error("Image generation failed (slot "+slotIndex+"):", err);
+      if (attempt === attempts-1){
+        setOverlay(slotIndex, "FAILED — " + ((err && err.message) ? err.message : "unknown error"));
+        return false;
+      }
+      setOverlay(slotIndex, "Retrying…");
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  return false;
+}
+
+// --- Generate images (fired in parallel; the plugin queues its own concurrency) ---
+async function generateImages(){
+  if (busy) return;
+  busy = true;
+  $("#btn-scan").disabled = true;
+  $("#btn-generate").disabled = true;
+  try{
+    setStatus("BUILDING PROMPTS…");
+    writeStateToRoot();
+    const { finalPrompt, negPrompt } = readStringsFromDataPane();
+
+    let positive = finalPrompt;
+    if ($("#aiRefine").checked){
+      setStatus("AI REFINING PROMPT…");
+      try{
+        positive = await withTimeout(refinePrompt(positive), GENERATION_TIMEOUT_MS, "prompt refinement");
+        $("#promptText").textContent = positive + "\n\n[Refined]";
+      }catch(err){
+        console.error("Prompt refinement failed:", err);
+      }
+    }
+
+    makeTiles(NUM_IMAGES);
+    setStatus("GENERATING…");
+
+    await Promise.allSettled(
+      Array.from({length: NUM_IMAGES}, (_, i) => generateOne(positive, negPrompt, i))
+    );
+  }finally{
+    setStatus("READY");
+    busy = false;
+    $("#btn-scan").disabled = false;
+    $("#btn-generate").disabled = false;
+  }
+}
+
+// --- Lifecycle ---
+function updateAll(){
+  updateDiagnostics();
+  writeStateToRoot();
+  pickCatalogNote();
+  readStringsFromDataPane();
+}
+
+$("#btn-scan").addEventListener("click", ()=>{ generateStats(); updateAll(); });
+$("#btn-generate").addEventListener("click", ()=>{ generateImages(); });
+
+// Initialize
+generateStats();
+updateAll();
+</script>
+``

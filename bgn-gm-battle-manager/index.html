@@ -1,0 +1,1920 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BATTLE MAP — a BGN network game built on the bgn-blank-template.
+     Per-table multiplayer: each room code owns its own persistent
+     map doc (tokens, walls, chat, fog toggle, map image). The room
+     creator is the DM; anyone who joins with the code sits at the
+     table. No turn logic — it's a shared real-time table.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══
+     Online tables: the host creates a room (5-letter code) and is the DM;
+     anyone who joins with the code sits at the table as a guest (live view
+     + chat). The whole combat doc — combatants, HP, effects, initiative,
+     round — is the room's durable state, persisted in the plugin `state`
+     slots. Every mutation is applied server-side and broadcast to both
+     players as the latestSnapshot. The server also sequences turns for the
+     standard pass-turn path (host/guest alternate) and tracks winner/reason
+     for resign, forfeit and end-of-game. PUBLIC source — no secrets here. -->
+<script type="text/x-server-plugin">
+const SLOT=262144;                 // 256 KiB per room
+const STATE_VERSION=1;
+const MAX_ROOMS=Math.max(16, Math.min(200, Math.floor(state.length/SLOT)));
+const DOC_CAP=200000;              // max utf8 bytes for a room doc (broadcast stays < 1 MiB)
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=2000;
+const COLS=22, ROWS=17, MAX_TOKENS=300;
+const ABILITY_KEYS=["str","dex","con","int","wis","cha"];
+const SKILL_KEYS=["acrobatics","animal handling","arcana","athletics","deception","history","insight","intimidation","investigation","medicine","nature","perception","performance","persuasion","religion","sleight of hand","stealth","survival"];
+
+/* ── sanitization helpers ── */
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max||500); }
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+function num(v,def){ if(typeof v==="number"&&Number.isFinite(v)) return v; if(typeof v==="string"&&v.trim()!==""){ const n=Number(v); if(Number.isFinite(n)) return n; } return def; }
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function safeParse(data){ try{ return JSON.parse(data); }catch(e){ return null; } }
+function saneColor(col){ if(typeof col==="string"){ const m=col.match(/^#([0-9a-fA-F]{6})$/); if(m)return "#"+m[1].toLowerCase(); const m3=col.match(/^#([0-9a-fA-F]{3})$/); if(m3){ const r=m3[1][0]; return "#"+r+r+m3[1][1]+m3[1][1]+m3[1][2]+m3[1][2]; } } return ""; }
+function saneImg(url){ if(typeof url!=="string")return ""; url=url.trim(); if(/^https?:\/\//.test(url)||/^data:image\//.test(url))return url.slice(0,300); return ""; }
+function saneTypes(v){ if(!Array.isArray(v))return []; const out=[]; for(const x of v){ const s=String(x||"").toLowerCase().trim().slice(0,20); if(s&&out.indexOf(s)===-1)out.push(s); if(out.length>=20)break; } return out; }
+function saneSaves(v){ const def={str:0,dex:0,con:0,int:0,wis:0,cha:0}; if(!v||typeof v!=="object")return def; for(const k of Object.keys(def))def[k]=clamp(Math.round(num(v[k],0)),-20,20); return def; }
+function abilityMod(score){ const s=clamp(Math.round(num(score,10)),1,30); return Math.floor((s-10)/2); }
+function saneAbilities(v){ const def={str:10,dex:10,con:10,int:10,wis:10,cha:10}; if(!v||typeof v!=="object")return def; for(const k of ABILITY_KEYS)def[k]=clamp(Math.round(num(v[k],10)),1,30); return def; }
+function saneAbilitiesFromSaves(saves){ const s=saneSaves(saves); const ab={}; for(const k of ABILITY_KEYS)ab[k]=clamp(s[k]*2+10,1,30); return ab; }
+function saneKeyList(v,allowed){ const out=[]; if(!Array.isArray(v))return out; for(const x of v){ const k=String(x||"").toLowerCase().replace(/\s+/g," ").trim(); if(allowed.indexOf(k)!==-1&&out.indexOf(k)===-1)out.push(k); } return out; }
+function saneSkillProf(v){ const out={}; if(!v||typeof v!=="object")return out; for(const k of SKILL_KEYS){ const lv=num(v[k],0); if(lv===0.5||lv===1||lv===2)out[k]=lv; } return out; }
+function deriveSaves(t){ const ab=saneAbilities(t&&t.abilities); const prof=clamp(Math.round(num(t&&t.profBonus,2)),1,20); const sp=saneKeyList(t&&t.saveProf,ABILITY_KEYS); t.saves={}; for(const k of ABILITY_KEYS)t.saves[k]=clamp(abilityMod(ab[k])+(sp.indexOf(k)!==-1?prof:0),-20,20); }
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   +1..+8:  room code (8 ASCII, zero padded)
+   +9:      first (0=host moves first, 1=guest; rematch flips)
+   +10:     state version
+   +11:     reserved
+   +12..+15: uint32 lastActive (unix secs)
+   +16:     winner 0=none 1=host 2=guest 3=draw
+   +17:     reason 0=none 1=resign 2=forfeit 3=end
+   +18..+19: uint16 turn counter (completed turns)
+   +20..+23: uint32 doc bytes length
+   +24..:   doc bytes (utf8 JSON — the room's latestSnapshot)          */
+const REASON=["","resign","forfeit","end"];
+let rooms=new Map();               // code -> room object (live cache)
+const conns=new Map();             // conn.id -> {code, role}
+const moveTimes=new Map();         // conn.id -> last move ms (rate limit)
+const chatTimes=new Map();         // conn.id -> last chat ms (rate limit)
+
+function off(i){ return i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function genId(doc){ let id; do{ id="t"+Math.floor(Math.random()*1e15).toString(36); }while(doc.tokens.some(t=>t.id===id)); return id; }
+function freeCell(doc){ const start=Math.floor(Math.random()*ROWS); for(let y=0;y<ROWS;y++){ for(let x=0;x<COLS;x++){ const yy=(y+start)%ROWS; let busy=false; for(const t of doc.tokens){ if(x>=t.x&&x<t.x+t.w&&yy>=t.y&&yy<t.y+t.h){ busy=true; break; } } if(!busy)return {x,y:yy}; } } return {x:0,y:0}; }
+function findToken(doc,id){ return doc.tokens.find(t=>t.id===id)||null; }
+function newDoc(){ return {tokens:[],initCurrent:"",round:0}; }
+
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const tn=Math.max(0,Math.min(0xFFFF,room.turn));
+  state[o+18]=(tn>>8)&255; state[o+19]=tn&255;
+  const mb=room.doc?utf8Encode(JSON.stringify(room.doc)):[];
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+20]=(len>>>24)&255; state[o+21]=(len>>>16)&255; state[o+22]=(len>>>8)&255; state[o+23]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const o=off(i);
+    const st=state[o];
+    if(st===0)continue;
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const len=((state[o+20]<<24)|(state[o+21]<<16)|(state[o+22]<<8)|state[o+23])>>>0;
+    let doc=null;
+    if(len>0){ try{ doc=JSON.parse(utf8Decode(state.slice(o+24,o+24+len))); }catch(e){ doc=null; } }
+    if(!doc||!Array.isArray(doc.tokens)){ state.fill(0,o,o+SLOT); continue; }
+    rooms.set(codeAt(i),{
+      slot:i,code:codeAt(i),status:st,
+      first:state[o+9],hostId:-1,guestId:-1,
+      turn:(state[o+18]<<8)|state[o+19],
+      snapshot:null, doc:doc,
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=state[off(i)];
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,doc:room.doc,snapshot:room.snapshot,first:room.first,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+
+/* ── game mutations (host = DM; guests watch live + chat) ── */
+function commitRoom(room,fn){
+  const before=room.doc;
+  let res;
+  try{ res=fn(room.doc); }
+  catch(e){ throw e; }
+  const j=JSON.stringify(room.doc);
+  if(j.length>DOC_CAP){ room.doc=before; throw new Error("table_too_large"); }
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);
+  return res;
+}
+function gameRpc(conn,data,fn){
+  const room=roomOf(conn);
+  if(!room)throw new Error("not_in_room");
+  if(room.status!==1&&room.status!==2)throw new Error("not_playing");
+  if(roleOf(conn)!=="host")throw new Error("not_your_turn: only the DM (host) can change the table");
+  const d=safeParse(data)||{};
+  return commitRoom(room,function(doc){ return fn(room,d,doc); });
+}
+function tokenErr(t){ if(!t)throw new Error("token not found"); return t; }
+
+const importCharsFn=function(room,d,doc){
+  const chars=(d&&Array.isArray(d.chars))?d.chars:[];
+  let made=0;
+  for(let i=0;i<chars.length&&doc.tokens.length<MAX_TOKENS;i++){
+    const ch=chars[i]||{};
+    const nm=cleanText(ch.name)||"Token";
+    const cell=freeCell(doc);
+    const rx=clamp(Math.round(num(ch.x,cell.x)),0,COLS-1);
+    const ry=clamp(Math.round(num(ch.y,cell.y)),0,ROWS-1);
+    const hp=clamp(Math.round(num(ch.hp,0)),0,99999);
+    const hasAb=!!(ch.abilities&&typeof ch.abilities==="object");
+    const abilities=hasAb?saneAbilities(ch.abilities):saneAbilitiesFromSaves(ch.saves);
+    doc.tokens.push({id:genId(doc),name:nm.slice(0,40),owner:"DM",
+      color:saneColor(ch.color)||"#4a76d9", img:saneImg(ch.img),
+      hp, maxHp:clamp(Math.round(num(ch.maxHp,hp)),0,99999)||hp,
+      w:clamp(Math.round(num(ch.w,1))||1,1,8), h:clamp(Math.round(num(ch.h,1))||1,1,8), x:rx, y:ry,
+      init:0, inTracker:true, effects:[],
+      ac:clamp(Math.round(num(ch.ac,10)),0,99), atk:clamp(Math.round(num(ch.atk,0)),-20,99),
+      dmg:String(ch.dmg||"1d6").trim().slice(0,24)||"1d6",
+      abilities, profBonus:clamp(Math.round(num(ch.profBonus,2)),1,20),
+      saveProf:saneKeyList(ch.saveProf,ABILITY_KEYS), skillProf:saneSkillProf(ch.skillProf),
+      hd:String(ch.hd||"").replace(/\s+/g,"").toLowerCase().slice(0,24),
+      condImm:saneTypes(ch.condImm), langs:cleanText(ch.langs).slice(0,80),
+      imm:saneTypes(ch.imm), res:saneTypes(ch.res), vuln:saneTypes(ch.vuln),
+      group:cleanText(ch.group).slice(0,30), conc:cleanText(ch.conc).slice(0,40),
+      deathF:0, deathS:0, deathStable:false});
+    deriveSaves(doc.tokens[doc.tokens.length-1]);
+    made++;
+  }
+  if(!made)throw new Error("no tokens created");
+  return "ok:"+made;
+};
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,first:0,hostId:conn.id,guestId:-1,turn:0,snapshot:null,doc:newDoc(),winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.turn,room.first)!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number"||obj.evt!==room.turn)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length<1||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.snapshot=obj.data;
+    room.turn++;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snapshot=null; room.winner=null; room.reason=null;
+    room.first=1-room.first;
+    room.doc=newDoc();
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  /* ── combat table mutations (host only; guests get the live snapshot) ── */
+  importChars({conn},data){ return gameRpc(conn,data,importCharsFn); },
+  moveToken({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); t.x=clamp(num(d.x,t.x),0,COLS-t.w); t.y=clamp(num(d.y,t.y),0,ROWS-t.h); return "ok"; }); },
+  resizeToken({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); t.w=clamp(Math.round(num(d.w,t.w))||1,1,8); t.h=clamp(Math.round(num(d.h,t.h))||1,1,8); t.x=clamp(t.x,0,COLS-t.w); t.y=clamp(t.y,0,ROWS-t.h); return "ok"; }); },
+  deleteToken({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); doc.tokens=doc.tokens.filter(k=>k.id!==t.id); if(doc.initCurrent===t.id)doc.initCurrent=""; return "ok"; }); },
+  setTokenInit({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); t.init=clamp(Math.round(num(d.init,0)),0,999); return "ok"; }); },
+  setHp({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(d.maxHp!=null)t.maxHp=clamp(Math.round(num(d.maxHp,t.maxHp)),0,99999); if(d.hp!=null)t.hp=clamp(Math.round(num(d.hp,t.hp)),0,99999); if(t.hp>0){ t.deathF=0; t.deathS=0; t.deathStable=false; } return "ok"; }); },
+  setCombatStats({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(d.ac!=null)t.ac=clamp(Math.round(num(d.ac,10)),0,99); if(d.atk!=null)t.atk=clamp(Math.round(num(d.atk,0)),-20,99); if(d.dmg!=null)t.dmg=String(d.dmg).replace(/\s+/g,"").slice(0,24)||"1d6"; if(d.saves!=null&&d.abilities==null)t.abilities=saneAbilitiesFromSaves(d.saves); if(d.abilities!=null)t.abilities=saneAbilities(d.abilities); if(d.profBonus!=null)t.profBonus=clamp(Math.round(num(d.profBonus,2)),1,20); if(d.saveProf!=null)t.saveProf=saneKeyList(d.saveProf,ABILITY_KEYS); if(d.skillProf!=null)t.skillProf=saneSkillProf(d.skillProf); if(d.hd!=null)t.hd=String(d.hd).replace(/\s+/g,"").toLowerCase().slice(0,24); if(d.condImm!=null)t.condImm=saneTypes(d.condImm); if(d.langs!=null)t.langs=cleanText(d.langs).slice(0,80); if(d.saves!=null||d.abilities!=null||d.profBonus!=null||d.saveProf!=null)deriveSaves(t); if(d.imm!=null)t.imm=saneTypes(d.imm); if(d.res!=null)t.res=saneTypes(d.res); if(d.vuln!=null)t.vuln=saneTypes(d.vuln); if(d.group!=null)t.group=cleanText(d.group).slice(0,30); if(d.conc!=null)t.conc=cleanText(d.conc).slice(0,40); return "ok"; }); },
+  setDeathSaves({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(d.fails!=null)t.deathF=clamp(Math.round(num(d.fails,0)),0,3); if(d.successes!=null)t.deathS=clamp(Math.round(num(d.successes,0)),0,3); if(d.stable!=null)t.deathStable=!!d.stable; return "ok"; }); },
+  addEffect({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(!Array.isArray(t.effects))t.effects=[]; if(t.effects.length>=20)throw new Error("too many effects"); const en=String(d.name||"").replace(/\s+/g," ").trim().slice(0,40); const type=String(d.type||"").toLowerCase(); if(type!=="ability"&&type!=="skill"&&type!=="save"&&type!=="attack")throw new Error("invalid effect type"); const stat=String(d.stat||"").toLowerCase().replace(/\s+/g," ").trim().slice(0,40); const bonus=clamp(Math.round(num(d.bonus,0)),-20,20); if(!en)throw new Error("invalid effect"); const eff={id:genId(doc),name:en,type,stat,bonus,source:"DM",ts:Date.now()}; if(d.cond)eff.cond=true; const durType=String(d.durType||"").toLowerCase(); const durValue=clamp(Math.round(num(d.durValue,1)),0,9999); if(durType==="rounds"&&durValue>0){ eff.durRounds=Math.min(durValue,999); eff.startRound=doc.round||0; } t.effects.push(eff); return "ok"; }); },
+  removeEffect({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(!Array.isArray(t.effects))throw new Error("effect not found"); const before=t.effects.length; t.effects=t.effects.filter(e=>e.id!==String(d.effectId)); if(t.effects.length===before)throw new Error("effect not found"); return "ok"; }); },
+  initAdd({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); if(t.inTracker)return "ok"; t.inTracker=true; if(!doc.initCurrent)doc.initCurrent=t.id; return "ok"; }); },
+  initRemove({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); t.inTracker=false; t.init=0; if(doc.initCurrent===t.id)doc.initCurrent=""; return "ok"; }); },
+  initNext({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const list=[]; for(let i=0;i<doc.tokens.length;i++)if(doc.tokens[i].inTracker)list.push(doc.tokens[i]); list.sort(function(a,b){ return num(b.init,0)-num(a.init,0); }); if(!list.length){ doc.initCurrent=""; return "ok"; } let idx=-1; for(let i=0;i<list.length;i++)if(list[i].id===doc.initCurrent){ idx=i; break; } const nextIdx=(idx+1)%list.length; if(idx>=0&&nextIdx===0)doc.round=(doc.round||0)+1; doc.initCurrent=list[nextIdx].id; return "ok"; }); },
+  initGoto({conn},data){ return gameRpc(conn,data,function(room,d,doc){ const t=tokenErr(findToken(doc,String(d.id))); t.inTracker=true; doc.initCurrent=t.id; return "ok"; }); },
+  clearMap({conn},data){ return gameRpc(conn,data,function(room,d,doc){ doc.tokens=[]; doc.initCurrent=""; doc.round=0; return "ok"; }); }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  chatTimes.delete(conn.id);
+  if(!info)return;
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // the other player sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">GM Battle Manager</div>
+      <h2 class="sec-title goldtext">How would you like to run the table?</h2>
+      <p class="sec-sub">Track initiative, hit points, conditions and effects for the whole fight — solo on this screen, or live over the network with a room code.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Local table</span>
+        <span class="bgn-mode-sub">One screen — the DM runs the whole fight, auto-saved</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online table</span>
+        <span class="bgn-mode-sub">Create a room, share the code, run the table live</span>
+      </button>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:20px; flex-wrap:wrap; gap:10px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a room and share the 5-letter code with your players, or join a friend's room with theirs. As host you are the DM; players who join watch the table live and can chat.</p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center; align-items:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ INITIATIVE TRACKER ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table">
+      <div class="panel bgn-stagepanel">
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+
+        <div class="bgn-players">
+          <div class="bgn-player" id="pHost">
+            <span class="bgn-avatar host"></span>
+            <div>
+              <div class="bgn-pname" id="hostNameEl">Host</div>
+              <div class="bgn-psub">the DM</div>
+            </div>
+          </div>
+          <div class="bgn-turn" id="turnEl">Local table</div>
+          <div class="bgn-player right" id="pGuest">
+            <span class="bgn-avatar guest"></span>
+            <div>
+              <div class="bgn-pname" id="guestNameEl">Guest</div>
+              <div class="bgn-psub">at the table</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="trackerPanel">
+
+        <div class="initTop">
+          <span class="panelLabel" style="margin:0">Initiative</span>
+          <span id="initRoundEl" class="initRound"></span>
+          <button class="btn btn-sm" id="initSortBtn">↓ High first</button>
+        </div>
+        <div id="initNowRow" class="initNowRow" hidden>
+          <span id="initNowEl"></span>
+          <button class="btn btn-sm" id="initNextBtn">Next ▶</button>
+        </div>
+        <div id="initList"></div>
+
+        <div class="trackerCtl">
+          <button class="btn primary" id="addCombatantBtn">＋ Add combatant</button>
+          <button class="btn btn-ghost btn-sm" id="diceBtn">🎲 Dice</button>
+          <button class="btn btn-ghost btn-sm" id="clearTableBtn">🗑 Clear</button>
+        </div>
+
+        <div class="hint" style="margin-top:10px">
+          Set each combatant's roll — the list sorts automatically, highest first, showing current HP. The active combatant is highlighted with ▶. <b>Next ▶</b> advances turns; cycling past the last combatant starts a new round (which expires round-limited effects). Click any combatant row to open its manager — hit points, conditions and effects.
+        </div>
+
+        <div id="addPanel" hidden>
+          <div class="panelLabel">Heroes</div>
+          <div id="defaultChars"></div>
+          <div class="panelLabel" style="margin-top:14px">NPCs</div>
+          <div id="npcChars"></div>
+          <div class="panelLabel" style="margin-top:14px">Compendium</div>
+          <div class="compTools">
+            <input id="compSearch" maxlength="40" placeholder="Search monsters…" autocomplete="off">
+            <select id="compFilter">
+              <option value="">All types</option>
+              <option value="humanoid">Humanoid</option>
+              <option value="beast">Beast</option>
+              <option value="undead">Undead</option>
+              <option value="monstrosity">Monstrosity</option>
+              <option value="giant">Giant</option>
+              <option value="dragon">Dragon</option>
+            </select>
+          </div>
+          <div id="compGrid"></div>
+          <p class="hint">Tap any monster to drop it into the tracker with its full stat block — AC, attacks, ability scores, save &amp; skill proficiency, damage types and languages included. CR &amp; XP help you balance encounters.</p>
+          <div class="panelLabel" style="margin-top:14px">Bosses</div>
+          <div id="bossChars"></div>
+          <div class="panelLabel" style="margin-top:14px">Encounters</div>
+          <div class="encRow">
+            <input id="encName" maxlength="40" placeholder="Encounter name…" autocomplete="off">
+            <button class="btn btn-sm" id="encSaveBtn" title="Save the whole current tracker as a reusable encounter">Save table</button>
+          </div>
+          <div class="encRow" style="margin-top:8px">
+            <select id="encSel"></select>
+            <button class="btn primary btn-sm" id="encAddBtn">＋ Add encounter</button>
+            <button class="btn btn-ghost btn-sm" id="encDelBtn">✕ Delete</button>
+          </div>
+          <p class="hint">Save the current table as a reusable encounter, then drop it back in later — combat stats, groups and damage types are preserved.</p>
+          <div class="panelLabel" style="margin-top:14px">Custom import</div>
+          <textarea id="importInput" placeholder="Paste combatants here…"></textarea>
+          <button class="btn primary" id="importBtn" style="margin-top:8px">Add to tracker</button>
+        </div>
+
+        <div id="dicePanel" hidden>
+          <div class="panelLabel" style="margin-top:4px">Dice roller</div>
+          <div class="diceTray">
+            <div class="diceDiceRow">
+              <button type="button" class="dieBtn" data-d="4">d4</button>
+              <button type="button" class="dieBtn" data-d="6">d6</button>
+              <button type="button" class="dieBtn" data-d="8">d8</button>
+              <button type="button" class="dieBtn" data-d="10">d10</button>
+              <button type="button" class="dieBtn" data-d="12">d12</button>
+              <button type="button" class="dieBtn" data-d="20">d20</button>
+            </div>
+            <div class="diceOpts">
+              <label>Count <input id="diceCount" type="number" min="1" max="10" value="1"></label>
+              <label>Modifier <input id="diceMod" type="number" value="0"></label>
+              <label>Roll
+                <select id="diceAdv">
+                  <option value="normal">Normal</option>
+                  <option value="adv">Advantage</option>
+                  <option value="dis">Disadvantage</option>
+                </select>
+              </label>
+              <button class="btn btn-sm" id="diceClearBtn">Clear log</button>
+            </div>
+            <div class="diceCombat">
+              <div class="diceCombatRow">
+                <label>Actor
+                  <select id="diceActor"></select>
+                </label>
+                <label>Target
+                  <select id="diceTargetSel"></select>
+                </label>
+                <button type="button" class="btn btn-sm atkBtn" id="attackBtn">⚔ Attack</button>
+                <button type="button" class="btn btn-sm saveBtn" id="saveBtn">🛡 Save</button>
+                <button type="button" class="btn btn-sm checkBtn" id="checkBtn">📖 Check</button>
+              </div>
+              <div class="diceCombatRow diceCombatOpts">
+                <label id="diceSaveRow">Save
+                  <select id="diceSaveSel">
+                    <option value="str">Strength</option>
+                    <option value="dex">Dexterity</option>
+                    <option value="con">Constitution</option>
+                    <option value="int">Intelligence</option>
+                    <option value="wis">Wisdom</option>
+                    <option value="cha">Charisma</option>
+                  </select>
+                </label>
+                <label id="diceCheckRow" hidden>Check
+                  <select id="diceCheckSel"></select>
+                </label>
+                <label id="diceCheckModRow" hidden>Bonus
+                  <input id="diceCheckMod" type="number" value="0">
+                </label>
+                <label id="diceTypeRow">Damage type
+                  <select id="diceTypeSel">
+                    <option>bludgeoning</option>
+                    <option>piercing</option>
+                    <option>slashing</option>
+                    <option>acid</option>
+                    <option>cold</option>
+                    <option>fire</option>
+                    <option>force</option>
+                    <option>lightning</option>
+                    <option>necrotic</option>
+                    <option>poison</option>
+                    <option>psychic</option>
+                    <option>radiant</option>
+                    <option>thunder</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div class="hint" style="margin-top:10px">
+              Click a die to roll, or use the combat actions: <b>Attack</b> rolls d20 + the attacker's Attack bonus against the target's AC — a natural 20 always hits and doubles the damage dice, a natural 1 always misses. <b>Save</b> and <b>Check</b> roll d20 + the combatant's modifier (effects apply automatically). Every roll lands in the log with its dice and total; damage applies type modifiers from the combatant's stats.
+            </div>
+          </div>
+          <div id="diceLog"></div>
+        </div>
+
+        <div id="toast"></div>
+        </div><!-- /trackerPanel -->
+
+        <div class="bgn-banner" id="bannerEl"></div>
+      </div>
+
+      <div class="panel bgn-side">
+        <div id="roomBox" class="bgn-room" hidden>
+          <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
+          <div style="display:flex; gap:8px; justify-content:center; margin-bottom:8px; flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Resign &amp; leave</button>
+          </div>
+          <p class="muted small" id="connEl">Connecting…</p>
+        </div>
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+        <h3 class="sideTitle">Turn log</h3>
+        <div class="bgn-log" id="logEl"></div>
+        <div class="bgn-actions">
+          <button class="btn btn-gold" id="newGameBtn">Restart</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Back to lobby</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══ FULLSCREEN TABLE (maximized board) ═══
+     Opened by the ⛶ Full screen button in the stage. The board
+     (#trackerPanel) is MOVED in here live — never cloned — so all
+     gameplay keeps working while maximized. Closed via ✕ Exit or
+     Escape. -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span class="fs-status" id="fsStatusEl"></span>
+    <span class="fs-actions" id="fsActionsCtn"></span>
+    <button class="btn btn-gold btn-sm" id="fsExitBtn" title="Exit full screen">✕ Exit</button>
+  </div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+  </div>
+  <div class="fs-meeple" id="fsMeepleCtn"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ TOKEN MANAGER DIALOG (HP + effects) ═══ -->
+<div id="effectsOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help effects-dlg">
+    <button class="bgn-help-close" id="effectsCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body">
+      <h2 id="effectsTitleEl">Token</h2>
+      <p class="muted small" id="effectsSubEl"></p>
+      <h3>Hit points</h3>
+      <div class="hpBox">
+        <div class="effRow">
+          <label for="hpInput">HP</label>
+          <input id="hpInput" type="number" min="0" value="0">
+          <span class="hpSep">/</span>
+          <input id="maxHpInput" type="number" min="0" value="0">
+          <button class="btn btn-sm" id="hpApplyBtn">Set</button>
+        </div>
+        <div class="hpQuick">
+          <button type="button" class="hpQ" data-d="-10">−10</button>
+          <button type="button" class="hpQ" data-d="-5">−5</button>
+          <button type="button" class="hpQ" data-d="-1">−1</button>
+          <button type="button" class="hpQ" data-d="1">+1</button>
+          <button type="button" class="hpQ" data-d="5">+5</button>
+          <button type="button" class="hpQ" data-d="10">+10</button>
+          <button type="button" class="hpQ" data-zero="1">0</button>
+          <button type="button" class="hpQ" data-full="1">Full</button>
+        </div>
+        <p class="muted small">Quick buttons deal damage (−) or heal (+). "0" drops the creature to zero, "Full" heals back to max.</p>
+      </div>
+      <h3>Combat stats</h3>
+      <div class="csBox">
+        <div class="effRow">
+          <label for="csAc">AC</label>
+          <input id="csAc" type="number" min="0" max="99" value="10">
+          <label for="csAtk" class="csLbl">Attack</label>
+          <input id="csAtk" type="number" min="-20" max="99" value="0">
+          <label for="csDmg" class="csLbl">Damage</label>
+          <input id="csDmg" maxlength="24" placeholder="e.g. 2d6+3" autocomplete="off">
+        </div>
+        <div class="abilRow">
+          <div class="abilBox" data-a="str"><span class="abilLabel">STR</span><input class="abilScore" data-a="str" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="str">+0</span></div>
+          <div class="abilBox" data-a="dex"><span class="abilLabel">DEX</span><input class="abilScore" data-a="dex" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="dex">+0</span></div>
+          <div class="abilBox" data-a="con"><span class="abilLabel">CON</span><input class="abilScore" data-a="con" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="con">+0</span></div>
+          <div class="abilBox" data-a="int"><span class="abilLabel">INT</span><input class="abilScore" data-a="int" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="int">+0</span></div>
+          <div class="abilBox" data-a="wis"><span class="abilLabel">WIS</span><input class="abilScore" data-a="wis" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="wis">+0</span></div>
+          <div class="abilBox" data-a="cha"><span class="abilLabel">CHA</span><input class="abilScore" data-a="cha" type="number" min="1" max="30" value="10"><span class="abilMod" data-a="cha">+0</span></div>
+        </div>
+        <div class="effRow">
+          <label for="csProf" class="csLbl">Prof</label>
+          <input id="csProf" type="number" min="1" max="20" value="2">
+          <span class="muted small">proficiency bonus — auto-adds to proficient saves &amp; skills</span>
+        </div>
+        <div class="saveProfRow">
+          <span class="saveModLabel">Saves</span>
+          <button type="button" class="saveChip" data-s="str">STR <b>+0</b></button>
+          <button type="button" class="saveChip" data-s="dex">DEX <b>+0</b></button>
+          <button type="button" class="saveChip" data-s="con">CON <b>+0</b></button>
+          <button type="button" class="saveChip" data-s="int">INT <b>+0</b></button>
+          <button type="button" class="saveChip" data-s="wis">WIS <b>+0</b></button>
+          <button type="button" class="saveChip" data-s="cha">CHA <b>+0</b></button>
+          <span class="muted small">click a save to toggle proficiency</span>
+        </div>
+        <div class="skillRow">
+          <span class="saveModLabel">Skills</span>
+          <div class="skillGrid" id="skillGrid"></div>
+        </div>
+        <div class="effRow">
+          <label for="csCondImm" class="csLbl">Cond. immune</label>
+          <input id="csCondImm" maxlength="80" placeholder="charmed, frightened" autocomplete="off">
+          <label for="csLangs" class="csLbl">Languages</label>
+          <input id="csLangs" maxlength="80" placeholder="Common, Goblin" autocomplete="off">
+        </div>
+        <div class="effRow">
+          <label for="csHd" class="csLbl">Hit dice</label>
+          <input id="csHd" maxlength="24" placeholder="5d8" autocomplete="off">
+          <button type="button" class="btn btn-sm" id="hdRollBtn">Roll &amp; heal</button>
+        </div>
+        <div class="effRow">
+          <label for="csImm">Immune</label>
+          <input id="csImm" maxlength="80" placeholder="fire, poison" autocomplete="off">
+          <label for="csRes" class="csLbl">Resist</label>
+          <input id="csRes" maxlength="80" placeholder="cold, psychic" autocomplete="off">
+        </div>
+        <div class="effRow">
+          <label for="csVuln">Vuln</label>
+          <input id="csVuln" maxlength="80" placeholder="radiant" autocomplete="off">
+          <label for="csGroup" class="csLbl">Group</label>
+          <input id="csGroup" maxlength="30" placeholder="e.g. Goblins" autocomplete="off">
+        </div>
+        <div class="effRow">
+          <label for="csConc" class="csLbl">Concentrating</label>
+          <input id="csConc" maxlength="40" placeholder="e.g. Bless" autocomplete="off">
+          <button class="btn primary" id="csApplyBtn">Save stats</button>
+        </div>
+        <p class="muted small">Ability scores auto-derive the save modifiers and skill/ability-check bonuses used by the 🎲 Dice panel — edit a score and every dependent number updates. Toggle a save chip to add your proficiency bonus; click a skill to cycle proficiency (✧) and expertise (✧✧). AC, Attack and Damage feed the Attack action. Damage types are checked when damage lands: immune → 0, resist → halved, vulnerable → doubled. Group labels the combatant under a shared tracker header. Hit dice roll and heal in the dice log. Concentrating triggers an automatic CON save whenever this combatant takes damage.</p>
+        <div id="csDeathBox" class="deathBox" hidden></div>
+      </div>
+      <h3>Active effects</h3>
+      <div id="effectsListEl"></div>
+      <h3>Conditions</h3>
+      <div id="effCondsEl" class="effConds"></div>
+      <p class="muted small">One click applies the condition's rules-backed modifiers — e.g. Poisoned is −2 attack &amp; −2 ability checks (flat −2 approximates disadvantage). Hard rules like auto-failed saves and movement locks aren't enforced. Conditions are set off with the same Duration choice as effects.</p>
+      <h3>Add a custom effect</h3>
+      <div class="effForm">
+        <div class="effRow">
+          <label for="effNameInput">Name</label>
+          <input id="effNameInput" maxlength="40" placeholder="e.g. Bless, Slow, +2 sword" autocomplete="off">
+        </div>
+        <div class="effRow">
+          <label for="effTypeSel">Affects</label>
+          <select id="effTypeSel">
+            <option value="ability">Ability check</option>
+            <option value="skill">Skill check</option>
+            <option value="save">Saving throw</option>
+            <option value="attack">Attack roll</option>
+          </select>
+          <select id="effStatSel"></select>
+        </div>
+        <div class="effRow">
+          <label for="effBonusInput">Bonus</label>
+          <input id="effBonusInput" type="number" step="1" value="2" min="-20" max="20">
+        </div>
+        <div class="effRow">
+          <label for="effDurSel">Duration</label>
+          <select id="effDurSel">
+            <option value="none">Indefinite</option>
+            <option value="rounds">Rounds</option>
+          </select>
+          <input id="effDurInput" type="number" min="1" max="999" value="1" hidden title="Rounds">
+          <button class="btn primary" id="effAddBtn">Apply effect</button>
+        </div>
+      </div>
+      <p class="muted small">Effects are stored on the combatant and shown as colored dots on its tracker row. Set a duration in <b>rounds</b> and the effect auto-expires as the initiative tracker cycles — advancing past the last combatant starts a new round.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2,#d4af37)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+  <!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+  <a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+  <div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+  <style>
+  #bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+  #bgnAuditOverlay[hidden]{display:none}
+  .bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+  .bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+  </style>
+  <script>
+  function openBgnAudit(){
+    var f=document.getElementById("bgnAuditFrame");
+    f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+    document.getElementById("bgnAuditOverlay").hidden=false;
+    document.body.style.overflow="hidden";
+  }
+  function closeBgnAudit(){
+    document.getElementById("bgnAuditOverlay").hidden=true;
+    document.body.style.overflow="";
+  }
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+  document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+  </script>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ GM BATTLE MANAGER — table, stage & tools (overrides + app styles) ═══ */
+html { color-scheme: dark; }
+#gameCtn .bgn-table { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:18px; align-items:start; max-width:1180px; margin:0 auto; }
+@media (max-width:900px){ #gameCtn .bgn-table{ grid-template-columns:minmax(0,1fr); } }
+.bgn-stagepanel { padding:14px; text-align:left; position:relative; padding-top:46px; }
+
+/* ── lobby & mode cards ── */
+.bgn-lobby{ max-width:760px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{
+  background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+  border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px;
+  text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s;
+  color:inherit; font:inherit;
+}
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-accent,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+#onlinePanel{ margin-top:22px; }
+
+/* ── players / turn / banner ── */
+.bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+.bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
+.bgn-player.right{ flex-direction:row-reverse; text-align:right; }
+.bgn-player.on{ border-color:var(--bgn-accent,#d4af37); box-shadow:0 0 14px rgba(212,175,55,.35); }
+.bgn-avatar{ width:26px; height:26px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.25); flex:none; }
+.bgn-avatar.host{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.bgn-avatar.guest{ background:radial-gradient(circle at 35% 30%, #3c3c44, #050507); }
+.bgn-pname{ font-weight:700; font-size:.92rem; white-space:nowrap; }
+.bgn-psub{ font-size:.7rem; opacity:.7; white-space:nowrap; }
+.bgn-turn{ font-size:.78rem; opacity:.9; text-align:center; white-space:nowrap; color:var(--bgn-accent2,#f2dc8b); }
+.bgn-banner{ min-height:22px; margin-top:12px; font-weight:600; color:var(--bgn-accent2,#f2dc8b); font-size:.95rem; text-align:center; }
+
+/* ── side panel: room / chat / log / actions ── */
+.bgn-side{ min-width:0; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:var(--bgn-accent2,#f2dc8b); opacity:1; }
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3, .sideTitle{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.sideTitle{ margin-top:16px; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your table — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-accent,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+.bgn-log{ max-height:280px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item b{ color:var(--bgn-accent,#d4af37); margin-right:6px; }
+.log-item .resp{ opacity:.75; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+
+/* ═══ fullscreen board (maximized playing area) ═══ */
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72); color:#fff;
+  border:1px solid rgba(255,255,255,.28); border-radius:8px;
+  padding:6px 11px; cursor:pointer;
+  font:700 12.5px/1 system-ui; letter-spacing:.02em;
+  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  transition:border-color .12s, background .12s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); background:rgba(20,26,42,.85); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid rgba(255,255,255,.08); }
+.fs-status{ font-size:.85rem; color:var(--bgn-accent2,#f2dc8b); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fs-actions{ display:flex; gap:8px; align-items:center; }
+.fs-board{ flex:1; min-height:0; position:relative; padding:12px; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+#fsOverlay #trackerPanel{ position:absolute; inset:0; width:100%; height:100%; overflow:auto; padding:14px; box-sizing:border-box; }
+.fs-tile{ position:absolute; top:14px; right:22px; z-index:10; width:auto; max-width:min(92vw,300px); }
+.fs-tile:empty{ display:none; }
+.fs-meeple{ position:absolute; right:22px; bottom:22px; z-index:10; width:260px; max-width:min(90vw,330px); display:flex; flex-direction:column; gap:8px; background:rgba(10,14,24,.92); border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:12px; -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px); box-shadow:0 8px 32px rgba(0,0,0,.55); }
+.fs-meeple:empty{ display:none; }
+.btn[disabled]{ opacity:.45; cursor:default; }
+
+
+/* ── tracker-first layout ── */
+#initList { display:flex; flex-direction:column; gap:6px; max-height:clamp(320px, 52vh, 560px); overflow-y:auto; min-height:120px; }
+.initTop { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; gap:8px; }
+.initRound { font:700 12px var(--bgn-sans,system-ui); letter-spacing:.08em; color:var(--bgn-accent2,#f2dc8b); background:rgba(212,175,55,.14); border:1px solid rgba(212,175,55,.4); border-radius:999px; padding:2px 10px; white-space:nowrap; }
+.initNowRow { display:flex; align-items:center; justify-content:space-between; gap:8px; background:rgba(212,175,55,.12); border:1px solid rgba(212,175,55,.4); border-radius:8px; padding:7px 9px; margin-bottom:8px; }
+#initNowEl { font-weight:700; color:var(--bgn-accent2); font-size:13px; letter-spacing:.04em; border-left:3px solid var(--bgn-accent); padding-left:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.initRow {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.18); border-radius:9px; padding:7px 9px;
+  transition:border-color .12s, background .12s;
+}
+.initRow:hover { border-color:rgba(212,175,55,.45); }
+.initRow.current { border-color:var(--bgn-accent); background:rgba(212,175,55,.1); box-shadow:0 0 0 1px var(--bgn-accent); }
+.initTurn { color:var(--bgn-accent2); font-size:12px; width:16px; text-align:center; opacity:0; flex-shrink:0; }
+.initRow.current .initTurn { opacity:1; }
+.initVal { width:52px; flex-shrink:0; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text); font-size:14px; padding:5px 6px; text-align:center; font-family:inherit; outline:none; }
+.initVal:focus { border-color:var(--bgn-accent); }
+.initNameWrap { flex:1; min-width:120px; display:flex; flex-direction:column; }
+.initName { font-size:14px; color:var(--bgn-cream); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.initSub { font-size:11px; color:var(--bgn-muted); }
+.initHpQuick { display:flex; gap:4px; flex-shrink:0; }
+.initHpBtn {
+  min-width:34px; padding:4px 6px; border-radius:6px; cursor:pointer; font:700 12px var(--bgn-sans,system-ui);
+  background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.28); color:var(--bgn-cream);
+}
+.initHpBtn:hover { border-color:var(--bgn-accent,#d4af37); background:rgba(40,32,60,.9); }
+.initHpBtn[data-d^="-"] { color:#ff9a8a; }
+.initHpBtn[data-d^="+"] { color:#9fe8b0; }
+.condDots { display:flex; gap:3px; align-items:center; flex-shrink:0; }
+.condDots .condDot { width:9px; height:9px; border-radius:50%; box-shadow:0 0 0 1.5px rgba(0,0,0,.55); }
+.initDel { width:24px; height:24px; flex-shrink:0; border:none; background:transparent; color:var(--bgn-muted); cursor:pointer; font-size:12px; border-radius:6px; }
+.initDel:hover { background:rgba(212,175,55,.15); color:var(--bgn-accent2); }
+.initEmpty { font-size:13px; color:var(--bgn-muted); text-align:center; padding:22px 4px; line-height:1.6; border:1px dashed rgba(212,175,55,.2); border-radius:10px; }
+.trackerCtl { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; align-items:center; }
+#addCombatantBtn { margin-right:auto; }
+#addPanel { margin-top:14px; border-top:1px solid rgba(212,175,55,.16); padding-top:14px; }
+#importInput {
+  width:100%; min-height:120px; resize:vertical; background:#0b0912;
+  border:1px solid rgba(212,175,55,.25); border-radius:8px; color:var(--bgn-text); padding:9px;
+  font-size:12.5px; font-family:ui-monospace, monospace; outline:none;
+}
+.hint { font-size:11.5px; color:var(--bgn-muted); margin-top:8px; line-height:1.5; }
+.panelLabel { font-size:11px; color:var(--bgn-muted); text-transform:uppercase; letter-spacing:.12em; margin-bottom:8px; }
+#defaultChars, #npcChars, #bossChars { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
+.defChar {
+  display:flex; align-items:center; gap:8px; background:rgba(23,20,40,.6);
+  border:1px solid rgba(212,175,55,.2); border-radius:8px; padding:6px; cursor:pointer; text-align:left;
+}
+.defChar:hover { border-color:rgba(212,175,55,.5); }
+.defImg { width:40px; height:40px; border-radius:7px; object-fit:cover; }
+.defInfo { display:flex; flex-direction:column; min-width:0; }
+.defTitle { font-size:12px; color:var(--bgn-cream); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.defSub { font-size:11px; color:var(--bgn-muted); }
+
+/* small buttons inside the table UI (BGN .btn is too big) */
+.bgn-stagepanel .btn { font:600 12px var(--bgn-sans); letter-spacing:.06em; text-transform:none; padding:9px 16px; border-radius:999px; }
+.bgn-stagepanel .btn.primary { background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent) 60%,var(--bgn-accent3)); color:#221803; }
+
+#toast {
+  position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
+  background:rgba(23,20,40,.95); border:1px solid rgba(212,175,55,.4); padding:8px 16px; border-radius:999px;
+  font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; z-index:9; max-width:80%;
+}
+#toast.show { opacity:1; }
+
+/* ── dice roller ── */
+.diceTray { background:rgba(0,0,0,.16); border:1px solid rgba(212,175,55,.12); border-radius:10px; padding:12px 14px; }
+.diceDiceRow { display:flex; gap:8px; flex-wrap:wrap; }
+.dieBtn {
+  flex:1; min-width:52px; padding:10px 6px; border-radius:8px; cursor:pointer; font:800 14px var(--bgn-sans,system-ui);
+  background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.3); color:var(--bgn-accent2,#f2dc8b);
+  transition:background .12s, border-color .12s;
+}
+.dieBtn:hover { border-color:var(--bgn-accent,#d4af37); background:rgba(40,32,60,.9); }
+.dieBtn:active { transform:translateY(1px); }
+.dieBtn[data-d="20"] { border-color:rgba(212,175,55,.65); }
+.diceOpts { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-top:10px; }
+.diceOpts label { display:flex; flex-direction:column; gap:4px; font:600 11px var(--bgn-sans,system-ui); color:var(--bgn-muted); text-transform:uppercase; letter-spacing:.08em; }
+.diceOpts input, .diceOpts select { background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text); font-size:13px; padding:6px 8px; outline:none; font-family:inherit; }
+.diceOpts input:focus, .diceOpts select:focus { border-color:var(--bgn-accent,#d4af37); }
+.diceOpts input { width:64px; text-align:center; }
+#diceClearBtn { margin-left:auto; }
+#diceLog { display:flex; flex-direction:column; gap:6px; margin-top:12px; max-height:320px; overflow-y:auto; }
+.diceCard {
+  display:flex; flex-direction:column; gap:7px; padding:9px 12px; border-radius:9px;
+  background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.18);
+}
+.diceCard.crit { border-color:rgba(92,184,92,.6); }
+.diceCard.fumble { border-color:rgba(217,83,79,.6); }
+.diceTop { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.diceFormula { font:600 12.5px var(--bgn-sans,system-ui); color:var(--bgn-muted); letter-spacing:.05em; }
+.diceDice { display:flex; gap:5px; flex-wrap:wrap; }
+.die {
+  min-width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center;
+  background:#0b0912; border:1px solid rgba(212,175,55,.35); border-radius:6px;
+  font:800 14px var(--bgn-sans,system-ui); color:var(--bgn-cream,#f4efe3);
+}
+.die.nat20 { border-color:#5cb85c; color:#5cb85c; }
+.die.nat1 { border-color:#d9534f; color:#d9534f; }
+.die.dropped { opacity:.4; border-style:dashed; text-decoration:line-through; }
+.diceTotal { font:800 15px var(--bgn-sans,system-ui); color:var(--bgn-accent2,#f2dc8b); }
+.diceTotal.good { color:#5cb85c; }
+.diceTotal.bad { color:#d9534f; }
+.diceApply { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.diceTarget { flex:1; min-width:100px; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text); font-size:12.5px; padding:6px 8px; outline:none; }
+.diceBtnApply {
+  padding:6px 12px; border-radius:6px; cursor:pointer; font:700 12px var(--bgn-sans,system-ui);
+  background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.3); color:var(--bgn-cream);
+}
+.diceBtnApply.dmg { color:#ff9a8a; }
+.diceBtnApply.dmg:hover { border-color:#d9534f; background:rgba(217,83,79,.15); }
+.diceBtnApply.heal { color:#9fe8b0; }
+.diceBtnApply.heal:hover { border-color:#5cb85c; background:rgba(92,184,92,.15); }
+.diceBtnApply.again { color:var(--bgn-muted); }
+.diceBtnApply.again:hover { border-color:rgba(212,175,55,.5); }
+
+/* ── dice combat actions (attack / save / check) ── */
+.diceCombat { margin-top:12px; padding-top:12px; border-top:1px solid rgba(212,175,55,.14); }
+.diceCombatRow { display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-top:10px; }
+.diceCombatRow:first-child { margin-top:0; }
+.diceCombatRow label { display:flex; flex-direction:column; gap:4px; font:600 11px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); text-transform:uppercase; letter-spacing:.08em; }
+.diceCombatRow select, .diceCombatRow input { background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text,#e8e3d8); font-size:13px; padding:6px 8px; outline:none; font-family:inherit; }
+.diceCombatRow select:focus, .diceCombatRow input:focus { border-color:var(--bgn-accent,#d4af37); }
+.diceCombatRow select { min-width:130px; }
+#diceActor, #diceTargetSel { flex:1; min-width:140px; }
+#diceSaveSel, #diceCheckSel, #diceTypeSel { flex:none; min-width:150px; }
+#diceCheckMod { width:70px; text-align:center; }
+.atkBtn { background:rgba(217,83,79,.16); border:1px solid rgba(217,83,79,.45); color:#ffb4a8; }
+.atkBtn:hover { background:rgba(217,83,79,.3); }
+.saveBtn { background:rgba(212,175,55,.13); border:1px solid rgba(212,175,55,.4); }
+.checkBtn { background:rgba(91,132,217,.15); border:1px solid rgba(91,132,217,.4); color:#b9d2ff; }
+
+/* ── dice cards: titles & verdicts ── */
+.diceTitle { font:700 13px var(--bgn-sans,system-ui); color:var(--bgn-cream,#f4efe3); letter-spacing:.03em; }
+.diceVerdict { font:700 12.5px var(--bgn-sans,system-ui); padding:5px 10px; border-radius:6px; letter-spacing:.03em; }
+.diceVerdict.good { color:#9fe8b0; background:rgba(92,184,92,.12); border:1px solid rgba(92,184,92,.35); }
+.diceVerdict.bad { color:#ff9a8a; background:rgba(217,83,79,.1); border:1px solid rgba(217,83,79,.32); }
+.diceVerdict.neutral { color:var(--bgn-accent2,#f2dc8b); background:rgba(212,175,55,.1); border:1px solid rgba(212,175,55,.28); }
+.dmgCard { border-color:rgba(255,154,138,.45); }
+
+/* ── combat stats (manager dialog) ── */
+.csBox { background:rgba(0,0,0,.16); border:1px solid rgba(212,175,55,.12); border-radius:10px; padding:10px 14px 8px; }
+.csBox .effRow label.csLbl { width:auto; }
+.csBox .effRow input[type="number"] { width:64px; }
+#csAc, #csAtk { width:64px; text-align:center; }
+#csDmg { flex:1; min-width:100px; }
+#csImm, #csRes, #csVuln { flex:1; min-width:90px; }
+#csConc { flex:1; min-width:100px; }
+.saveModRow { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+.saveModLabel { font:600 12px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); width:52px; flex:none; }
+.saveModRow label { display:flex; flex-direction:column; align-items:center; gap:3px; font:700 10px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); }
+.saveModRow input { width:52px; text-align:center; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); border-radius:8px; color:var(--bgn-text,#e8e3d8); padding:7px 4px; font-size:13px; outline:none; font-family:inherit; }
+.saveModRow input:focus { border-color:var(--bgn-accent,#d4af37); }
+
+/* ── ability scores / save & skill proficiency ── */
+.abilRow { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+.abilBox { flex:1; min-width:56px; display:flex; flex-direction:column; align-items:center; gap:3px; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); border-radius:8px; padding:6px 4px; }
+.abilLabel { font:800 10px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); letter-spacing:.1em; }
+.abilScore { width:100%; text-align:center; background:transparent; border:none; color:var(--bgn-text,#e8e3d8); font:800 17px var(--bgn-sans,system-ui); outline:none; }
+.abilMod { font:800 12px var(--bgn-sans,system-ui); color:var(--bgn-accent2,#f2dc8b); font-variant-numeric:tabular-nums; }
+.abilBox input::-webkit-outer-spin-button, .abilBox input::-webkit-inner-spin-button { -webkit-appearance:none; margin:0; }
+.saveProfRow { display:flex; gap:6px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+.saveChip { display:inline-flex; align-items:center; gap:5px; padding:6px 10px; border-radius:8px; cursor:pointer; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); color:var(--bgn-cream,#f4efe3); font:700 11.5px var(--bgn-sans,system-ui); }
+.saveChip b { color:var(--bgn-accent2,#f2dc8b); font-variant-numeric:tabular-nums; }
+.saveChip.prof { background:rgba(212,175,55,.18); border-color:var(--bgn-accent,#d4af37); }
+.saveChip.prof b { color:#9fe8b0; }
+.saveChip:hover { border-color:rgba(212,175,55,.6); }
+.skillRow { display:flex; gap:8px; align-items:flex-start; margin:8px 0; flex-wrap:wrap; }
+.skillGrid { flex:1; min-width:220px; display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:5px; }
+.skillChip { display:flex; justify-content:space-between; align-items:center; gap:6px; padding:5px 9px; border-radius:7px; cursor:pointer; background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.18); color:var(--bgn-cream,#f4efe3); font:600 11.5px var(--bgn-sans,system-ui); text-align:left; }
+.skillChip b { color:var(--bgn-muted,#a49bb4); white-space:nowrap; font-variant-numeric:tabular-nums; }
+.skillChip.lv1 { border-color:rgba(92,184,92,.55); }
+.skillChip.lv1 b { color:#9fe8b0; }
+.skillChip.lv2 { background:rgba(212,175,55,.15); border-color:var(--bgn-accent,#d4af37); }
+.skillChip.lv2 b { color:var(--bgn-accent2,#f2dc8b); }
+.skillChip.lvhalf { border-style:dashed; border-color:rgba(212,175,55,.45); }
+.skillChip.lvhalf b { color:var(--bgn-accent2,#f2dc8b); }
+.skillChip:hover { border-color:rgba(212,175,55,.6); }
+#csProf { width:64px; text-align:center; }
+#csCondImm, #csLangs { flex:1; min-width:110px; }
+#csHd { flex:none; width:76px; text-align:center; }
+.deathBox { margin-top:10px; background:rgba(217,83,79,.08); border:1px solid rgba(217,83,79,.35); border-radius:10px; padding:10px 14px; }
+.deathBoxRow { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+.pipGroup { display:flex; align-items:center; gap:5px; font:600 11px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); text-transform:uppercase; letter-spacing:.06em; }
+.pip { width:12px; height:12px; border-radius:50%; border:1px solid rgba(212,175,55,.35); background:transparent; }
+.pip.fail.filled { background:#d9534f; border-color:#d9534f; }
+.pip.success.filled { background:#5cb85c; border-color:#5cb85c; }
+.deathStatus { font-size:12px; color:var(--bgn-muted,#a49bb4); margin-top:8px; line-height:1.5; }
+.deathBox .btn { margin-top:0; }
+
+/* ── initiative groups, down state, death-save button ── */
+.initGroup { display:flex; align-items:center; gap:8px; margin-top:6px; padding:5px 4px 2px; border-bottom:1px solid rgba(212,175,55,.25); }
+.initGroupToggle { width:22px; height:22px; flex:none; border:none; background:transparent; color:var(--bgn-accent2,#f2dc8b); cursor:pointer; font-size:12px; border-radius:6px; }
+.initGroupToggle:hover { background:rgba(212,175,55,.15); }
+.initGroupName { font:800 12.5px var(--bgn-sans,system-ui); text-transform:uppercase; letter-spacing:.1em; color:var(--bgn-accent2,#f2dc8b); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.initGroupCount { font-size:11px; color:var(--bgn-muted,#a49bb4); white-space:nowrap; }
+.initRow.inGroup { margin-left:14px; border-left:3px solid rgba(212,175,55,.35); }
+.initRow.down { border-color:rgba(217,83,79,.4); }
+.initRow.down .initName { color:#d8a6a0; }
+.initDS { flex-shrink:0; min-width:34px; padding:4px 6px; border-radius:6px; cursor:pointer; font:700 12px var(--bgn-sans,system-ui); background:rgba(217,83,79,.16); border:1px solid rgba(217,83,79,.45); color:#ff9a8a; }
+.initDS:hover { background:rgba(217,83,79,.3); }
+
+/* ── encounters ── */
+.encRow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+#encName, #encSel { flex:1; min-width:150px; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text,#e8e3d8); font-size:13px; padding:8px 10px; outline:none; font-family:inherit; }
+#encName:focus, #encSel:focus { border-color:var(--bgn-accent,#d4af37); }
+
+/* ── compendium browser ── */
+.compTools { display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap; }
+#compSearch { flex:1; min-width:140px; background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text,#e8e3d8); font-size:13px; padding:8px 10px; outline:none; font-family:inherit; }
+#compSearch:focus, #compFilter:focus { border-color:var(--bgn-accent,#d4af37); }
+#compFilter { background:#0b0912; border:1px solid rgba(212,175,55,.25); border-radius:6px; color:var(--bgn-text,#e8e3d8); font-size:13px; padding:8px 10px; outline:none; font-family:inherit; }
+#compGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(175px,1fr)); gap:8px; max-height:360px; overflow-y:auto; }
+.compCard { display:flex; align-items:center; gap:8px; background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.2); border-radius:8px; padding:6px; cursor:pointer; text-align:left; transition:border-color .12s; }
+.compCard:hover { border-color:rgba(212,175,55,.5); }
+.compTile { width:36px; height:36px; flex:none; border-radius:7px; display:flex; align-items:center; justify-content:center; font:800 15px var(--bgn-sans,system-ui); color:#0b0912; overflow:hidden; }
+.compTile img { width:100%; height:100%; object-fit:cover; }
+.compInfo { display:flex; flex-direction:column; min-width:0; }
+.compName { font-size:12.5px; color:var(--bgn-cream,#f4efe3); font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.compSub { font-size:10.5px; color:var(--bgn-muted,#a49bb4); line-height:1.35; }
+
+/* ── token manager: hit points ── */
+.hpBox{ background:rgba(0,0,0,.16); border:1px solid rgba(212,175,55,.12); border-radius:10px; padding:10px 14px 8px; }
+.hpSep{ color:var(--bgn-muted); font-size:15px; padding:0 2px; }
+#hpInput, #maxHpInput{ width:76px; text-align:center; }
+.hpQuick{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+.hpQ{
+  flex:1; min-width:52px; padding:6px 4px; border-radius:8px; cursor:pointer;
+  background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.28); color:var(--bgn-cream);
+  font:700 12.5px var(--bgn-sans,system-ui); transition:background .12s, border-color .12s;
+}
+.hpQ:hover{ border-color:var(--bgn-accent,#d4af37); background:rgba(40,32,60,.9); }
+.hpQ[data-d^="-"]{ color:#ff9a8a; }
+.hpQ[data-d="0"]{ color:#ff7d7d; }
+.hpQ[data-full]{ color:#9fe8b0; }
+.hpBox .btn{ margin-top:0; }
+
+/* ── help / popup instructions modal ── */
+.bgn-help-overlay{
+  position:fixed; inset:0; z-index:1000;
+  background:rgba(8,7,14,.72);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  display:flex; align-items:center; justify-content:center; padding:20px;
+}
+.bgn-help{
+  position:relative; width:100%; max-width:560px; max-height:84vh;
+  background:linear-gradient(180deg,#191531,#120f20);
+  border:1px solid var(--bgn-line,rgba(212,175,55,.16));
+  border-radius:12px;
+  box-shadow:0 30px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(212,175,55,.08);
+  padding:34px 36px 30px;
+}
+.bgn-help-close{
+  position:absolute; top:12px; right:12px; width:34px; height:34px; border-radius:50%;
+  border:1px solid rgba(212,175,55,.35); background:rgba(20,17,32,.6); color:var(--bgn-muted,#a49bb4);
+  font-size:14px; cursor:pointer; line-height:1;
+}
+.bgn-help-close:hover{ color:var(--bgn-accent2,#f2dc8b); border-color:var(--bgn-accent,#d4af37); }
+.bgn-help-body{ max-height:calc(84vh - 70px); overflow-y:auto; padding-right:8px; }
+.bgn-help-body h2{ margin:0 0 14px; font-size:1.5rem; font-family:var(--bgn-serif,Cinzel,serif); }
+.bgn-help-body h3{ font-family:var(--bgn-serif,Cinzel,serif); letter-spacing:.1em; text-transform:uppercase; font-size:.82rem; color:var(--bgn-accent2,#f2dc8b); margin:22px 0 10px; border-bottom:1px solid var(--bgn-line,rgba(212,175,55,.16)); padding-bottom:8px; }
+.bgn-help-body p{ margin:8px 0; font-size:.92rem; }
+.bgn-help-body .btn{ margin-top:20px; }
+/* ── effects dialog ── */
+.effects-dlg{ max-width:620px; }
+#effectsTitleEl{ color:var(--bgn-accent2,#f2dc8b); }
+.effTypeBadge{ display:inline-block; font:700 10px var(--bgn-sans,system-ui); letter-spacing:.08em; text-transform:uppercase; border-radius:4px; padding:2px 7px; margin-right:8px; vertical-align:1px; }
+.effRow{ display:flex; align-items:center; gap:8px; margin:8px 0; flex-wrap:wrap; }
+.effRow label{ font:600 12px var(--bgn-sans,system-ui); color:var(--bgn-muted,#a49bb4); width:52px; flex:none; }
+.effRow input[type="text"], .effRow select, .effRow input[type="number"]{
+  background:rgba(23,20,40,.7); border:1px solid rgba(212,175,55,.25); border-radius:8px;
+  color:var(--bgn-text,#e8e3d8); padding:8px 10px; font-size:13px; outline:none; font-family:inherit;
+}
+.effRow input[type="text"]{ flex:1; min-width:120px; }
+.effRow select{ flex:1; min-width:100px; }
+.effRow input[type="number"]{ width:76px; text-align:center; }
+.effRow input:focus, .effRow select:focus{ border-color:var(--bgn-accent,#d4af37); }
+.effRow .btn{ margin-top:0; }
+#effectsListEl{ display:flex; flex-direction:column; gap:6px; }
+.effCard{
+  display:flex; align-items:center; gap:8px; padding:9px 12px; border-radius:9px;
+  background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.18); font-size:13px;
+}
+.effCard .effName{ font-weight:700; color:var(--bgn-cream,#f4efe3); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.effCard .effDetail{ font-size:12px; color:var(--bgn-muted,#a49bb4); white-space:nowrap; }
+.effCard .effBonus{ font-weight:800; font-variant-numeric:tabular-nums; color:var(--bgn-accent2,#f2dc8b); }
+.effCard .effBonus.neg{ color:#ff7d7d; }
+.effCard .effSrc{ font-size:10.5px; color:#6f6880; margin-left:2px; }
+.effDel{ flex:none; width:24px; height:24px; border:none; background:transparent; color:var(--bgn-muted,#a49bb4); cursor:pointer; font-size:13px; border-radius:6px; }
+.effDel:hover{ background:rgba(212,175,55,.15); color:var(--bgn-accent2,#f2dc8b); }
+.effEmpty{ font-size:12.5px; color:var(--bgn-muted,#a49bb4); text-align:center; padding:12px 4px; line-height:1.5; border:1px dashed rgba(212,175,55,.18); border-radius:9px; }
+.effForm{ background:rgba(0,0,0,.16); border:1px solid rgba(212,175,55,.12); border-radius:10px; padding:6px 14px 12px; }
+.effConds{ display:flex; flex-wrap:wrap; gap:6px; }
+.condChip{
+  display:inline-flex; align-items:center; gap:6px; padding:5px 11px; border-radius:999px;
+  background:rgba(23,20,40,.6); border:1px solid rgba(212,175,55,.25); color:var(--bgn-cream,#f4efe3);
+  font:600 12.5px var(--bgn-sans,system-ui); cursor:pointer; transition:border-color .12s, background .12s;
+}
+.condChip:hover{ border-color:rgba(212,175,55,.65); background:rgba(40,32,60,.9); }
+.condChip .condDot{ width:10px; height:10px; border-radius:50%; box-shadow:0 0 0 1.5px rgba(0,0,0,.55); flex:none; }
+@media (max-width:560px){
+  .bgn-help{ padding:26px 20px 22px; }
+  .bgn-help-body{ max-height:calc(84vh - 60px); }
+}
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+
+<script type="module" src="src/main.js"></script>
+<script>
+(function(){
+"use strict";
+
+/* theme config from main.pjs */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ app bootstrapping ══════════ */
+var app=null;
+function ready(cb){
+  if(window.__createApp) return cb();
+  setTimeout(function(){ ready(cb); }, 120);
+}
+function startApp(o){
+  ready(function(){
+    sfx("deal");
+    app = window.__createApp(o);
+    try { window.scrollTo({top:0}); } catch(e){}
+  });
+}
+function destroyApp(){
+  if(window.__app){ try{ window.__app.destroy(); }catch(e){} window.__app=null; }
+  app=null;
+}
+
+/* ══════════ table state (lobby, rooms, turns) ══════════ */
+var game={ mode:null, myRole:null, roomCode:null, socket:null, sockOpen:false, wantReconnect:false, retryDelay:800,
+  openResolvers:[], serverTurn:0, first:0, status:"idle", oppPresent:true, over:false, winner:null, reason:"",
+  lastDoc:null, log:[], prevStatus:0, prevOppIn:null };
+
+var lobbyCtn=document.getElementById("lobbyCtn");
+var gameCtn=document.getElementById("gameCtn");
+var onlinePanel=document.getElementById("onlinePanel");
+var onlineMsgEl=document.getElementById("onlineMsg");
+var joinCodeInput=document.getElementById("joinCodeInput");
+var turnEl=document.getElementById("turnEl");
+var bannerEl=document.getElementById("bannerEl");
+var logEl=document.getElementById("logEl");
+var hostNameEl=document.getElementById("hostNameEl");
+var guestNameEl=document.getElementById("guestNameEl");
+var roomBox=document.getElementById("roomBox");
+var roomCodeEl=document.getElementById("roomCodeEl");
+var connEl=document.getElementById("connEl");
+var copyCodeBtn=document.getElementById("copyCodeBtn");
+var leaveBtn=document.getElementById("leaveBtn");
+var newGameBtn=document.getElementById("newGameBtn");
+var claimBtn=document.getElementById("claimBtn");
+var menuBtn=document.getElementById("menuBtn");
+var chatBox=document.getElementById("chatBox");
+var chatMsgsEl=document.getElementById("chatMsgsEl");
+var chatInput=document.getElementById("chatInput");
+var chatSendBtn=document.getElementById("chatSendBtn");
+var pHost=document.getElementById("pHost");
+var pGuest=document.getElementById("pGuest");
+
+function roleName(r){ return r==="host"?"DM":"Guest"; }
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+function turnRoleFor(n){ return ((n+(game.first?1:0))%2)===0?"host":"guest"; }
+
+/* ══════════ table chat (sanitized on both ends) ══════════ */
+function fmtTime(ts){ var d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(role,text,ts){
+  var row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(role===game.myRole?"You":roleName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole)sfx("draw");
+}
+function sendChat(){
+  var t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ status UI ══════════ */
+function updateNames(){
+  if(game.mode==="online"&&game.myRole){
+    hostNameEl.textContent=game.myRole==="host"?"You (DM)":"Host (DM)";
+    guestNameEl.textContent=game.myRole==="host"?"Guest":"You";
+  }else{
+    hostNameEl.textContent="Host (DM)";
+    guestNameEl.textContent="Guest";
+  }
+}
+function addLog(role,msg){
+  game.log.push({r:role,m:msg});
+  if(game.log.length>60)game.log.shift();
+  renderLog();
+}
+function renderLog(){
+  logEl.innerHTML="";
+  if(!game.log.length){ logEl.innerHTML='<div class="muted small">No turns yet.</div>'; return; }
+  var frag=document.createDocumentFragment();
+  for(var i=0;i<game.log.length;i++){
+    var e=game.log[i];
+    var div=document.createElement("div");
+    div.className="log-item";
+    div.innerHTML="<b>"+(e.r?esc(roleName(e.r)):"")+"</b><span class='resp'>"+esc(e.m)+"</span>";
+    frag.appendChild(div);
+  }
+  logEl.appendChild(frag);
+}
+function resultText(){
+  if(game.winner==="draw")return "Draw — the match is over.";
+  var w=roleName(game.winner);
+  var youWon=game.mode==="online"&&game.winner===game.myRole;
+  if(youWon){
+    if(game.reason==="resign")return "You win — your opponent resigned!";
+    if(game.reason==="forfeit")return "You win — your opponent left!";
+    return "You win!";
+  }
+  if(game.mode==="online"&&game.winner!==game.myRole){
+    if(game.reason==="resign")return "You lose — you resigned.";
+    if(game.reason==="forfeit")return "You lose — you left the match.";
+    return "You lose.";
+  }
+  if(game.reason==="resign")return w+" wins by resignation.";
+  if(game.reason==="forfeit")return w+" wins — the other side left.";
+  return w+" wins!";
+}
+function updateBanner(){
+  var msg="";
+  if(game.over){
+    msg=resultText();
+  }else if(game.mode==="local"){
+    msg="Local table — the DM runs the whole fight here.";
+  }else if(game.mode==="online"){
+    if(!game.sockOpen)msg="Connecting…";
+    else if(game.status===1)msg="Waiting for a player to join — share your code…";
+    else if(!game.oppPresent)msg="Your opponent disconnected — they can rejoin with the code. Claim the win anytime.";
+    else msg=game.myRole==="host"?"Your table — make changes anytime.":"The DM is running the table — you're watching live.";
+  }
+  bannerEl.textContent=msg;
+  if(!fsOverlay.hidden)fsStatusEl.textContent=msg;
+}
+var bannerTimer=null;
+function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+function refreshTurn(){
+  if(game.over){ turnEl.textContent="Table closed"; pHost.classList.remove("on"); pGuest.classList.remove("on"); return; }
+  if(game.mode!=="online"){
+    turnEl.textContent="Local table";
+    pHost.classList.add("on"); pGuest.classList.remove("on");
+    return;
+  }
+  if(!game.sockOpen){ turnEl.textContent="Connecting…"; pHost.classList.remove("on"); pGuest.classList.remove("on"); return; }
+  if(game.status===1){ turnEl.textContent="Waiting for a player…"; }
+  else if(game.myRole==="host"){ turnEl.textContent="Your table — DM runs all"; }
+  else { turnEl.textContent="The DM is running the table"; }
+  pHost.classList.toggle("on",game.myRole==="host");
+  pGuest.classList.toggle("on",game.myRole==="guest");
+}
+function updateButtons(){
+  if(game.mode==="online"){
+    newGameBtn.textContent=game.over?"Rematch":"New match";
+    newGameBtn.style.display=game.over?"":"none";
+    menuBtn.textContent="Exit match";
+    claimBtn.hidden=!(game.status===2&&!game.over&&!game.oppPresent);
+  }else{
+    newGameBtn.textContent="Restart";
+    newGameBtn.style.display="";
+    menuBtn.textContent="Back to lobby";
+    claimBtn.hidden=true;
+  }
+}
+function renderAll(){ updateNames(); refreshTurn(); updateBanner(); updateButtons(); renderLog(); }
+
+/* ══════════ modes ══════════ */
+function resetTable(){
+  game.log=[];
+  game.over=false; game.winner=null; game.reason="";
+  game.lastDoc=null; game.prevStatus=0; game.prevOppIn=null;
+}
+function startLocal(){
+  if(game.mode==="online"&&game.socket)exitOnline(false);
+  destroyApp();
+  resetTable();
+  game.mode="local";
+  updateNames();
+  roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  sfx("deal");
+  startApp({ mode:"local", resume:true });
+  renderAll();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  chatBox.hidden=true;
+  sessionSave(null);
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  destroyApp();
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen)rpc("leave",game.roomCode).catch(function(){});
+    exitOnline(true);
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+  }
+}
+
+/* ══════════ online client ══════════ */
+var SESSION_KEY="bgn_gm_online";
+function sessionSave(o){
+  try{ if(o)sessionStorage.setItem(SESSION_KEY,JSON.stringify(o)); else sessionStorage.removeItem(SESSION_KEY); }catch(e){}
+}
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }
+  catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true; game.retryDelay=800;
+    var rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){ if(game.mode==="online")onServerMsg(ev.data); });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    var rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null; connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){
+  connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — share the code with a player":"Connecting…");
+}
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  var msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+}
+function refreshFromServer(){
+  return rpc("getRoom",game.roomCode).then(function(r){
+    if(r&&r.snap)applyServerSnap(r.snap);
+  }).catch(function(){});
+}
+function pushDocToApp(){
+  if(window.__app&&game.lastDoc){ try{ window.__app.applyDoc(game.lastDoc); }catch(e){} }
+}
+function applyServerSnap(s){
+  if(!s)return;
+  var prevStatus=game.status, prevOppIn=game.oppPresent;
+  game.serverTurn=s.turn;
+  game.first=s.first;
+  game.status=s.status;
+  game.oppPresent=game.myRole==="host"?s.guestIn:s.hostIn;
+  if(s.doc){ game.lastDoc=s.doc; pushDocToApp(); }
+  if(s.status===3){
+    game.winner=s.winner;
+    game.reason=s.reason||"";
+    if(!game.over)addLog(game.winner,resultText());
+    game.over=true;
+    if(game.winner==="draw")sfx("draw2");
+    else if(game.winner===game.myRole)sfx("win");
+    else sfx("lose");
+  }else{
+    game.over=false; game.winner=null; game.reason="";
+  }
+  if(prevStatus!==s.status){
+    if(s.status===2)addLog("","A player joined — the table is live.");
+  }else if(prevOppIn!==null&&prevOppIn!==game.oppPresent){
+    if(game.oppPresent)addLog("","A player rejoined the table.");
+    else addLog("","A player disconnected — they can rejoin with the code.");
+  }
+  renderAll();
+}
+function afterApp(cb){
+  (function poll(){ if(window.__app){ cb(); } else { setTimeout(poll,100); } })();
+}
+function ensureOnlineApp(){
+  if(window.__app)return;
+  startApp({ mode:"online", getSocket:function(){ return game.socket; }, resume:false });
+  afterApp(function(){ pushDocToApp(); });
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  roomBox.hidden=false;
+  chatBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  updateNames(); renderAll();
+}
+function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  openedP().then(function(ok){
+    if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+    rpc("createRoom","").then(function(r){
+      if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+      resetTable();
+      game.mode="online"; game.roomCode=r.code; game.myRole=r.role;
+      sessionSave({code:game.roomCode,role:game.myRole});
+      setOnlineMsg("");
+      addLog(r.role,"created the room — share code "+r.code+" with a player.");
+      enterOnlineGame();
+      ensureOnlineApp();
+      if(r.snap)applyServerSnap(r.snap);
+      afterApp(function(){ if(game.lastDoc){ try{ window.__app.applyDoc(game.lastDoc); }catch(e){} } });
+      sfx("deal");
+    }).catch(function(){ setOnlineMsg("Server error — please retry."); });
+  });
+}
+function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  openedP().then(function(ok){
+    if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+    rpc("joinRoom",code).then(function(r){
+      if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+      resetTable();
+      game.mode="online"; game.roomCode=code; game.myRole=r.role;
+      sessionSave({code:game.roomCode,role:game.myRole});
+      setOnlineMsg("");
+      addLog(r.role,"joined the table ("+code+").");
+      enterOnlineGame();
+      ensureOnlineApp();
+      if(r.snap)applyServerSnap(r.snap);
+      afterApp(function(){ if(game.lastDoc){ try{ window.__app.applyDoc(game.lastDoc); }catch(e){} } });
+      sfx("deal");
+    }).catch(function(){ setOnlineMsg("Server error — please retry."); });
+  });
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+        return;
+      }
+      if(r.err==="no_such_room"){
+        sessionSave(null);
+        if(game.mode==="online"){
+          game.wantReconnect=false;
+          game.roomCode=null; game.myRole=null; game.mode=null;
+          gameCtn.hidden=true; lobbyCtn.hidden=false;
+          setOnlineMsg("That room is gone — create or join a new one.");
+          renderAll();
+        }
+      }
+      return;
+    }
+    game.myRole=r.role;
+    sessionSave({code:game.roomCode,role:game.myRole});
+    if(r.snap)applyServerSnap(r.snap);
+    if(game.mode==="online"&&gameCtn.hidden){
+      enterOnlineGame();
+      ensureOnlineApp();
+    }
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+
+/* ══════════ fullscreen board (maximized tracker) ══════════
+   The game author registers the board once the app starts:
+     window.bgnFullscreen.register({
+       canvas: boardEl,       // the tracker panel → stretched to fill the overlay
+       tile:   tileBox,       // optional → top-right corner slot
+       meeple: meepleCtn,     // optional → bottom-right corner slot
+       resize: myResize       // optional → called after open/close & window resize
+     });
+   The ⛶ Full screen button appears top-right of the stage once a
+   canvas is registered. Opening MOVES the live elements in (never
+   clones) and closing moves them back to their exact original
+   parents/positions, so play continues in either view. */
+var fsOverlay=document.getElementById("fsOverlay");
+var fsOpenBtn=document.getElementById("fsOpenBtn");
+var fsExitBtn=document.getElementById("fsExitBtn");
+var fsStatusEl=document.getElementById("fsStatusEl");
+var fsActionsCtn=document.getElementById("fsActionsCtn");
+var fsBoardWrap=document.getElementById("fsBoardWrap");
+var fsTileCtn=document.getElementById("fsTileCtn");
+var fsMeepleCtn=document.getElementById("fsMeepleCtn");
+var fsGame={ canvas:null, tile:null, meeple:null, resize:null };
+function fsStash(el){
+  if(el&&!el._fsOrig){ el._fsOrig={ p:el.parentNode, n:el.nextSibling }; }
+  return el;
+}
+function fsRestore(el){
+  if(!el||!el._fsOrig)return;
+  var o=el._fsOrig;
+  if(o.p&&o.n&&o.n.parentNode===o.p)o.p.insertBefore(el,o.n);
+  else if(o.p)o.p.appendChild(el);
+  el._fsOrig=null;
+}
+function fsDefaultResize(){
+  if(!fsGame.canvas)return;
+  var w=fsGame.canvas.parentElement.clientWidth||640;
+  var h=fsGame.canvas.parentElement.clientHeight||400;
+  var dpr=window.devicePixelRatio||1;
+  var nw=Math.round(w*dpr), nh=Math.round(h*dpr);
+  if(nw!==fsGame.canvas.width||nh!==fsGame.canvas.height){
+    fsGame.canvas.width=nw; fsGame.canvas.height=nh;
+  }
+}
+function fsRefit(){ (fsGame.resize||fsDefaultResize)(); }
+var initNextBtn=document.getElementById("initNextBtn");
+function openFullscreen(){
+  if(!fsOverlay.hidden)return;
+  fsOverlay.hidden=false;
+  fsStatusEl.textContent=bannerEl.textContent||"Full screen table";
+  if(fsGame.tile)fsTileCtn.appendChild(fsStash(fsGame.tile));
+  if(fsGame.meeple)fsMeepleCtn.appendChild(fsStash(fsGame.meeple));
+  if(fsGame.canvas)fsBoardWrap.appendChild(fsStash(fsGame.canvas));
+  if(initNextBtn)fsActionsCtn.appendChild(fsStash(initNextBtn));
+  fsOpenBtn.hidden=true;
+  document.body.style.overflow="hidden";
+  fsRefit();
+  try{ if(fsOverlay.requestFullscreen)fsOverlay.requestFullscreen().catch(function(){}); }catch(e){}
+}
+function closeFullscreen(){
+  if(fsOverlay.hidden)return;
+  try{ if(document.fullscreenElement)document.exitFullscreen().catch(function(){}); }catch(e){}
+  fsRestore(initNextBtn);
+  fsRestore(fsGame.canvas);
+  fsRestore(fsGame.meeple);
+  fsRestore(fsGame.tile);
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  fsOpenBtn.hidden=!fsGame.canvas;
+  fsRefit();
+}
+window.bgnFullscreen={
+  register:function(o){
+    if(!o)return;
+    if(o.canvas){ fsGame.canvas=o.canvas; fsOpenBtn.hidden=false; }
+    if(o.tile)fsGame.tile=o.tile;
+    if(o.meeple)fsGame.meeple=o.meeple;
+    if(o.resize)fsGame.resize=o.resize;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !fsOverlay.hidden; }
+};
+fsOpenBtn.addEventListener("click",openFullscreen);
+fsExitBtn.addEventListener("click",closeFullscreen);
+window.addEventListener("resize",function(){ if(!fsOverlay.hidden)fsRefit(); });
+window.bgnFullscreen.register({
+  canvas:document.getElementById("trackerPanel"),
+  resize:function(){}
+});
+
+/* ══════════ help modal ══════════ */
+var helpOverlay=document.getElementById("helpOverlay");
+var helpBody=document.getElementById("helpBody");
+var HELP_HTML='<h2 class="goldtext">GM Battle Manager</h2>'
+  +'<p class="muted">An initiative tracker and combat manager for the DM. Add heroes, NPCs and monsters, set their initiative rolls, and run the fight — track hit points with quick damage/heal buttons, and slap on conditions and effects as it plays out. Run it solo (auto-saved in this browser) or host an <b>Online table</b> and share the code so your players can watch the fight live.</p>'
+  +'<h3>Adding combatants</h3>'
+  +'<p>Press <b>＋ Add combatant</b> and tap a portrait (heroes, NPCs, monsters, bosses) or paste your own JSON. Every combatant lands in the tracker at full hit points.</p>'
+  +'<h3>Initiative</h3>'
+  +'<p>Type each combatant\'s roll in the number box — the list sorts automatically, highest first, showing current HP. <b>Next ▶</b> advances turns; cycling past the last combatant starts a new round, which expires round-limited effects.</p>'
+  +'<h3>Hit points</h3>'
+  +'<p>Use the −10/−5/+5/+10 buttons right on a row to deal damage or heal, or click the row to open its manager for exact HP, "drop to 0" and "heal to full".</p>'
+  +'<h3>Conditions &amp; effects</h3>'
+  +'<p>From a combatant\'s manager, one click applies a standard condition (Poisoned, Restrained, …) with its rules-backed modifiers, or add your own custom effect with a bonus to abilities, skills, saves or attacks. Colored dots on the row show active conditions.</p>'
+  +'<h3>Combat stats</h3>'
+  +'<p>Each combatant\'s manager is a compact monster sheet: ability scores that auto-derive save and check bonuses, save &amp; skill proficiency toggles, AC, attack bonus, damage formula, damage immunities/resistances/vulnerabilities, condition immunities, languages, hit dice (roll &amp; heal), a tracker group, and a spell it\'s concentrating on. All of it auto-saves and comes back with your table.</p>'
+  +'<h3>Combat rolls &amp; dice</h3>'
+  +'<p>In the 🎲 Dice panel, pick an <b>Actor</b> and a <b>Target</b>, then ⚔ <b>Attack</b> rolls d20 + the attacker\'s bonus against the target\'s AC — natural 20 always hits (and doubles damage dice), natural 1 always misses, and a hit offers a damage roll that applies resist/vuln/immune. 🛡 <b>Save</b> and 📖 <b>Check</b> roll d20 + the combatant\'s modifier with effects applied. Drop a creature to 0 HP and its row offers a 💀 death-save roll; taking damage while concentrating triggers an automatic CON save.</p>'
+  +'<h3>Encounters</h3>'
+  +'<p>Under <b>＋ Add combatant → Encounters</b>, save the whole current table as a named encounter and drop it back into any future fight — combat stats, groups and damage types are preserved.</p>'
+  +'<h3>Compendium</h3>'
+  +'<p>Under <b>＋ Add combatant → Compendium</b>, search or filter a library of SRD monsters — each shows CR, XP and its full stat block (ability scores, saves, skills, damage types, languages). Tap one to drop it straight into the tracker.</p>'
+  +'<h3>Online &amp; full screen</h3>'
+  +'<p>In the lobby, <b>🌐 Online table</b> creates a room with a 5-letter code. Share it and players join to watch the table live and chat; as the host you stay in control. <b>⛶ Full screen</b> maximizes the tracker into a full-window view (Escape exits) — the <b>Next ▶</b> button rides along in the top bar.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+function openHelp(){ helpBody.innerHTML=HELP_HTML; document.getElementById("helpDoneBtn").addEventListener("click",closeHelp); helpOverlay.hidden=false; }
+function closeHelp(){ helpOverlay.hidden=true; try{ localStorage.setItem("battleboard_help_seen","1"); }catch(_){} }
+function helpSeen(){ try{ return localStorage.getItem("battleboard_help_seen")==="1"; }catch(_){ return false; } }
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+
+/* pop-up instructions, but only the first time — the ❓ buttons always re-open it */
+if(!helpSeen()) setTimeout(openHelp, 500);
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+function applyTable(o){
+  if(!o || !Array.isArray(o.tokens)) return false;
+  if(game.mode==="online")exitOnline(false);
+  destroyApp();
+  startLocal();
+  ready(function(){
+    if(!app) return;
+    app.waitOpen().then(function(){
+      var ops = Promise.resolve();
+      ops = ops.then(function(){ return app.net.rpc("clearMap", {}).catch(function(){}); });
+      var chars = (o.tokens||[]).map(function(t){
+        return {name:t.name, color:t.color, img:t.img, hp:t.hp, maxHp:t.maxHp, w:t.w, h:t.h, x:t.x, y:t.y};
+      });
+      if(chars.length) ops = ops.then(function(){ return app.net.rpc("importChars", {chars:chars}).catch(function(){}); });
+      var tk = o.tokens||[];
+      for(var i=0;i<tk.length;i++){
+        (function(t, idx){
+          ops = ops.then(function(){
+            var tok = app.state.tokens[idx];
+            if(!tok) return;
+            var chain = Promise.resolve();
+            if(t.maxHp || t.hp) chain = chain.then(function(){ return app.net.rpc("setHp", {id:tok.id, hp:t.hp, maxHp:t.maxHp}).catch(function(){}); });
+            if(t.init) chain = chain.then(function(){ return app.net.rpc("setTokenInit", {id:tok.id, init:t.init}).catch(function(){}); });
+            if(t.inTracker) chain = chain.then(function(){ return app.net.rpc("initAdd", {id:tok.id}).catch(function(){}); });
+            return chain;
+          });
+        })(tk[i], i);
+      }
+      return ops;
+    }).then(function(){ sfx("deal"); }).catch(function(){ sfx("deal"); });
+  });
+  return true;
+}
+
+document.getElementById("clearTableBtn").addEventListener("click", function(){
+  if(!app) return;
+  if(confirm("Remove all tokens and reset the initiative tracker?")) app.rpc("clearMap", {}).catch(function(e){ app.toast("Failed: "+e.message); });
+});
+
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-blank-template",
+    gameName:function(){ return "GM Battle Manager"; },
+    exportData:function(){
+      if(!window.__app) return null;
+      var s=window.__app.state;
+      return {v:1, tokens:s.tokens, round:s.round};
+    },
+    applySave:applyTable,
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return document.getElementById("trackerPanel");
+      return document.getElementById("lobbyCtn");
+    },
+    title:function(){ return "GM BATTLE MANAGER"; },
+    subtitle:function(){ return "combat table export"; },
+    filenameBase:function(){ return "gm-battle-manager"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    var m=btn.dataset.mode;
+    if(m==="online"){
+      if(game.mode==="online"){ enterOnlineGame(); return; }
+      onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus();
+      return;
+    }
+    onlinePanel.hidden=true;
+    startLocal();
+  });
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true; connectSocket(); doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  var c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true; connectSocket(); doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.over)rpc("rematch",game.roomCode).then(function(r){
+      if(r&&r.ok){ refreshFromServer(); sfx("deal"); }
+      else if(r&&r.err==="opp_gone")flashBanner("Your opponent is gone — create a new room to play again.");
+      else flashBanner("Can't rematch yet.");
+    }).catch(function(){});
+    return;
+  }
+  if(window.__clearLocalSave){ try{ window.__clearLocalSave(); }catch(e){} }
+  startLocal();
+});
+claimBtn.addEventListener("click",function(){
+  if(game.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ closeFullscreen(); return; }
+    if(!helpOverlay.hidden)closeHelp();
+  }
+});
+
+/* ══════════ auto-rejoin: a refresh brings the player back to their room ══════════ */
+var savedOnline=null;
+try{ savedOnline=JSON.parse(sessionStorage.getItem("bgn_gm_online")||"null"); }catch(e){ savedOnline=null; }
+if(savedOnline&&savedOnline.code){
+  game.mode="online";
+  game.roomCode=savedOnline.code;
+  game.myRole=savedOnline.role||null;
+  game.wantReconnect=true;
+  connectSocket();
+  setConnLabel("Reconnecting to your table…");
+}
+
+renderAll();
+
+/* debug/testing handle for browser_eval */
+window.__t = { game:game, applyServerSnap:applyServerSnap, startLocal:startLocal, exitToLobby:exitToLobby,
+  doCreateRoom:doCreateRoom, doJoinRoom:doJoinRoom, rejoinRoom:rejoinRoom, refreshFromServer:refreshFromServer,
+  rpc:rpc, connectSocket:connectSocket, turnRoleFor:turnRoleFor, renderAll:renderAll,
+  fullscreen:window.bgnFullscreen, fsOpen:openFullscreen, fsClose:closeFullscreen };
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game.
+     Standard floating-button layout (shared with the hub). -->
+<style>
+.bgn-lounge-btn{position:fixed;right:22px;bottom:94px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>

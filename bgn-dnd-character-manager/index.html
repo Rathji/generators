@@ -1,0 +1,933 @@
+<!-- ════════════════════════════════════════════════════════════════
+     D&D CHARACTER FORGE — index.html
+     A D&D 5e character manager built on the BGN blank template:
+       · Character Forge (local) — create/play characters (2014 & 2024)
+       · Party Table (online)    — bring heroes to a shared table
+     The <script type="text/x-server-plugin"> element below is the
+     authoritative party-table server (rooms, seats, presence, chat).
+     It is PUBLIC source — no secrets here.
+     ──────────────────────────────────────────────────────────── -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE PARTY TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── Party table server ─────────────────────────────────────────
+   Rooms with 6 seats. Each seat holds a compact character "card"
+   (name, class, level, species, HP, AC…) submitted by the seat's
+   player via the `move` rpc. Presence, chat, and room snapshots
+   are broadcast to everyone in the room. Durable state lives in
+   the plugin `state` bytes; seats keep a reconnect tag so a
+   player can rejoin their seat after a disconnect.  */
+const SLOT=2048;
+const SEATS=6;
+const STATE_VERSION=1;
+const MAX_ROOMS=Math.min(1024, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_CARD=1400;
+const MAX_CHAT=160;
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+function genTag(){ let s=""; for(let i=0;i<8;i++) s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; return s; }
+
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function readLastAct(i){ const o=off(i); return (state[o+10]<<24)|(state[o+11]<<16)|(state[o+12]<<8)|state[o+13]; }
+function slotStatus(i){ return state[off(i)]; }
+
+const rooms=new Map();      // code -> room
+const conns=new Map();      // conn.id -> {code, role}
+const moveTimes=new Map();  // conn.id -> last move ms
+const chatTimes=new Map();  // conn.id -> last chat ms
+
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+8]=STATE_VERSION;
+  state[o+9]=(room.turn!=null&&room.turn>=0)?room.turn:255;
+  state[o+14]=(room.winner!=null&&room.winner>=0)?room.winner:255;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+10]=(la>>>24)&255; state[o+11]=(la>>>16)&255; state[o+12]=(la>>>8)&255; state[o+13]=la&255;
+  const seatsJson=JSON.stringify(room.seats.map(function(s){ return s?{card:s.card,tag:s.tag}:null; }));
+  const b=utf8Encode(seatsJson);
+  const len=Math.min(SLOT-24,b.length);
+  state[o+16]=(len>>8)&255; state[o+17]=len&255;
+  if(len>0)state.set(b.slice(0,len),o+24);
+}
+function loadRooms(){
+  rooms.clear();
+  for(let i=0;i<MAX_ROOMS;i++){
+    if(slotStatus(i)===0)continue;
+    const o=off(i);
+    if(state[o+8]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }
+    const len=(state[o+16]<<8)|state[o+17];
+    let seats=null;
+    if(len>0){ try{ seats=JSON.parse(utf8Decode(state.slice(o+24,o+24+len))); }catch(e){ seats=null; } }
+    if(!seats||!Array.isArray(seats)){ state.fill(0,o,o+SLOT); continue; }
+    while(seats.length<SEATS)seats.push(null);
+    seats=seats.map(function(s){ return s?{card:s.card||null,tag:s.tag||null,connId:-1}:null; });
+    rooms.set(codeAt(i),{slot:i,code:codeAt(i),status:2,seats:seats,lastAct:readLastAct(i),
+      turn:state[o+9]===255?-1:state[o+9], winner:state[o+14]===255?null:state[o+14]});
+  }
+}
+function findSlot(){
+  let free=-1,oldest=-1,oldT=Infinity;
+  for(let i=0;i<MAX_ROOMS;i++){
+    if(slotStatus(i)===0)return i;
+    const t=readLastAct(i);
+    if(t<oldT){ oldT=t; oldest=i; }
+  }
+  return oldest;
+}
+function genCode(){ for(let t=0;t<80;t++){ let s=""; for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)]; if(!rooms.has(s))return s; } return "AAAAA"; }
+function topic(code){ return "tbl:"+code; }
+function snap(room){
+  return { code:room.code, status:room.status, turn: room.turn!=null?room.turn:-1, winner: room.winner!=null?room.winner:null,
+    seats: room.seats.map(function(s){ return s?{card:s.card,in:s.connId!==-1}:null; }),
+    count: room.seats.filter(function(s){ return s&&s.card; }).length };
+}
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function freeSeat(room){ for(let i=0;i<SEATS;i++){ const s=room.seats[i]; if(!s||(s.card==null&&s.connId===-1))return i; } return -1; }
+function seatByTag(room,tag){ if(!tag)return -1; for(let i=0;i<SEATS;i++){ const s=room.seats[i]; if(s&&s.tag&&s.tag===tag)return i; } return -1; }
+function nextOccupied(room,from){ for(let k=1;k<=SEATS;k++){ const i=(from+k)%SEATS; if(i===from)break; const s=room.seats[i]; if(s&&s.card)return i; } return -1; }
+function fixTurn(room){ if(room.turn==null||room.turn===-1){ room.turn=nextOccupied(room,-1); } else if(!room.seats[room.turn]||!room.seats[room.turn].card){ room.turn=nextOccupied(room,room.turn); } }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot(); if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const seats=[{connId:conn.id,card:null,tag:genTag()}];
+    while(seats.length<SEATS)seats.push(null);
+    const room={slot,code,status:2,seats:seats,lastAct:nowSec(),turn:-1,winner:null};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:0});
+    return JSON.stringify({ok:true,code,role:0,tag:room.seats[0].tag,snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    let obj; try{ obj=JSON.parse(data||"{}"); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const code=String(obj.code||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    if(existing&&existing.code===code){
+      conn.subscribe(topic(code));
+      const s=room.seats[existing.role];
+      return JSON.stringify({ok:true,code,role:existing.role,tag:s?s.tag:null,snap:snap(room)});
+    }
+    let role=-1;
+    if(obj.tag)role=seatByTag(room,String(obj.tag).slice(0,24));
+    if(role===-1){
+      role=freeSeat(room);
+      if(role===-1)return JSON.stringify({ok:false,err:"room_full"});
+    }
+    let seat=room.seats[role];
+    if(!seat){ seat={connId:conn.id,card:null,tag:genTag()}; room.seats[role]=seat; }
+    else { seat.connId=conn.id; if(!seat.tag)seat.tag=genTag(); }
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true,code,role,tag:seat.tag,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(roleOf(conn)!==obj.seat)return JSON.stringify({ok:false,err:"not_your_seat"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(!obj.card||typeof obj.card!=="object")return JSON.stringify({ok:false,err:"bad_move"});
+    const s=JSON.stringify(obj.card);
+    if(s.length<2||s.length>MAX_CARD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.seats[obj.seat].card=JSON.parse(s);
+    fixTurn(room);
+    room.lastAct=nowSec();
+    saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  nextTurn({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const role=roleOf(conn);
+    if(role==null)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===3)return JSON.stringify({ok:false,err:"game_over"});
+    if(room.turn!==-1&&room.turn!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    room.turn=nextOccupied(room,room.turn);
+    room.lastAct=nowSec();
+    saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true,turn:room.turn});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const role=roleOf(conn);
+    if(role==null)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===3)return JSON.stringify({ok:false,err:"game_over"});
+    if(room.turn!==-1&&room.turn!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    room.winner=role; room.status=3;
+    room.lastAct=nowSec();
+    saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true,winner:role});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(role==null||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,MAX_CHAT);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const i=conns.get(conn.id);
+    conns.delete(conn.id);
+    if(!i)return JSON.stringify({ok:true});
+    const room=rooms.get(i.code);
+    if(room){
+      const s=room.seats[i.role];
+      if(s){ s.connId=-1; s.card=null; s.tag=null; }
+      fixTurn(room);
+      room.lastAct=nowSec();
+      saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const i=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  chatTimes.delete(conn.id);
+  if(!i)return;
+  const room=rooms.get(i.code);
+  if(!room)return;
+  const s=room.seats[i.role];
+  if(s)s.connId=-1;              // keep card + tag so they can rejoin
+  room.lastAct=nowSec();
+  saveRoom(room); broadcast(room);
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+      <span class="tag">2014 · 2024</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Forge a hero under the 2014 Legacy or 2024 rules with AI help, then bring them to the Party Table where your whole group can see live HP, AC and more.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="forge">
+        <span class="bgn-mode-icon">⚔️</span>
+        <span class="bgn-mode-name">Character Forge</span>
+        <span class="bgn-mode-sub">Create, edit &amp; play your heroes</span>
+      </button>
+      <button class="bgn-mode" data-mode="party">
+        <span class="bgn-mode-icon">🏰</span>
+        <span class="bgn-mode-name">Party Table</span>
+        <span class="bgn-mode-sub">Bring your hero to a shared online table</span>
+      </button>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Export or import your heroes as JSON / PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your hero</h3>
+      <p class="muted small" id="continueInfoEl">A character was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Forget</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ CHARACTER FORGE (local) ═══ -->
+  <section id="forgeCtn" hidden>
+    <div id="rosterScreen">
+      <div class="flex" style="justify-content:space-between; align-items:flex-end; margin-bottom:26px">
+        <div>
+          <div class="sec-eyebrow">Character Forge</div>
+          <h2 class="sec-title goldtext" style="margin-top:6px">Your heroes</h2>
+        </div>
+        <button class="btn btn-gold" onclick="CF.newCharacter()">⚔️ New hero</button>
+      </div>
+      <div class="grid" id="rosterList" style="grid-template-columns:repeat(auto-fill,minmax(250px,1fr))"></div>
+    </div>
+
+    <div id="wizardScreen" hidden>
+      <div class="flex" style="justify-content:space-between; align-items:center; margin-bottom:18px">
+        <button class="btn btn-ghost btn-sm" id="wizBackBtn">← Back to roster</button>
+        <h2 class="sec-title goldtext" style="font-size:1.4rem">Create a hero</h2>
+        <span class="tag" id="wizEditionTag"></span>
+      </div>
+      <div class="wiz-nav" id="wizNav"></div>
+      <div class="panel wiz-body" id="wizBody" style="margin-top:20px"></div>
+      <div class="wiz-foot">
+        <button class="btn btn-ghost" id="wizPrevBtn">← Prev</button>
+        <button class="btn btn-gold" id="wizNextBtn">Next →</button>
+        <button class="btn btn-gold" id="wizFinishBtn" hidden>⚔️ Save hero</button>
+      </div>
+    </div>
+
+    <div id="sheetScreen" hidden></div>
+  </section>
+
+  <!-- ═══ PARTY TABLE (online) ═══ -->
+  <section id="tableCtn" hidden>
+    <div id="partyJoinPanel" class="bgn-lobby">
+      <div class="sec-head"><div class="sec-eyebrow">Online table</div>
+        <h2 class="sec-title goldtext">Gather the party</h2>
+        <p class="sec-sub">Create a table and share the 5-letter code, or join a friend's table. Bring your hero to a seat — the whole party sees your card.</p>
+      </div>
+      <div class="panel center" style="max-width:520px; margin:0 auto">
+        <div class="flex center" style="gap:10px; justify-content:center">
+          <button class="btn btn-gold" id="createRoomBtn">Create room</button>
+          <div style="display:flex; gap:8px; align-items:center">
+            <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false" placeholder="CODE" class="code-input">
+            <button class="btn btn-ghost" id="partyJoinBtn">Join</button>
+          </div>
+        </div>
+        <p class="muted small" id="partyMsg"></p>
+      </div>
+    </div>
+
+    <div id="partyRoomPanel" hidden>
+      <div class="bgn-table party-table" id="board">
+        <div class="panel bgn-stagepanel">
+          <div class="bgn-players" style="justify-content:center">
+            <b id="turnEl" class="bgn-turn">Waiting for players…</b>
+            <button class="btn btn-ghost btn-sm" id="nextTurnBtn" title="Advance the turn" style="margin-left:10px" hidden>▶ Next turn</button>
+          </div>
+          <div class="party-seats" id="partySeats"></div>
+          <div class="bgn-banner" id="partyBanner"></div>
+        </div>
+        <div class="panel bgn-side">
+          <div class="bgn-room" id="partyRoomBox">
+            <div class="bgn-room-code"><span>Table code</span><b id="roomCodeEl">—</b></div>
+            <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:8px">
+              <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+              <button class="btn btn-ghost btn-sm" id="linkHeroBtn" title="Save this table code on your hero" hidden>🔗 Link hero</button>
+              <button class="btn btn-ghost btn-sm" id="leaveBtn">Leave</button>
+            </div>
+            <p class="muted small" id="partyConnEl">Connecting…</p>
+          </div>
+          <div class="bgn-chat">
+            <h3>Table chat</h3>
+            <div class="bgn-chat-msgs" id="partyChatMsgs"></div>
+            <div class="bgn-chat-compose">
+              <input id="partyChatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+              <button class="btn btn-gold btn-sm" id="partyChatSend">Send</button>
+            </div>
+          </div>
+          <div class="bgn-actions">
+            <button class="btn btn-gold" id="partySwapBtn">🎒 Bring character</button>
+            <button class="btn btn-ghost btn-sm" id="newGameBtn">🔄 New table</button>
+            <button class="btn btn-ghost btn-sm" id="claimBtn">🏆 Claim win</button>
+            <button class="btn btn-ghost btn-sm" id="menuBtn">☰ Menu</button>
+          </div>
+        </div>
+      </div>
+      <div id="logEl" class="bgn-log"></div>
+      <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+    </div>
+
+    <div class="bgn-actions" id="partyMenu" style="margin-top:14px" hidden>
+      <button class="btn btn-ghost" onclick="CF.party.exit()">← Back to lobby</button>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ CHARACTER PICKER (party table) ═══ -->
+<div id="charPickOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help" style="max-width:520px">
+    <button class="bgn-help-close" id="charPickCloseBtn" title="Close">✕</button>
+    <h2 class="goldtext">Bring a hero to your seat</h2>
+    <p class="muted small">Your seat broadcasts a live card — name, class, level, HP and AC — to everyone at the table.</p>
+    <div id="charPickList" style="display:flex; flex-direction:column; gap:8px; margin-top:12px"></div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+  <p class="footnote">D&amp;D is a trademark of Wizards of the Coast. This fan tool is unofficial and not affiliated with them.</p>
+</footer>
+
+<!-- ═══ BGN Lounge (shared chat) ═══ -->
+<style>
+.bgn-lounge-btn{position:fixed;right:16px;bottom:16px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<style>
+/* ════════════════════════════════════════════════════════════════
+   D&D CHARACTER FORGE — theme + app styles
+   ──────────────────────────────────────────────────────────── */
+:root{
+  --dnd-red:#a8352c;
+  --dnd-red-dark:#6e1d17;
+  --dnd-cream:#f3e9d2;
+  --dnd-parch:#f6ecd2;
+  --dnd-ink:#1c1209;
+  --dnd-gold:#d4af37;
+  --dnd-line:rgba(212,175,55,.22);
+}
+body{ background-image:
+  radial-gradient(1100px 700px at 85% -10%, rgba(212,175,55,.09), transparent 60%),
+  radial-gradient(900px 640px at -12% 15%, rgba(168,53,44,.10), transparent 60%),
+  linear-gradient(180deg, #0b0912, #0e0c17 45%, #0a0912);
+}
+.game-hero{
+  background:
+    radial-gradient(700px 380px at 15% -20%, rgba(212,175,55,.15), transparent 60%),
+    radial-gradient(700px 380px at 85% 120%, rgba(168,53,44,.18), transparent 60%),
+    linear-gradient(180deg,#0e0c17,#0a0912);
+}
+.game-hero.has-img{
+  background-image: linear-gradient(180deg, rgba(10,9,16,.82), rgba(10,9,16,.88)), var(--bgn-hero-img, none);
+  background-size:cover; background-position:center;
+}
+.tag{ border-radius:3px; }
+.sec-eyebrow{ color:var(--bgn-accent); }
+
+/* ── flash toast ── */
+.flash-toast{ position:fixed; top:74px; left:50%; transform:translateX(-50%) translateY(-8px); z-index:9900;
+  background:linear-gradient(180deg,#2a2233,#1c1726); color:var(--bgn-cream); border:1px solid rgba(212,175,55,.55);
+  padding:12px 22px; border-radius:10px; font-size:.92rem; box-shadow:0 12px 40px rgba(0,0,0,.6);
+  opacity:0; pointer-events:none; transition:opacity .25s, transform .25s; max-width:88vw; text-align:center; }
+.flash-toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+
+/* ── welcome intro modal ── */
+.intro-hero{ text-align:center; margin-bottom:14px; }
+.intro-icon{ font-size:2.2rem; }
+.intro-step{ display:flex; gap:12px; align-items:flex-start; margin:10px 0; text-align:left; }
+.intro-num{ flex:none; width:26px; height:26px; border-radius:50%; background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); color:#221803; font-weight:700; display:flex; align-items:center; justify-content:center; margin-top:2px; }
+.intro-step b{ color:var(--bgn-cream); }
+
+/* ── game & map links (sheet) ── */
+.link-row{ margin:10px 0 14px; text-align:left; }
+.link-row small{ display:block; font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color:var(--bgn-muted); margin-bottom:5px; }
+.link-controls{ display:flex; gap:6px; align-items:center; }
+.link-input{ flex:1; min-width:0; text-align:center; letter-spacing:.18em; text-transform:uppercase; font-weight:700; }
+
+/* ── wizard ── */
+.wiz-nav{ display:flex; gap:4px; flex-wrap:wrap; justify-content:center; }
+.wiz-step{ border:1px solid var(--dnd-line); background:rgba(23,20,40,.5); color:var(--bgn-muted);
+  border-radius:999px; padding:7px 15px; cursor:pointer; display:flex; align-items:center; gap:8px; font-family:var(--bgn-sans); font-size:.78rem; transition:all .2s; }
+.wiz-step .ws-num{ width:20px; height:20px; border-radius:50%; background:rgba(212,175,55,.15); color:var(--bgn-accent2); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; }
+.wiz-step.done .ws-num{ background:var(--bgn-green); color:#04120d; }
+.wiz-step.on{ background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); color:#221803; border-color:transparent; font-weight:600; }
+.wiz-step.on .ws-num{ background:rgba(0,0,0,.18); color:#fff; }
+.wiz-step:hover{ border-color:var(--bgn-accent); }
+.wiz-body{ text-align:center; }
+.wiz-foot{ display:flex; gap:12px; justify-content:center; margin-top:24px; }
+.f-label{ display:block; font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--bgn-muted); margin:12px 0 6px; text-align:left; }
+.ai-row{ display:flex; gap:8px; align-items:stretch; text-align:left; }
+.ai-row .field{ flex:1; }
+.ai-btn{ flex:none; width:44px; border:1px solid rgba(212,175,55,.4); background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); color:#221803; border-radius:8px; cursor:pointer; font-size:1rem; transition:transform .15s; }
+.ai-btn:hover{ transform:scale(1.06); }
+.ai-btn:disabled{ opacity:.5; cursor:wait; }
+.ai-btn.dice{ background:rgba(23,20,40,.7); color:var(--bgn-accent2); }
+.ai-spin{ display:inline-block; width:14px; height:14px; border:2px solid rgba(0,0,0,.25); border-top-color:#221803; border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.wiz-ai-opt{ display:flex; gap:10px; align-items:center; justify-content:center; margin-top:10px; flex-wrap:wrap; }
+
+.ed-toggle{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; max-width:760px; margin:0 auto; }
+.ed-card{ border:1px solid var(--dnd-line); background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.01)); border-radius:14px; padding:20px; cursor:pointer; transition:all .2s; text-align:left; color:inherit; font:inherit; }
+.ed-card:hover{ border-color:rgba(212,175,55,.5); transform:translateY(-2px); }
+.ed-card.on{ border-color:var(--bgn-accent); box-shadow:0 0 0 1px var(--bgn-accent), 0 10px 30px rgba(212,175,55,.15); background:linear-gradient(180deg,rgba(212,175,55,.1),rgba(212,175,55,.03)); }
+.ed-name{ font-family:var(--bgn-serif); font-size:1.1rem; color:var(--bgn-cream); margin-bottom:4px; }
+.ed-desc{ font-size:.8rem; color:var(--bgn-muted); }
+
+.level-stepper{ display:flex; align-items:center; gap:12px; justify-content:flex-start; }
+.level-stepper button{ width:38px; height:38px; border-radius:8px; border:1px solid var(--dnd-line); background:rgba(23,20,40,.7); color:var(--bgn-accent2); cursor:pointer; font-size:1.1rem; }
+.level-stepper b{ font-family:var(--bgn-serif); font-size:1.5rem; color:var(--bgn-cream); min-width:34px; text-align:center; }
+
+.opt-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin-top:16px; }
+.opt-card{ border:1px solid var(--dnd-line); background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.01)); border-radius:12px; padding:16px 10px; cursor:pointer; transition:all .18s; color:inherit; font:inherit; text-align:center; }
+.opt-card:hover{ border-color:rgba(212,175,55,.55); transform:translateY(-3px); }
+.opt-card.on{ border-color:var(--bgn-accent); box-shadow:0 0 0 1px var(--bgn-accent), 0 8px 24px rgba(212,175,55,.18); background:linear-gradient(180deg,rgba(212,175,55,.12),rgba(212,175,55,.03)); }
+.opt-icon{ font-size:1.7rem; display:block; margin-bottom:6px; }
+.opt-name{ font-family:var(--bgn-serif); font-weight:600; font-size:.92rem; color:var(--bgn-cream); }
+.opt-sub{ font-size:.7rem; color:var(--bgn-muted); margin-top:3px; }
+.klass-grid{ grid-template-columns:repeat(auto-fill,minmax(135px,1fr)); }
+.klass-detail{ text-align:left; }
+.detail-line{ font-size:.86rem; margin:2px 0 8px; color:var(--bgn-text); line-height:1.4; }
+.trait-list{ text-align:left; margin:8px 0 0; padding-left:18px; color:var(--bgn-text); font-size:.9rem; }
+.trait-list li{ margin-bottom:5px; line-height:1.45; }
+.check-row{ display:flex; align-items:center; gap:8px; font-size:.86rem; color:var(--bgn-text); cursor:pointer; padding:4px 0; }
+
+/* form controls: dark-theme contrast fix for <select> (native styling is unreadable on dark backgrounds) */
+select, select.field{ color-scheme:dark; background:#221b2e; color:var(--bgn-cream); border:1px solid var(--dnd-line); border-radius:8px; padding:8px 10px; font:inherit; }
+select option{ background:#1c1626; color:var(--bgn-cream); }
+
+/* text inputs used inside the app (chat, room code): keep them dark-themed too */
+.bgn-chat-compose input, input.code-input{
+  color-scheme:dark; background:#221b2e; color:var(--bgn-cream); border:1px solid var(--dnd-line); border-radius:8px; padding:8px 10px; font:inherit; }
+.bgn-chat-compose input::placeholder, input.code-input::placeholder{ color:var(--bgn-muted); }
+
+.method-row{ display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-top:8px; }
+.score-stat{ padding:18px 12px; }
+.score-input{ width:70px; text-align:center; font-family:var(--bgn-serif); font-size:1.6rem; font-weight:700; background:transparent; border:0; border-bottom:1px solid var(--dnd-line); color:var(--bgn-cream); outline:none; margin:6px auto 2px; display:block; }
+.score-input:focus{ border-bottom-color:var(--bgn-accent); }
+.stat b{ font-size:1.3rem; }
+.boosted{ color:var(--bgn-green) !important; text-transform:none; letter-spacing:.05em; font-size:.6rem; }
+
+.skill-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:8px; margin-top:14px; text-align:left; }
+.skill-chip{ display:flex; align-items:center; gap:8px; border:1px solid var(--dnd-line); background:rgba(23,20,40,.55); border-radius:9px; padding:8px 10px; cursor:pointer; color:inherit; font:inherit; font-size:.8rem; transition:all .15s; }
+.skill-chip:hover{ border-color:rgba(212,175,55,.5); }
+.skill-chip.prof{ border-color:rgba(212,175,55,.65); background:linear-gradient(180deg,rgba(212,175,55,.14),rgba(212,175,55,.05)); }
+.skill-chip.expert{ border-color:var(--bgn-accent); box-shadow:0 0 0 1px var(--bgn-accent); }
+.skill-name{ flex:1; }
+.skill-abil{ color:var(--bgn-muted); font-size:.68rem; }
+.skill-bonus{ font-family:var(--bgn-serif); font-weight:700; color:var(--bgn-accent2); font-size:.85rem; min-width:26px; text-align:right; }
+.die{ display:inline-block; font-size:.58rem; color:#221803; background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); border-radius:3px; padding:0 4px; margin-left:3px; vertical-align:1px; }
+.lang-grid{ display:flex; flex-wrap:wrap; gap:7px; margin-top:6px; }
+
+.portrait-frame{ width:min(240px,60vw); aspect-ratio:2/3; border-radius:12px; border:1px solid var(--dnd-line); overflow:hidden; margin:0 auto; background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.01)); box-shadow:0 14px 44px rgba(0,0,0,.5); }
+.portrait-frame img{ width:100%; height:100%; object-fit:cover; display:block; }
+.portrait-placeholder{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:3.4rem; color:var(--bgn-muted); }
+
+.review-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; text-align:left; }
+.review-row{ display:flex; justify-content:space-between; gap:10px; font-size:.86rem; padding:4px 0; border-bottom:1px dashed rgba(212,175,55,.12); }
+.review-row b{ color:var(--bgn-muted); font-weight:500; }
+.review-row span{ color:var(--bgn-text); text-align:right; }
+.review-portrait{ width:90px; border-radius:8px; border:1px solid var(--dnd-line); margin-top:10px; }
+
+.gear-catalog{ display:flex; flex-wrap:wrap; gap:7px; margin-top:6px; }
+.gear-row{ display:flex; justify-content:space-between; align-items:center; gap:10px; padding:7px 0; border-bottom:1px dashed rgba(212,175,55,.12); font-size:.86rem; }
+.gear-row .qty-stepper{ display:inline-flex; align-items:center; gap:5px; margin-right:8px; }
+.qty-stepper .chip{ padding:3px 9px; }
+.equip-list, .weapon-list{ margin-top:6px; }
+.money-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+
+/* ── roster ── */
+.char-card{ }
+.char-portrait{ width:100%; height:100%; object-fit:cover; }
+.card-actions{ display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+.card-actions .btn{ flex:1; }
+.danger{ color:#ff9b8b; border-color:rgba(220,80,60,.4); }
+.danger:hover{ border-color:#ff6b55; color:#ffb3a6; }
+.char-hpbar{ height:7px; border-radius:999px; background:rgba(255,255,255,.08); overflow:hidden; }
+.char-hpbar div{ height:100%; background:linear-gradient(90deg,#7ac74f,#4caf50); border-radius:999px; transition:width .3s; }
+
+/* ── character sheet ── */
+.sheet-top{ display:flex; gap:18px; align-items:center; justify-content:space-between; flex-wrap:wrap; margin-bottom:20px; padding:20px 24px; border:1px solid var(--dnd-line); border-radius:14px; background:linear-gradient(180deg,rgba(212,175,55,.06),rgba(23,20,40,.4)); position:relative; }
+.sheet-top::before{ content:""; position:absolute; top:0; left:12%; right:12%; height:1px; background:linear-gradient(90deg,transparent,var(--bgn-accent),transparent); }
+.sheet-id{ flex:1; min-width:240px; }
+.sheet-name{ font-family:var(--bgn-serif); font-size:clamp(1.4rem,3.4vw,2.1rem); font-weight:700; color:var(--bgn-cream); line-height:1.15; }
+.sheet-line{ font-size:.9rem; margin-top:2px; }
+.sheet-portrait{ width:84px; height:112px; object-fit:cover; border-radius:10px; border:2px solid rgba(212,175,55,.45); box-shadow:0 8px 26px rgba(0,0,0,.5); flex:none; }
+.sheet-portrait.ph{ display:flex; align-items:center; justify-content:center; font-size:2rem; background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.01)); color:var(--bgn-muted); }
+.sheet-actions{ display:flex; gap:8px; flex-wrap:wrap; }
+.sheet-actions .btn{ flex:1; min-width:96px; }
+.xp-input{ width:86px; background:rgba(23,20,40,.7); border:1px solid var(--dnd-line); color:var(--bgn-text); border-radius:6px; padding:3px 6px; font-size:.85rem; }
+
+.sheet-grid{ display:grid; grid-template-columns:minmax(260px,300px) 1fr minmax(250px,300px); gap:16px; align-items:start; }
+@media (max-width:1100px){ .sheet-grid{ grid-template-columns:1fr; } }
+.sheet-block{ border:1px solid var(--dnd-line); border-radius:12px; background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.008)); padding:16px 18px; margin-bottom:16px; text-align:left; position:relative; }
+.sheet-block::before{ content:""; position:absolute; top:0; left:18%; right:18%; height:1px; background:linear-gradient(90deg,transparent,var(--bgn-accent),transparent); }
+.block-title{ font-family:var(--bgn-serif); font-weight:700; letter-spacing:.08em; text-transform:uppercase; font-size:.82rem; color:var(--bgn-cream); margin-bottom:10px; }
+.block-title .tag{ margin-left:6px; vertical-align:1px; }
+
+.abil-row{ display:grid; grid-template-columns:78px 1fr 74px; gap:10px; align-items:center; padding:7px 0; border-bottom:1px dashed rgba(212,175,55,.12); }
+.abil-score{ text-align:center; font-family:var(--bgn-serif); font-weight:700; font-size:1.5rem; color:var(--bgn-cream); line-height:1; }
+.abil-mod{ display:block; font-size:.8rem; color:var(--bgn-accent2); margin-top:2px; }
+.abil-label{ font-family:var(--bgn-serif); font-size:.95rem; letter-spacing:.1em; }
+.abil-label small{ display:block; font-family:var(--bgn-sans); font-size:.62rem; letter-spacing:.06em; color:var(--bgn-muted); text-transform:uppercase; }
+.abil-save{ text-align:center; border-left:1px solid var(--dnd-line); padding-left:10px; }
+.abil-save b{ display:block; font-size:1.05rem; color:var(--bgn-accent2); }
+.abil-save small{ font-size:.58rem; letter-spacing:.08em; color:var(--bgn-muted); text-transform:uppercase; }
+
+.skill-table{ }
+.skill-row{ display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; cursor:pointer; font-size:.84rem; transition:background .12s; }
+.skill-row:hover{ background:rgba(212,175,55,.08); }
+.prof-mark{ width:16px; text-align:center; color:var(--bgn-accent); font-size:.9rem; }
+.skill-label{ flex:1; }
+.skill-val{ font-family:var(--bgn-serif); font-weight:700; color:var(--bgn-accent2); min-width:30px; text-align:right; }
+.sub-stat{ display:flex; justify-content:space-between; align-items:center; padding:9px 6px 0; margin-top:8px; border-top:1px solid var(--dnd-line); font-size:.85rem; }
+.sub-stat b{ font-family:var(--bgn-serif); color:var(--bgn-accent2); }
+
+.combat-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.combat-box{ border:1px solid var(--dnd-line); border-radius:10px; padding:12px; text-align:center; background:rgba(23,20,40,.4); }
+.combat-box small{ display:block; font-size:.6rem; letter-spacing:.12em; text-transform:uppercase; color:var(--bgn-muted); margin-bottom:4px; }
+.big-num{ font-family:var(--bgn-serif); font-size:2.1rem; font-weight:700; color:var(--bgn-cream); display:block; line-height:1; }
+.small-num{ font-size:1rem; color:var(--bgn-muted); }
+.hp-box{ grid-column:1/-1; }
+.hp-main{ display:flex; align-items:baseline; justify-content:center; gap:8px; }
+.hp-main b{ font-family:var(--bgn-serif); font-size:2.6rem; color:#7ac74f; }
+.hp-main span{ color:var(--bgn-muted); font-size:1.4rem; }
+.hp-max-input{ width:64px; background:transparent; border:0; border-bottom:1px solid var(--dnd-line); color:var(--bgn-muted); font-family:var(--bgn-serif); font-size:1.5rem; text-align:center; outline:none; }
+.hp-controls{ display:flex; gap:6px; justify-content:center; margin:8px 0 4px; flex-wrap:wrap; }
+.hp-controls .chip{ padding:4px 11px; }
+.hp-temp{ font-size:.78rem; color:var(--bgn-muted); }
+.hp-temp-input{ width:56px; background:rgba(23,20,40,.7); border:1px solid var(--dnd-line); color:var(--bgn-text); border-radius:5px; padding:2px 5px; text-align:center; }
+.ds-row{ display:flex; gap:6px; justify-content:center; align-items:center; margin:3px 0; font-size:.72rem; }
+.ds-dot{ width:24px; height:24px; border-radius:50%; border:1px solid var(--dnd-line); background:rgba(23,20,40,.6); color:var(--bgn-muted); cursor:pointer; font-size:.8rem; }
+.ds-dot.ok{ background:rgba(122,199,79,.25); border-color:#7ac74f; color:#7ac74f; }
+.ds-dot.bad{ background:rgba(220,80,60,.25); border-color:#dc503c; color:#ff9b8b; }
+
+.feature-list{ max-height:420px; overflow:auto; }
+.feature-item{ padding:7px 10px; border-left:2px solid var(--bgn-accent); background:rgba(212,175,55,.05); border-radius:0 7px 7px 0; margin-bottom:7px; font-size:.86rem; line-height:1.45; }
+.p-row{ display:flex; gap:10px; padding:6px 0; border-bottom:1px dashed rgba(212,175,55,.12); font-size:.86rem; }
+.p-row b{ color:var(--bgn-muted); font-weight:500; min-width:64px; flex:none; }
+.p-row span{ white-space:pre-wrap; }
+
+.attack-row{ display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px dashed rgba(212,175,55,.12); font-size:.86rem; }
+.attack-nums{ display:flex; align-items:center; gap:10px; flex:none; }
+.attack-nums span{ font-family:var(--bgn-serif); font-weight:700; color:var(--bgn-accent2); }
+.attack-nums .chip{ padding:2px 8px; }
+
+.spell-ctn{ display:flex; flex-direction:column; gap:14px; }
+.spell-row{ }
+.spell-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:6px; }
+.spell-lvl{ font-family:var(--bgn-serif); font-weight:700; font-size:.9rem; color:var(--bgn-cream); }
+.slot-dots{ display:flex; gap:5px; }
+.slot-dot{ width:17px; height:17px; border-radius:50%; border:2px solid rgba(212,175,55,.6); background:transparent; cursor:pointer; padding:0; }
+.slot-dot.used{ background:linear-gradient(180deg,var(--bgn-accent2),var(--bgn-accent)); border-color:var(--bgn-accent3); box-shadow:0 0 6px rgba(212,175,55,.5); }
+.spell-klist{ display:flex; flex-direction:column; gap:7px; }
+.spell-chip{ position:relative; border:1px solid var(--dnd-line); border-radius:9px; padding:8px 34px 8px 12px; background:rgba(23,20,40,.5); font-size:.82rem; }
+.spell-name{ font-family:var(--bgn-serif); font-weight:600; color:var(--bgn-cream); }
+.spell-meta{ color:var(--bgn-muted); font-size:.68rem; margin-top:1px; }
+.spell-desc{ color:var(--bgn-text); font-size:.78rem; margin-top:3px; line-height:1.4; }
+.spell-chip > .chip{ position:absolute; top:7px; right:6px; padding:2px 7px; font-size:.7rem; }
+.prep-toggle{ position:absolute; left:-1px; top:-1px; bottom:-1px; width:26px; border:0; border-right:1px solid var(--dnd-line); background:rgba(23,20,40,.6); color:var(--bgn-muted); cursor:pointer; border-radius:9px 0 0 9px; font-size:.85rem; }
+.prep-toggle.on{ background:rgba(122,199,79,.2); color:#7ac74f; }
+.spell-add{ margin-top:7px; }
+.spell-add .field{ padding:7px 10px; font-size:.8rem; }
+
+.equip-sheet{ max-height:260px; overflow:auto; }
+.equip-srow{ display:flex; justify-content:space-between; gap:10px; align-items:center; padding:6px 0; border-bottom:1px dashed rgba(212,175,55,.12); font-size:.85rem; }
+.equip-srow .qty{ color:var(--bgn-muted); }
+.equip-srow .chip{ padding:2px 8px; }
+.money-sheet{ display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:12px; text-align:center; }
+.money-sheet div{ border:1px solid var(--dnd-line); border-radius:8px; padding:7px 2px; background:rgba(23,20,40,.4); }
+.money-sheet small{ display:block; font-size:.56rem; letter-spacing:.1em; color:var(--bgn-muted); }
+.money-sheet b{ font-family:var(--bgn-serif); color:var(--bgn-accent2); }
+
+/* ── party table ── */
+.party-table{ grid-template-columns:1fr 320px; }
+@media (max-width:900px){ .party-table{ grid-template-columns:1fr; } }
+.party-seats{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:14px 0; }
+.seat-card{ position:relative; border:1px solid var(--dnd-line); border-radius:12px; padding:14px 12px; background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.01)); text-align:center; }
+.seat-card.mine{ border-color:var(--bgn-accent); box-shadow:0 0 16px rgba(212,175,55,.25); }
+.seat-card.down{ border-color:rgba(220,80,60,.6); }
+.seat-card.gone{ opacity:.6; }
+.seat-presence{ position:absolute; top:8px; right:8px; width:9px; height:9px; border-radius:50%; background:#7ac74f; box-shadow:0 0 6px #7ac74f; }
+.seat-presence:empty{ }
+.seat-avatar{ font-size:2rem; margin-bottom:4px; }
+.seat-name{ font-family:var(--bgn-serif); font-weight:700; color:var(--bgn-cream); font-size:.95rem; }
+.seat-you{ font-size:.58rem; letter-spacing:.12em; background:var(--bgn-accent); color:#221803; padding:1px 6px; border-radius:3px; vertical-align:2px; }
+.seat-gone{ font-size:.62rem; color:var(--bgn-muted); font-weight:400; }
+.seat-line{ font-size:.8rem; margin-top:2px; }
+.seat-hpbar{ height:6px; border-radius:999px; background:rgba(255,255,255,.08); overflow:hidden; margin-top:8px; }
+.seat-hpbar div{ height:100%; background:linear-gradient(90deg,#7ac74f,#4caf50); border-radius:999px; }
+.seat-card.down .seat-hpbar div{ background:linear-gradient(90deg,#dc503c,#a8352c); }
+.seat-card.empty{ border-style:dashed; background:rgba(23,20,40,.25); display:flex; align-items:center; justify-content:center; min-height:120px; }
+.seat-empty-inner{ display:flex; flex-direction:column; gap:8px; align-items:center; }
+.code-input{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700; }
+
+.pick-row{ display:flex; align-items:center; gap:12px; width:100%; border:1px solid var(--dnd-line); background:rgba(23,20,40,.6); border-radius:10px; padding:10px 12px; cursor:pointer; color:inherit; font:inherit; text-align:left; transition:all .15s; }
+.pick-row:hover{ border-color:var(--bgn-accent); }
+.pick-icon{ font-size:1.6rem; flex:none; }
+.pick-row b{ font-family:var(--bgn-serif); color:var(--bgn-cream); }
+.pick-hp{ margin-left:auto; font-size:.78rem; color:var(--bgn-muted); flex:none; }
+
+/* ── print ── */
+@media print{
+  .bgn-nav, .game-hero, .bgn-footer, .bgn-lounge-btn, .bgn-lounge-overlay, .flash-toast, .sheet-actions, #lobbyCtn, #rosterScreen, .wiz-foot, .wiz-nav { display:none !important; }
+  body{ background:#fff !important; background-image:none !important; color:#111 !important; }
+  #forgeCtn{ display:block !important; }
+  #sheetScreen{ display:block !important; }
+  .sheet-top, .sheet-block{ background:#fffdf5 !important; border-color:#8a7440 !important; color:#1c1209 !important; break-inside:avoid; }
+  .sheet-name, .big-num, .abil-score, .block-title, .spell-name, .seat-name{ color:#1c1209 !important; }
+  .detail-line, .p-row span, .feature-item, .skill-label, .spell-desc{ color:#333 !important; }
+  .tag{ background:transparent !important; color:#8a7440 !important; }
+  .spell-chip, .combat-box, .abil-row, .skill-row, .attack-row, .equip-srow{ border-color:#cbb98a !important; }
+  .chip{ display:none !important; }
+  .slot-dot.used{ background:#8a7440 !important; }
+  .muted, .small, .detail-line b, .p-row b, .abil-label small, .combat-box small{ color:#666 !important; }
+}
+</style>
+
+<!-- ═══ hero background from main.pjs ═══ -->
+<script>
+(function(){
+  var rootRef = window.root || {};
+  function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+  document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor, "#d4af37"));
+  var heroImg = val(rootRef.heroImage, "").trim();
+  var hero = document.getElementById("gameHero");
+  if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img", "url('"+heroImg+"')"); }
+})();
+</script>
+
+<!-- ═══ FULLSCREEN BOARD OVERLAY (BGN standard) ═══ -->
+<div id="fsOverlay" class="fs-overlay" hidden>
+  <div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>
+  <div class="fs-board" id="fsBoardWrap">
+    <div class="fs-tile" id="fsTileCtn"></div>
+    <div class="fs-meeple" id="fsMeepleCtn"></div>
+  </div>
+</div>
+
+<style>
+/* ── BGN fullscreen board (standard) ── */
+#partyRoomPanel{ position:relative; }
+.bgn-players{ padding-right:132px; }
+@media (max-width:640px){ .fs-open-btn{ top:6px; right:6px; padding:7px 11px; font-size:12px; } }
+.fs-open-btn{ position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); backdrop-filter:blur(6px); -webkit-backdrop-filter:blur(6px); color:#fff; border:1px solid rgba(255,255,255,.6); border-radius:999px; padding:8px 14px; cursor:pointer; font:600 13px/1 system-ui; letter-spacing:.04em; transition:all .2s; }
+.fs-open-btn:hover{ border-color:var(--bgn-accent); color:var(--bgn-accent2); box-shadow:0 0 12px rgba(212,175,55,.35); }
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none !important; }
+.fs-topbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 18px; flex:none; background:rgba(10,14,24,.85); border-bottom:1px solid rgba(212,175,55,.25); color:var(--bgn-cream); font-size:.9rem; }
+#fsStatusEl{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; }
+#fsActionsCtn{ display:flex; gap:8px; align-items:center; flex:none; }
+#fsBoardWrap{ flex:1; min-height:0; position:relative; overflow:hidden; }
+#fsBoardWrap canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.fs-tile{ position:absolute; top:10px; right:10px; z-index:5; }
+.fs-tile:empty{ display:none; }
+.fs-meeple{ position:absolute; bottom:10px; right:10px; z-index:5; }
+.fs-meeple:empty{ display:none; }
+.fs-board .bgn-table{ height:100%; }
+.fs-board .bgn-stagepanel{ display:flex; flex-direction:column; min-height:0; margin-bottom:0; }
+.fs-board .party-seats{ flex:1; align-content:center; }
+
+/* ── game log (standard) ── */
+.bgn-log{ margin:16px 0 0; max-height:170px; overflow:auto; text-align:left; font-size:.82rem; border:1px solid var(--dnd-line); border-radius:10px; background:rgba(23,20,40,.4); padding:10px 14px; color:var(--bgn-muted); }
+.bgn-log .log-item{ padding:3px 0; border-bottom:1px dashed rgba(212,175,55,.1); }
+.bgn-log .log-item:last-child{ border-bottom:0; }
+.bgn-log b{ color:var(--bgn-accent2); font-weight:600; }
+</style>
+
+<script>
+/* ═══ Client <-> server wiring ═══
+   window.connectSocket is the single socket factory for the party table.
+   party.js attaches the open/message/close handlers and subscribes to the
+   room RPCs (createRoom / joinRoom / move / chat / nextTurn / claimWin). */
+window.connectSocket = function () {
+  if (!window.root || !window.root.createServerSocket) return null;
+  try { return window.root.createServerSocket(); } catch (e) { return null; }
+};
+</script>
+
+<script>
+/* ═══ Fullscreen board (BGN standard) ═══
+   Opening MOVES the live board (never clones) into the overlay and
+   restores it to its exact original spot on close (✕ or Escape).
+   Exposes window.bgnFullscreen { register, open, close, isOpen }. */
+(function () {
+  "use strict";
+  var fsOverlay = document.getElementById("fsOverlay");
+  var fsBoardWrap = document.getElementById("fsBoardWrap");
+  var fsOpenBtn = document.getElementById("fsOpenBtn");
+  var fsExitBtn = document.getElementById("fsExitBtn");
+  var fsStatusEl = document.getElementById("fsStatusEl");
+  if (!fsOverlay || !fsBoardWrap || !fsOpenBtn || !fsExitBtn || !fsStatusEl) return;
+
+  var reg = { canvas: null, tile: null, meeple: null, resize: null };
+  var _fsOrig = null;
+
+  function fsRefit() { if (reg.resize) reg.resize(); }
+
+  function closeFullscreen() {
+    if (fsOverlay.hidden) return;
+    fsOverlay.hidden = true;
+    if (_fsOrig) {
+      if (reg.canvas && _fsOrig.canvas) { _fsOrig.canvas.parent.insertBefore(reg.canvas, _fsOrig.canvas.next); }
+      if (reg.tile && _fsOrig.tile) { _fsOrig.tile.parent.insertBefore(reg.tile, _fsOrig.tile.next); }
+      if (reg.meeple && _fsOrig.meeple) { _fsOrig.meeple.parent.insertBefore(reg.meeple, _fsOrig.meeple.next); }
+    }
+    document.body.style.overflow = "";
+    _fsOrig = null;
+    fsRefit();
+    if (document.fullscreenElement) { try { const pr = document.exitFullscreen(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {} }
+  }
+
+  function openFullscreen() {
+    if (!reg.canvas || !fsOverlay.hidden) return;
+    _fsOrig = {};
+    _fsOrig.canvas = { parent: reg.canvas.parentNode, next: reg.canvas.nextSibling };
+    fsBoardWrap.appendChild(reg.canvas);
+    if (reg.tile) { _fsOrig.tile = { parent: reg.tile.parentNode, next: reg.tile.nextSibling }; fsBoardWrap.appendChild(reg.tile); }
+    if (reg.meeple) { _fsOrig.meeple = { parent: reg.meeple.parentNode, next: reg.meeple.nextSibling }; fsBoardWrap.appendChild(reg.meeple); }
+    fsOverlay.hidden = false;
+    document.body.style.overflow = "hidden";
+    fsRefit();
+    try { const pr = fsOverlay.requestFullscreen && fsOverlay.requestFullscreen(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
+  }
+
+  window.bgnFullscreen = {
+    register: function (o) {
+      if (!o || !o.canvas) return;
+      reg.canvas = o.canvas;
+      reg.tile = o.tile || null;
+      reg.meeple = o.meeple || null;
+      reg.resize = (typeof o.resize === "function") ? o.resize : null;
+      fsOpenBtn.hidden = false;
+    },
+    open: openFullscreen,
+    close: closeFullscreen,
+    isOpen: function () { return !fsOverlay.hidden; }
+  };
+
+  fsOpenBtn.addEventListener("click", openFullscreen);
+  fsExitBtn.addEventListener("click", closeFullscreen);
+  window.addEventListener("resize", function () { if (!fsOverlay.hidden) fsRefit(); });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") {
+      if (!fsOverlay.hidden) { closeFullscreen(); return; }
+    }
+  });
+
+  /* Keep the overlay status line in sync with the board banner. */
+  function updateBanner(bannerEl, text) {
+    if (bannerEl) bannerEl.textContent = text;
+    fsStatusEl.textContent = bannerEl ? bannerEl.textContent : text;
+    if (!fsOverlay.hidden) fsStatusEl.textContent = text;
+  }
+  window.updateBanner = updateBanner;
+})();
+</script>
+
+<!-- ═══ app scripts ═══ -->
+<script src="src/dnddata.js"></script>
+<script src="src/spells.js"></script>
+<script src="src/core.js"></script>
+<script src="src/wizard.js"></script>
+<script src="src/sheet.js"></script>
+<script src="src/party.js"></script>
+<script src="src/app.js"></script>

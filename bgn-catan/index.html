@@ -1,0 +1,2225 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN BLANK TEMPLATE — index.html
+     A boardless, ready-to-build-on multiplayer table for the
+     Boardgame Network: rooms, room codes, turn order, presence,
+     rematch, claim-win — with NO game logic.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative table server (rooms, turn sequencing, presence,
+       game-over declarations). It is PUBLIC source — no secrets here.
+     - Durable room state lives in the server-plugin `state` bytes
+       (the acting player can submit a compact full-state snapshot
+       via the `move` rpc — see the server comment for the layout).
+     - To build your game: replace the #stageEl placeholder with
+       your board/UI. On your turn, submit a turn payload with
+       `move`, and declare a winner with `endGame`.
+     ════════════════════════════════════════════════════════════════ -->
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- Light / dark theme: set data-theme on <html> before first paint (saved → system preference → dark). -->
+<script>(function(){var t;try{t=localStorage.getItem("bgn_blank_theme");}catch(e){}if(t!=="light"&&t!=="dark"){try{t=window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";}catch(e){t="dark";}}document.documentElement.setAttribute("data-theme",t);})();</script>
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<!-- Sound starts muted (BGN standard); the audio plugin's own pref still overrides for returning players. -->
+<script>(function(){window.BGN_AUDIO={music:"https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3",muted:true};try{if(!localStorage.getItem("bgn-audio-pref"))localStorage.setItem("bgn-audio-pref",JSON.stringify({muted:true,vol:0.5}));}catch(e){}})();</script>
+<script src="https://user.uploads.dev/file/346e6f5c64f15c0849bec19d5c57beb3.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── BGN table server ─────────────────────────────────────────────
+   Four-seat rooms: host + guest + seat3 + seat4, 5-letter codes.
+   The server sequences turns (who starts is the room's `first` — drawn in
+   the lobby, set with `setFirst`, rotated by rematch), stores ONE full-game snapshot per room (opaque string submitted
+   by whichever player is on turn), and tracks winner/reason for
+   resign, forfeit and end-of-game. No game logic here — the
+   snapshot is whatever the game decides it should be.
+   Durable state in the plugin `state` bytes (versioned layout).  */
+const SLOT=1024;
+const STATE_VERSION=4;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=2000;
+
+/* ── durable leaderboard (top ~50 scores) ──
+   Rooms use the first MAX_ROOMS*SLOT bytes; the leaderboard reserves the
+   last LB_BYTES of `state` so the two never collide. Ranks by higher score;
+   the top 10 are served by getScores. Survives restarts (durable bytes). */
+const LB_VERSION=1, LB_CAP=50, LB_NAME_MAX=24, LB_EXTRA_MAX=11, LB_ENTRY=44, LB_HEAD=2;
+const LB_BYTES=LB_HEAD+LB_CAP*LB_ENTRY;
+const LB_BASE=Math.max(state.length-LB_BYTES, 1+MAX_ROOMS*SLOT);
+const lbTimes=new Map(), lbNets=new Map();   // rate-limit trackers (per conn / per network group)
+function cleanField(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function lbInit(){ if(state[LB_BASE]!==LB_VERSION){ state.fill(0,LB_BASE,state.length); state[LB_BASE]=LB_VERSION; } }
+function lbRead(){
+  const a=[];
+  for(let i=0;i<LB_CAP;i++){
+    const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+    if(state[e]!==1)continue;
+    let name=""; for(let k=1;k<=LB_NAME_MAX;k++){ const c=state[e+k]; if(!c)break; name+=String.fromCharCode(c); }
+    let extra=""; for(let k=0;k<LB_EXTRA_MAX;k++){ const c=state[e+33+k]; if(!c)break; extra+=String.fromCharCode(c); }
+    a.push({i,
+      name,
+      score:((state[e+25]<<24)|(state[e+26]<<16)|(state[e+27]<<8)|state[e+28])>>>0,
+      ts:((state[e+29]<<24)|(state[e+30]<<16)|(state[e+31]<<8)|state[e+32])>>>0,
+      extra});
+  }
+  return a;
+}
+function lbWriteSlot(i,name,score,ts,extra){
+  const e=LB_BASE+LB_HEAD+i*LB_ENTRY;
+  state.fill(0,e,e+LB_ENTRY);
+  state[e]=1;
+  const nb=[]; for(let k=0;k<name.length&&k<LB_NAME_MAX;k++)nb.push(name.charCodeAt(k));
+  for(let k=0;k<nb.length;k++)state[e+1+k]=nb[k];
+  const xb=[]; for(let k=0;k<extra.length&&k<LB_EXTRA_MAX;k++)xb.push(extra.charCodeAt(k));
+  for(let k=0;k<xb.length;k++)state[e+33+k]=xb[k];
+  state[e+25]=(score>>>24)&255; state[e+26]=(score>>>16)&255; state[e+27]=(score>>>8)&255; state[e+28]=score&255;
+  state[e+29]=(ts>>>24)&255; state[e+30]=(ts>>>16)&255; state[e+31]=(ts>>>8)&255; state[e+32]=ts&255;
+}
+function lbBetter(asc,a,b){ if(asc)return a.score<b.score||(a.score===b.score&&a.ts<b.ts); return a.score>b.score||(a.score===b.score&&a.ts<b.ts); }
+function lbSubmit(name,score,ts,extra,asc){
+  lbInit();
+  const a=lbRead();
+  if(a.length<LB_CAP){
+    for(let i=0;i<LB_CAP;i++){ if(state[LB_BASE+LB_HEAD+i*LB_ENTRY]!==1){ lbWriteSlot(i,name,score,ts,extra); return; } }
+    return;
+  }
+  let wi=-1; const w={score:0,ts:0};
+  for(const en of a){ if(wi===-1||lbBetter(asc,w,en)){ wi=en.i; w.score=en.score; w.ts=en.ts; } }
+  if(lbBetter(asc,{score,ts},w))lbWriteSlot(wi,name,score,ts,extra);
+}
+
+let rooms=new Map();           // code -> room object (live cache)
+const conns=new Map();         // conn.id -> {code, role}
+const moveTimes=new Map();     // conn.id -> last move ms (rate limit)
+const chatTimes=new Map();     // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   slot +1..+8: room code (8 ASCII, zero padded)
+   slot +9: first (0=host, 1=guest, 2=seat3, 3=seat4 — who starts the match; rematch rotates)
+   slot +10: state version
+   slot +11: reserved
+   slot +12..+15: uint32 lastActive (unix secs)
+   slot +16: winner 0=none 1=host 2=guest 3=draw
+   slot +17: reason 0=none 1=resign 2=forfeit 3=end
+   slot +18..+19: uint16 turn counter (completed turns)
+   slot +20..+21: uint16 snapshot bytes length
+   slot +22..+23: reserved
+   slot +24..: snapshot bytes (utf8, latest only)                */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const tn=Math.max(0,Math.min(0xFFFF,room.turn));
+  state[o+18]=(tn>>8)&255; state[o+19]=tn&255;
+  const mb=room.snapshot?utf8Encode(room.snapshot):[];
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+20]=(len>>8)&255; state[o+21]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+const REASON=["","resign","forfeit","end"];
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const snapLen=(state[o+20]<<8)|state[o+21];
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      first:state[o+9], hostId:-1, guestId:-1, s3Id:-1, s4Id:-1,
+      turn:(state[o+18]<<8)|state[o+19],
+      snapshot:snapLen?utf8Decode(state.slice(o+24,o+24+snapLen)):null,
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,snapshot:room.snapshot,first:room.first,turn:room.turn,presence:[room.hostId!==-1,room.guestId!==-1,room.s3Id!==-1,room.s4Id!==-1],winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+const ROLES=["host","guest","seat3","seat4"];
+function turnRoleFor(n,first){ return ROLES[((n+(first?1:0))%ROLES.length+ROLES.length)%ROLES.length]; }
+function connectedCount(room){ let n=0; if(room.hostId!==-1)n++; if(room.guestId!==-1)n++; if(room.s3Id!==-1)n++; if(room.s4Id!==-1)n++; return n; }
+function clearSeat(room,role){ if(role==="host")room.hostId=-1; else if(role==="guest")room.guestId=-1; else if(role==="seat3")room.s3Id=-1; else if(role==="seat4")room.s4Id=-1; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const d=String(data||"");
+    const first=(d.indexOf("guestFirst")!==-1)?1:(function(){const m=d.match(/first([0-3])/);return m?+m[1]:0;})();   // who-goes-first roll from the lobby
+    const room={slot,code,status:1,first,hostId:conn.id,guestId:-1,s3Id:-1,s4Id:-1,turn:0,snapshot:null,winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  setFirst({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==1)return JSON.stringify({ok:false,err:"not_waiting"});
+    if(roleOf(conn)!=="host")return JSON.stringify({ok:false,err:"host_only"});
+    const r=String(data||"").trim();
+    if(r==="host")room.first=0;
+    else if(r==="guest")room.first=1;
+    else if(r==="seat3")room.first=2;
+    else if(r==="seat4")room.first=3;
+    else room.first=0;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true,first:room.first});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else if(room.s3Id===-1)role="seat3";
+    else if(room.s4Id===-1)role="seat4";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id;
+    else if(role==="guest")room.guestId=conn.id;
+    else if(role==="seat3")room.s3Id=conn.id;
+    else room.s4Id=conn.id;
+    if(room.status===1&&connectedCount(room)>=2)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    // Turn order is enforced server-side: each move names its actor
+    // (0=host, 1=guest, 2=seat3, 3=seat4) and only the connection
+    // holding that role may move — moves from the wrong player are
+    // rejected (not_your_turn). This still allows setup A/B/C/D/D/C/B/A,
+    // sequential discards and multi-commit dev-card actions (the same
+    // player legitimately moves more than once in a row). The `evt`
+    // counter below keeps updates ordered and stale submissions out.
+    if(obj.actor<0||obj.actor>3||!ROLES[obj.actor])return JSON.stringify({ok:false,err:"bad_move"});
+    if(role!==ROLES[obj.actor])return JSON.stringify({ok:false,err:"not_your_turn"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number"||obj.evt!==room.turn)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length<1||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.snapshot=obj.data;
+    room.turn++;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","seat3","seat4","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      clearSeat(room,roleOf(conn));
+      if(connectedCount(room)<2){ room.status=3; room.winner=null; room.reason="resign"; }
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=connectedCount(room)>1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snapshot=null; room.winner=null; room.reason=null;
+    room.first=(room.first+1)%4;   // who starts next match rotates around the table
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(connectedCount(room)>1)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      clearSeat(room,roleOf(conn));
+      if(connectedCount(room)<2){ room.status=3; room.winner=null; room.reason="forfeit"; }
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  },
+  submitScore({conn},data){
+    let p; try{ p=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const now=Date.now();
+    if(now-(lbTimes.get(conn.id)||0)<1200)return JSON.stringify({ok:false,err:"rate"});   // per connection
+    lbTimes.set(conn.id,now);
+    if(now-(lbNets.get(conn.net[3])||0)<6000)return JSON.stringify({ok:false,err:"rate"}); // per network group
+    lbNets.set(conn.net[3],now);
+    const name=cleanField(p.name,24)||"Player";
+    const score=Math.max(0,Math.min(0xffffffff,Math.floor(Number(p.score)||0)));
+    const extra=cleanField(p.extra,11);
+    lbSubmit(name,score,Math.floor(now/1000),extra,false);
+    return JSON.stringify({ok:true});
+  },
+  getScores({conn},data){
+    lbInit();
+    const a=lbRead().sort(function(x,y){ return lbBetter(false,x,y)?-1:1; }).slice(0,10);
+    return JSON.stringify({scores:a});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  chatTimes.delete(conn.id);
+  if(!info)return;
+  const room=rooms.get(info.code);
+  if(!room)return;
+  clearSeat(room,info.role);
+  if(room.status===2&&connectedCount(room)<2){ room.status=3; room.winner=null; room.reason="forfeit"; }
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // other players see the disconnection and may claim the win
+};
+
+loadRooms();
+lbInit();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <div class="bgn-nav-right">
+      <span class="bgn-nav-title">[gameTitle]</span>
+      <a class="bgn-nav-projects" id="rathjiBackBtn" href="[projectsUrl]" target="_blank" rel="noopener" title="Rathji's Projects" aria-label="Rathji's Projects">
+        <span class="rb-badge">[authorInitial]</span>
+        <span class="rb-label">Rathji's Projects</span>
+      </a>
+      <button id="themeBtn" class="btn btn-ghost btn-sm theme-btn" type="button" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">🌙</button>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Four-player Catan: settle, build roads, cities and dev cards, and race to 10 victory points. Local, vs three bots, or online with up to four at the table.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Local table</span>
+        <span class="bgn-mode-sub">Four players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">Play vs AI</span>
+        <span class="bgn-mode-sub">You + three bots</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online table</span>
+        <span class="bgn-mode-sub">Up to four live players</span>
+      </button>
+    </div>
+
+    <div class="bgn-diff" id="diffRow">
+      <span class="muted small" style="letter-spacing:.05em; text-transform:uppercase">🤖 Machine difficulty</span>
+      <div class="diff-btns">
+        <button class="chip" data-diff="easy">Easy</button>
+        <button class="chip" data-diff="normal">Normal</button>
+        <button class="chip" data-diff="hard">Hard</button>
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px; flex-wrap:wrap; gap:10px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="guideBtn">🧩 Template guide</button>
+      <button class="btn btn-ghost" id="lbBtn">🏆 Leaderboard</button>
+      <button class="btn btn-ghost" id="toBtn" title="Who goes first, teams & seats">🎲 Turn order &amp; teams</button>
+      <button class="btn btn-ghost" id="shareBtn" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last table</h3>
+      <p class="muted small" id="continueInfoEl">A saved table was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table">
+      <div class="panel bgn-stagepanel">
+        <div class="bgn-players">
+          <div class="bgn-side-players">
+            <div class="bgn-player" id="pHost">
+              <span class="bgn-avatar host"></span>
+              <div>
+                <div class="bgn-pname" id="hostNameEl">Host</div>
+                <div class="bgn-psub" id="hostSubEl">sitting at the table</div>
+              </div>
+            </div>
+            <div class="bgn-player" id="pGuest">
+              <span class="bgn-avatar guest"></span>
+              <div>
+                <div class="bgn-pname" id="guestNameEl">Guest</div>
+                <div class="bgn-psub" id="guestSubEl">sitting at the table</div>
+              </div>
+            </div>
+          </div>
+          <div class="bgn-turn" id="turnEl">Host to move</div>
+          <div class="bgn-timer" id="turnTimerEl" hidden>⏱ —</div>
+          <div class="bgn-side-players right">
+            <div class="bgn-player" id="pSeat3">
+              <span class="bgn-avatar seat3"></span>
+              <div>
+                <div class="bgn-pname" id="seat3NameEl">Player 3</div>
+                <div class="bgn-psub" id="seat3SubEl">sitting at the table</div>
+              </div>
+            </div>
+            <div class="bgn-player" id="pSeat4">
+              <span class="bgn-avatar seat4"></span>
+              <div>
+                <div class="bgn-pname" id="seat4NameEl">Player 4</div>
+                <div class="bgn-psub" id="seat4SubEl">sitting at the table</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bgn-stage" id="stageEl">
+          <div id="catanCtn">
+            <div class="catan-board">
+              <canvas id="catanCanvas"></canvas>
+            </div>
+            <div class="catan-hud">
+              <div class="catan-hand opp" id="oppResEl"></div>
+              <div class="catan-dice" id="diceEl"></div>
+              <div class="catan-hand" id="myResEl"></div>
+              <div class="catan-devs" id="myDevEl"></div>
+              <div class="catan-vprow">
+                <span id="myVpEl" class="catan-vp"></span>
+                <span id="oppVpEl" class="catan-vp"></span>
+              </div>
+              <div class="catan-actions">
+                <button class="btn btn-gold" id="rollBtn">Roll 🎲</button>
+                <button class="btn btn-ghost" id="roadBtn">🛤️ Road</button>
+                <button class="btn btn-ghost" id="settleBtn">🏠 Settlement</button>
+                <button class="btn btn-ghost" id="cityBtn">🏙️ City</button>
+                <button class="btn btn-ghost" id="devBtn">🃏 Buy dev</button>
+                <button class="btn btn-ghost" id="playKnightBtn">⚔️ Knight</button>
+                <button class="btn btn-ghost" id="playRoadBtn">🛤️ Road B.</button>
+                <button class="btn btn-ghost" id="playYopBtn">🎁 Y. Plenty</button>
+                <button class="btn btn-ghost" id="playMonoBtn">🃏 Monopoly</button>
+                <button class="btn btn-ghost" id="tradeBtn">🔁 Trade</button>
+                <button class="btn btn-ghost" id="cancelBtn">✕ Cancel</button>
+                <button class="btn btn-gold" id="passBtn">End turn ✓</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+
+        <div class="bgn-banner" id="bannerEl"></div>
+      </div>
+
+      <div class="panel bgn-side">
+        <div id="roomBox" class="bgn-room" hidden>
+          <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
+          <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:8px;">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Resign &amp; leave</button>
+          </div>
+          <p class="muted small" id="connEl">Connecting…</p>
+        </div>
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+        <h3 id="sideTitleEl">Turn log</h3>
+        <div class="bgn-log" id="logEl"></div>
+        <div class="bgn-actions">
+          <button class="btn btn-gold" id="newGameBtn">Restart</button>
+          <button class="btn btn-ghost" id="tableToBtn" title="Who goes first, teams & seats">🎲 Turn order</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Back to lobby</button>
+          <button class="btn btn-ghost" id="overLbBtn" hidden>🏆 Leaderboard</button>
+          <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ CATAN OVERLAY (discard / trade / dev-card pickers) ═══ -->
+<div id="catanOverlay" class="catan-overlay" hidden>
+  <div class="catan-modal" id="catanOverlayBody"></div>
+</div>
+
+<!-- ═══ FULLSCREEN MAP OVERLAY (BGN standard) ═══ -->
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold" type="button">✕ Exit</button>
+  </div>
+  <div id="fsBoardWrap" class="fs-board">
+    <div id="fsTileCtn" class="fs-tile"></div>
+    <div id="fsMeepleCtn" class="fs-meeple"></div>
+  </div>
+  <div id="fsHudCtn" class="fs-hud"></div>
+  <div id="fsLogCtn" class="fs-log"></div>
+</div>
+
+<!-- ═══ LEADERBOARD MODAL ═══ -->
+<div class="lb-overlay" id="lbModal" hidden>
+  <div class="lb-modal">
+    <button class="lb-close" id="lbCloseBtn" title="Close">✕</button>
+    <div class="lb-title">🏆 Leaderboard</div>
+    <p class="muted small" style="margin:6px 0 2px">Top 10 scores, shared across every game built on this template.</p>
+    <div class="lbname-row">
+      <label for="lbNameInput">Your name</label>
+      <input id="lbNameInput" maxlength="24" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="lb-rows" id="lbRowsEl"><div class="lb-empty">Loading…</div></div>
+    <div style="display:flex; justify-content:center; margin-top:14px">
+      <button class="btn btn-gold" id="lbDoneBtn">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ TURN ORDER & TEAMS MODAL ═══ -->
+<div class="to-overlay" id="toModal" hidden>
+  <div class="to-modal">
+    <button class="to-close" id="toCloseBtn" title="Close">✕</button>
+    <div class="to-title">🎲 Turn Order &amp; Teams</div>
+    <p class="muted small" style="margin:2px 0 14px">Randomize the table — who starts, team sides, and seats.</p>
+    <div class="to-grid">
+      <div class="to-card">
+        <div class="to-label">Who goes first?</div>
+        <div class="to-draw" id="toFirstDraw">—</div>
+        <button class="btn btn-gold" id="toFirstBtn">🎲 Roll</button>
+        <div class="to-note" id="toFirstNote"></div>
+      </div>
+      <div class="to-card">
+        <div class="to-label">Team splitter</div>
+        <div class="to-draw" id="toTeamDraw">—</div>
+        <button class="btn btn-ghost" id="toTeamBtn">🎭 Split</button>
+        <div class="to-note" id="toTeamNote"></div>
+      </div>
+      <div class="to-card">
+        <div class="to-label">Seat draw</div>
+        <div class="to-draw" id="toSeatDraw">—</div>
+        <button class="btn btn-ghost" id="toSeatBtn">🪑 Draw</button>
+        <div class="to-note" id="toSeatNote"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2,var(--bgn-accent2))">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+</footer>
+
+<style>
+/* ═══ BGN BLANK TEMPLATE ═══ */
+.bgn-nav-projects{
+  display:inline-flex;align-items:center;gap:8px;flex:none;
+  padding:6px 14px 6px 6px;border-radius:999px;
+  background:rgba(13,15,21,.82);border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 6px 18px rgba(0,0,0,.3);
+  text-decoration:none;color:#fff;font-family:var(--bgn-sans,system-ui);
+  transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease;
+}
+.bgn-nav-projects:hover{ transform:translateY(-1px); border-color:rgba(167,139,250,.65); box-shadow:0 8px 20px rgba(0,0,0,.4),0 0 14px rgba(139,92,246,.35); }
+.bgn-nav-projects .rb-badge{
+  width:26px;height:26px;flex:0 0 26px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;
+  font-size:14px;font-weight:700;line-height:1;user-select:none;
+}
+.bgn-nav-projects .rb-label{ font-size:13px;font-weight:600;line-height:1;white-space:nowrap; }
+@media(max-width:560px){
+  .bgn-nav-projects{ position:fixed;left:16px;bottom:16px;z-index:450;padding:8px 16px 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.35); }
+  .bgn-nav-projects .rb-label{ font-size:14px; }
+}
+.bgn-nav-right{ display:flex; align-items:center; gap:12px; min-width:0; }
+.bgn-nav-right .bgn-nav-title{ min-width:0; }
+.theme-btn{ flex:none; width:38px; height:38px; padding:0; display:flex; align-items:center; justify-content:center; font-size:1.05rem; line-height:1; }
+@media(max-width:560px){ .bgn-nav-right{ gap:8px; } .theme-btn{ width:34px; height:34px; } }
+.bgn-lobby{ max-width:760px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+.bgn-diff{ display:flex; flex-direction:column; align-items:center; gap:8px; margin-top:20px; }
+.diff-btns{ display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+
+.bgn-table{ display:grid; grid-template-columns:auto 320px; gap:18px; align-items:start; justify-content:center; }
+@media (max-width:900px){ .bgn-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.bgn-stagepanel{ text-align:center; }
+
+.bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+.bgn-side-players{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.bgn-side-players.right{ flex-direction:row-reverse; }
+.bgn-timer{ font-size:.8rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(212,175,55,.35); border-radius:999px; padding:4px 11px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.bgn-timer.low{ color:#ff9b6b; border-color:rgba(255,120,60,.55); }
+.bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
+.bgn-player.on{ border-color:var(--bgn-gold2,#d4af37); box-shadow:0 0 14px rgba(212,175,55,.35); }
+.bgn-avatar{ width:26px; height:26px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.25); flex:none; }
+.bgn-avatar.host{ background:radial-gradient(circle at 35% 30%, #ff8a75, #8f2b1c); }
+.bgn-avatar.guest{ background:radial-gradient(circle at 35% 30%, #7ee09a, #1f6e33); }
+.bgn-avatar.seat3{ background:radial-gradient(circle at 35% 30%, #7fb6ff, #1f4d9e); }
+.bgn-avatar.seat4{ background:radial-gradient(circle at 35% 30%, #ffc56a, #a86b12); }
+.bgn-pname{ font-weight:700; font-size:.92rem; white-space:nowrap; }
+.bgn-psub{ font-size:.7rem; opacity:.7; white-space:nowrap; }
+.bgn-turn{ font-size:.78rem; opacity:.8; text-align:center; white-space:nowrap; }
+
+.bgn-stage{ min-height:280px; margin-top:12px; padding:18px; border-radius:10px; background:rgba(0,0,0,.18); border:1px dashed rgba(212,175,55,.35); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
+.stage-placeholder{ max-width:420px; }
+.stage-orb{ font-size:2.6rem; margin-bottom:6px; }
+.stage-title{ font-family:var(--bgn-serif,serif); font-weight:700; font-size:1.05rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 4px; }
+#passBtn{ min-width:170px; }
+
+/* ══════ help modal ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help code{ background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.1); border-radius:5px; padding:1px 6px; font-size:.8rem; color:#f2dc8b; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+.bgn-banner{ min-height:22px; margin-top:12px; font-weight:600; color:#f6e6a4; font-size:.95rem; }
+.bgn-side{ min-width:0; }
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+.bgn-log{ max-height:280px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; }
+.log-item .resp{ opacity:.7; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.btn[disabled]{ opacity:.45; cursor:default; }
+
+/* the platform injects `button:not([disabled]){color:inherit}`, which would turn
+   gold-button text into the page text color — re-assert the dark text on gold */
+.btn.btn-gold, .btn.btn-gold:hover{ color:#221803; }
+
+/* ══════ leaderboard modal ══════ */
+.lb-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.lb-modal{ position:relative; width:min(420px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:24px 22px 20px; text-align:center; }
+.lb-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.lb-close:hover{ background:rgba(0,0,0,.65); }
+.lb-title{ font-family:var(--bgn-serif,serif); font-size:1.3rem; color:var(--bgn-accent2,#f2dc8b); }
+.lbname-row{ display:flex; align-items:center; justify-content:center; gap:8px; margin:12px 0; }
+.lbname-row label{ font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; color:var(--bgn-muted,#c8c3c9); }
+.lbname-row input{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:7px 10px; width:170px; text-align:center; }
+.lb-rows{ min-width:280px; display:grid; gap:6px; margin:4px 0 6px; }
+.lb-row{ display:flex; align-items:center; gap:10px; padding:6px 12px; border-radius:8px; background:rgba(255,255,255,.04); font-size:.9rem; }
+.lb-row .rk{ color:var(--bgn-gold2,#d4af37); font-weight:700; width:26px; text-align:right; }
+.lb-row .nm{ flex:1; text-align:left; }
+.lb-row .sc{ font-weight:700; }
+.lb-row.top{ background:rgba(212,175,55,.12); border:1px solid rgba(212,175,55,.35); }
+.lb-empty{ color:var(--bgn-muted,#c8c3c9); font-size:.85rem; padding:8px 0; }
+
+/* ═══ LIGHT THEME ═══
+   data-theme is set on <html> before first paint by the theme-init
+   script near the top of this file (saved → prefers-color-scheme → dark). */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bgn-bg:#f5efe0;
+  --bgn-bg2:#efe6d0;
+  --bgn-panel:#fdf9ee;
+  --bgn-accent:#b07d13;
+  --bgn-accent2:#7c5f10;
+  --bgn-accent3:#8f721d;
+  --bgn-cream:#2b2113;
+  --bgn-text:#43351f;
+  --bgn-muted:#8a7b5e;
+  --bgn-green:#1d8a6d;
+  --bgn-line:rgba(122,92,32,.22);
+}
+:root[data-theme="light"] body{
+  background-image:
+    radial-gradient(1100px 700px at 85% -10%, rgba(176,125,19,.10), transparent 60%),
+    radial-gradient(900px 640px at -12% 15%, rgba(47,174,140,.07), transparent 60%),
+    linear-gradient(180deg,#f8f2e2,#f1e8d2 45%,#f6efde);
+}
+:root[data-theme="light"] .goldtext{ background:linear-gradient(180deg,#8a6a1c 0%,#b07d13 45%,#7a5c10 100%); }
+:root[data-theme="light"] .game-hero{
+  background:
+    radial-gradient(700px 380px at 15% -20%, rgba(176,125,19,.14), transparent 60%),
+    radial-gradient(700px 380px at 85% 120%, rgba(47,174,140,.09), transparent 60%),
+    linear-gradient(180deg,#f3ebd6,#f6efde);
+}
+:root[data-theme="light"] .game-hero.has-img{
+  background-image:linear-gradient(180deg, rgba(248,243,228,.82), rgba(248,243,228,.9)), var(--bgn-hero-img,none);
+}
+:root[data-theme="light"] .bgn-nav{ background:rgba(248,243,228,.82); }
+:root[data-theme="light"] .bgn-nav-brand{ color:#3d2f14; }
+:root[data-theme="light"] .bgn-footer{ background:rgba(248,243,228,.8); }
+:root[data-theme="light"] .bgn-nav-projects{ background:rgba(255,255,255,.75); border-color:rgba(140,106,36,.35); color:#3d2f14; box-shadow:0 6px 18px rgba(90,70,25,.18); }
+:root[data-theme="light"] .bgn-nav-projects:hover{ color:#3d2f14; }
+:root[data-theme="light"] .theme-btn{ background:rgba(255,255,255,.7); color:#7c5f10; }
+:root[data-theme="light"] .bgn-help-close, :root[data-theme="light"] .lb-close, :root[data-theme="light"] .bgn-lounge-close{ color:#fff; }
+:root[data-theme="light"] .bgn-avatar{ box-shadow:0 0 0 2px rgba(140,106,36,.3); }
+:root[data-theme="light"] .btn-gold{
+  background:linear-gradient(180deg,#f7e7ab,#d4af37 55%,#a07e18);
+  box-shadow:0 8px 24px rgba(168,125,19,.28), inset 0 1px 0 rgba(255,255,255,.6);
+}
+:root[data-theme="light"] .btn-ghost{ color:#43351f; border-color:rgba(140,106,36,.42); background:rgba(255,255,255,.55); }
+:root[data-theme="light"] .btn-ghost:hover{ color:#7c5f10; border-color:#b07d13; }
+:root[data-theme="light"] .panel{ background:linear-gradient(180deg,#fffdf6,rgba(255,255,255,.6)); }
+:root[data-theme="light"] .tag{ background:rgba(176,125,19,.12); color:#7c5f10; border-color:rgba(140,106,36,.4); }
+:root[data-theme="light"] .chip{ background:rgba(255,255,255,.6); color:#6d6047; }
+:root[data-theme="light"] .chip.on{ background:linear-gradient(180deg,#f7e7ab,#d4af37); color:#221803; }
+:root[data-theme="light"] .field,
+:root[data-theme="light"] select,
+:root[data-theme="light"] .bgn-chat-compose input,
+:root[data-theme="light"] .lbname-row input{
+  color-scheme:light; background:#fffdf4; color:#43351f; border-color:rgba(140,106,36,.3);
+}
+:root[data-theme="light"] select option{ background:#fffdf4; color:#43351f; }
+:root[data-theme="light"] #joinCodeInput{ background:#fffdf4 !important; border-color:rgba(140,106,36,.35) !important; color:#43351f !important; }
+:root[data-theme="light"] .bgn-mode{
+  background:linear-gradient(180deg, rgba(255,255,255,.9), rgba(255,255,255,.55));
+  border-color:rgba(140,106,36,.25);
+  box-shadow:0 12px 32px rgba(90,70,25,.14);
+}
+:root[data-theme="light"] .bgn-mode:hover{ border-color:var(--bgn-accent); box-shadow:0 20px 44px rgba(90,70,25,.24), 0 0 0 1px var(--bgn-accent); }
+:root[data-theme="light"] .bgn-player{ background:rgba(255,255,255,.65); border-color:rgba(140,106,36,.25); }
+:root[data-theme="light"] .bgn-player.on{ border-color:var(--bgn-accent); box-shadow:0 0 14px rgba(176,125,19,.3); }
+:root[data-theme="light"] .bgn-timer{ background:rgba(255,255,255,.7); border-color:rgba(140,106,36,.4); }
+:root[data-theme="light"] .bgn-timer.low{ color:#c2451d; border-color:rgba(200,90,40,.6); }
+:root[data-theme="light"] .bgn-stage{ background:rgba(255,255,255,.5); border-color:rgba(140,106,36,.4); }
+:root[data-theme="light"] .bgn-banner{ color:var(--bgn-accent3); }
+:root[data-theme="light"] .bgn-chat{ border-top-color:rgba(140,106,36,.2); }
+:root[data-theme="light"] .bgn-chat-msgs{ background:rgba(140,106,36,.07); }
+:root[data-theme="light"] .bgn-chat-msgs:empty::before{ color:#8a7b5e; }
+:root[data-theme="light"] .chat-item b, :root[data-theme="light"] .log-item b, :root[data-theme="light"] .lb-row .rk{ color:var(--bgn-accent2); }
+:root[data-theme="light"] .chat-item .chat-time{ color:#9a8d76; }
+:root[data-theme="light"] .bgn-log{ background:rgba(140,106,36,.07); }
+:root[data-theme="light"] .log-item{ border-bottom-color:rgba(140,106,36,.12); }
+:root[data-theme="light"] .bgn-room{ border-color:rgba(140,106,36,.5); }
+:root[data-theme="light"] .bgn-room-code b{ color:var(--bgn-accent3); }
+:root[data-theme="light"] .bgn-help,
+:root[data-theme="light"] .lb-modal{
+  background:linear-gradient(180deg,#fffdf6,#f6efdd);
+  border-color:rgba(140,106,36,.4);
+  box-shadow:0 26px 80px rgba(60,45,10,.35), 0 0 0 1px rgba(140,106,36,.15);
+}
+:root[data-theme="light"] .bgn-help h3, :root[data-theme="light"] .lb-title{ color:var(--bgn-accent2); }
+:root[data-theme="light"] .bgn-help code{ background:rgba(176,125,19,.12); border-color:rgba(140,106,36,.3); color:#7c5f10; }
+:root[data-theme="light"] .lb-row{ background:rgba(255,255,255,.6); }
+:root[data-theme="light"] .lb-row.top{ background:rgba(176,125,19,.16); border-color:rgba(176,125,19,.4); }
+:root[data-theme="light"] .bgn-lounge-btn{ background:#e9e2cd; color:#43351f; border-color:#cabb92; }
+:root[data-theme="light"] .bgn-lounge-frame{ background:#fdf9ee; }
+:root[data-theme="light"] #bgnAudioBtn{
+  background:linear-gradient(150deg,#fffdf4,#e9e2cd); color:#7c5f10;
+  box-shadow:0 6px 18px rgba(90,70,25,.25);
+}
+:root[data-theme="light"] #bgnAudioBtn:hover{ box-shadow:0 10px 26px rgba(90,70,25,.35), 0 0 14px rgba(176,125,19,.25); }
+:root[data-theme="light"] #bgnAudioBtn.muted{ color:#8a8298; }
+:root[data-theme="light"] #bgnAudioVol{ background:rgba(255,255,255,.96); border-color:rgba(140,106,36,.35); }
+:root[data-theme="light"] #bgnAudioVol span{ color:#8a7b5e; }
+
+/* ═══ CATAN ═══ */
+#catanCtn{ display:flex; flex-direction:column; gap:14px; align-items:center; width:100%; }
+.catan-board{ width:100%; display:flex; justify-content:center; }
+#catanCanvas{ max-width:100%; border-radius:10px; touch-action:manipulation; cursor:pointer; }
+.catan-hud{ width:100%; max-width:700px; display:flex; flex-direction:column; gap:8px; }
+.catan-hand{ display:flex; gap:6px; justify-content:center; align-items:center; flex-wrap:wrap; min-height:32px; background:rgba(0,0,0,.22); border-radius:8px; padding:6px 8px; font-size:.84rem; }
+.catan-hand.opp{ background:rgba(0,0,0,.12); }
+.res-chip{ display:inline-flex; align-items:center; gap:4px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.14); border-radius:7px; padding:3px 8px; font-size:.82rem; }
+.res-chip b{ min-width:14px; text-align:center; }
+.res-ico{ font-size:.9rem; }
+.hand-label{ font-weight:700; font-size:.8rem; margin-right:4px; }
+.hand-label.muted{ opacity:.6; font-weight:600; }
+.catan-dice{ font-size:1.02rem; font-weight:700; min-height:22px; letter-spacing:.03em; }
+.catan-devs{ display:flex; gap:6px; justify-content:center; align-items:center; flex-wrap:wrap; min-height:26px; }
+.dev-chip{ background:rgba(212,175,55,.16); border:1px solid rgba(212,175,55,.4); border-radius:7px; padding:2px 8px; font-size:.8rem; }
+.dev-chip.empty{ opacity:.35; }
+.dev-chip.vp{ border-color:rgba(255,255,255,.25); }
+.catan-vprow{ display:flex; justify-content:space-between; gap:10px; font-size:.86rem; opacity:.9; }
+.catan-vprow .catan-vp>span+span{ margin-left:14px; }
+.catan-actions{ display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+.catan-actions .btn{ min-width:0; }
+.catan-overlay{ position:fixed; inset:0; z-index:9700; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.catan-modal{ position:relative; width:min(440px,100%); background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; padding:22px 20px; box-shadow:0 18px 60px rgba(0,0,0,.7); text-align:center; }
+.catan-modal-title{ font-family:var(--bgn-serif,serif); font-weight:700; color:#f6e6a4; margin:0 0 8px; }
+.discard-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin:12px 0; }
+.discard-card{ background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.15); border-radius:9px; padding:10px 8px; color:inherit; cursor:pointer; font-size:.86rem; }
+.discard-card.chosen{ background:rgba(212,175,55,.2); border-color:#d4af37; }
+.discard-card[disabled]{ opacity:.35; cursor:default; }
+.discard-actions{ display:flex; justify-content:center; gap:10px; margin-top:6px; }
+.trade-row{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; font-size:.9rem; }
+.trade-row select{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); color:inherit; border-radius:8px; padding:7px 10px; }
+:root[data-theme="light"] .catan-modal{ background:linear-gradient(180deg,#fffdf6,#f6efdd); border-color:rgba(140,106,36,.4); }
+:root[data-theme="light"] .catan-modal-title{ color:var(--bgn-accent2); }
+:root[data-theme="light"] .catan-hand{ background:rgba(140,106,36,.07); }
+:root[data-theme="light"] .res-chip{ background:rgba(255,255,255,.7); border-color:rgba(140,106,36,.25); }
+:root[data-theme="light"] .dev-chip{ background:rgba(176,125,19,.12); border-color:rgba(176,125,19,.35); }
+:root[data-theme="light"] .trade-row select{ background:#fffdf4; color:#43351f; border-color:rgba(140,106,36,.3); }
+
+/* ══════ turn order & teams modal ══════ */
+.to-overlay{ position:fixed; inset:0; z-index:9600; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.to-modal{ position:relative; width:min(780px,100%); max-height:min(86vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:24px 22px 20px; text-align:center; }
+.to-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.to-close:hover{ background:rgba(0,0,0,.65); }
+.to-title{ font-family:var(--bgn-serif,serif); font-size:1.3rem; color:var(--bgn-accent2,#f2dc8b); }
+.to-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin-top:8px; }
+.to-card{ background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:14px 12px; display:flex; flex-direction:column; gap:10px; align-items:center; }
+.to-label{ font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--bgn-muted,#c8c3c9); }
+.to-draw{ min-height:44px; display:flex; align-items:center; justify-content:center; font-size:1.02rem; font-weight:700; color:#f6e6a4; }
+.to-note{ font-size:.72rem; color:var(--bgn-muted,#c8c3c9); min-height:30px; }
+:root[data-theme="light"] .to-modal{ background:linear-gradient(180deg,#fffdf6,#f6efdd); border-color:rgba(140,106,36,.4); box-shadow:0 26px 80px rgba(60,45,10,.35), 0 0 0 1px rgba(140,106,36,.15); }
+:root[data-theme="light"] .to-close{ color:#fff; }
+:root[data-theme="light"] .to-title{ color:var(--bgn-accent2); }
+:root[data-theme="light"] .to-card{ background:rgba(140,106,36,.07); border-color:rgba(140,106,36,.2); }
+:root[data-theme="light"] .to-draw{ color:var(--bgn-accent3); }
+
+/* ══════ fullscreen map (BGN standard) ══════ */
+.bgn-stage{ position:relative; }
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  background:rgba(10,14,24,.72);
+  -webkit-backdrop-filter:blur(8px); backdrop-filter:blur(8px);
+  color:#fff; border:1px solid rgba(255,255,255,.75); border-radius:8px;
+  padding:8px 12px; cursor:pointer; font-family:var(--bgn-sans,system-ui);
+  font-size:.82rem; font-weight:600; line-height:1;
+  box-shadow:0 4px 14px rgba(0,0,0,.35);
+  transition:border-color .15s ease,color .15s ease;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); color:var(--bgn-accent2,#f2dc8b); }
+.fs-open-btn[hidden]{ display:none; }
+#fsOverlay{
+  position:fixed; inset:0; z-index:9500; background:#0b0e15;
+  display:flex; flex-direction:column;
+}
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{
+  flex:none; display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:10px 14px; border-bottom:1px solid rgba(255,255,255,.12);
+}
+#fsStatusEl{ color:#f6e6a4; font-weight:600; font-size:.95rem; min-height:22px; }
+#fsActionsCtn{ display:flex; align-items:center; gap:8px; min-height:32px; }
+#fsExitBtn{ flex:none; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+#fsBoardWrap{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; top:0; right:0; bottom:0; left:0; width:100%; height:100%; }
+#fsBoardWrap canvas{ position:absolute; inset:0; top:0; right:0; bottom:0; left:0; width:100%; height:100%; }
+.fs-tile{ position:absolute; top:12px; right:12px; z-index:3; }
+.fs-meeple{ position:absolute; bottom:12px; right:12px; z-index:3; }
+.fs-tile:empty{ display:none; }
+.fs-meeple:empty{ display:none; }
+.fs-hud{ flex:none; display:flex; justify-content:center; padding:8px 14px 4px; }
+.fs-log{ flex:none; display:flex; justify-content:center; padding:2px 14px 12px; }
+#fsLogCtn h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; text-align:center; }
+#fsLogCtn .bgn-log{ width:min(720px,100%); max-height:170px; }
+</style>
+
+<script src="src/catan.js"></script>
+
+<!-- ═══ FULLSCREEN MAP MODULE (BGN standard: window.bgnFullscreen) ═══ -->
+<script>
+(function(){
+"use strict";
+var fsOpenBtn=document.getElementById("fsOpenBtn");
+var fsOverlay=document.getElementById("fsOverlay");
+var fsBoard=document.getElementById("fsBoardWrap");
+var fsTileCtn=document.getElementById("fsTileCtn");
+var fsMeepleCtn=document.getElementById("fsMeepleCtn");
+var fsHudCtn=document.getElementById("fsHudCtn");
+var fsLogCtn=document.getElementById("fsLogCtn");
+var catanOverlay=document.getElementById("catanOverlay");
+var fsStatusEl=document.getElementById("fsStatusEl");
+var fsExitBtn=document.getElementById("fsExitBtn");
+var canvas=null,tile=null,meeple=null,hud=[],logEls=[],resize=null;
+function toArr(v){ return v==null?[]:(Array.isArray(v)?v:[v]); }
+function isOpen(){ return !!fsOverlay && !fsOverlay.hidden; }
+function fsRefit(){ if(resize){ try{ resize(); }catch(e){} } }
+function syncStatus(){
+  var bannerEl=document.getElementById("bannerEl");
+  if(!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent;
+}
+function openFullscreen(){
+  if(!canvas||!fsOverlay||isOpen())return;
+  var moves=[];
+  if(tile)moves.push({el:tile,to:fsTileCtn});
+  if(meeple)moves.push({el:meeple,to:fsMeepleCtn});
+  moves.push({el:canvas,to:fsBoard});
+  for(var a=0;a<hud.length;a++)moves.push({el:hud[a],to:fsHudCtn});
+  for(var b=0;b<logEls.length;b++)moves.push({el:logEls[b],to:fsLogCtn});
+  if(catanOverlay)moves.push({el:catanOverlay,to:fsOverlay});
+  for(var i=0;i<moves.length;i++){ moves[i].el._fsOrig={ parent:moves[i].el.parentNode, next:moves[i].el.nextSibling }; }
+  for(var j=0;j<moves.length;j++){ moves[j].to.appendChild(moves[j].el); }
+  fsOverlay.hidden=false;
+  document.body.style.overflow="hidden";
+  syncStatus();
+  fsRefit();
+  try{
+    if(fsOverlay.requestFullscreen){
+      var p=fsOverlay.requestFullscreen();
+      if(p&&p.catch)p.catch(function(){});
+    }else if(fsOverlay.webkitRequestFullscreen){
+      fsOverlay.webkitRequestFullscreen();
+    }
+  }catch(e){}
+}
+function closeFullscreen(){
+  if(!fsOverlay||!isOpen())return;
+  fsOverlay.hidden=true;
+  document.body.style.overflow="";
+  var els=[];
+  if(canvas&&canvas._fsOrig)els.push(canvas);
+  if(tile&&tile._fsOrig)els.push(tile);
+  if(meeple&&meeple._fsOrig)els.push(meeple);
+  for(var a=0;a<hud.length;a++)if(hud[a]._fsOrig)els.push(hud[a]);
+  for(var b=0;b<logEls.length;b++)if(logEls[b]._fsOrig)els.push(logEls[b]);
+  if(catanOverlay&&catanOverlay._fsOrig)els.push(catanOverlay);
+  for(var i=els.length-1;i>=0;i--){
+    els[i]._fsOrig.parent.insertBefore(els[i],els[i]._fsOrig.next);
+    delete els[i]._fsOrig;
+  }
+  try{
+    if(document.fullscreenElement||document.webkitFullscreenElement){
+      (document.exitFullscreen||document.webkitExitFullscreen||function(){}).call(document);
+    }
+  }catch(e){}
+  fsRefit();
+}
+if(fsExitBtn)fsExitBtn.addEventListener("click",closeFullscreen);
+if(fsOpenBtn)fsOpenBtn.addEventListener("click",openFullscreen);
+window.addEventListener("resize",function(){ if(isOpen())fsRefit(); });
+document.addEventListener("keydown",function(e){
+  if(e.key==="Escape"){
+    if(!fsOverlay.hidden){ e.stopImmediatePropagation(); closeFullscreen(); return; }
+  }
+});
+window.bgnFullscreen={
+  register:function(o){
+    o=o||{};
+    if(o.canvas){ canvas=o.canvas; if(fsOpenBtn)fsOpenBtn.hidden=false; }
+    tile=o.tile||null;
+    meeple=o.meeple||null;
+    hud=toArr(o.hud);
+    logEls=toArr(o.log);
+    resize=(typeof o.resize==="function")?o.resize:null;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return !!fsOverlay && !fsOverlay.hidden; }
+};
+})();
+</script>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+var darkAccent = val(rootRef.accentColor,"#d4af37");
+function isLight(){ return document.documentElement.getAttribute("data-theme")==="light"; }
+function shade(hex,amt){
+  var m=String(hex||"#d4af37").replace("#","");
+  if(m.length===3)m=m.replace(/./g,function(c){return c+c;});
+  if(!/^[0-9a-f]{6}$/i.test(m))return "#b07d13";
+  var n=parseInt(m,16),r=n>>16&255,g=n>>8&255,b=n&255;
+  function k(v){ var x=amt<0?v*(1+amt):v+(255-v)*amt; return Math.max(0,Math.min(255,Math.round(x))); }
+  function h(v){ var s=v.toString(16); return s.length===1?"0"+s:s; }
+  return "#"+h(k(r))+h(k(g))+h(k(b));
+}
+var lightAccent = shade(darkAccent,-0.42);   // darkened so it reads on light backgrounds
+function setAccent(t){ document.body.style.setProperty("--bgn-accent", t==="light"?lightAccent:darkAccent); }
+setAccent(isLight()?"light":"dark");
+document.body.setAttribute("data-dark-accent",darkAccent);
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ light / dark theme toggle ══════════ */
+(function(){
+  var btn=document.getElementById("themeBtn"); if(!btn)return;
+  var icons={dark:"🌙",light:"☀️"};
+  function sync(){
+    var t=isLight()?"light":"dark";
+    btn.textContent=icons[t];
+    btn.title="Switch to "+(t==="light"?"dark":"light")+" mode";
+    btn.setAttribute("aria-label",btn.title);
+  }
+  btn.addEventListener("click",function(){
+    var next=isLight()?"dark":"light";
+    document.documentElement.setAttribute("data-theme",next);
+    try{ localStorage.setItem("bgn_blank_theme",next); }catch(e){}
+    setAccent(next);
+    sync();
+    sfx("flip");
+  });
+  sync();
+})();
+
+/* ══════════ table state ══════════
+   Two roles per table: "host" (the room creator) and "guest".
+   Whose turn it is is derived from the server's turn counter (host
+   takes turns 0,2,4,… when first=0; a rematch flips first). The
+   server is the source of truth; each player submits their turn
+   payload via the `move` rpc when it's their turn. This template
+   just passes the turn — the game you build decides what the
+   payloads mean and when to call `endGame`. */
+const game={ mode:null, myRole:null, roomCode:null, socket:null, sockOpen:false, wantReconnect:false, retryDelay:800,
+  openResolvers:[], serverTurn:0, first:0, status:"idle", oppPresent:true, over:false, winner:null, reason:"",
+  locked:false, log:[], lastLoggedTurn:0, teams:null, localNames:null };
+
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const turnEl=document.getElementById("turnEl");
+const bannerEl=document.getElementById("bannerEl");
+const logEl=document.getElementById("logEl");
+const hostNameEl=document.getElementById("hostNameEl");
+const guestNameEl=document.getElementById("guestNameEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const passBtn=document.getElementById("passBtn");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const saveBtn=document.getElementById("saveBtn");
+const pHost=document.getElementById("pHost");
+const pGuest=document.getElementById("pGuest");
+const pSeat3=document.getElementById("pSeat3");
+const pSeat4=document.getElementById("pSeat4");
+const seat3NameEl=document.getElementById("seat3NameEl");
+const seat4NameEl=document.getElementById("seat4NameEl");
+const lbBtn=document.getElementById("lbBtn");
+const overLbBtn=document.getElementById("overLbBtn");
+const lbModal=document.getElementById("lbModal");
+const lbNameInput=document.getElementById("lbNameInput");
+const lbRowsEl=document.getElementById("lbRowsEl");
+const lbCloseBtn=document.getElementById("lbCloseBtn");
+const lbDoneBtn=document.getElementById("lbDoneBtn");
+const guideBtn=document.getElementById("guideBtn");
+
+const ROLES=["host","guest","seat3","seat4"];
+function turnRoleFor(n){ return ROLES[((n+game.first)%ROLES.length+ROLES.length)%ROLES.length]; }
+function roleName(r){ return r==="host"?"Host":r==="guest"?"Guest":r==="seat3"?"Player 3":r==="seat4"?"Player 4":r; }
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+/* ══════════ table chat ══════════ */
+function fmtTime(ts){ const d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(role,text,ts){
+  const row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(role===game.myRole?"You":roleName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ status UI ══════════ */
+function updateNames(){
+  if(game.mode==="local"&&game.localNames){
+    hostNameEl.textContent=game.localNames.host;
+    guestNameEl.textContent=game.localNames.guest;
+    seat3NameEl.textContent=game.localNames.seat3;
+    seat4NameEl.textContent=game.localNames.seat4;
+    return;
+  }
+  if(game.mode==="ai"){
+    hostNameEl.textContent="You";
+    guestNameEl.textContent="Bot 2 🤖";
+    seat3NameEl.textContent="Bot 3 🤖";
+    seat4NameEl.textContent="Bot 4 🤖";
+  }else if(game.mode==="online"&&game.myRole){
+    hostNameEl.textContent=game.myRole==="host"?"You":"Host";
+    guestNameEl.textContent=game.myRole==="guest"?"You":"Guest";
+    seat3NameEl.textContent=game.myRole==="seat3"?"You":"Player 3";
+    seat4NameEl.textContent=game.myRole==="seat4"?"You":"Player 4";
+  }else{
+    hostNameEl.textContent="Host";
+    guestNameEl.textContent="Guest";
+    seat3NameEl.textContent="Player 3";
+    seat4NameEl.textContent="Player 4";
+  }
+}
+function addLog(role,msg){
+  game.log.push({r:role,m:msg});
+  if(game.log.length>60)game.log.shift();
+  renderLog();
+}
+function renderLog(){
+  logEl.innerHTML="";
+  if(!game.log.length){ logEl.innerHTML='<div class="muted small">No turns yet.</div>'; return; }
+  const frag=document.createDocumentFragment();
+  for(const e of game.log){
+    const div=document.createElement("div");
+    div.className="log-item";
+    div.innerHTML="<b>"+esc(roleName(e.r))+"</b><span class='resp'>"+esc(e.m)+"</span>";
+    frag.appendChild(div);
+  }
+  logEl.appendChild(frag);
+}
+function resultText(){
+  if(game.winner==="draw")return "Draw — the match is over.";
+  if(game.winner==null){
+    if(game.reason==="resign")return "Match over — a player resigned.";
+    if(game.reason==="forfeit")return "Match over — a player left.";
+    return "Match over.";
+  }
+  if(game.reason==="end"&&window.CatanGame&&CatanGame.getState()&&CatanGame.isOver()){
+    const w=CatanGame.getWinner();
+    const wP=CatanGame.constants.P_NAME[w];
+    const vp=CatanGame.totalVp(w);
+    const youWon=game.mode==="online"&&game.winner===game.myRole;
+    if(youWon)return "You win! "+wP+" hits "+vp+" victory points. 🏆";
+    if(game.mode==="online")return "You lose — "+wP+" reaches "+vp+" VP.";
+    return wP+" wins with "+vp+" victory points! 🏆";
+  }
+  const w=roleName(game.winner);
+  const youWon=game.mode==="online"&&game.winner===game.myRole;
+  if(youWon){
+    if(game.reason==="resign")return "You win — your opponent resigned!";
+    if(game.reason==="forfeit")return "You win — your opponent left!";
+    return "You win!";
+  }
+  if(game.mode==="online"&&game.winner!==game.myRole){
+    if(game.reason==="resign")return "You lose — you resigned.";
+    if(game.reason==="forfeit")return "You lose — you left the match.";
+    return "You lose.";
+  }
+  if(game.reason==="resign")return w+" wins by resignation.";
+  if(game.reason==="forfeit")return w+" wins — the other side left.";
+  return w+" wins!";
+}
+function updateBanner(){
+  let msg="";
+  if(game.over){
+    msg=resultText();
+  }else if(window.CatanGame&&CatanGame.getState()){
+    msg=CatanGame.bannerText()||"";
+    if(!msg){
+      if(game.mode==="online"&&!game.sockOpen)msg="Connecting…";
+      else if(game.mode==="online"&&game.status===1)msg="Waiting for an opponent to join…";
+      else if(game.mode==="online"&&!game.oppPresent)msg="Another player disconnected — they can rejoin with the code. Claim the win anytime.";
+    }
+  }else if(game.mode==="online"){
+    if(!game.sockOpen)msg="Connecting…";
+    else if(game.status===1)msg="Waiting for an opponent to join…";
+    else if(game.status===2)msg=(game.myRole==="host"?"Setting up the board…":"Waiting for the host to set up the board…");
+  }
+  bannerEl.textContent=msg;
+  if(window.bgnFullscreen&&window.bgnFullscreen.isOpen()){ const fs=document.getElementById("fsStatusEl"); if(fs)fs.textContent=msg; }
+}
+let bannerTimer=null;
+function flashBanner(msg){
+  bannerEl.textContent=msg;
+  if(window.bgnFullscreen&&window.bgnFullscreen.isOpen()){ const fs=document.getElementById("fsStatusEl"); if(fs)fs.textContent=msg; }
+  if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600);
+}
+
+/* ══════════ turn timer (local & online; 0 to disable) ══════════ */
+const TIMER_SECS=0;   // Catan: no auto-pass mid-turn — turns are open-ended
+const turnTimerEl=document.getElementById("turnTimerEl");
+let timerRemain=0, timerInt=null, timerKey="";
+function timerFmt(s){ const m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0"); }
+function timerStop(){ if(timerInt){ clearInterval(timerInt); timerInt=null; } }
+function timerStart(){ if(TIMER_SECS<=0)return; timerStop(); timerRemain=TIMER_SECS; timerInt=setInterval(timerTick,1000); timerTick(); }
+function timerTick(){
+  timerRemain--;
+  if(turnTimerEl){ turnTimerEl.textContent="⏱ "+timerFmt(Math.max(0,timerRemain)); turnTimerEl.classList.toggle("low",timerRemain<=10); }
+  if(timerRemain<=0){
+    timerStop();
+    flashBanner("Time's up — pass auto-sent.");
+    if(!game.over&&!game.locked)passTurn();
+  }
+}
+function syncTimer(){
+  const running = game.mode!=="idle" && game.mode!==null && !game.over && !game.locked;
+  if(!running){ timerStop(); if(turnTimerEl)turnTimerEl.hidden=true; return; }
+  if(turnTimerEl)turnTimerEl.hidden=false;
+  const key = game.mode==="online" ? "O:"+game.serverTurn : "L:"+game.log.length;
+  if(game.mode==="online" && turnRoleFor(game.serverTurn)!==game.myRole){ timerStop(); if(turnTimerEl)turnTimerEl.textContent="⏱ —"; return; }
+  if(game.mode==="ai" && aiThinking){ timerStop(); if(turnTimerEl)turnTimerEl.textContent="⏱ —"; return; }
+  if(key!==timerKey){ timerKey=key; timerStart(); }
+}
+function refreshTurn(){
+  if(game.over){ turnEl.textContent="Match over"; pHost.classList.remove("on"); pGuest.classList.remove("on"); pSeat3.classList.remove("on"); pSeat4.classList.remove("on"); return; }
+  if(window.CatanGame&&CatanGame.getState()){
+    turnEl.textContent=CatanGame.turnLabel();
+    const a=CatanGame.active();
+    pHost.classList.toggle("on",a===0);
+    pGuest.classList.toggle("on",a===1);
+    pSeat3.classList.toggle("on",a===2);
+    pSeat4.classList.toggle("on",a===3);
+  }else{
+    turnEl.textContent="…";
+    pHost.classList.remove("on"); pGuest.classList.remove("on"); pSeat3.classList.remove("on"); pSeat4.classList.remove("on");
+  }
+}
+function catanMyIdx(){ return game.mode==="online"?(ROLES.indexOf(game.myRole)):0; }
+function syncIdentity(){
+  if(!window.CatanGame)return;
+  if(game.mode==="online")CatanGame.setIdentity("online",game.myRole?Math.max(0,ROLES.indexOf(game.myRole)):0);
+  else CatanGame.setIdentity(game.mode||"local",0);
+}
+function updateButtons(){
+  if(game.mode==="online"){
+    newGameBtn.textContent=game.over?"Rematch":"New match";
+    newGameBtn.style.display=game.over?"":"none";
+    menuBtn.textContent="Exit match";
+    claimBtn.hidden=!(game.status===2&&!game.over&&!game.oppPresent);
+    overLbBtn.hidden=!game.over;
+  }else{
+    newGameBtn.textContent="Restart";
+    newGameBtn.style.display="";
+    menuBtn.textContent="Back to lobby";
+    claimBtn.hidden=true;
+    overLbBtn.hidden=!game.over;
+    saveBtn.style.display=!game.over?"":"none";
+  }
+  if(game.over||game.locked||!window.CatanGame||!CatanGame.getState()){ passBtn.disabled=true; return; }
+  const ph=CatanGame.phase();
+  const myTurn=CatanGame.isMyAction();
+  if(ph==="setup"){ passBtn.textContent="Placing…"; passBtn.disabled=true; }
+  else if(ph==="discard"){ passBtn.textContent="Discard"; passBtn.disabled=CatanGame.uiActor()!==catanMyIdx(); }
+  else if(ph==="rob"){ passBtn.textContent="Choose a hex"; passBtn.disabled=CatanGame.uiActor()!==catanMyIdx(); }
+  else if(ph==="roll"){ passBtn.textContent="Roll to start"; passBtn.disabled=true; }
+  else if(ph==="action"){ passBtn.textContent=myTurn?"End turn ✓":"Waiting…"; passBtn.disabled=!myTurn; }
+  else { passBtn.textContent="—"; passBtn.disabled=true; }
+}
+function renderChrome(){ updateNames(); refreshTurn(); updateBanner(); updateButtons(); renderLog(); renderSeats(); syncTimer(); maybeSubmitScore(); if(game.mode==="ai"&&!game.over&&!aiThinking&&window.CatanGame&&CatanGame.getState()&&CatanGame.isBotTurn())aiPassTurn(); }
+function renderAll(){ renderChrome(); if(window.CatanGame)CatanGame.uiUpdate(); }
+
+/* ══════════ modes ══════════ */
+function resetTable(){
+  game.log=[];
+  game.lastLoggedTurn=0;
+  game.over=false; game.winner=null; game.reason="";
+  game.locked=false;
+  timerKey=""; timerStop();
+  aiThinking=false;
+  lbAutoSubmitted=false;
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer=null; }
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  resetTable();
+  game.mode=mode;
+  updateNames();
+  roomBox.hidden=mode!=="online";
+  chatBox.hidden=mode!=="online";
+  claimBtn.hidden=true;
+  if(mode!=="online"&&window.CatanGame){
+    CatanGame.setIdentity(mode,0);
+    CatanGame.setFirst(game.first);
+    CatanGame.newGame();
+  }
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  sfx("deal");
+  renderAll();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  chatBox.hidden=true;
+  timerStop();
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen)rpc("leave",game.roomCode).catch(function(){});
+    exitOnline(true);
+    refreshContinuePanel();
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+    refreshContinuePanel();
+  }
+}
+
+/* ══════════ play vs AI (mode "ai") ══════════
+   The human always plays Host; the AI is Guest. This template ships
+   with a passive AI that simply passes the turn — build your own
+   computer player by overriding AI_DO_TURN() (return a string
+   describing what the AI did, or null to log nothing). The turn
+   flow, banner, turn timer, and saving are all wired up for you. */
+
+/* ── AI difficulty (Easy / Normal / Hard) ──
+   Selected in the lobby, persisted as bgn_ai_diff. Read the current
+   level in your bot with window.__bgn_ai_diff() — or just reference
+   AI_DIFF directly (same scope as AI_DO_TURN). The built-in passive
+   bot only varies its think time. */
+let AI_DIFF="normal";
+try{ const s=localStorage.getItem("bgn_ai_diff"); if(s==="easy"||s==="normal"||s==="hard")AI_DIFF=s; }catch(e){}
+function setDiff(d){
+  AI_DIFF=d;
+  try{ localStorage.setItem("bgn_ai_diff",d); }catch(e){}
+  document.querySelectorAll(".diff-btns .chip").forEach(function(b){ b.classList.toggle("on",b.dataset.diff===d); });
+}
+window.__bgn_ai_diff=function(){ return AI_DIFF; };
+
+let aiThinking=false, aiTimer=null;
+function AI_DO_TURN(){
+  if(window.CatanGame)try{ CatanGame.aiTurn(); return "took its turn"; }catch(e){ console.error("AI error:",e); }
+  return "passed the turn";
+}
+function aiDelayMs(){ return AI_DIFF==="easy"?350:(AI_DIFF==="hard"?1500:900); }
+function aiPassTurn(){
+  if(game.mode!=="ai"||game.over)return;
+  if(aiThinking)return;
+  if(!window.CatanGame||!CatanGame.getState()||CatanGame.isOver())return;
+  if(!CatanGame.isBotTurn())return;
+  aiThinking=true;
+  refreshTurn(); updateBanner(); updateButtons(); syncTimer();
+  aiTimer=setTimeout(function(){
+    aiTimer=null;
+    aiThinking=false;
+    if(game.mode!=="ai"||game.over){ renderAll(); return; }
+    try{ AI_DO_TURN(); }catch(e){}
+    sfx("turn");
+    renderAll();
+    saveGame();
+    if(game.mode==="ai"&&!game.over&&window.CatanGame&&CatanGame.isBotTurn()&&!aiThinking)aiPassTurn();
+  },aiDelayMs());
+}
+
+/* ══════════ leaderboard (top scores, server-shared) ══════════
+   A lazy background socket (separate from the table socket) that is
+   only opened when someone views the leaderboard or submits a score.
+   Name persists in localStorage under bgn_lb_name. */
+const LB_NAME_KEY="bgn_lb_name";
+function lbName(){ try{ return localStorage.getItem(LB_NAME_KEY)||"Player"; }catch(e){ return "Player"; } }
+function setLbName(n){ try{ localStorage.setItem(LB_NAME_KEY,String(n).trim().slice(0,24)||"Player"); }catch(e){} }
+let lbSock=null, lbReady=false, lbBack=800, lbQueue=null;
+function lbConnect(){
+  if(lbSock||!rootRef.createServerSocket)return;
+  try{ lbSock=rootRef.createServerSocket(); }catch(e){ return; }
+  lbSock.addEventListener("open",function(){
+    lbReady=true; lbBack=800;
+    if(lbQueue){ const q=lbQueue; lbQueue=null; lbSubmitNow(q.name,q.score,q.extra); }
+  });
+  lbSock.addEventListener("close",function(e){
+    lbReady=false;
+    if(e.code===4403)return;
+    setTimeout(function(){ lbConnect(); }, Math.min(15000,lbBack)+Math.random()*500);
+    lbBack=Math.min(15000,lbBack*2);
+  });
+}
+function lbSubmitNow(name,score,extra){
+  if(!lbSock||lbSock.readyState!==1)return;
+  lbSock.rpc.submitScore(JSON.stringify({name:name,score:score,extra:extra})).catch(function(){});
+}
+function lbSubmitScore(name,score,extra){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ lbQueue={name:name,score:score,extra:extra}; return; }
+  lbSubmitNow(name,score,extra);
+}
+function lbGetScores(cb){
+  if(!lbSock)lbConnect();
+  if(!lbReady){ setTimeout(function(){ lbGetScores(cb); },600); return; }
+  lbSock.rpc.getScores("").then(function(r){
+    let o; try{ o=JSON.parse(r); }catch(e){ cb([]); return; }
+    cb(o.scores||[]);
+  }).catch(function(){ cb([]); });
+}
+function lbRenderRows(list){
+  if(!list.length){ lbRowsEl.innerHTML='<div class="lb-empty">No scores yet — finish a game to set one.</div>'; return; }
+  lbRowsEl.innerHTML=list.map(function(x,i){
+    return '<div class="lb-row'+(i<3?" top":"")+'"><span class="rk">#'+(i+1)+'</span><span class="nm">'+esc(x.name)+'</span><span class="sc">'+x.score+' pts</span></div>';
+  }).join("");
+}
+function openLb(){
+  lbNameInput.value=lbName();
+  lbModal.hidden=false;
+  lbRowsEl.innerHTML='<div class="lb-empty">Loading…</div>';
+  lbGetScores(lbRenderRows);
+}
+function closeLb(){
+  setLbName(lbNameInput.value);
+  lbNameInput.value=lbName();
+  lbModal.hidden=true;
+}
+/* ── builder hook ──
+   Override window.__bgn_lb_score = function(){ return myScore; } to make
+   the template auto-submit your score at game end (set game.over = true
+   and the normal UI refresh triggers it). Online: only the host submits. */
+let lbAutoSubmitted=false;
+window.__bgn_lb_score=function(){ if(window.CatanGame&&CatanGame.isOver())return 10; return null; };
+function maybeSubmitScore(){
+  if(!game.over||lbAutoSubmitted)return;
+  if(game.mode==="online"&&game.myRole!=="host")return;
+  let sc=null;
+  try{ sc=window.__bgn_lb_score(); }catch(e){ sc=null; }
+  if(typeof sc==="number"&&isFinite(sc)&&sc>=0){
+    lbAutoSubmitted=true;
+    lbSubmitScore(lbName(),Math.floor(sc),game.mode||"");
+  }
+}
+
+/* ══════════ help modal ══════════ */
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const HELP_HTML='<h2 class="goldtext">Settlers of Catan — how to play</h2>'
+  +'<p class="muted">A 4-player Catan: <b>Red</b>, <b>Green</b>, <b>Blue</b> &amp; <b>Orange</b>. Race to <b>10 victory points</b> — settlements (1), cities (2), VP dev cards, Largest Army and Longest Road.</p>'
+  +'<h3>Turn order &amp; teams</h3>'
+  +'<p>Hit <b>🎲 Turn order &amp; teams</b> (in the lobby or the side panel) to roll <b>who goes first</b> — the drawn player really starts the match, online included — and to split random <b>teams</b> and draw <b>seats</b> for a shared screen. The starting player gets a 🎯 marker on their card. Everything persists through save, continue and share.</p>'
+  +'<h3>Setup</h3>'
+  +'<p>Each player places <b>2 settlements + 2 roads</b> in order Red → Green → Blue → Orange → Orange → Blue → Green → Red. The second settlement can\u2019t touch any existing settlement. Each second settlement collects the resources of its hexes.</p>'
+  +'<h3>Each turn</h3>'
+  +'<p><b>1.</b> Roll the dice — every settlement/city on a matching number produces resources (cities produce 2). A <b>7</b> means the robber: anyone holding 8+ cards discards half, then the roller moves the robber and steals one card from a rival building next to it.</p>'
+  +'<p><b>2.</b> Build & trade in any order: <b>Road</b> (🪵+🧱), <b>Settlement</b> (🪵+🧱+🐑+🌾, needs your road), <b>City</b> (⛏️×3+🌾×2, upgrades a settlement), <b>Dev card</b> (🐑+🌾+⛏️), or <b>trade 4:1</b> with the bank.</p>'
+  +'<p><b>3.</b> End your turn.</p>'
+  +'<h3>Dev cards</h3>'
+  +'<p><b>⚔️ Knight</b> moves the robber and steals · <b>🛤️ Road Builder</b> places 2 roads · <b>🎁 Year of Plenty</b> takes 2 resources · <b>🃏 Monopoly</b> takes all of one resource from every rival · <b>⭐ Victory Point</b> counts immediately. Cards bought this turn can\u2019t be played until your next turn.</p>'
+  +'<h3>Ports & house rules</h3>'
+  +'<p>This 4-player version uses <b>4:1 bank trades only</b> (no ports) and has no domestic trading. The robber blocks production on its hex, and a rolled 7 makes anyone with 8+ cards discard half. Watch out — your rivals see how many cards you hold, but not which ones.</p>'
+  +'<button class="btn btn-gold" id="helpDoneBtn">Got it</button>';
+const GUIDE_HTML='<h2 class="goldtext">🧩 The Blank template, decoded</h2>'
+  +'<p class="muted">This generator is a <b>ready-to-fork multiplayer table</b> for the Boardgame Network: rooms, room codes, turn order, presence, rematch, saves, sounds and a shared leaderboard — with <b>no game logic</b>. Your game drops into the stage below.</p>'
+  +'<h3>Remix in 4 steps</h3>'
+  +'<p><b>1. Fork it.</b> Copy this generator to a new name.</p>'
+  +'<p><b>2. Edit <code>main.pjs</code></b> — the config at the top: <code>hubUrl</code>, <code>gameTitle</code>, <code>gameTagline</code>, <code>gameKicker</code>, <code>gameGenre</code>, <code>gamePlayers</code>, <code>accentColor</code>, <code>heroImage</code>, and your own <code>projectsUrl</code>.</p>'
+  +'<p><b>3. Replace <code>#stageEl</code></b> with your board/UI. For single-player, override <code>AI_DO_TURN()</code> to return a string describing what your bot did.</p>'
+  +'<p><b>4. Wire your rules in.</b> On your turn, submit your move payload through the <code>move</code> rpc and declare the end with <code>endGame</code> (the server comment at the top of this file documents the layout).</p>'
+  +'<h3>Builder hooks</h3>'
+  +'<p><b>🏆 Leaderboard:</b> define <code>window.__bgn_lb_score = function(){ return myScore; }</code>. When a match ends (<code>game.over = true</code>), your score is submitted automatically — online, only the host submits, and the name comes from the leaderboard modal.</p>'
+  +'<p><b>🤖 AI difficulty:</b> the lobby lets players pick Easy/Normal/Hard, persisted as <code>AI_DIFF</code> (localStorage <code>bgn_ai_diff</code>). Read the level in your bot with <code>window.__bgn_ai_diff()</code>.</p>'
+  +'<button class="btn btn-gold" id="guideDoneBtn">Got it</button>';
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function openTemplateGuide(){
+  helpBody.innerHTML=GUIDE_HTML;
+  document.getElementById("guideDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+
+/* ══════════ save / continue (local table only) ══════════
+   This template ships without game logic, so the local save captures
+   the table itself (turn log + match state). Builders with a real game
+   should extend the payload below with their own game state. */
+const SAVE_KEY="catan_save_v1";
+function saveGame(){
+  if(game.mode!=="local"&&game.mode!=="ai")return;
+  if(!window.CatanGame||!CatanGame.getState())return;
+  if(game.over){ deleteSave(); return; }
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:2,mode:game.mode,catan:CatanGame.serialize(),first:game.first,teams:game.teams,localNames:game.localNames,savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved table was found.";
+  try{ const o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.catan||!window.CatanGame){ flashBanner("No saved table found."); return; }
+  resetTable();
+  game.mode=o.mode==="ai"?"ai":"local";
+  game.first=o.first!==undefined?o.first:0;
+  game.teams=o.teams||null;
+  game.localNames=o.localNames||null;
+  updateNames();
+  CatanGame.setIdentity(game.mode,0);
+  if(CatanGame.applySnapshot(o.catan)===false){ flashBanner("Couldn't load that save."); return; }
+  CatanGame.setFirst(game.first);
+  roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  sfx("deal");
+  renderAll();
+  if(game.mode==="ai")aiPassTurn();
+}
+
+/* ══════════ turn action ══════════ */
+function commitSnapshot(){
+  if(!window.CatanGame||!CatanGame.getState())return Promise.resolve();
+  if(game.mode!=="online"||!game.sockOpen||!game.roomCode)return Promise.resolve();
+  game.locked=true;
+  updateButtons();
+  const evt=game.serverTurn;
+  return rpc("move",JSON.stringify({code:game.roomCode,evt:evt,actor:catanMyIdx(),data:CatanGame.serialize()})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok){ flashBanner("Couldn't sync ("+(r&&r.err?r.err:"error")+")."); }
+    return refreshFromServer();
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+function passTurn(){
+  if(game.over||game.locked)return;
+  if(!window.CatanGame||!CatanGame.getState())return;
+  if(!CatanGame.isMyAction())return;
+  const r=CatanGame.pass();
+  if(r.needDiscard){ CatanGame.openDiscardUI(); return; }
+  if(r.needPlacement||r.needRobber)return;
+  if(!r.committed)return;
+  if(game.mode==="ai"){
+    renderAll(); saveGame(); aiPassTurn();
+  }else if(game.mode==="local"){
+    renderAll(); saveGame();
+  }else{
+    commitSnapshot().then(function(){ renderAll(); });
+  }
+}
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }
+  catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true; game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){ if(game.mode==="online")onServerMsg(ev.data); });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null; connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){
+  connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — sharing code with a friend starts the match":"Connecting…");
+}
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+}
+function refreshFromServer(){
+  return rpc("getRoom",game.roomCode).then(function(r){
+    if(r&&r.snap)applyServerSnap(r.snap);
+  }).catch(function(){});
+}
+function applyServerSnap(s){
+  game.serverTurn=s.turn;
+  game.first=s.first;
+  game.status=s.status;
+  syncIdentity();
+  if(Array.isArray(s.presence)){
+    const myIdx=game.myRole?ROLES.indexOf(game.myRole):-1;
+    game.oppPresent=myIdx>=0?s.presence.some(function(v,i){ return i!==myIdx&&v; }):false;
+  }else{
+    game.oppPresent=game.myRole==="host"?s.guestIn:s.hostIn;
+  }
+  if(s.status===3){
+    game.over=true;
+    game.winner=s.winner;
+    game.reason=s.reason||"";
+    if(window.CatanGame&&CatanGame.getState()&&!CatanGame.isOver()){
+      const st=CatanGame.getState();
+      st.phase="over"; st.ended=true;
+      st.winner=ROLES.indexOf(s.winner);
+      st.reason=s.reason||"";
+    }
+    if(game.winner==="draw")sfx("draw2");
+    else if(game.winner===game.myRole)sfx("win");
+    else sfx("lose");
+  }else{
+    game.over=false; game.winner=null; game.reason="";
+    if(window.CatanGame){
+      if(typeof s.snapshot==="string"&&s.snapshot){
+        if(CatanGame.applySnapshot(s.snapshot)===false){ /* bad snapshot — stay put */ }
+      }else if(s.status===2&&game.myRole==="host"&&(!CatanGame.getState()||CatanGame.isOver())){
+        CatanGame.setIdentity("online",0);
+        CatanGame.setFirst(game.first);
+        CatanGame.newGame();
+        commitSnapshot();
+      }
+    }
+  }
+  renderAll();
+}
+function catanOnGameOver(pi){
+  game.over=true;
+  game.winner=ROLES[pi];
+  game.reason="end";
+  if(game.mode==="online"){
+    commitSnapshot().then(function(){
+      if(game.mode==="online")rpc("endGame",JSON.stringify({code:game.roomCode,winner:game.winner})).catch(function(){});
+    });
+  }else{
+    sfx(pi===0?"win":"lose");
+    saveGame();
+  }
+  renderAll();
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  roomBox.hidden=false;
+  chatBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  updateNames(); renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom", (game.first===1?"guestFirst":"first"+game.first));
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=r.code; game.myRole=r.role;
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    sfx("deal");
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=code; game.myRole=r.role;
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    sfx("deal");
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+
+/* ══════════ turn order & teams (who goes first / team splitter / seat draw) ══════════
+   Three randomizers for the table. "Who goes first" drives the REAL
+   turn order: local/AI set game.first directly (the turn pill and
+   banner follow it); online, the host sets it server-side before the
+   match starts — a lobby roll is honored by createRoom, and setFirst
+   covers a waiting room. Teams and seats are table-side labels shown
+   on the player cards. */
+const toModal=document.getElementById("toModal");
+const toFirstDraw=document.getElementById("toFirstDraw");
+const toTeamDraw=document.getElementById("toTeamDraw");
+const toSeatDraw=document.getElementById("toSeatDraw");
+const toFirstNote=document.getElementById("toFirstNote");
+const toTeamNote=document.getElementById("toTeamNote");
+const toSeatNote=document.getElementById("toSeatNote");
+const hostSubEl=document.getElementById("hostSubEl");
+const guestSubEl=document.getElementById("guestSubEl");
+const seat3SubEl=document.getElementById("seat3SubEl");
+const seat4SubEl=document.getElementById("seat4SubEl");
+const toBtn=document.getElementById("toBtn");
+const tableToBtn=document.getElementById("tableToBtn");
+const TEAM_PAIRS=[["🦁 Lions","🐉 Dragons"],["☀️ Sun","🌙 Moon"],["🥇 Gold","🥈 Silver"],["🔴 Red","🔵 Blue"],["🌹 Rose","🌿 Vine"]];
+function spinRoll(opts, el, done){
+  const target=opts[Math.floor(Math.random()*opts.length)];
+  let i=0;
+  const iv=setInterval(function(){
+    if(i<opts.length*5){ el.textContent=opts[i%opts.length]; i++; }
+    else{ clearInterval(iv); el.textContent=target; done(target); }
+  },70);
+}
+function renderSeats(){
+  function one(subEl, role){
+    let t="sitting at the table";
+    if(game.teams&&game.teams[role])t="Team "+game.teams[role];
+    if(game.mode&&game.mode!=="idle"&&!game.over){
+      const starts=(ROLES.indexOf(role)===game.first);
+      if(starts)t+=" · 🎯 starts";
+    }
+    subEl.textContent=t;
+  }
+  one(hostSubEl,"host");
+  one(guestSubEl,"guest");
+  one(seat3SubEl,"seat3");
+  one(seat4SubEl,"seat4");
+}
+function toSyncState(){
+  const firstRole=ROLES[Math.min(Math.max(game.first,0),3)];
+  toFirstDraw.textContent=roleName(firstRole);
+  toTeamDraw.textContent=game.teams?game.teams.host+" vs "+game.teams.guest:"—";
+  toSeatDraw.textContent=game.localNames?game.localNames.host+" · "+game.localNames.guest+" · "+game.localNames.seat3+" · "+game.localNames.seat4:"—";
+  toFirstNote.textContent=(game.mode==="online"&&game.myRole!=="host")?"Turn order is set by the host."
+    :(roleName(firstRole)+" is set to go first"+(game.mode==="online"?".":" for this table."));
+  toTeamNote.textContent=game.teams?"Team "+game.teams.host+" vs Team "+game.teams.guest+" (two sides)":"Draw two team sides for the seats.";
+  if(game.mode==="local")toSeatNote.textContent=game.localNames?"Seats drawn — they show on the player cards.":"Draw who sits at each seat of a shared screen.";
+  else if(!game.mode)toSeatNote.textContent=game.localNames?"Drawn — applies when you start a Local table.":"Draw who sits at each seat of a Local table.";
+  else toSeatNote.textContent=(game.mode==="ai"?"Seats are fixed vs the bots — you are Host.":"Seats are fixed online — the host is the room creator.")+" Seat draws apply to Local tables.";
+}
+function applyFirst(role){
+  const idx=ROLES.indexOf(role);
+  const who=roleName(role);
+  if(game.mode==="online"&&game.sockOpen){
+    if(game.myRole==="host"&&game.status===1&&!game.over){
+      rpc("setFirst",role).then(function(r){
+        if(r&&r.ok){ game.first=r.first; renderAll(); flashBanner("🎲 "+who+" goes first!"); }
+        else flashBanner("Couldn't set turn order ("+(r&&r.err?r.err:"error")+").");
+        toSyncState();
+      }).catch(function(){ flashBanner("Couldn't reach the server."); });
+    }else{
+      flashBanner("🎲 "+who+" would go first — it applies to the next match.");
+      toSyncState();
+    }
+  }else{
+    game.first=idx;
+    if(window.CatanGame)CatanGame.setFirst(idx);
+    renderAll();
+    flashBanner("🎲 "+who+" goes first!");
+    toSyncState();
+  }
+}
+function rollFirst(){ spinRoll(["Host","Guest","Player 3","Player 4"], toFirstDraw, function(w){ applyFirst(["host","guest","seat3","seat4"][["Host","Guest","Player 3","Player 4"].indexOf(w)]); }); }
+function splitTeams(){
+  const pair=TEAM_PAIRS[Math.floor(Math.random()*TEAM_PAIRS.length)];
+  const roles=["host","guest","seat3","seat4"];
+  for(let i=roles.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=roles[i]; roles[i]=roles[j]; roles[j]=tmp; }
+  const t={};
+  for(let i=0;i<4;i++)t[roles[i]]=i<2?pair[0]:pair[1];
+  game.teams=t;
+  spinRoll([pair[0]+" · "+pair[1], pair[1]+" · "+pair[0]], toTeamDraw, function(){
+    toTeamDraw.textContent=pair[0]+" vs "+pair[1];
+    renderAll();
+    flashBanner("🎭 Teams: Team "+pair[0]+" vs Team "+pair[1]);
+    toSyncState();
+  });
+}
+function drawSeats(){
+  const names=["Player 1","Player 2","Player 3","Player 4"];
+  for(let i=names.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=names[i]; names[i]=names[j]; names[j]=tmp; }
+  game.localNames={host:names[0],guest:names[1],seat3:names[2],seat4:names[3]};
+  spinRoll(names, toSeatDraw, function(){
+    toSeatDraw.textContent=names.join(" · ");
+    if(game.mode==="local"){
+      toSeatNote.textContent="Seats drawn — "+game.localNames.host+" is Host, "+game.localNames.guest+" is Guest.";
+      flashBanner("🪑 Seats drawn — "+names.join(" · "));
+    }else if(!game.mode){
+      toSeatNote.textContent="Drawn — applies when you start a Local table.";
+    }else{
+      toSeatNote.textContent=(game.mode==="ai"?"Seats are fixed vs the bots — you are Host.":"Seats are fixed online — the host is the room creator.")+" This draw applies to Local tables.";
+    }
+    renderAll();
+  });
+}
+function openToModal(){ toSyncState(); toModal.hidden=false; }
+function closeToModal(){ toModal.hidden=true; }
+toBtn.addEventListener("click",openToModal);
+tableToBtn.addEventListener("click",openToModal);
+document.getElementById("toCloseBtn").addEventListener("click",closeToModal);
+document.getElementById("toFirstBtn").addEventListener("click",rollFirst);
+document.getElementById("toTeamBtn").addEventListener("click",splitTeams);
+document.getElementById("toSeatBtn").addEventListener("click",drawSeats);
+toModal.addEventListener("click",function(e){ if(e.target===toModal)closeToModal(); });
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    startMode(m);
+  });
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true; connectSocket(); doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true; connectSocket(); doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+passBtn.addEventListener("click",function(){ passTurn(); });
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.over)rpc("rematch",game.roomCode).then(function(r){ if(r&&r.ok){ refreshFromServer(); sfx("deal"); } }).catch(function(){});
+    return;
+  }
+  startMode(game.mode==="ai"?"ai":"local");
+});
+claimBtn.addEventListener("click",function(){
+  if(game.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Table saved."); });
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+guideBtn.addEventListener("click",openTemplateGuide);
+lbBtn.addEventListener("click",openLb);
+overLbBtn.addEventListener("click",openLb);
+lbCloseBtn.addEventListener("click",closeLb);
+lbDoneBtn.addEventListener("click",closeLb);
+lbNameInput.addEventListener("keydown",function(e){ if(e.key==="Enter")closeLb(); });
+lbModal.addEventListener("click",function(e){ if(e.target===lbModal)closeLb(); });
+document.querySelectorAll(".diff-btns .chip").forEach(function(b){
+  b.addEventListener("click",function(){ setDiff(b.dataset.diff); });
+});
+setDiff(AI_DIFF);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+document.addEventListener("keydown",function(e){ if(e.key==="Escape"){ if(!helpOverlay.hidden)closeHelp(); if(!lbModal.hidden)closeLb(); if(!toModal.hidden)closeToModal(); } });
+
+/* ══════════ wire Catan engine to this table ══════════ */
+if(window.CatanGame){
+  CatanGame.setHooks({
+    addLog: addLog,
+    sfx: function(n){ try{ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }catch(e){} },
+    flashBanner: flashBanner,
+    isOnline: function(){ return game.mode==="online"; },
+    myRole: function(){ return game.myRole; },
+    requestCommit: function(){ commitSnapshot(); },
+    onGameOver: catanOnGameOver,
+    chrome: renderChrome,
+  });
+  CatanGame.setIdentity(game.mode,0);
+  CatanGame.init();
+  if(window.bgnFullscreen){
+    window.bgnFullscreen.register({
+      canvas: document.getElementById("catanCanvas"),
+      hud: document.querySelector("#catanCtn .catan-hud"),
+      log: [document.getElementById("sideTitleEl"), document.getElementById("logEl")],
+      resize: function(){ if(window.CatanGame)CatanGame.resizeCanvas(); }
+    });
+  }
+}
+
+refreshContinuePanel();
+renderAll();
+
+/* debug/testing handle for browser_eval */
+window.__t = { game, turnRoleFor, applyServerSnap, passTurn, commitSnapshot, startMode, exitToLobby, doCreateRoom, doJoinRoom, refreshFromServer, saveGame, continueGame, deleteSave, aiPassTurn, AI_DO_TURN, AI_DIFF, setDiff, openHelp, closeHelp, openTemplateGuide, openLb, closeLb, lbName, setLbName, lbSubmitScore, maybeSubmitScore, resetTable, renderAll, rollFirst, splitTeams, drawSeats, openToModal, closeToModal, toSyncState, renderSeats, applyFirst };
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"Blank Template"); }
+  function importTable(o){
+    if(!o||!o.catan||!window.CatanGame)return false;
+    if(game.mode==="online")exitOnline(false);
+    resetTable();
+    game.mode=o.mode==="ai"?"ai":"local";
+    game.first=o.first!==undefined?o.first:0;
+    game.teams=o.teams||null;
+    game.localNames=o.localNames||null;
+    updateNames();
+    CatanGame.setIdentity(game.mode,0);
+    if(CatanGame.applySnapshot(o.catan)===false)return false;
+    CatanGame.setFirst(game.first);
+    roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+    lobbyCtn.hidden=true; gameCtn.hidden=false;
+    sfx("deal");
+    renderAll();
+    if(game.mode==="ai")aiPassTurn();
+    return true;
+  }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-blank-template",
+    gameName:tplName,
+    exportData:function(){
+      if(game.mode!=="local"&&game.mode!=="ai")return null;
+      if(!window.CatanGame||!CatanGame.getState())return null;
+      return {mode:game.mode, catan:CatanGame.serialize(), first:game.first, teams:game.teams, localNames:game.localNames};
+    },
+    applySave:importTable,
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs AI":"local table"; },
+    filenameBase:function(){ return tplName().toLowerCase().replace(/[^a-z0-9]+/g,"-")||"blank"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game.
+     Standard floating-button layout (shared with the hub):
+       bottom-right anchor  .lobby-fab  (hub only)  right:22px; bottom:22px;  z-index:500
+       Lounge pill          #loungeBtn               right:22px; bottom:94px;  z-index:9000
+       modal overlays                               z-index:9100+
+     "My projects" is nav, not a corner action: top-right in bgn-nav, and it
+     floats bottom-LEFT on small screens (see .bgn-nav-projects above). -->
+<style>
+.bgn-lounge-btn{position:fixed;right:22px;bottom:94px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>
+
+<!-- ═══ FULLSCREEN TOGGLE (self-contained) ═══ -->
+<style>
+#fsToggleBtn{
+  position:fixed;right:16px;bottom:16px;z-index:9999;
+  width:44px;height:44px;padding:0;
+  display:flex;align-items:center;justify-content:center;
+  border:1px solid rgba(255,255,255,.22);border-radius:50%;
+  background:rgba(18,20,30,.55);color:#eae6f5;
+  cursor:pointer;opacity:.4;
+  transition:opacity .18s ease,background .18s ease;
+  box-shadow:0 4px 14px rgba(0,0,0,.35);
+  -webkit-tap-highlight-color:transparent;
+}
+#fsToggleBtn:hover,#fsToggleBtn:focus-visible{ opacity:1; background:rgba(18,20,30,.8); }
+:fullscreen, :-webkit-full-screen{ width:100vw; height:100vh; height:100dvh; }
+</style>
+<button type="button" id="fsToggleBtn" title="Enter fullscreen" aria-label="Enter fullscreen">
+  <svg id="fsIcon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"></svg>
+</button>
+<script>
+(function(){
+  var btn=document.getElementById("fsToggleBtn"); if(!btn)return;
+  var doc=document, dd=doc.documentElement, icon=document.getElementById("fsIcon");
+  var req=dd.requestFullscreen||dd.webkitRequestFullscreen;
+  var ext=doc.exitFullscreen||doc.webkitExitFullscreen;
+  var ENTER='<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>';
+  var EXIT='<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>';
+  var isFs=function(){ return doc.fullscreenElement||doc.webkitFullscreenElement; };
+  var enabled=doc.fullscreenEnabled!==false||doc.webkitFullscreenEnabled!==false;
+  if(!enabled||!req||!ext){ btn.style.display="none"; return; }
+  function hide(){ btn.style.display="none"; }
+  function paint(){
+    var fs=isFs();
+    icon.innerHTML=fs?EXIT:ENTER;
+    btn.title=fs?"Exit fullscreen":"Enter fullscreen";
+    btn.setAttribute("aria-label",btn.title);
+  }
+  btn.addEventListener("click",function(){
+    if(isFs()){ ext.call(doc); return; }
+    var p=req.call(dd);
+    if(p&&p.catch)p.catch(hide);
+  });
+  doc.addEventListener("fullscreenchange",paint);
+  doc.addEventListener("webkitfullscreenchange",paint);
+  paint();
+})();
+</script>
+<details class="stdbox" style="margin-top:18px">
+  <summary>🛡️ BGN standards check</summary>
+  <p>Auto-checks this generator against the BGN house standards — pass, fail and warning checks with per-item fix hints.</p>
+  <iframe src="https://perchance.org/bgn-standards-checker?g=[window.generatorName]&embed=1" loading="lazy" style="width:100%;height:620px;border:0;border-radius:12px;background:#0a0912"></iframe>
+</details>

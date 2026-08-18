@@ -1,0 +1,2547 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN BLANK TEMPLATE — index.html
+     A boardless, ready-to-build-on multiplayer table for the
+     Boardgame Network: rooms, room codes, turn order, presence,
+     rematch, claim-win — with NO game logic.
+     ─────────────────────────────────────────────────────────────
+     - The <script type="text/x-server-plugin"> element below is the
+       authoritative table server (rooms, turn sequencing, presence,
+       game-over declarations). It is PUBLIC source — no secrets here.
+     - Durable room state lives in the server-plugin `state` bytes
+       (the acting player can submit a compact full-state snapshot
+       via the `move` rpc — see the server comment for the layout).
+     - To build your game: replace the #stageEl placeholder with
+       your board/UI. On your turn, submit a turn payload with
+       `move`, and declare a winner with `endGame`.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<!-- BGN Audio System: shared sound + music (SFX are WebAudio-synthesized; music URL below). -->
+<script>window.BGN_AUDIO = { music: "https://user.uploads.dev/file/3722354b767ff0c6c1d9b3dac1b28527.mp3", muted: true };</script>
+<script src="src/bgn-audio.js"></script>
+<script src="https://user.uploads.dev/file/2ca2c779727012d212d20a0f915d73df.js"></script> <!-- BGN share/export toolkit (bgn-share.js) -->
+
+<!-- ═══ AUTHORITATIVE TABLE SERVER (server-plugin) ═══ -->
+<script type="text/x-server-plugin">
+/* ── BGN table server ─────────────────────────────────────────────
+   Generic two-player rooms: host + guest, 5-letter codes. The
+   server sequences turns (host first unless a rematch flips it),
+   stores ONE full-game snapshot per room (opaque string submitted
+   by whichever player is on turn), and tracks winner/reason for
+   resign, forfeit and end-of-game. No game logic here — the
+   snapshot is whatever the game decides it should be.
+   Durable state in the plugin `state` bytes (versioned layout).  */
+const SLOT=16384;
+const STATE_VERSION=6;
+const MAX_ROOMS=Math.min(512, Math.max(16, Math.floor((state.length-1)/SLOT)));
+const CODE_CHARS="ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const MAX_PAYLOAD=16000;
+
+let rooms=new Map();           // code -> room object (live cache)
+const conns=new Map();         // conn.id -> {code, role}
+const moveTimes=new Map();     // conn.id -> last move ms (rate limit)
+const chatTimes=new Map();     // conn.id -> last chat ms (rate limit)
+const CHAT_BANNED=["nigger","nigga","faggot","kys","kill yourself","retard","heil hitler","tranny"];
+function cleanText(s,max){ return String(s||"").trim().replace(/[\u0000-\u001f\u007f]/g,"").replace(/\s+/g," ").slice(0,max); }
+function isChatBanned(t){ const s=t.toLowerCase(); for(let i=0;i<CHAT_BANNED.length;i++){ if(s.indexOf(CHAT_BANNED[i])!==-1) return true; } return false; }
+
+/* ── durable state (slot layout) ──
+   slot byte 0: status 0=free 1=waiting 2=playing 3=finished
+   slot +1..+8: room code (8 ASCII, zero padded)
+   slot +9: first (0=host moves first, 1=guest; rematch flips)
+   slot +10: state version
+   slot +11: reserved
+   slot +12..+15: uint32 lastActive (unix secs)
+   slot +16: winner 0=none 1=host 2=guest 3=draw
+   slot +17: reason 0=none 1=resign 2=forfeit 3=end
+   slot +18..+19: uint16 turn counter (completed turns)
+   slot +20..+21: uint16 snapshot bytes length
+   slot +22..+23: reserved
+   slot +24..: snapshot bytes (utf8, latest only)                */
+function off(i){ return 1+i*SLOT; }
+function nowSec(){ return Math.floor(Date.now()/1000); }
+function readLastAct(i){ const o=off(i); return (state[o+12]<<24)|(state[o+13]<<16)|(state[o+14]<<8)|state[o+15]; }
+function slotStatus(i){ return state[off(i)]; }
+function writeCode(o,code){ for(let k=0;k<8;k++)state[o+1+k]=k<code.length?code.charCodeAt(k):0; }
+function codeAt(i){ const o=off(i); let s=""; for(let k=0;k<8;k++){ const ch=state[o+1+k]; if(!ch)break; s+=String.fromCharCode(ch); } return s; }
+function utf8Encode(s){ const out=[]; for(let i=0;i<s.length;i++){ const c=s.charCodeAt(i); if(c<128)out.push(c); else if(c<2048)out.push(192|(c>>6),128|(c&63)); else out.push(224|(c>>12),128|((c>>6)&63),128|(c&63)); } return out; }
+function utf8Decode(bytes){ let s="",i=0; while(i<bytes.length){ const b=bytes[i]; if(b<128){ s+=String.fromCharCode(b); i++; } else if(b<224){ s+=String.fromCharCode(((b&31)<<6)|(bytes[i+1]&63)); i+=2; } else { s+=String.fromCharCode(((b&15)<<12)|((bytes[i+1]&63)<<6)|(bytes[i+2]&63)); i+=3; } } return s; }
+function saveRoom(room){
+  const o=off(room.slot);
+  state.fill(0,o,o+SLOT);
+  state[o]=room.status;
+  writeCode(o,room.code);
+  state[o+9]=room.first;
+  state[o+10]=STATE_VERSION;
+  state[o+11]=room.scenario||0;
+  const la=Math.max(0,Math.min(0xFFFFFFFF,room.lastAct));
+  state[o+12]=(la>>>24)&255; state[o+13]=(la>>>16)&255; state[o+14]=(la>>>8)&255; state[o+15]=la&255;
+  state[o+16]=room.winner==="host"?1:room.winner==="guest"?2:room.winner==="draw"?3:0;
+  state[o+17]=room.reason==="resign"?1:room.reason==="forfeit"?2:room.reason==="end"?3:0;
+  const tn=Math.max(0,Math.min(0xFFFF,room.turn));
+  state[o+18]=(tn>>8)&255; state[o+19]=tn&255;
+  const mb=room.snapshot?utf8Encode(room.snapshot):[];
+  const len=Math.min(SLOT-24,mb.length);
+  state[o+20]=(len>>8)&255; state[o+21]=len&255;
+  if(len>0)state.set(mb.slice(0,len),o+24);
+}
+const REASON=["","resign","forfeit","end"];
+function loadRooms(){
+  rooms=new Map();
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)continue;
+    const o=off(i);
+    if(state[o+10]!==STATE_VERSION){ state.fill(0,o,o+SLOT); continue; }  // old/foreign schema → reclaim
+    if(st===1){ state.fill(0,o,o+SLOT); continue; }                        // abandoned waiting rooms are reclaimed
+    const snapLen=(state[o+20]<<8)|state[o+21];
+    rooms.set(codeAt(i),{
+      slot:i, code:codeAt(i), status:st,
+      first:state[o+9], scenario:state[o+11]||0, hostId:-1, guestId:-1,
+      turn:(state[o+18]<<8)|state[o+19],
+      snapshot:snapLen?utf8Decode(state.slice(o+24,o+24+snapLen)):null,
+      winner:state[o+16]===1?"host":state[o+16]===2?"guest":state[o+16]===3?"draw":null,
+      reason:REASON[state[o+17]]||null,
+      lastAct:readLastAct(i)
+    });
+  }
+}
+function findSlot(){
+  let free=-1,bFin=-1,bWait=-1,bAny=-1,bFinT=0,bWaitT=0,bAnyT=0;
+  for(let i=0;i<MAX_ROOMS;i++){
+    const st=slotStatus(i);
+    if(st===0)return i;
+    const t=readLastAct(i);
+    if(st===3){ if(bFin===-1||t<bFinT){bFin=i;bFinT=t;} }
+    else if(st===1){ if(bWait===-1||t<bWaitT){bWait=i;bWaitT=t;} }
+    else if(st===2){ if(bAny===-1||t<bAnyT){bAny=i;bAnyT=t;} }
+  }
+  if(bFin!==-1)return bFin;
+  if(bWait!==-1)return bWait;
+  return bAny;
+}
+function genCode(){
+  for(let t=0;t<60;t++){
+    let s="";
+    for(let k=0;k<5;k++)s+=CODE_CHARS[Math.floor(Math.random()*CODE_CHARS.length)];
+    if(!rooms.has(s))return s;
+  }
+  return "AAAAA";
+}
+
+/* ── helpers ── */
+function topic(code){ return "tbl:"+code; }
+function snap(room){ return {code:room.code,status:room.status,snapshot:room.snapshot,first:room.first,scenario:room.scenario||0,turn:room.turn,hostIn:room.hostId!==-1,guestIn:room.guestId!==-1,winner:room.winner,reason:room.reason}; }
+function broadcast(room){ try{ pubsub.publish(topic(room.code), JSON.stringify({t:"snap",snap:snap(room)})); }catch(e){} }
+function roleOf(conn){ const i=conns.get(conn.id); return i?i.role:null; }
+function roomOf(conn){ const i=conns.get(conn.id); return i?rooms.get(i.code):null; }
+function turnRoleFor(n,first){ return ((n+(first?1:0))%2)===0?"host":"guest"; }
+
+self.rpc={
+  createRoom({conn},data){
+    if(conns.has(conn.id))return JSON.stringify({ok:false,err:"already_in_room"});
+    const slot=findSlot();
+    if(slot<0)return JSON.stringify({ok:false,err:"server_full"});
+    const code=genCode();
+    const room={slot,code,status:1,first:0,scenario:parseInt(data)||0,hostId:conn.id,guestId:-1,turn:0,snapshot:null,winner:null,reason:null,lastAct:nowSec()};
+    rooms.set(code,room);
+    saveRoom(room);
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role:"host"});
+    return JSON.stringify({ok:true,code,role:"host",snap:snap(room)});
+  },
+  joinRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const existing=conns.get(conn.id);
+    let role=null;
+    if(existing&&existing.code===code)role=existing.role;
+    else if(room.hostId===-1)role="host";
+    else if(room.guestId===-1)role="guest";
+    else return JSON.stringify({ok:false,err:"room_full"});
+    if(room.status===3&&!existing)return JSON.stringify({ok:false,err:"game_over"});
+    if(role==="host")room.hostId=conn.id; else room.guestId=conn.id;
+    if(room.status===1&&room.hostId!==-1&&room.guestId!==-1)room.status=2;
+    conn.subscribe(topic(code));
+    conns.set(conn.id,{code,role});
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true,role,snap:snap(room)});
+  },
+  getRoom({conn},data){
+    const code=String(data||"").trim().toUpperCase();
+    const room=rooms.get(code);
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    return JSON.stringify({ok:true,snap:snap(room)});
+  },
+  move({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(turnRoleFor(room.turn,room.first)!==role)return JSON.stringify({ok:false,err:"not_your_turn"});
+    const now=Date.now();
+    if(now-(moveTimes.get(conn.id)||0)<300)return JSON.stringify({ok:false,err:"rate_limited"});
+    moveTimes.set(conn.id,now);
+    if(typeof obj.evt!=="number"||obj.evt!==room.turn)return JSON.stringify({ok:false,err:"stale"});
+    if(typeof obj.data!=="string"||obj.data.length<1||obj.data.length>MAX_PAYLOAD)return JSON.stringify({ok:false,err:"bad_move"});
+    room.snapshot=obj.data;
+    room.turn++;
+    room.lastAct=nowSec();
+    saveRoom(room);
+    broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  endGame({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(["host","guest","draw"].indexOf(obj.winner)===-1)return JSON.stringify({ok:false,err:"bad_request"});
+    room.status=3; room.winner=obj.winner; room.reason="end";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  resign({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="resign";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  rematch({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==3)return JSON.stringify({ok:false,err:"not_finished"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(!oppPresent)return JSON.stringify({ok:false,err:"opp_gone"});
+    room.status=2; room.turn=0; room.snapshot=null; room.winner=null; room.reason=null;
+    room.first=1-room.first;
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  claimWin({conn},data){
+    const room=roomOf(conn);
+    if(!room)return JSON.stringify({ok:false,err:"not_in_room"});
+    if(room.status!==2)return JSON.stringify({ok:false,err:"not_playing"});
+    const role=roleOf(conn);
+    const oppPresent=role==="host"?room.guestId!==-1:room.hostId!==-1;
+    if(oppPresent)return JSON.stringify({ok:false,err:"opp_present"});
+    room.status=3; room.winner=role; room.reason="forfeit";
+    room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    return JSON.stringify({ok:true});
+  },
+  leave({conn},data){
+    const room=roomOf(conn);
+    if(room&&room.status===2){
+      room.status=3; room.winner=roleOf(conn)==="host"?"guest":"host"; room.reason="forfeit";
+      room.lastAct=nowSec(); saveRoom(room); broadcast(room);
+    }
+    return JSON.stringify({ok:true});
+  },
+  chat({conn},data){
+    let obj; try{ obj=JSON.parse(data); }catch(e){ return JSON.stringify({ok:false,err:"bad_request"}); }
+    const room=rooms.get(String(obj.code||"").trim().toUpperCase());
+    if(!room)return JSON.stringify({ok:false,err:"no_such_room"});
+    const role=roleOf(conn);
+    if(!role||roomOf(conn)!==room)return JSON.stringify({ok:false,err:"not_in_room"});
+    const now=Date.now();
+    if(now-(chatTimes.get(conn.id)||0)<700)return JSON.stringify({ok:false,err:"rate_limited"});
+    chatTimes.set(conn.id,now);
+    const text=cleanText(obj.text,160);
+    if(!text)return JSON.stringify({ok:false,err:"empty"});
+    if(isChatBanned(text))return JSON.stringify({ok:false,err:"blocked"});
+    pubsub.publish(topic(room.code),JSON.stringify({t:"chat",role,text,ts:nowSec()}));
+    return JSON.stringify({ok:true});
+  }
+};
+
+self.onopen=({conn})=>{};
+self.onclose=({conn})=>{
+  const info=conns.get(conn.id);
+  conns.delete(conn.id);
+  moveTimes.delete(conn.id);
+  chatTimes.delete(conn.id);
+  if(!info)return;
+  const room=rooms.get(info.code);
+  if(!room)return;
+  if(info.role==="host")room.hostId=-1; else room.guestId=-1;
+  room.lastAct=nowSec();
+  saveRoom(room);
+  broadcast(room);   // opponent sees "disconnected" and may claim the win
+};
+
+loadRooms();
+</script>
+
+<!-- ═══ NAV: back to the hub ═══ -->
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="24" height="24" viewBox="0 0 26 26" fill="none">
+        <path d="M13 2l4.6 3.2-.9 5.6 3.7 4.3-4.4 3.5-.4 5.6L13 21l-2.6 3.2-.4-5.6-4.4-3.5 3.7-4.3-.9-5.6L13 2z" fill="url(#bgnG)"/>
+        <circle cx="13" cy="8" r="1.7" fill="#0a0912"/>
+        <circle cx="18.2" cy="14" r="1.7" fill="#0a0912"/>
+        <circle cx="7.8" cy="14" r="1.7" fill="#0a0912"/>
+        <defs><linearGradient id="bgnG" x1="6" y1="2" x2="20" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+      </svg>
+      ← Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+    <div class="bgn-nav-right">
+      <a class="bgn-nav-projects" id="myProjectsBtn" href="[projectsUrl]" target="_blank" rel="noopener" title="[projectsLabel]" aria-label="[projectsLabel]">
+        <span class="rb-badge">[authorInitial]</span>
+        <span class="rb-label">[projectsLabel]</span>
+      </a>
+      <button class="bgn-nav-gear" id="navSettingsBtn" title="Settings &amp; help" aria-label="Settings &amp; help">⚙</button>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap" style="padding-top:44px">
+
+  <!-- ═══ LOBBY ═══ -->
+  <section id="lobbyCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Choose a table</div>
+      <h2 class="sec-title goldtext">How would you like to play?</h2>
+      <p class="sec-sub">Two lances of BattleMechs fight it out across a ridge and river valley: movement points, terrain, line of sight, armor vs internal damage, critical hits, heat, ammo explosions — plus rooms, turn order, presence, rematch and table chat.</p>
+    </div>
+
+    <div class="bgn-modes">
+      <button class="bgn-mode" data-mode="local">
+        <span class="bgn-mode-icon">🛋️</span>
+        <span class="bgn-mode-name">Local table</span>
+        <span class="bgn-mode-sub">Two players, one screen</span>
+      </button>
+      <button class="bgn-mode" data-mode="ai">
+        <span class="bgn-mode-icon">🤖</span>
+        <span class="bgn-mode-name">Play vs AI</span>
+        <span class="bgn-mode-sub">One player against the machine</span>
+      </button>
+      <button class="bgn-mode" data-mode="online">
+        <span class="bgn-mode-icon">🌐</span>
+        <span class="bgn-mode-name">Online table</span>
+        <span class="bgn-mode-sub">Live match over the network</span>
+      </button>
+    </div>
+
+    <div style="display:flex; justify-content:center; margin-top:18px">
+      <button class="btn btn-ghost" id="helpBtn">❓ How it works</button>
+      <button class="btn btn-ghost" id="shareBtn" style="margin-left:10px" title="Download this table as JSON or a PNG">📤 Share</button>
+    </div>
+
+    <div id="continuePanel" class="panel center" style="margin-top:22px" hidden>
+      <h3>▶ Continue your last table</h3>
+      <p class="muted small" id="continueInfoEl">A saved table was found.</p>
+      <div style="display:flex; gap:10px; justify-content:center; margin-top:12px">
+        <button class="btn btn-gold" id="continueBtn">Continue</button>
+        <button class="btn btn-ghost" id="deleteSaveBtn">Delete save</button>
+      </div>
+    </div>
+
+    <div id="onlinePanel" class="panel center" hidden>
+      <h3>Online table</h3>
+      <p class="muted small">Create a room and share the 5-letter code, or join a friend's room with theirs.</p>
+      <div class="flex center mt" style="gap:10px; flex-wrap:wrap; justify-content:center;">
+        <button class="btn btn-gold" id="createRoomBtn">Create a room</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <input id="joinCodeInput" maxlength="5" autocomplete="off" spellcheck="false"
+                 placeholder="CODE"
+                 style="background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); border-radius:8px; color:inherit; padding:9px 10px; width:110px; text-align:center; letter-spacing:5px; text-transform:uppercase; font-weight:700;">
+          <button class="btn btn-ghost" id="joinRoomBtn">Join</button>
+        </div>
+      </div>
+      <p class="muted small" id="onlineMsg"></p>
+    </div>
+
+    <div class="panel center" style="margin-top:22px">
+      <h3>⚔️ Choose your battle</h3>
+      <p class="muted small">Each side fields the same lance. In an online match the room host's pick is used for both players.</p>
+      <select id="scenarioSelect" class="bgn-select"></select>
+    </div>
+  </section>
+
+  <!-- ═══ GAME TABLE ═══ -->
+  <section id="gameCtn" hidden>
+    <div class="bgn-table">
+      <div class="panel bgn-stagepanel">
+        <div class="bgn-players">
+          <div class="bgn-player" id="pHost">
+            <span class="bgn-avatar host"></span>
+            <div>
+              <div class="bgn-pname" id="hostNameEl">Host</div>
+              <div class="bgn-psub">sitting at the table</div>
+            </div>
+          </div>
+          <div class="bgn-turn" id="turnEl">Host to move</div>
+          <div class="bgn-timer" id="turnTimerEl" hidden>⏱ —</div>
+          <div class="bgn-player right" id="pGuest">
+            <span class="bgn-avatar guest"></span>
+            <div>
+              <div class="bgn-pname" id="guestNameEl">Guest</div>
+              <div class="bgn-psub">sitting at the table</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="bgn-stage" id="stageEl">
+          <div class="hex-toolbar">
+            <div class="hex-tools">
+              <span class="hex-group-label">Move</span>
+              <button class="btn btn-ghost btn-sm move-btn active" data-mode="walk" id="walkBtn">🚶 Walk</button>
+              <button class="btn btn-ghost btn-sm move-btn" data-mode="run" id="runBtn">🏃 Run</button>
+              <button class="btn btn-ghost btn-sm move-btn" data-mode="jump" id="jumpBtn">🦿 Jump</button>
+              <span class="hex-sep"></span>
+              <button class="btn btn-ghost btn-sm tool-btn active" data-tool="move">🎯 Select</button>
+              <button class="btn btn-ghost btn-sm tool-btn" data-tool="measure">📏 Measure</button>
+              <span class="hex-sep"></span>
+              <button class="btn btn-ghost btn-sm zoom-btn" data-z="-1" title="Zoom out">➖</button>
+              <button class="btn btn-ghost btn-sm zoom-btn zoom-pct" data-z="reset" id="zoomPctEl" title="Reset zoom to fit">100%</button>
+              <button class="btn btn-ghost btn-sm zoom-btn" data-z="1" title="Zoom in">➕</button>
+              <span class="hex-sep"></span>
+              <button class="btn btn-ghost btn-sm" id="fsBtn" title="Fullscreen map">⛶</button>
+            </div>
+            <div class="hex-hint" id="hexHintEl">Select one of your 'Mechs to move and fight.</div>
+          </div>
+          <div id="hexBoardEl" class="hex-board-wrap"></div>
+          <div class="bt-tip" id="mechTipEl" hidden></div>
+          <div class="hex-info" id="hexInfoEl">Hover a hex for its details.</div>
+          <div class="bt-roster" id="btRosterEl"></div>
+          <div class="hex-turnbar">
+            <div class="hex-turnmsg" id="hexTurnMsgEl"></div>
+            <button class="btn btn-gold" id="passBtn">End turn</button>
+          </div>
+        </div>
+
+        <div class="bt-mechpanel" id="mechPanelEl"></div>
+
+        <div class="bgn-banner" id="bannerEl"></div>
+      </div>
+
+      <div class="panel bgn-side">
+        <div id="roomBox" class="bgn-room" hidden>
+          <div class="bgn-room-code"><span>Room code</span><b id="roomCodeEl">—</b></div>
+          <div class="flex center" style="gap:8px; justify-content:center; margin-bottom:8px;">
+            <button class="btn btn-ghost btn-sm" id="copyCodeBtn">Copy code</button>
+            <button class="btn btn-ghost btn-sm" id="leaveBtn">Resign &amp; leave</button>
+          </div>
+          <p class="muted small" id="connEl">Connecting…</p>
+        </div>
+        <div class="bgn-chat" id="chatBox" hidden>
+          <h3>Table chat</h3>
+          <div class="bgn-chat-msgs" id="chatMsgsEl"></div>
+          <div class="bgn-chat-compose">
+            <input id="chatInput" maxlength="160" placeholder="Message…" autocomplete="off">
+            <button class="btn btn-gold btn-sm" id="chatSendBtn">Send</button>
+          </div>
+        </div>
+        <h3 id="sideTitleEl">Turn log</h3>
+        <div class="bgn-log" id="logEl"></div>
+        <div class="bgn-actions">
+          <button class="btn btn-gold" id="newGameBtn">Restart</button>
+          <button class="btn btn-ghost" id="claimBtn" hidden>Claim win</button>
+          <button class="btn btn-ghost" id="menuBtn">Back to lobby</button>
+          <button class="btn btn-ghost" id="tableHelpBtn" title="How it works">❓</button>
+          <button class="btn btn-ghost" id="saveBtn" hidden>💾 Save</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══ FULLSCREEN BOARD OVERLAY (BGN standard) ═══
+     The fsOpenBtn floats top-right and is revealed by bgnFullscreen.register().
+     Registered elements (canvas + optional tile/meeple) are MOVED into the
+     overlay and restored to their original parent/order on close. -->
+<button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>
+<div id="fsOverlay" hidden>
+  <div class="fs-topbar">
+    <span id="fsStatusEl"></span>
+    <span id="fsActionsCtn"></span>
+    <button id="fsExitBtn" class="btn btn-gold">✕ Exit</button>
+  </div>
+  <div id="fsBoardArea" class="fs-board"></div>
+  <div id="fsTileCtn" class="fs-tile"></div>
+  <div id="fsMeepleCtn" class="fs-meeple"></div>
+</div>
+
+<!-- ═══ HELP MODAL ═══ -->
+<div id="helpOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help">
+    <button class="bgn-help-close" id="helpCloseBtn" title="Close">✕</button>
+    <div class="bgn-help-body" id="helpBody"></div>
+  </div>
+</div>
+
+<!-- ═══ SETTINGS MODAL ═══ -->
+<div id="settingsOverlay" class="bgn-help-overlay" hidden>
+  <div class="bgn-help bgn-settings">
+    <button class="bgn-help-close" id="settingsCloseBtn" title="Close">✕</button>
+    <h2 class="goldtext">Settings</h2>
+    <div class="bgn-settings-row">
+      <div>
+        <div class="bgn-settings-name">📖 Interface guide</div>
+        <div class="bgn-settings-desc">How to use the board, toolbar, panels and controls.</div>
+      </div>
+      <button class="btn btn-ghost" id="guideBtn">Show</button>
+    </div>
+    <div class="bgn-settings-row">
+      <div>
+        <div class="bgn-settings-name">⚔️ How to fight</div>
+        <div class="bgn-settings-desc">Rules reference: movement, to-hit, damage, heat, falls.</div>
+      </div>
+      <button class="btn btn-ghost" id="rulesBtn">Show</button>
+    </div>
+    <div class="bgn-settings-row">
+      <div>
+        <div class="bgn-settings-name">Show guide on first visit</div>
+        <div class="bgn-settings-desc">Pop up the interface guide when the page loads.</div>
+      </div>
+      <label class="bgn-switch">
+        <input type="checkbox" id="firstVisitCb">
+        <span class="bgn-switch-track"></span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="bgn-footer">
+  <div class="ornament">✦</div>
+  <p>Part of <b style="color:var(--bgn-gold2)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a></p>
+<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->
+<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>
+<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>
+<style>
+#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+#bgnAuditOverlay[hidden]{display:none}
+.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}
+.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}
+</style>
+<script>
+function openBgnAudit(){
+  var f=document.getElementById("bgnAuditFrame");
+  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();
+  document.getElementById("bgnAuditOverlay").hidden=false;
+  document.body.style.overflow="hidden";
+}
+function closeBgnAudit(){
+  document.getElementById("bgnAuditOverlay").hidden=true;
+  document.body.style.overflow="";
+}
+document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });
+document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });
+</script>
+  <p>Made with the BGN template on <a href="https://perchance.org" target="_blank" rel="noopener">Perchance</a></p>
+  <p>Mech sprites by the <a href="https://github.com/MegaMek/megamek" target="_blank" rel="noopener">MegaMek project</a> · <a href="https://megamek.org" target="_blank" rel="noopener">megamek.org</a> · <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a></p>
+</footer>
+
+<style>
+/* ═══ BGN BLANK TEMPLATE ═══ */
+.bgn-nav-right{ display:flex; align-items:center; gap:10px; }
+.bgn-nav-gear{ width:34px; height:34px; border-radius:999px; border:1px solid rgba(255,255,255,.18); background:rgba(0,0,0,.3); color:var(--bgn-cream,#f6e6a4); cursor:pointer; font-size:16px; line-height:1; display:inline-flex; align-items:center; justify-content:center; transition:background .12s, transform .12s; }
+.bgn-nav-gear:hover{ background:rgba(0,0,0,.55); transform:rotate(30deg); }
+
+.bgn-nav-projects{
+  display:inline-flex;align-items:center;gap:8px;flex:none;
+  padding:6px 14px 6px 6px;border-radius:999px;
+  background:rgba(13,15,21,.82);border:1px solid rgba(255,255,255,.14);
+  box-shadow:0 6px 18px rgba(0,0,0,.3);
+  text-decoration:none;color:#fff;font-family:var(--bgn-sans,system-ui);
+  transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease;
+}
+.bgn-nav-projects:hover{ transform:translateY(-1px); border-color:rgba(167,139,250,.65); box-shadow:0 8px 20px rgba(0,0,0,.4),0 0 14px rgba(139,92,246,.35); }
+.bgn-nav-projects .rb-badge{
+  width:26px;height:26px;flex:0 0 26px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#8b5cf6,#d946ef);color:#fff;
+  font-size:14px;font-weight:700;line-height:1;user-select:none;
+}
+.bgn-nav-projects .rb-label{ font-size:13px;font-weight:600;line-height:1;white-space:nowrap; }
+@media(max-width:560px){
+  .bgn-nav-projects{ position:fixed;left:16px;bottom:16px;z-index:450;padding:8px 16px 8px 8px;box-shadow:0 8px 24px rgba(0,0,0,.35); }
+  .bgn-nav-projects .rb-label{ font-size:14px; }
+}
+
+.bgn-settings h2{ margin:0 0 14px; }
+.bgn-settings-row{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:12px 0; border-top:1px solid rgba(255,255,255,.08); }
+.bgn-settings-row:first-of-type{ border-top:0; }
+.bgn-settings-name{ font-weight:700; color:var(--bgn-cream,#f6e6a4); font-size:.92rem; }
+.bgn-settings-desc{ font-size:.78rem; color:var(--bgn-muted,#c8c3c9); margin-top:2px; }
+.bgn-switch{ position:relative; display:inline-block; width:42px; height:24px; flex:none; cursor:pointer; }
+.bgn-switch input{ opacity:0; width:0; height:0; position:absolute; }
+.bgn-switch-track{ position:absolute; inset:0; border-radius:999px; background:rgba(255,255,255,.14); transition:background .15s; }
+.bgn-switch-track::after{ content:""; position:absolute; top:3px; left:3px; width:18px; height:18px; border-radius:999px; background:#c8c3c9; transition:transform .15s, background .15s; }
+.bgn-switch input:checked + .bgn-switch-track{ background:rgba(212,175,55,.6); }
+.bgn-switch input:checked + .bgn-switch-track::after{ transform:translateX(18px); background:#f6e6a4; }
+
+.bgn-lobby{ max-width:760px; margin:0 auto; }
+.bgn-modes{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin-top:18px; }
+.bgn-mode{ background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02)); border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:24px 16px; text-align:center; cursor:pointer; transition:transform .12s, box-shadow .12s, border-color .12s; color:inherit; font:inherit; }
+.bgn-mode:hover{ transform:translateY(-3px); border-color:var(--bgn-gold2,#d4af37); box-shadow:0 10px 24px rgba(0,0,0,.4); }
+.bgn-mode-icon{ font-size:2rem; display:block; margin-bottom:8px; }
+.bgn-mode-name{ font-weight:800; font-size:1.05rem; display:block; }
+.bgn-mode-sub{ font-size:.8rem; opacity:.7; display:block; margin-top:4px; }
+
+.bgn-table{ display:grid; grid-template-columns:minmax(0,1fr) 270px; gap:14px; align-items:start; justify-content:center; }
+@media (max-width:900px){ .bgn-table{ grid-template-columns:minmax(0,1fr); justify-content:stretch; } }
+.bgn-stagepanel{ text-align:center; padding:12px; }
+
+.bgn-players{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.bgn-timer{ font-size:.8rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(212,175,55,.35); border-radius:999px; padding:4px 11px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.bgn-timer.low{ color:#ff9b6b; border-color:rgba(255,120,60,.55); }
+.bgn-player{ display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:10px; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); min-width:0; }
+.bgn-player.right{ flex-direction:row-reverse; text-align:right; }
+.bgn-player.on{ border-color:var(--bgn-gold2,#d4af37); box-shadow:0 0 14px rgba(212,175,55,.35); }
+.bgn-avatar{ width:26px; height:26px; border-radius:50%; box-shadow:0 0 0 2px rgba(255,255,255,.25); flex:none; }
+.bgn-avatar.host{ background:radial-gradient(circle at 35% 30%, #ffffff, #cfc8b8); }
+.bgn-avatar.guest{ background:radial-gradient(circle at 35% 30%, #3c3c44, #050507); }
+.bgn-pname{ font-weight:700; font-size:.92rem; white-space:nowrap; }
+.bgn-psub{ font-size:.7rem; opacity:.7; white-space:nowrap; }
+.bgn-turn{ font-size:.78rem; opacity:.8; text-align:center; white-space:nowrap; }
+
+.bgn-stage{ min-height:280px; margin-top:12px; padding:18px; border-radius:10px; background:rgba(0,0,0,.18); border:1px dashed rgba(212,175,55,.35); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
+.stage-placeholder{ max-width:420px; }
+.stage-orb{ font-size:2.6rem; margin-bottom:6px; }
+.stage-title{ font-family:var(--bgn-serif,serif); font-weight:700; font-size:1.05rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 4px; }
+#passBtn{ min-width:170px; }
+
+/* ══════ help modal ══════ */
+.bgn-help-overlay{ position:fixed; inset:0; z-index:9500; background:rgba(5,8,16,.66); display:flex; align-items:center; justify-content:center; padding:18px; }
+.bgn-help{ position:relative; width:min(560px,100%); max-height:min(82vh,720px); overflow:auto; background:#17131f; border:1px solid rgba(212,175,55,.45); border-radius:14px; box-shadow:0 18px 60px rgba(0,0,0,.7); padding:26px 26px 22px; }
+.bgn-help h2{ font-family:var(--bgn-serif,serif); margin:0 0 6px; }
+.bgn-help h3{ font-family:var(--bgn-serif,serif); margin:18px 0 4px; color:var(--bgn-gold2,#d4af37); font-size:1rem; }
+.bgn-help p{ margin:0 0 8px; color:var(--bgn-muted,#c8c3c9); font-size:.9rem; line-height:1.55; }
+.bgn-help b{ color:var(--bgn-cream,#f6e6a4); font-weight:600; }
+.bgn-help code{ background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.1); border-radius:5px; padding:1px 6px; font-size:.8rem; color:#f2dc8b; }
+.bgn-help .btn{ margin-top:14px; }
+.bgn-help-close{ position:absolute; top:10px; right:10px; width:32px; height:32px; border-radius:999px; border:0; background:rgba(0,0,0,.4); color:#fff; cursor:pointer; font-size:14px; line-height:1; }
+.bgn-help-close:hover{ background:rgba(0,0,0,.65); }
+
+.bgn-banner{ min-height:22px; margin-top:12px; font-weight:600; color:#f6e6a4; font-size:.95rem; }
+.bgn-side{ min-width:0; }
+.bgn-chat{ margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,.09); text-align:left; }
+.bgn-chat h3{ font-family:var(--bgn-serif,Georgia,serif); font-size:.95rem; color:var(--bgn-accent2,#f2dc8b); margin:0 0 8px; letter-spacing:.04em; }
+.bgn-chat-msgs{ max-height:150px; overflow-y:auto; display:flex; flex-direction:column; gap:5px; background:rgba(0,0,0,.25); border-radius:8px; padding:8px; font-size:.84rem; margin-bottom:8px; }
+.bgn-chat-msgs:empty::before{ content:"Say hi to your opponent — they see this too."; color:#6f6880; font-style:italic; font-size:.78rem; }
+.chat-item{ line-height:1.4; word-break:break-word; }
+.chat-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; font-weight:600; }
+.chat-item.mine b{ color:var(--bgn-green,#2fae8c); }
+.chat-item .chat-time{ color:#6f6880; font-size:.66rem; margin-left:4px; }
+.bgn-chat-compose{ display:flex; gap:8px; align-items:center; }
+.bgn-chat-compose input{ flex:1; min-width:0; background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.22); color:inherit; border-radius:8px; padding:8px 10px; font-size:.84rem; outline:none; font-family:inherit; }
+.bgn-chat-compose input:focus{ border-color:var(--bgn-accent,#d4af37); }
+.bgn-log{ max-height:280px; overflow:auto; background:rgba(0,0,0,.25); border-radius:8px; padding:10px; font-size:.85rem; }
+.log-item{ padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.05); }
+.log-item b{ color:var(--bgn-gold2,#d4af37); margin-right:6px; }
+.log-item .resp{ opacity:.7; }
+.bgn-actions{ display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+.bgn-room{ border:1px dashed rgba(212,175,55,.55); border-radius:10px; padding:12px; margin-bottom:14px; text-align:center; }
+.bgn-room-code{ display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px; font-size:.8rem; opacity:.8; }
+.bgn-room-code b{ font-size:1.7rem; letter-spacing:6px; color:#f6e6a4; opacity:1; }
+.btn[disabled]{ opacity:.45; cursor:default; }
+
+/* ═══ BGN HEX BOARD ═══ */
+.hex-board-wrap{ width:100%; max-width:100%; margin:10px 0 12px; overflow:auto; }
+.hex-svg{ display:block; border-radius:10px; box-shadow:0 8px 30px rgba(0,0,0,.45); margin:0 auto; }
+.hex-toolbar{ display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+.hex-tools{ display:flex; gap:8px; }
+.tool-btn.active{ border-color:var(--bgn-gold2,#d4af37); color:#f2dc8b; background:rgba(212,175,55,.16); }
+.hex-radius{ display:flex; align-items:center; gap:8px; background:rgba(0,0,0,.28); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:3px 12px; }
+.hex-radius b{ color:var(--bgn-accent2,#f2dc8b); font-size:1rem; min-width:16px; text-align:center; }
+.hex-hint{ font-size:.84rem; color:var(--bgn-muted); }
+.hex-info{ min-height:1.6em; font-size:.86rem; color:var(--bgn-accent2,#f2dc8b); background:rgba(0,0,0,.25); border:1px solid rgba(255,255,255,.08); border-radius:8px; padding:7px 12px; margin-bottom:10px; text-align:center; }
+.hex-turnbar{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; text-align:left; }
+.hex-turnmsg{ font-size:.92rem; color:var(--bgn-cream); }
+.hex-turnmsg b{ color:var(--bgn-accent2,#f2dc8b); }
+
+/* ═══ BATTLETECH · 3025 ═══ */
+.bgn-select{ background:rgba(0,0,0,.35); border:1px solid rgba(255,255,255,.25); color:inherit; border-radius:8px; padding:9px 12px; font:inherit; font-size:.92rem; min-width:220px; }
+.hex-group-label{ font-size:.76rem; text-transform:uppercase; letter-spacing:.08em; color:var(--bgn-muted); align-self:center; }
+.hex-sep{ width:1px; height:22px; background:rgba(255,255,255,.15); margin:0 2px; }
+.move-btn.active{ border-color:var(--bgn-gold2,#d4af37); color:#f2dc8b; background:rgba(212,175,55,.16); }
+
+.bt-roster{ display:flex; flex-direction:column; gap:6px; margin:0 0 10px; }
+.bt-roster-row{ display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-start; }
+.bt-roster-row.right{ justify-content:flex-end; }
+.bt-chip{ display:flex; align-items:center; gap:7px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:9px; padding:5px 9px; cursor:pointer; color:inherit; font:inherit; font-size:.76rem; text-align:left; }
+.bt-chip:hover{ border-color:var(--bgn-gold2,#d4af37); }
+.bt-chip.sel{ border-color:#ffd76a; box-shadow:0 0 10px rgba(255,215,106,.4); }
+.bt-chip.tgt{ border-color:#ff5252; }
+.bt-chip.dead{ opacity:.38; }
+.bt-chip-dot{ width:9px; height:9px; border-radius:50%; flex:none; }
+.bt-roster-row:first-child .bt-chip-dot{ background:#e8452c; }
+.bt-roster-row.right .bt-chip-dot{ background:#3d7dd8; }
+.bt-chip-n{ font-weight:700; white-space:nowrap; }
+.bt-chip-meta{ opacity:.65; white-space:nowrap; }
+
+.bt-mechpanel{ text-align:left; background:rgba(0,0,0,.22); border:1px solid rgba(255,255,255,.1); border-radius:12px; padding:14px 16px; margin-top:10px; }
+.bt-ms-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+.bt-ms-head b{ font-family:var(--bgn-serif,Georgia,serif); font-size:1.05rem; color:#f6e6a4; }
+.bt-ms-status{ display:flex; gap:6px; flex-wrap:wrap; }
+.bt-st{ font-size:.66rem; font-weight:800; letter-spacing:.05em; padding:2px 7px; border-radius:999px; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); }
+.bt-st.hot{ color:#ffb08a; border-color:rgba(255,120,60,.55); background:rgba(255,120,60,.12); }
+.bt-ms-move{ font-size:.82rem; opacity:.85; margin-top:2px; }
+.bt-ms-face{ font-size:.82rem; margin-top:3px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.bt-arc-legend{ font-size:.72rem; opacity:.9; display:inline-flex; align-items:center; gap:5px; margin-left:2px; }
+.bt-arc-dot{ display:inline-block; width:9px; height:9px; border-radius:3px; margin:0 1px; }
+.dot-torso{ background:#ffd400; }
+.dot-la{ background:#5ae6c9; }
+.dot-ra{ background:#ff82be; }
+.bt-turn{ margin-left:auto; display:inline-flex; gap:6px; }
+.bt-twist{ margin-left:0; }
+.bt-twist .btn{ color:#ffd76a; border-color:rgba(255,215,106,.5); }
+.bt-wp-arc{ font-size:.62rem; font-weight:800; letter-spacing:.04em; padding:1px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.25); color:#0e1410; }
+.bt-wp-arc.arc-torso{ background:#ffd400; }
+.bt-wp-arc.arc-la{ background:#5ae6c9; }
+.bt-wp-arc.arc-ra{ background:#ff82be; }
+.bt-heat{ display:flex; align-items:center; gap:10px; margin-top:8px; }
+.bt-heat-lbl{ font-size:.8rem; font-weight:700; color:#f2dc8b; min-width:52px; }
+.bt-heat-bar{ flex:1; max-width:220px; height:11px; border-radius:999px; background:rgba(0,0,0,.4); border:1px solid rgba(255,255,255,.14); overflow:hidden; }
+.bt-heat-fill{ height:100%; background:linear-gradient(90deg,#2fae8c,#f2b84b 55%,#ff5252 85%); transition:width .3s; }
+.bt-heat-pen{ font-size:.74rem; color:#ffb08a; margin-top:3px; }
+.bt-locs{ display:grid; grid-template-columns:repeat(8,minmax(52px,1fr)); gap:6px; margin-top:10px; }
+@media (max-width:720px){ .bt-locs{ grid-template-columns:repeat(4,minmax(52px,1fr)); } }
+.bt-loc{ background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.09); border-radius:8px; padding:5px 7px; text-align:center; }
+.bt-loc.dest{ border-color:#ff5252; background:rgba(255,82,82,.12); }
+.bt-loc-n{ display:block; font-size:.68rem; font-weight:800; letter-spacing:.06em; opacity:.75; }
+.bt-loc-a, .bt-loc-s{ height:6px; border-radius:999px; background:rgba(0,0,0,.5); margin:4px 0 2px; overflow:hidden; }
+.bt-loc-a .bt-loc-fill{ height:100%; background:#5fb95f; }
+.bt-loc-a .bt-loc-fill{ background:#e0a04b; }
+.bt-loc-s{ height:5px; }
+.bt-loc-s .bt-loc-fill-s{ height:100%; background:#e05555; }
+.bt-loc-v{ font-size:.72rem; font-weight:700; }
+.bt-loc-vs{ font-size:.66rem; opacity:.8; margin-left:3px; }
+.bt-pilot{ font-size:.78rem; margin-top:8px; color:#ffd6d6; }
+.bt-tgt{ font-size:.82rem; margin:10px 0 4px; color:#ffb9a6; }
+.bt-weaps{ display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+.bt-wp{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.08); border-radius:8px; padding:5px 9px; font-size:.8rem; }
+.bt-wp.dead{ opacity:.45; }
+.bt-wp-n{ font-weight:700; min-width:96px; }
+.bt-wp-a{ font-variant-numeric:tabular-nums; opacity:.85; margin-left:auto; }
+.bt-wp-t{ min-width:120px; font-size:.74rem; opacity:.85; }
+
+/* ── hover tooltip panel ── */
+.bt-tip{ position:fixed; z-index:1200; pointer-events:none; width:330px; max-height:72vh; overflow-y:auto; background:rgba(9,11,16,.97); border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:11px 13px; box-shadow:0 10px 36px rgba(0,0,0,.55); font-size:12px; color:#e9e4d5; text-align:left; scrollbar-width:thin; }
+.bt-tip::-webkit-scrollbar{ width:6px; }
+.bt-tip::-webkit-scrollbar-thumb{ background:rgba(255,255,255,.2); border-radius:999px; }
+.bt-tip .bt-locs{ grid-template-columns:repeat(4,minmax(44px,1fr)); margin-top:8px; }
+.bt-tip .bt-loc{ padding:4px 6px; }
+.bt-tip .bt-wp{ font-size:.76rem; padding:4px 8px; }
+.bt-tip .bt-ms-head b{ font-size:.95rem; }
+.bt-tip .bt-ms-move{ font-size:.76rem; }
+.bt-tip .bt-heat{ margin-top:7px; }
+.bt-tip .bt-heat-lbl{ min-width:46px; }
+.bt-tip .bt-heat-bar{ flex:1; max-width:none; }
+.bt-tip .bt-heat-sub{ font-size:.72rem; opacity:.85; margin-top:3px; color:#ffd6a0; }
+.bt-tip .bt-pilot{ margin-top:7px; }
+.bt-tip-head{ display:flex; align-items:center; gap:7px; }
+.bt-tip-head svg{ flex:none; border-radius:5px; box-shadow:0 0 0 1.5px rgba(255,255,255,.28), 0 2px 6px rgba(0,0,0,.4); }
+.bt-tip-owner{ font-size:.66rem; font-weight:800; letter-spacing:.07em; text-transform:uppercase; opacity:.8; }
+.bt-tip-head b{ display:flex; align-items:center; }
+.bt-pilot-row{ display:flex; align-items:center; gap:6px; margin-top:6px; padding:4px 8px; border-radius:8px; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.09); font-size:.8rem; }
+.bt-pilot-ico{ font-size:.85rem; line-height:1; filter:drop-shadow(0 0 3px rgba(242,220,139,.35)); }
+.bt-fire{ margin-left:auto; }
+.bt-melee{ margin-top:10px; font-size:.82rem; }
+
+/* ═══ compact chrome (bigger map) ═══ */
+.bgn-nav .wrap{ height:48px; }
+.bgn-nav-brand{ font-size:.66rem; letter-spacing:.1em; }
+.bgn-nav-brand svg{ width:20px; height:20px; }
+.bgn-nav-title{ font-size:.7rem; }
+.bgn-table{ grid-template-columns:auto 270px; gap:14px; }
+.bgn-log{ max-height:120px; }
+.bgn-chat-msgs{ max-height:100px; }
+body.bt-in-game .game-hero{ display:none; }
+body.bt-in-game main.wrap{ padding-top:18px; }
+
+/* ═══ fullscreen board overlay (BGN standard) ═══ */
+.fs-open-btn{
+  position:absolute; top:10px; right:10px; z-index:6;
+  display:inline-flex; align-items:center; gap:7px;
+  padding:10px 15px; border-radius:10px; cursor:pointer;
+  font:600 13px/1 var(--bgn-sans, system-ui); letter-spacing:.03em;
+  color:#fff; background:rgba(10,14,24,.72);
+  border:1px solid rgba(255,255,255,.35);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  box-shadow:0 6px 18px rgba(0,0,0,.35);
+  transition:border-color .15s, box-shadow .15s, transform .15s;
+}
+.fs-open-btn:hover{ border-color:var(--bgn-accent,#d4af37); box-shadow:0 8px 22px rgba(0,0,0,.4), 0 0 12px rgba(212,175,55,.3); }
+.fs-open-btn[hidden]{ display:none; }
+#fsOpenBtn{ z-index:200; }   /* float above the sticky nav so it stays clickable */
+#fsOverlay{ position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column; }
+#fsOverlay[hidden]{ display:none; }
+.fs-topbar{ flex:none; display:flex; align-items:center; gap:12px; padding:9px 14px; background:rgba(0,0,0,.4); border-bottom:1px solid rgba(255,255,255,.12); }
+#fsStatusEl{ flex:1; min-width:0; font-weight:600; font-size:.92rem; color:var(--bgn-accent2,#f2dc8b); text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#fsActionsCtn{ display:flex; align-items:center; gap:8px; flex:none; }
+#fsExitBtn{ padding:9px 16px; font-size:.72rem; }
+#fsBoardArea{ flex:1; min-height:0; position:relative; overflow:hidden; }
+.fs-board{ flex:1; min-height:0; position:relative; }
+.fs-board canvas{ position:absolute; inset:0; width:100%; height:100%; }
+#fsBoardArea .hex-board-wrap{ position:absolute; inset:0; width:100%; height:100%; margin:0; }
+.fs-tile{ position:absolute; top:64px; right:14px; z-index:3; max-width:min(560px,46vw); }
+.fs-tile:empty{ display:none; }
+.fs-tile .bt-mechpanel{ margin:0; max-height:calc(100vh - 96px); overflow-y:auto; box-shadow:0 14px 44px rgba(0,0,0,.5); border-color:rgba(212,175,55,.35); }
+.fs-meeple{ position:absolute; bottom:14px; right:14px; z-index:3; }
+.fs-meeple:empty{ display:none; }
+</style>
+
+<!-- ═══ BGN HEX FRAMEWORK ═══ -->
+<script src="src/hex.js"></script>       <!-- rules engine: grid math, board, tokens, movement + measurement -->
+<script src="src/hexview.js"></script>   <!-- SVG renderer + interaction -->
+<script src="src/bt.js"></script>        <!-- BattleTech · 3025: 'Mech sheets + combat engine -->
+
+<!-- ═══ BGN FULLSCREEN BOARD OVERLAY — standard module ═══
+     window.bgnFullscreen.register({ canvas, tile, meeple, resize, status, onOpen, onClose })
+     opens a fixed overlay (#fsOverlay) and MOVES the registered elements into it
+     (never cloned), restoring each to its original parent + position on close.
+     A registered canvas reveals the floating #fsOpenBtn (hidden by default). -->
+<script>
+(function(){
+"use strict";
+var fsOverlay=document.getElementById("fsOverlay");
+var fsOpenBtn=document.getElementById("fsOpenBtn");
+var fsExitBtn=document.getElementById("fsExitBtn");
+var fsStatusEl=document.getElementById("fsStatusEl");
+var fsBoardArea=document.getElementById("fsBoardArea");
+var fsTileCtn=document.getElementById("fsTileCtn");
+var fsMeepleCtn=document.getElementById("fsMeepleCtn");
+var bannerEl=document.getElementById("bannerEl");
+var cfg=null, open=false, moved=[];
+
+function stash(el){ el._fsOrig = { parentNode: el.parentNode, nextSibling: el.nextSibling }; }
+function moveTo(el, target){ if(!el || !target || el.parentNode===target) return; stash(el); moved.push(el); target.appendChild(el); }
+function restoreAll(){
+  for(var i=moved.length-1; i>=0; i--){                      /* restore in reverse order */
+    var el=moved[i], o=el._fsOrig;
+    if(o && o.parentNode && el){ try{ o.parentNode.insertBefore(el, o.nextSibling); }catch(e){} }
+    el._fsOrig = null;
+  }
+  moved=[];
+}
+function refit(){
+  if(cfg && typeof cfg.resize === "function"){ try{ cfg.resize(); }catch(e){} }
+}
+function syncStatus(){
+  if(!fsStatusEl) return;
+  var t="";
+  if(cfg && typeof cfg.status === "function"){ try{ t=cfg.status(); }catch(e){ t=""; } }
+  fsStatusEl.textContent=t;
+}
+function openFullscreen(){
+  if(open) return;
+  open=true;
+  document.body.style.overflow="hidden";                    /* lock page scroll */
+  if(cfg && cfg.canvas) moveTo(cfg.canvas, fsBoardArea);
+  if(cfg && cfg.tile) moveTo(cfg.tile, fsTileCtn);
+  if(cfg && cfg.meeple) moveTo(cfg.meeple, fsMeepleCtn);
+  syncStatus();
+  if(fsOverlay) fsOverlay.hidden=false;
+  refit();
+  setTimeout(refit, 60);
+  if(fsOverlay && fsOverlay.requestFullscreen){ try{ var fp=fsOverlay.requestFullscreen(); if(fp && fp.catch) fp.catch(function(){}); }catch(e){} }
+  if(cfg && typeof cfg.onOpen === "function"){ try{ cfg.onOpen(); }catch(e){} }
+}
+function closeFullscreen(){
+  if(!open) return;
+  open=false;
+  if(document.fullscreenElement){ try{ document.exitFullscreen(); }catch(e){} }
+  if(fsOverlay) fsOverlay.hidden=true;
+  restoreAll();                                            /* elements moved back home */
+  document.body.style.overflow="";                         /* restore page scroll */
+  refit();
+  if(cfg && typeof cfg.onClose === "function"){ try{ cfg.onClose(); }catch(e){} }
+}
+if(fsOpenBtn) fsOpenBtn.addEventListener("click", function(){ if(open) closeFullscreen(); else openFullscreen(); });
+if(fsExitBtn) fsExitBtn.addEventListener("click", function(){ closeFullscreen(); });
+window.addEventListener("resize", function(){ if(open) refit(); });
+/* keep the overlay status line in sync with banner changes while open */
+if (bannerEl && fsStatusEl && fsOverlay) {
+  new MutationObserver(function(){
+    if (!fsOverlay.hidden) fsStatusEl.textContent = bannerEl.textContent;
+  }).observe(bannerEl, { childList:true, characterData:true, subtree:true });
+}
+/* Esc closes the fullscreen overlay first, before help/leaderboard handling */
+document.addEventListener("keydown", function(e){
+  if (e.key === "Escape" && !fsOverlay.hidden) { e.stopImmediatePropagation(); closeFullscreen(); }
+});
+window.bgnFullscreen={
+  register:function(o){
+    cfg=o||{};
+    if(o && o.canvas && fsOpenBtn) fsOpenBtn.hidden=false;  /* a canvas reveals the ⛶ button */
+    refit();
+    return window.bgnFullscreen;
+  },
+  open:openFullscreen,
+  close:closeFullscreen,
+  isOpen:function(){ return open; }
+};
+})();
+</script>
+
+<script>
+(function(){
+"use strict";
+
+/* ══════════ theme config (from main.pjs) ══════════ */
+function val(n,d){ if(n==null)return d; var v=(n&&typeof n.evaluateItem==="function")?n.evaluateItem():n.evaluateItem; return v==null?d:String(v); }
+var rootRef = window.root||{};
+document.body.style.setProperty("--bgn-accent", val(rootRef.accentColor,"#d4af37"));
+function sfx(n){ if(window.BGN&&BGN.sfx)BGN.sfx.play(n); }
+var heroImg = val(rootRef.heroImage,"").trim();
+var hero = document.getElementById("gameHero");
+if(heroImg && hero){ hero.classList.add("has-img"); hero.style.setProperty("--bgn-hero-img","url('"+heroImg+"')"); }
+
+/* ══════════ table state ══════════
+   Two roles per table: "host" (the room creator) and "guest".
+   Whose turn it is is derived from the server's turn counter (host
+   takes turns 0,2,4,… when first=0; a rematch flips first). The
+   server is the source of truth; each player submits their turn
+   payload via the `move` rpc when it's their turn. This template
+   just passes the turn — the game you build decides what the
+   payloads mean and when to call `endGame`. */
+const game={ mode:null, myRole:null, roomCode:null, socket:null, sockOpen:false, wantReconnect:false, retryDelay:800,
+  openResolvers:[], serverTurn:0, first:0, status:"idle", oppPresent:true, over:false, winner:null, reason:"",
+  locked:false, log:[], lastLoggedTurn:0, scenario:0 };
+
+const lobbyCtn=document.getElementById("lobbyCtn");
+const gameCtn=document.getElementById("gameCtn");
+const onlinePanel=document.getElementById("onlinePanel");
+const onlineMsgEl=document.getElementById("onlineMsg");
+const joinCodeInput=document.getElementById("joinCodeInput");
+const turnEl=document.getElementById("turnEl");
+const bannerEl=document.getElementById("bannerEl");
+const logEl=document.getElementById("logEl");
+const hostNameEl=document.getElementById("hostNameEl");
+const guestNameEl=document.getElementById("guestNameEl");
+const roomBox=document.getElementById("roomBox");
+const roomCodeEl=document.getElementById("roomCodeEl");
+const connEl=document.getElementById("connEl");
+const copyCodeBtn=document.getElementById("copyCodeBtn");
+const leaveBtn=document.getElementById("leaveBtn");
+const newGameBtn=document.getElementById("newGameBtn");
+const claimBtn=document.getElementById("claimBtn");
+const menuBtn=document.getElementById("menuBtn");
+const passBtn=document.getElementById("passBtn");
+const chatBox=document.getElementById("chatBox");
+const chatMsgsEl=document.getElementById("chatMsgsEl");
+const chatInput=document.getElementById("chatInput");
+const chatSendBtn=document.getElementById("chatSendBtn");
+const continuePanel=document.getElementById("continuePanel");
+const continueInfoEl=document.getElementById("continueInfoEl");
+const continueBtn=document.getElementById("continueBtn");
+const deleteSaveBtn=document.getElementById("deleteSaveBtn");
+const saveBtn=document.getElementById("saveBtn");
+const pHost=document.getElementById("pHost");
+const pGuest=document.getElementById("pGuest");
+
+function turnRoleFor(n){ return ((n+(game.first?1:0))%2)===0?"host":"guest"; }
+function roleName(r){ return r==="host"?"Host":"Guest"; }
+function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]; }); }
+
+/* ══════════ BATTLETECH · 3025 ══════════
+   Two lances of 'Mechs fight across a ridge and river valley. Movement
+   uses the hex framework's MP economy (walk 1 MP/hex, run 2, jump 1
+   and terrain-ignoring); the combat engine in src/bt.js handles to-hit
+   rolls, hit locations, armor/structure damage, critical hits, heat,
+   ammo explosions, pilot wounds, falls and physical attacks. Win by
+   destroying every enemy 'Mech. */
+
+const TERRAIN = {
+  0: { name:"Clear",       color:"#40603c", glyph:"" },
+  1: { name:"Light Woods", color:"#28502e", glyph:"🌲" },
+  2: { name:"Rough",       color:"#7d7352", glyph:"▲" },
+  3: { name:"Water",       color:"#2b5e8a", glyph:"~" },
+  4: { name:"Mountain",    color:"#59636d", glyph:"⛰" }
+};
+const TERRAIN_PAL = {}; for (const id in TERRAIN) TERRAIN_PAL[id] = TERRAIN[id].color;
+
+/* ── battlefield: fully deterministic so both players build the same map ── */
+function buildBTBoard(){
+  const board = new HexBoard({ shape:"rect", width:15, height:11 });
+  const set = (q, r, p) => board.setCellProps(q + "," + r, p);
+  const T = BT.TERRAIN;
+  // central ridgeline (elev +2) split by a pass at rows 4-6
+  for (let r = 0; r < 11; r++) {
+    if (r >= 4 && r <= 6) continue;
+    set(7, r, { elevation: 2 });
+    if (r >= 2 && r <= 8) { set(6, r, { elevation: 1 }); set(8, r, { elevation: 1 }); }
+  }
+  set(6, 3, {elevation:2}); set(8, 3, {elevation:2});
+  set(6, 7, {elevation:2}); set(8, 7, {elevation:2});
+  // forest belts guarding the approaches
+  for (const [q, r] of [[5,3],[5,4],[6,5],[5,6],[4,6],[3,5],[3,4],[9,3],[9,4],[8,5],[9,6],[10,6],[11,5],[11,4]]) set(q, r, { terrain: T.woods });
+  // rough ground flanking the pass
+  for (const [q, r] of [[4,2],[4,3],[3,3],[10,2],[10,3],[11,3],[5,7],[5,8]]) set(q, r, { terrain: T.rough });
+  // rivers and ponds (depth comes from the negative elevation)
+  for (const [q, r] of [[0,9],[1,9],[0,10],[1,10],[2,6],[3,6],[2,7],[3,7],[12,9],[13,8],[13,9],[12,10]]) set(q, r, { terrain: T.water, elevation: -1 });
+  set(13, 10, { terrain: T.water, elevation: -2 });
+  // high spurs
+  for (const [q, r] of [[3,0],[4,0],[5,0],[9,0],[10,0],[11,0],[14,8],[14,9]]) set(q, r, { elevation: 1 });
+  // impassable crags on the flanks
+  set(0, 4, { terrain: T.mountain }); set(0, 5, { terrain: T.mountain });
+  set(14, 4, { terrain: T.mountain }); set(14, 5, { terrain: T.mountain });
+  return board;
+}
+
+/* The rulebook hooks the 'Mech rules into the hex movement engine. */
+const RULES = {
+  terrainCost(game, cell, token) {
+    const m = token && token.meta && token.meta.mech;
+    if (!m) return 1;
+    let base = m.moveMode === "run" ? 2 : 1;        // walk 1 MP/hex, run 2, jump 1
+    const t = cell.terrain;
+    if (t === BT.TERRAIN.woods) base += 1;
+    else if (t === BT.TERRAIN.rough) base += 1;
+    else if (t === BT.TERRAIN.water) base += Math.max(1, -(cell.elevation || 0));
+    return base;
+  },
+  canStand(game, cell, token, from) {
+    const m = token && token.meta && token.meta.mech;
+    if (m && (m.destroyed || m.prone)) return false;
+    if (cell.terrain === BT.TERRAIN.mountain) return false;
+    if (cell.terrain === BT.TERRAIN.water) {
+      const depth = Math.abs(cell.elevation || 0);
+      if (depth >= 3) return false;
+      if (m && m.moveMode === "jump") return depth < 2;      // can't land deep
+      if (m) return m.moveMode === "walk";                   // wading only
+      return false;
+    }
+    return true;
+  },
+  climbCost(game, fromCell, toCell, token) {
+    const m = token && token.meta && token.meta.mech;
+    const d = (toCell ? toCell.elevation || 0 : 0) - (fromCell ? fromCell.elevation || 0 : 0);
+    if (d <= 0) return 0;
+    if (m && m.moveMode === "jump") return 0;
+    if (m && m.moveMode === "run") return d * 2;
+    return d;
+  },
+  canCapture(game, attacker, victim) { return false; },      // 'Mechs never overrun
+  onTokenMoved(game, token, from, to, captured) {
+    const m = token.meta.mech;
+    if (!m || m.destroyed) return;
+    m.q = token.q; m.r = token.r;
+    m.movedThisTurn = true;
+    m.hexesMoved++;
+    if (m.moveMode === "jump") m.heat += 1;                  // 1 heat per hex jumped
+    else if (m.hexesMoved === 1) m.heat += m.moveMode === "run" ? 2 : 1;
+  }
+};
+
+/* ── MegaMek mech sprites ──────────────────────────────────────
+   mechGraphic builds the token's SVG <image> element from the
+   pre-tinted sprites in src/sprites/meks/<host|guest>/ (BT.SPRITE in
+   src/bt.js): the whole cropped PNG is scaled so its longest axis
+   reaches the per-'Mech `fit` (in hex world units; ≈1:1 px at
+   hexSize 30). Falls back to the hand-drawn silhouettes if a spec
+   has no sprite. */
+function mechGraphic(spec, owner) {
+  const s = BT.SPRITE && BT.SPRITE[spec];
+  if (!s) return BT.MECH_SVG[spec] || null;
+  const k = s.fit / Math.max(s.cw, s.ch);
+  const w = (s.cw * k).toFixed(2), h = (s.ch * k).toFixed(2);
+  return '<image href="' + s[owner === "guest" ? "guest" : "host"] + '" x="' + (-w / 2) +
+    '" y="' + (-h / 2) + '" width="' + w + '" height="' + h + '" preserveAspectRatio="xMidYMid meet"/>';
+}
+
+function makeToken(side, mechSpec, q, r, idx){
+  const mech = new BT.Mech(mechSpec, side, idx);
+  const tok = new Token({ id: side + "-m" + idx, owner: side, q, r,
+    name: mech.name, icon: BT.classGlyph(mech.tons), mp: mech.walk, rem: mech.walk, range: 0, meta: { mech } });
+  tok.graphic = mechGraphic(mechSpec.id, side);
+  tok.graphicScale = 1;
+  tok.facing = side === "host" ? 90 : -90;
+  tok.pilot = mech.pilot;
+  tok.faction = (BT.FACTIONS[side] && BT.FACTIONS[side].name) || side;
+  mech.tokenId = tok.id; mech.q = q; mech.r = r;
+  return tok;
+}
+
+function buildHexGame(first, scenario){
+  const sc = BT.SCENARIOS[scenario % BT.SCENARIOS.length] || BT.SCENARIOS[0];
+  const rows = sc.mechs.length === 2 ? [3, 7] : [2, 5, 8];
+  const g = new HexGame({ board: buildBTBoard(), rules: RULES, first: first || 0 });
+  sc.mechs.forEach((specId, i) => {
+    g.addToken(makeToken("host", BT.MECHS[specId], 1, rows[i], i));
+    g.addToken(makeToken("guest", BT.MECHS[specId], 12, rows[i], i));
+  });
+  return g;
+}
+
+/* ── board view + tool state ── */
+const hexBoardEl = document.getElementById("hexBoardEl");
+const hexInfoEl = document.getElementById("hexInfoEl");
+const hexHintEl = document.getElementById("hexHintEl");
+const hexView = new HexBoardView(hexBoardEl, {
+  hexSize: 30,
+  showCoords: false,
+  palette: { terrain: TERRAIN_PAL, bg: "#141c16", grid: "rgba(255,255,255,.14)", owners: { host: "#e8452c", guest: "#3d7dd8" } }
+});
+
+let gameState = null;
+let selectedMech = null;
+let targetMech = null;
+let currentTool = "move";
+let measureA = null, measureB = null;
+let lastHint = "Select one of your 'Mechs to move and fight.";
+
+function setHint(t) { lastHint = t; hexHintEl.textContent = t; }
+function activeRole() { return game.mode === "online" ? turnRoleFor(game.serverTurn) : (gameState ? turnRoleFor(gameState.turn) : "host"); }
+function isTurnOpen() {
+  if (game.over) return false;
+  if (game.mode === "online") return game.sockOpen && game.status === 2 && turnRoleFor(game.serverTurn) === game.myRole;
+  if (game.mode === "ai") return !aiThinking && (gameState ? turnRoleFor(gameState.turn) === "host" : false);
+  return true;
+}
+function isMine(tok){ return game.mode === "online" ? tok.owner === game.myRole : tok.owner === activeRole(); }
+function mechOf(tok){ return tok && tok.meta && tok.meta.mech; }
+function canAct(m){ return m && !m.destroyed && !m.prone && !m.shutdown && !m.pilotOut; }
+
+function boardDecor() {
+  const dec = { hover: hexView.hovered, dim: !!game.over };
+  if (!gameState) return dec;
+  if (currentTool === "measure" && measureA && measureB) {
+    const m = gameState.measure(measureA, measureB);
+    const l = BT.los(gameState, measureA, measureB);
+    dec.measure = { a: measureA, b: measureB, distance: m.distance, los: l.los };
+  }
+  if (selectedMech && !game.over && gameState.tokenById(selectedMech.id)) {
+    dec.selectedId = selectedMech.id;
+    if (currentTool === "move" && isTurnOpen() && isMine(selectedMech) && canAct(mechOf(selectedMech))) {
+      const reach = gameState.reachable(selectedMech);
+      if (reach && reach.size) dec.reachable = reach;
+    }
+  }
+  if (targetMech && !game.over && gameState.tokenById(targetMech.id)) dec.targetId = targetMech.id;
+  const arcTok = !game.over && (selectedMech || targetMech);
+  if (arcTok && gameState.tokenById(arcTok.id)) {
+    dec.arcs = { center: [arcTok.q, arcTok.r], facing: BT.effFacing(arcTok), radius: BT.MAX_RANGE * Math.sqrt(3) * hexView.hexSize };
+  }
+  const notes = {};
+  for (const t of gameState.tokens) {
+    const m = mechOf(t);
+    if (!m || m.destroyed) continue;
+    let n = String(t.rem);
+    if (m.shutdown) n = "OFF";
+    else if (m.pilotOut) n = "KO";
+    else if (m.prone) n = "PRN";
+    notes[t.id] = n;
+  }
+  dec.tokenNotes = notes;
+  return dec;
+}
+
+function refreshBoard() { if (hexView && gameState) hexView.render(gameState, boardDecor()); }
+
+function refreshHexInfo() {
+  if (!gameState) return;
+  const h = hexView.hovered;
+  if (!h) { hexInfoEl.textContent = lastHint; return; }
+  const cell = gameState.board.cell(h[0], h[1]);
+  const tok = gameState.tokenAt(h[0], h[1]);
+  let s = "<b>" + gameState.label(h[0], h[1]) + "</b>";
+  if (cell) {
+    const t = TERRAIN[cell.terrain];
+    s += " · " + (t ? t.name : "—");
+    if (cell.terrain === BT.TERRAIN.water) s += " (depth " + Math.abs(cell.elevation || 0) + ")";
+    else if (cell.elevation != null && cell.elevation !== 0) s += " · elev " + (cell.elevation > 0 ? "+" : "") + cell.elevation;
+  }
+  if (tok && mechOf(tok)) {
+    const m = mechOf(tok);
+    s += " · <b>" + m.name + "</b> (" + BT.classOf(m.tons) + ", " + m.tons + "t)";
+    if (m.prone) s += " · PRONE";
+    if (m.shutdown) s += " · SHUT DOWN";
+    if (m.pilotOut) s += " · PILOT OUT";
+    s += " · MP " + tok.rem + "/" + tok.mp + " · heat " + m.heat;
+  }
+  hexInfoEl.innerHTML = s;
+}
+
+/* ── board interaction ── */
+hexView.onCellClick = function(q, r) {
+  if (!gameState || game.over) return;
+  if (currentTool === "measure") {
+    if (!measureA) { measureA = [q, r]; measureB = null; setHint("Measure: click a second hex."); }
+    else if (!measureB) {
+      measureB = [q, r];
+      const m = gameState.measure(measureA, measureB);
+      const l = BT.los(gameState, measureA, measureB);
+      hexInfoEl.innerHTML = "<b>" + gameState.label(measureA[0], measureA[1]) + "</b> → <b>" + gameState.label(measureB[0], measureB[1]) + "</b> · distance <b>" + m.distance + "</b> hexes · LOS <b>" + (l.los ? "clear" : "blocked") + "</b>" + (l.woods ? " · " + l.woods + " woods hex" + (l.woods > 1 ? "es" : "") : "");
+      sfx("draw");
+    } else { measureA = [q, r]; measureB = null; hexInfoEl.textContent = ""; }
+    refreshBoard();
+    return;
+  }
+  const tok = gameState.tokenAt(q, r);
+  if (tok && mechOf(tok)) {
+    if (tok.owner === activeRole() && isTurnOpen()) {
+      selectedMech = (selectedMech && selectedMech.id === tok.id) ? null : tok;
+      if (selectedMech && !mechOf(selectedMech).movedThisTurn) setMoveMode("walk");
+      sfx("hint");
+      renderAll();
+      return;
+    }
+    if (tok.owner !== activeRole()) {
+      targetMech = tok;
+      sfx("draw");
+      renderAll();
+      return;
+    }
+  }
+  if (selectedMech && isTurnOpen() && isMine(selectedMech) && canAct(mechOf(selectedMech))) {
+    try {
+      gameState.moveToken(selectedMech, q, r, activeRole());
+      sfx("step");
+      renderAll();
+      return;
+    } catch (e) { flashBanner(e.message || "Can't move there."); return; }
+  }
+  flashBanner(selectedMech ? "That hex isn't reachable." : "Click one of your 'Mechs first.");
+};
+hexView.onCellHover = function(hex) { refreshHexInfo(); refreshBoard(); };
+hexView.onBoardClick = function() {
+  if (currentTool === "measure") { measureA = null; measureB = null; hexInfoEl.textContent = ""; refreshBoard(); }
+};
+
+/* ── 'Mech hover tooltip panel ── */
+const mechTipEl = document.getElementById("mechTipEl");
+let tipTokenId = null, tipSig = null;
+
+function mechTipSig(m, tok) {
+  let s = tok.id + "|" + tok.owner + "|" + m.heat + "|" + m.pilotHp + (m.prone ? "p" : "") + (m.shutdown ? "s" : "") + (m.pilotOut ? "o" : "") + (m.engineCrits ? m.engineCrits : "") + (m.gyroCrits ? m.gyroCrits : "") + tok.rem + "/" + tok.mp;
+  for (const w of m.weapons) s += "|" + w.id + ":" + (w.ammo == null ? "-" : w.ammo) + ":" + (w.destroyed ? 1 : 0) + ":" + (w.fired ? 1 : 0);
+  for (const l of BT.LOCATIONS) s += ":" + m.armor[l] + "/" + m.structure[l];
+  return s;
+}
+
+function mechTipHTML(tok) {
+  const m = mechOf(tok);
+  const specMax = BT.MECHS[m.spec];
+  const fac = BT.FACTIONS[tok.owner] || { name: tok.owner, color: "#888", logo: "" };
+  const chips = [];
+  if (m.prone) chips.push('<span class="bt-st">PRONE</span>');
+  if (m.shutdown) chips.push('<span class="bt-st hot">SHUT DOWN</span>');
+  if (m.pilotOut) chips.push('<span class="bt-st">PILOT OUT</span>');
+  if (m.engineCrits) chips.push('<span class="bt-st hot">ENGINE ' + m.engineCrits + '/3</span>');
+  if (m.gyroCrits) chips.push('<span class="bt-st">GYRO ' + m.gyroCrits + '/2</span>');
+  const p = [];
+  p.push('<div class="bt-ms-head"><div class="bt-tip-head">' + fac.logo + '<b>' + esc(m.name) + '</b></div><span class="bt-tip-owner">' + esc(fac.name) + '</span></div>');
+  p.push('<div class="muted small">' + esc(m.type) + ' · ' + m.tons + 't ' + BT.classOf(m.tons) + ' · MP ' + tok.rem + '/' + tok.mp + (tok.range ? ' · Rng ' + tok.range : '') + '</div>');
+  p.push('<div class="bt-pilot-row"><span class="bt-pilot-ico">👤</span><b>' + esc(m.pilot) + '</b><span class="muted small">' + (m.pilotHp > 0 ? "♥".repeat(m.pilotHp) : "") + '♡'.repeat(Math.max(0, 3 - m.pilotHp)) + (m.pilotOut ? " — unconscious" : "") + '</span></div>');
+  if (chips.length) p.push('<div class="bt-ms-status" style="margin-top:5px">' + chips.join('') + '</div>');
+  p.push('<div class="bt-ms-move">Walk ' + m.walk + ' · Run ' + m.run + (m.jump ? ' · Jump ' + m.jump : '') + (m.moveMode ? ' · mode: <b>' + m.moveMode.toUpperCase() + '</b>' : '') + (m.movedThisTurn ? ' · to-hit +' + (m.moveMode === "jump" ? 3 : m.moveMode === "run" ? 2 : 1) : '') + '</div>');
+  const heatPct = Math.min(100, Math.round(m.heat / 30 * 100));
+  p.push('<div class="bt-heat"><span class="bt-heat-lbl">Heat ' + m.heat + '</span><div class="bt-heat-bar"><div class="bt-heat-fill" style="width:' + heatPct + '%"></div></div></div><div class="bt-heat-sub">' + m.hs + ' heat sinks' + (m.heat >= 5 ? ' · to-hit mod +' + m.heatMod() : '') + (m.heat >= 15 ? ' · overheated!' : '') + '</div>');
+  p.push('<div class="bt-locs">');
+  for (const loc of BT.LOCATIONS) {
+    const aMax = specMax.armor[loc], sMax = specMax.structure[loc];
+    const a = Math.max(0, m.armor[loc]), s = Math.max(0, m.structure[loc]);
+    const aPct = Math.max(0, Math.min(100, a / aMax * 100));
+    const sPct = Math.max(0, Math.min(100, s / sMax * 100));
+    p.push('<div class="bt-loc' + (s <= 0 ? ' dest' : '') + '"><span class="bt-loc-n">' + BT.LOC_SHORT[loc] + '</span><div class="bt-loc-a"><div class="bt-loc-fill" style="width:' + aPct + '%"></div></div><span class="bt-loc-v">' + a + '</span><div class="bt-loc-s"><div class="bt-loc-fill-s" style="width:' + sPct + '%"></div></div><span class="bt-loc-vs">' + s + '</span></div>');
+  }
+  p.push('</div>');
+  p.push('<div class="bt-weaps">');
+  for (const wp of m.weapons) {
+    const base = BT.WEAPONS[wp.t];
+    const dead = wp.destroyed, empty = wp.ammo != null && wp.ammo <= 0;
+    const statusTxt = dead ? "DESTROYED" : wp.fired ? "FIRED" : empty ? "EMPTY" : "";
+    p.push('<div class="bt-wp' + (dead ? ' dead' : '') + '"><span class="bt-wp-n">' + esc(wp.name) + '</span><span class="muted small">' + (base.missiles ? base.missiles + '×' + base.mdm + ' dmg' : base.dmg + ' dmg') + ' · heat ' + base.heat + ' · ' + base.short + '/' + base.med + '/' + base.long + (base.min ? ' (min ' + base.min + ')' : '') + '</span>' + (wp.ammo != null ? '<span class="bt-wp-a">' + wp.ammo + '/' + wp.ammoMax + '</span>' : '') + (statusTxt ? '<span class="bt-wp-t">' + statusTxt + '</span>' : '') + '</div>');
+  }
+  p.push('</div>');
+  return p.join('');
+}
+
+function positionMechTip() {
+  const h = mechTipEl.offsetHeight;
+  mechTipEl.style.left = "auto";
+  mechTipEl.style.right = "14px";
+  mechTipEl.style.top = Math.max(64, (window.innerHeight - Math.min(h, window.innerHeight * 0.72)) / 2) + "px";
+}
+
+function hideMechTip() { tipTokenId = null; tipSig = null; mechTipEl.hidden = true; }
+
+hexView.svg.addEventListener("mousemove", function(e) {
+  if (!gameState || game.over) { if (tipTokenId !== null) hideMechTip(); return; }
+  const g = e.target.closest ? e.target.closest("[data-token-id]") : null;
+  if (!g) { if (tipTokenId !== null) hideMechTip(); return; }
+  const id = g.getAttribute("data-token-id");
+  const tok = gameState.tokenById(id);
+  if (!tok || !mechOf(tok) || mechOf(tok).destroyed) { if (tipTokenId !== null) hideMechTip(); return; }
+  const m = mechOf(tok);
+  const sig = mechTipSig(m, tok);
+  if (sig !== tipSig) {
+    tipSig = sig;
+    mechTipEl.innerHTML = mechTipHTML(tok);
+    mechTipEl.hidden = false;
+    positionMechTip();
+  }
+});
+hexView.svg.addEventListener("mouseleave", hideMechTip);
+hexView.svg.addEventListener("touchstart", function(e) { if (tipTokenId !== null) hideMechTip(); }, { passive: true });
+
+function setTool(tool) {
+  currentTool = tool;
+  measureA = null; measureB = null;
+  document.querySelectorAll(".tool-btn").forEach(b => b.classList.toggle("active", b.dataset.tool === tool));
+  if (tool === "move") setHint("Select one of your 'Mechs, pick a move mode, then click a green hex to move. Click an enemy 'Mech to target it.");
+  else setHint("Measure: click two hexes to see range and line of sight.");
+  refreshBoard();
+}
+
+function setMoveMode(mode) {
+  if (!selectedMech || !gameState) { flashBanner("Select one of your 'Mechs first."); return; }
+  const m = mechOf(selectedMech);
+  if (!m || m.destroyed) return;
+  if (!isTurnOpen() || !isMine(selectedMech)) { flashBanner("It's not your turn."); return; }
+  if (m.movedThisTurn) { flashBanner(m.name + " has already moved this turn."); return; }
+  if (m.prone) { flashBanner(m.name + " is prone — stand it up first."); return; }
+  if (m.shutdown || m.pilotOut) { flashBanner(m.name + " can't move right now."); return; }
+  if (mode === "jump" && m.jump <= 0) { flashBanner(m.name + " has no jump jets."); return; }
+  m.moveMode = mode;
+  selectedMech.mp = mode === "jump" ? m.jump : mode === "run" ? m.run : m.walk;
+  selectedMech.rem = selectedMech.mp;
+  document.querySelectorAll(".move-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
+  setHint(mode === "jump" ? "Jump: 1 MP per hex, ignores terrain, +1 heat per hex (can't land in deep water)."
+    : mode === "run" ? "Running: 2 MP per hex, +2 heat, +2 to-hit. Turn with ⟲/⟳ (1 MP per 60°)."
+    : "Walking: 1 MP per hex, +1 heat. Turn with ⟲/⟳ (1 MP per 60°) to aim your firing arcs.");
+  refreshBoard();
+}
+
+function standUp() {
+  const tok = selectedMech;
+  if (!tok || !gameState || !isTurnOpen() || !isMine(tok)) return;
+  const m = mechOf(tok);
+  if (!m || !m.prone || m.pilotOut) return;
+  m.prone = false;
+  m.moveMode = "stand";
+  tok.mp = m.walk;
+  tok.rem = Math.max(0, m.walk - 2);
+  gameState.addLog(activeRole(), m.name + " stands up (2 MP).");
+  sfx("step");
+  renderAll();
+}
+
+/* Turn a selected 'Mech 60° (1 MP per step). Turning counts as
+   movement (walk speed, target mod +1) but adds no heat and uses no
+   terrain MP. */
+function turnMech(dir) {
+  const tok = selectedMech;
+  if (!tok || !gameState) return;
+  const m = mechOf(tok);
+  if (!m || m.destroyed) return;
+  if (!isTurnOpen() || !isMine(tok)) { flashBanner("It's not your turn."); return; }
+  if (!canAct(m)) { flashBanner(m.name + " can't act right now."); return; }
+  if (tok.rem <= 0) { flashBanner(m.name + " has no MP left to turn."); return; }
+  if (!m.movedThisTurn) {
+    m.movedThisTurn = true;
+    m.moveMode = m.moveMode || "walk";
+  }
+  tok.rem -= 1;
+  tok.facing = ((tok.facing + dir * 60) % 360 + 360) % 360;
+  gameState.addLog(activeRole(), m.name + " turns " + (dir < 0 ? "left" : "right") + " to face " + BT.facingName(tok.facing) + " (1 MP).");
+  sfx("step");
+  renderAll();
+}
+
+/* Twist the selected 'Mech's torso 60° (free). The legs and sprite stay
+   put; only the weapons' firing arcs rotate, so a torso-twist can swing
+   guns onto a target that your facing can't reach. One hex-face per
+   direction, clamped to ±1 step. */
+function twistMech(dir) {
+  const tok = selectedMech;
+  if (!tok || !gameState) return;
+  const m = mechOf(tok);
+  if (!m || m.destroyed) return;
+  if (!isTurnOpen() || !isMine(tok)) { flashBanner("It's not your turn."); return; }
+  if (!canAct(m)) { flashBanner(m.name + " can't act right now."); return; }
+  if (m.moveMode === "jump") { flashBanner("A 'Mech that jumped can't twist its torso."); return; }
+  if (m.prone) { flashBanner(m.name + " is prone — stand up first."); return; }
+  const nxt = Math.max(-1, Math.min(1, (tok.twist || 0) + dir));
+  if (nxt === (tok.twist || 0)) { flashBanner("Torso is already twisted that far."); return; }
+  tok.twist = nxt;
+  const side = nxt > 0 ? "right" : "left";
+  gameState.addLog(activeRole(), m.name + " twists its torso " + side + " to " + BT.facingName(BT.effFacing(tok)) + " (free).");
+  sfx("hint");
+  renderAll();
+}
+
+/* ── combat actions ── */
+function fireSelectedWeapon(wp) {
+  if (!gameState || !selectedMech || !targetMech) { flashBanner("Select a 'Mech and click an enemy to target it."); return; }
+  const atkM = mechOf(selectedMech), defM = mechOf(targetMech);
+  if (!atkM || !defM || atkM.destroyed || defM.destroyed) return;
+  if (!isTurnOpen() || !isMine(selectedMech)) { flashBanner("It's not your turn."); return; }
+  if (!canAct(atkM)) { flashBanner(atkM.name + " can't act right now."); return; }
+  const ev = { hits: [] };
+  BT.fireWeapon(gameState, atkM, wp, defM, ev);
+  for (const h of ev.hits) addLog(activeRole(), h);
+  sfx("boom");
+  checkGameEnd();
+  renderAll();
+}
+function doPhysical(kind) {
+  if (!gameState || !selectedMech || !targetMech) { flashBanner("Select a 'Mech and click an adjacent enemy."); return; }
+  const atkM = mechOf(selectedMech), defM = mechOf(targetMech);
+  if (!atkM || !defM || atkM.destroyed || defM.destroyed) return;
+  if (!isTurnOpen() || !isMine(selectedMech)) { flashBanner("It's not your turn."); return; }
+  if (!canAct(atkM) || atkM.meleeDone) { flashBanner(atkM.name + " has already used its physical attack."); return; }
+  if (gameState.board.distance([selectedMech.q, selectedMech.r], [targetMech.q, targetMech.r]) !== 1) { flashBanner("Not adjacent to the target."); return; }
+  const ev = { hits: [] };
+  BT.physical(gameState, atkM, defM, kind, ev);
+  for (const h of ev.hits) addLog(activeRole(), h);
+  sfx("boom");
+  checkGameEnd();
+  renderAll();
+}
+
+/* ── roster strip: one chip per 'Mech ── */
+function clickRoster(t) {
+  if (!gameState) return;
+  if (t.owner === activeRole() && isTurnOpen()) {
+    selectedMech = (selectedMech && selectedMech.id === t.id) ? null : t;
+    if (selectedMech && !mechOf(selectedMech).movedThisTurn) setMoveMode("walk");
+  } else {
+    targetMech = t;
+  }
+  sfx("hint");
+  renderAll();
+}
+function renderRoster() {
+  const el = document.getElementById("btRosterEl");
+  if (!el || !gameState) { if (el) el.innerHTML = ""; return; }
+  el.innerHTML = "";
+  for (const side of ["host", "guest"]) {
+    const row = document.createElement("div");
+    row.className = "bt-roster-row" + (side === "guest" ? " right" : "");
+    const toks = gameState.tokensOf(side).slice().sort((a, b) => a.meta.mech.idx - b.meta.mech.idx);
+    for (const t of toks) {
+      const m = mechOf(t);
+      if (!m) continue;
+      const chip = document.createElement("button");
+      chip.className = "bt-chip"
+        + (m.destroyed ? " dead" : "")
+        + (selectedMech && selectedMech.id === t.id ? " sel" : "")
+        + (targetMech && targetMech.id === t.id ? " tgt" : "");
+      chip.title = m.name + " — click to " + (t.owner === activeRole() ? "select" : "target");
+      const st = m.shutdown ? " · SHUT DOWN" : m.pilotOut ? " · PILOT OUT" : m.prone ? " · PRONE" : "";
+      chip.innerHTML = "<span class=\"bt-chip-dot\"></span><span class=\"bt-chip-n\">" + esc(m.name) + st + "</span><span class=\"bt-chip-meta\">W" + m.walk + " R" + m.run + (m.jump ? " J" + m.jump : "") + " · heat " + m.heat + (m.destroyed ? " · DESTROYED" : "") + "</span>";
+      chip.addEventListener("click", function(){ clickRoster(t); });
+      row.appendChild(chip);
+    }
+    el.appendChild(row);
+  }
+}
+
+/* ── record-sheet panel for the selected (or targeted) 'Mech ── */
+function renderMechPanel() {
+  const el = document.getElementById("mechPanelEl");
+  if (!el) return;
+  const tok = selectedMech || targetMech;
+  const m = tok && mechOf(tok);
+  if (!gameState || !tok || !m || m.destroyed) { el.innerHTML = ""; el.hidden = true; return; }
+  el.hidden = false;
+  const myTurn = isTurnOpen();
+  const mine = isMine(tok);
+  const canFight = mine && myTurn && canAct(m);
+  const parts = [];
+  parts.push("<div class=\"bt-ms-head\"><div><b>" + esc(m.name) + "</b> <span class=\"muted small\">" + esc(m.type) + " · " + m.tons + "t " + BT.classOf(m.tons) + "</span></div>");
+  const chips = [];
+  if (m.prone) chips.push("<span class=\"bt-st\">PRONE</span>");
+  if (m.shutdown) chips.push("<span class=\"bt-st hot\">SHUT DOWN</span>");
+  if (m.pilotOut) chips.push("<span class=\"bt-st\">PILOT OUT</span>");
+  if (m.engineCrits) chips.push("<span class=\"bt-st hot\">ENGINE " + m.engineCrits + "/3</span>");
+  if (m.gyroCrits) chips.push("<span class=\"bt-st\">GYRO " + m.gyroCrits + "/2</span>");
+  if (chips.length) parts.push("<div class=\"bt-ms-status\">" + chips.join("") + "</div>");
+  parts.push("</div>");
+  parts.push("<div class=\"bt-ms-move\">Walk " + m.walk + " · Run " + m.run + (m.jump ? " · Jump " + m.jump : "") + (m.moveMode ? " · mode: <b>" + m.moveMode.toUpperCase() + "</b>" : "") + " · to-hit mod (own move): " + (m.movedThisTurn ? "+" + (m.moveMode === "jump" ? 3 : m.moveMode === "run" ? 2 : 1) : "0") + "</div>");
+  const facing = tok.facing || 0;
+  const effF = BT.effFacing(tok);
+  const canTwist = canFight && m.moveMode !== "jump" && !m.prone;
+  parts.push("<div class=\"bt-ms-face\">Facing <b>" + esc(BT.facingName(facing)) + "</b>" + (tok.twist ? " · Torso <b>" + esc(BT.facingName(effF)) + "</b>" : "") + " <span class=\"bt-arc-legend\"><i class=\"bt-arc-dot dot-torso\"></i>Torso <i class=\"bt-arc-dot dot-la\"></i>LA <i class=\"bt-arc-dot dot-ra\"></i>RA</span>" + (canFight ? "<span class=\"bt-turn\"><button class=\"btn btn-ghost btn-sm\" data-turn=\"-1\" title=\"Turn left 60° (1 MP)\">⟲ turn</button><button class=\"btn btn-ghost btn-sm\" data-turn=\"1\" title=\"Turn right 60° (1 MP)\">turn ⟳</button></span>" : "") + (canTwist ? "<span class=\"bt-turn bt-twist\"><button class=\"btn btn-ghost btn-sm\" data-twist=\"-1\" title=\"Twist torso left 60° (free)\">⟲ twist</button><button class=\"btn btn-ghost btn-sm\" data-twist=\"1\" title=\"Twist torso right 60° (free)\">twist ⟳</button></span>" : "") + "</div>");
+  const heatPct = Math.min(100, Math.round(m.heat / 30 * 100));
+  parts.push("<div class=\"bt-heat\"><span class=\"bt-heat-lbl\">Heat " + m.heat + "</span><div class=\"bt-heat-bar\"><div class=\"bt-heat-fill\" style=\"width:" + heatPct + "%\"></div></div><span class=\"muted small\">sinks " + m.hs + (m.heat >= 5 ? " · penalty +" + m.heatMod() : "") + "</span></div>");
+  if (m.heat >= 15) parts.push("<div class=\"bt-heat-pen\">" + (m.heat >= 20 ? "Shutdown &amp; ammo-explosion risk at end of turn." : "Shutdown risk at end of turn.") + "</div>");
+  parts.push("<div class=\"bt-locs\">");
+  const specMax = BT.MECHS[m.spec];
+  for (const loc of BT.LOCATIONS) {
+    const aMax = specMax.armor[loc], sMax = specMax.structure[loc];
+    const a = Math.max(0, m.armor[loc]), s = Math.max(0, m.structure[loc]);
+    const aPct = Math.max(0, Math.min(100, a / aMax * 100));
+    const sPct = Math.max(0, Math.min(100, s / sMax * 100));
+    parts.push("<div class=\"bt-loc" + (s <= 0 ? " dest" : "") + "\"><span class=\"bt-loc-n\">" + BT.LOC_SHORT[loc] + "</span><div class=\"bt-loc-a\"><div class=\"bt-loc-fill\" style=\"width:" + aPct + "%\"></div></div><span class=\"bt-loc-v\">" + a + "</span><div class=\"bt-loc-s\"><div class=\"bt-loc-fill-s\" style=\"width:" + sPct + "%\"></div></div><span class=\"bt-loc-vs\">" + s + "</span></div>");
+  }
+  parts.push("</div>");
+  parts.push("<div class=\"bt-pilot\">Pilot: " + "♥".repeat(Math.max(0, m.pilotHp)) + "♡".repeat(Math.max(0, 3 - m.pilotHp)) + (m.pilotOut ? " — unconscious" : "") + "</div>");
+  const defM = targetMech && mechOf(targetMech) && !mechOf(targetMech).destroyed ? mechOf(targetMech) : null;
+  const dist = defM ? gameState.board.distance([tok.q, tok.r], [targetMech.q, targetMech.r]) : null;
+  const tgtArc = (tok === selectedMech && targetMech) ? BT.arcOf(gameState, tok, targetMech) : null;
+  if (defM) parts.push("<div class=\"bt-tgt\">Target: <b>" + esc(defM.name) + "</b> at <b>" + dist + "</b> hexes" + (defM.prone ? " (prone, +1)" : "") + (tgtArc ? " — in your <b>" + BT.ARC_FULL[tgtArc] + "</b> arc" : "") + "</div>");
+  parts.push("<div class=\"bt-weaps\">");
+  for (const wp of m.weapons) {
+    const base = BT.WEAPONS[wp.t];
+    const dead = wp.destroyed;
+    const empty = wp.ammo != null && wp.ammo <= 0;
+    const warc = BT.weaponArc(wp);
+    const arcTag = "<span class=\"bt-wp-arc arc-" + warc + "\" title=\"" + BT.ARC_FULL[warc] + " arc\">" + (warc === "torso" ? "T" : warc.toUpperCase()) + "</span>";
+    let tnTxt = "", btn = "";
+    if (wp.fired) {
+      tnTxt = "· FIRED";
+    } else if (!dead && !empty && canFight && !m.shutdown && defM) {
+      if (dist <= base.long) {
+        if (tgtArc && tgtArc !== warc) {
+          tnTxt = "· out of " + BT.ARC_FULL[warc] + " arc";
+        } else {
+          const l = BT.los(gameState, [tok.q, tok.r], [targetMech.q, targetMech.r]);
+          const tn = BT.hitTN(gameState, m, defM, wp, base, dist, l);
+          if (tn != null) {
+            tnTxt = "· TN " + tn + " (" + BT.hitChance(tn) + "%)";
+            btn = "<button class=\"btn btn-gold btn-sm bt-fire\" data-w=\"" + wp.id + "\" title=\"Fire at target\">🔥 Fire</button>";
+          } else tnTxt = "· out of range";
+        }
+      } else tnTxt = "· out of range";
+    }
+    parts.push("<div class=\"bt-wp" + (dead ? " dead" : "") + "\">" + arcTag + "<span class=\"bt-wp-n\">" + esc(wp.name) + "</span><span class=\"muted small\">" + (base.missiles ? base.missiles + "×" + base.mdm + " dmg" : base.dmg + " dmg") + " · heat " + base.heat + " · " + base.short + "/" + base.med + "/" + base.long + (base.min ? " (min " + base.min + ")" : "") + "</span>");
+    if (wp.ammo != null) parts.push("<span class=\"bt-wp-a\">" + wp.ammo + "/" + wp.ammoMax + (empty ? " EMPTY" : "") + "</span>");
+    parts.push("<span class=\"bt-wp-t\">" + (dead ? "DESTROYED" : "") + tnTxt + "</span>" + btn + "</div>");
+  }
+  if (!canFight && !(mine && myTurn && !canAct(m))) parts.push("<div class=\"muted small\" style=\"margin-top:6px\">" + (mine ? "Waiting for your turn." : "Enemy 'Mech — select one of your own to fire.") + "</div>");
+  if (canFight && !m.meleeDone && defM && dist === 1) {
+    const kickDmg = Math.ceil(m.tons / 5), punchDmg = Math.ceil(m.tons / 10);
+    parts.push("<div class=\"bt-melee\">Physical: <button class=\"btn btn-ghost btn-sm\" data-m=\"kick\">👢 Kick (" + kickDmg + " to a leg)</button> <button class=\"btn btn-ghost btn-sm\" data-m=\"punch\">👊 Punch (" + punchDmg + ")</button></div>");
+  }
+  if (m.prone && mine && myTurn && !m.pilotOut && m.moveMode !== "stand") parts.push("<div style=\"margin-top:10px\"><button class=\"btn btn-gold btn-sm\" id=\"btStandBtn\">↟ Stand up (2 MP)</button></div>");
+  parts.push("</div>");
+  el.innerHTML = parts.join("");
+  el.querySelectorAll(".bt-fire").forEach(b => {
+    const wp = m.weapons.find(w => w.id === b.dataset.w);
+    b.addEventListener("click", function(){ fireSelectedWeapon(wp); });
+  });
+  el.querySelectorAll("[data-m]").forEach(b => b.addEventListener("click", function(){ doPhysical(b.dataset.m); }));
+  el.querySelectorAll("[data-turn]").forEach(b => b.addEventListener("click", function(){ turnMech(parseInt(b.dataset.turn, 10)); }));
+  el.querySelectorAll("[data-twist]").forEach(b => b.addEventListener("click", function(){ twistMech(parseInt(b.dataset.twist, 10)); }));
+  const sb = document.getElementById("btStandBtn");
+  if (sb) sb.addEventListener("click", standUp);
+}
+
+/* ── turn economy ── */
+function beginTurn(role) {
+  if (!gameState) return;
+  for (const t of gameState.tokensOf(role)) {
+    const m = mechOf(t);
+    if (!m || m.destroyed) continue;
+    m.movedThisTurn = false; m.moveMode = null; m.hexesMoved = 0; m.meleeDone = false;
+    for (const wp of m.weapons) wp.fired = false;
+    if (m.pilotOut) {
+      const r = BT.roll2d6();
+      if (r >= 8) { m.pilotOut = false; m.pilotHp = 1; gameState.addLog(role, m.name + "'s pilot regains consciousness (" + r + ")."); }
+    }
+    if (m.shutdown && m.heat < 15) { m.shutdown = false; gameState.addLog(role, m.name + " restarts its fusion reactor."); }
+    t.twist = 0;
+    t.mp = m.walk; t.rem = m.walk;
+  }
+}
+function resolveEndTurn(role) {
+  for (const t of gameState.tokensOf(role)) {
+    const m = mechOf(t);
+    if (!m || m.destroyed) continue;
+    m.lastMove = (m.movedThisTurn && m.moveMode && m.moveMode !== "stand") ? { mode: m.moveMode, hexes: Math.max(1, m.hexesMoved) } : null;
+    if (m.engineCrits) m.heat += m.engineCrits * 5;
+    if (m.heat >= 15 && !m.shutdown) {
+      const r = BT.roll2d6();
+      if (r <= 7) {
+        m.shutdown = true;
+        gameState.addLog(role, m.name + " SHUT DOWN from heat (" + m.heat + " heat, rolled " + r + " — 8+ needed)!");
+      }
+    }
+    if (m.heat >= 20) {
+      const r = BT.roll2d6();
+      if (r <= 7) {
+        const bins = m.weapons.filter(w => w.ammo != null && w.ammo > 0 && !w.destroyed);
+        if (bins.length) {
+          const bin = bins[Math.floor(Math.random() * bins.length)];
+          const ev = { hits: [] };
+          gameState.addLog(role, m.name + " overheats — ammo check " + r + " FAILS!");
+          BT.ammoExplosion(gameState, m, bin.loc, bin.id, ev);
+          for (const h of ev.hits) gameState.addLog(role, h);
+        }
+      }
+    }
+    m.heat = Math.max(0, m.heat - m.hs);
+  }
+}
+function endTurn(role) {
+  resolveEndTurn(role);
+  gameState.addLog(role, "ends the turn.");
+  gameState.turn = game.mode === "online" ? game.serverTurn + 1 : gameState.turn + 1;
+  if (game.mode !== "online") beginTurn(gameState.turnRole());
+  selectedMech = null; targetMech = null; measureA = null; measureB = null;
+  if (game.mode !== "online") saveGame();
+  renderAll();
+}
+function checkGameEnd() {
+  if (game.over || !gameState) return;
+  const h = gameState.tokensOf("host"), g = gameState.tokensOf("guest");
+  const hAlive = h.some(t => mechOf(t) && !mechOf(t).destroyed);
+  const gAlive = g.some(t => mechOf(t) && !mechOf(t).destroyed);
+  if (hAlive && gAlive) return;
+  let w = "draw";
+  if (hAlive) w = "host";
+  else if (gAlive) w = "guest";
+  finishGame(w);
+}
+function finishGame(w) {
+  const winner = w === "draw" ? "draw" : w;
+  const loser = winner === "draw" ? "draw" : (winner === "host" ? "guest" : "host");
+  gameState.winner = winner;
+  gameState.reason = winner === "draw" ? "draw" : "battle";
+  gameState.addLog(winner === "draw" ? "host" : winner,
+    winner === "draw" ? "Both forces are destroyed — the battle is a draw!" : "The " + roleName(loser) + " force is destroyed — " + roleName(winner) + " wins!");
+  selectedMech = null; targetMech = null;
+  if (game.mode === "online") {
+    gameState.addLog(game.myRole, "ends the turn");
+    gameState.turn = game.serverTurn + 1;
+    rpc("move", JSON.stringify({ code: game.roomCode, evt: game.serverTurn, data: snapshotJSON() })).then(function(mr) {
+      return rpc("endGame", JSON.stringify({ code: game.roomCode, winner })).then(function(er) {
+        if (!er || !er.ok) flashBanner("Couldn't submit the win (" + (er && er.err ? er.err : "error") + ").");
+        refreshFromServer();
+      });
+    }).catch(function() {});
+  } else {
+    game.winner = winner;
+    game.reason = gameState.reason;
+    game.over = true;
+    if (game.mode === "ai") { if (winner === "host") sfx("win"); else sfx("lose"); }
+    else sfx("tada");
+    renderAll();
+    saveGame();
+  }
+}
+
+/* ── AI: the bot drives the same movement engine and combat tables ── */
+function aiTarget(t) {
+  const enemy = gameState.tokensOf(t.owner === "host" ? "guest" : "host").filter(e => mechOf(e) && !mechOf(e).destroyed);
+  let best = null, bd = Infinity;
+  for (const e of enemy) {
+    const d = gameState.board.distance([t.q, t.r], [e.q, e.r]);
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+function aiMove(t) {
+  const m = mechOf(t);
+  const def = aiTarget(t);
+  if (!def) return;
+  const d0 = gameState.board.distance([t.q, t.r], [def.q, def.r]);
+  const mode = (m.jump > 0 && d0 >= 5) ? "jump" : (d0 >= 5 ? "run" : "walk");
+  m.moveMode = mode;
+  t.mp = mode === "jump" ? m.jump : mode === "run" ? m.run : m.walk;
+  t.rem = t.mp;
+  const reach = gameState.reachable(t);
+  let best = null, bestScore = -Infinity;
+  reach.forEach(v => {
+    const dist = gameState.board.distance([v.q, v.r], [def.q, def.r]);
+    const los = BT.los(gameState, [v.q, v.r], [def.q, def.r]).los;
+    let sc = -dist * 10;
+    if (los) sc += 40;
+    if (los && dist <= 6) sc += 30;
+    else if (los && dist <= 9) sc += 15;
+    if (gameState.board.cell(v.q, v.r).terrain === BT.TERRAIN.woods) sc += 8;
+    const elev = gameState.board.elevationOf(v.q, v.r) - gameState.board.elevationOf(t.q, t.r);
+    if (elev > 0) sc += 6;
+    if (sc > bestScore) { bestScore = sc; best = v; }
+  });
+  if (best) { try { gameState.moveToken(t, best.q, best.r, "guest"); } catch (e) {} }
+  t.facing = BT.snapFacing(BT.bearing(gameState.board, [t.q, t.r], [def.q, def.r]));
+}
+function aiFire(t) {
+  const m = mechOf(t);
+  const def = aiTarget(t);
+  if (!def) return false;
+  const defM = mechOf(def);
+  const arc = BT.arcOf(gameState, t, def);
+  let any = false;
+  const order = m.weapons.slice().sort((a, b) => (BT.WEAPONS[b.t].dmg || 0) - (BT.WEAPONS[a.t].dmg || 0));
+  for (const wp of order) {
+    if (wp.destroyed || wp.fired || m.shutdown) continue;
+    if (wp.ammo != null && wp.ammo <= 0) continue;
+    if (arc && BT.weaponArc(wp) !== arc) continue;   // only weapons in arc
+    const base = BT.WEAPONS[wp.t];
+    const dist = gameState.board.distance([t.q, t.r], [def.q, def.r]);
+    if (dist > base.long) continue;
+    if (m.heat >= 10 && base.heat > 5) continue;   // lay off the PPCs when hot
+    const ev = { hits: [] };
+    BT.fireWeapon(gameState, m, wp, defM, ev);
+    for (const h of ev.hits) gameState.addLog("guest", h);
+    any = true;
+    if (defM.destroyed) break;
+  }
+  return any;
+}
+function AI_DO_TURN() {
+  const acts = [];
+  const myToks = gameState.tokensOf("guest").filter(t => mechOf(t) && !mechOf(t).destroyed)
+    .sort((a, b) => (aiTarget(a) ? gameState.board.distance([a.q, a.r], [aiTarget(a).q, aiTarget(a).r]) : 999) - (aiTarget(b) ? gameState.board.distance([b.q, b.r], [aiTarget(b).q, aiTarget(b).r]) : 999));
+  for (const t of myToks) {
+    const m = mechOf(t);
+    if (m.destroyed || m.pilotOut) continue;
+    if (m.prone) {
+      m.prone = false; m.moveMode = "stand";
+      t.mp = m.walk; t.rem = Math.max(0, m.walk - 2);
+      acts.push(m.name + " stands");
+    }
+    if (m.shutdown) { acts.push(m.name + " is shut down"); continue; }
+    const def = aiTarget(t);
+    if (!def) break;
+    aiMove(t);
+    if (aiFire(t)) acts.push(m.name + " fires at " + def.meta.mech.name);
+    if (!m.shutdown && !m.meleeDone && gameState.board.distance([t.q, t.r], [def.q, def.r]) === 1) {
+      const ev = { hits: [] };
+      BT.physical(gameState, m, def.meta.mech, "kick", ev);
+      for (const h of ev.hits) gameState.addLog("guest", h);
+      acts.push(m.name + " kicks " + def.meta.mech.name);
+    }
+  }
+  checkGameEnd();
+  return acts.length ? acts.join("; ") : "holds position";
+}
+
+/* ══════════ table chat ══════════ */
+function fmtTime(ts){ const d=new Date((ts||0)*1000); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+function addChat(role,text,ts){
+  const row=document.createElement("div");
+  row.className="chat-item"+(role===game.myRole?" mine":"");
+  row.innerHTML="<b>"+esc(role===game.myRole?"You":roleName(role))+"</b>"+esc(text)+'<span class="chat-time">'+fmtTime(ts)+'</span>';
+  chatMsgsEl.appendChild(row);
+  chatMsgsEl.scrollTop=chatMsgsEl.scrollHeight;
+  if(role!==game.myRole)sfx("draw");
+}
+function sendChat(){
+  const t=chatInput.value.trim().slice(0,160);
+  if(!t||game.mode!=="online"||!game.sockOpen)return;
+  chatInput.value="";
+  rpc("chat",JSON.stringify({code:game.roomCode,text:t})).then(function(r){
+    if(r&&!r.ok)flashBanner("Chat blocked ("+r.err+").");
+  }).catch(function(){});
+}
+
+/* ══════════ status UI ══════════ */
+function updateNames(){
+  if(game.mode==="ai"){
+    hostNameEl.textContent="You";
+    guestNameEl.textContent="Bot 🤖";
+  }else if(game.mode==="online"&&game.myRole){
+    hostNameEl.textContent=game.myRole==="host"?"You":"Host";
+    guestNameEl.textContent=game.myRole==="host"?"Guest":"You";
+  }else{
+    hostNameEl.textContent="Host";
+    guestNameEl.textContent="Guest";
+  }
+}
+function addLog(role,msg){
+  if(gameState)gameState.addLog(role,msg);
+  else game.log.push({r:role,m:msg});
+  renderLog();
+}
+function renderLog(){
+  const log = gameState ? gameState.log : game.log;
+  logEl.innerHTML="";
+  if(!log.length){ logEl.innerHTML='<div class="muted small">No turns yet.</div>'; return; }
+  const frag=document.createDocumentFragment();
+  for(const e of log){
+    const div=document.createElement("div");
+    div.className="log-item";
+    div.innerHTML="<b>"+esc(roleName(e.r))+"</b><span class='resp'>"+esc(e.m)+"</span>";
+    frag.appendChild(div);
+  }
+  logEl.appendChild(frag);
+}
+function resultText(){
+  if(game.winner==="draw")return "Draw — the match is over.";
+  const w=roleName(game.winner);
+  const youWon=game.mode==="online"&&game.winner===game.myRole;
+  if(youWon){
+    if(game.reason==="resign")return "You win — your opponent resigned!";
+    if(game.reason==="forfeit")return "You win — your opponent left!";
+    if(game.reason==="battle")return "You win — the enemy force is destroyed!";
+    return "You win!";
+  }
+  if(game.mode==="online"&&game.winner!==game.myRole){
+    if(game.reason==="resign")return "You lose — you resigned.";
+    if(game.reason==="forfeit")return "You lose — you left the match.";
+    if(game.reason==="battle")return "You lose — your force is destroyed.";
+    return "You lose.";
+  }
+  if(game.reason==="resign")return w+" wins by resignation.";
+  if(game.reason==="forfeit")return w+" wins — the other side left.";
+  if(game.reason==="battle")return w+" wins — the opposing force is destroyed!";
+  return w+" wins!";
+}
+function updateBanner(){
+  let msg="";
+  if(game.over){
+    msg=resultText();
+  }else if(game.mode==="local"){
+    msg=roleName(turnRoleFor(gameState?gameState.turn:0))+" to move — move your 'Mechs, fire, then end the turn.";
+  }else if(game.mode==="ai"){
+    msg=(gameState&&turnRoleFor(gameState.turn))==="host"?"Your turn — move your 'Mechs, fire, then end the turn.":"Bot is thinking…";
+  }else{
+    if(!game.sockOpen)msg="Connecting…";
+    else if(game.status===1)msg="Waiting for an opponent to join…";
+    else if(!game.oppPresent)msg="Your opponent disconnected — they can rejoin with the code. Claim the win anytime.";
+    else if(turnRoleFor(game.serverTurn)===game.myRole)msg="Your turn — move your 'Mechs, fire, then end the turn.";
+    else msg="Waiting for your opponent…";
+  }
+  bannerEl.textContent=msg;
+}
+let bannerTimer=null;
+function flashBanner(msg){ bannerEl.textContent=msg; if(bannerTimer)clearTimeout(bannerTimer); bannerTimer=setTimeout(updateBanner,2600); }
+
+/* ══════════ turn timer (local & online; 0 to disable) ══════════ */
+const TIMER_SECS=60;
+const turnTimerEl=document.getElementById("turnTimerEl");
+let timerRemain=0, timerInt=null, timerKey="";
+function timerFmt(s){ const m=Math.floor(s/60), r=s%60; return m+":"+String(r).padStart(2,"0"); }
+function timerStop(){ if(timerInt){ clearInterval(timerInt); timerInt=null; } }
+function timerStart(){ if(TIMER_SECS<=0)return; timerStop(); timerRemain=TIMER_SECS; timerInt=setInterval(timerTick,1000); timerTick(); }
+function timerTick(){
+  timerRemain--;
+  if(turnTimerEl){ turnTimerEl.textContent="⏱ "+timerFmt(Math.max(0,timerRemain)); turnTimerEl.classList.toggle("low",timerRemain<=10); }
+  if(timerRemain<=0){
+    timerStop();
+    flashBanner("Time's up — pass auto-sent.");
+    if(!game.over&&!game.locked)passTurn();
+  }
+}
+function syncTimer(){
+  const running = game.mode!=="idle" && game.mode!==null && !game.over && !game.locked;
+  if(!running){ timerStop(); if(turnTimerEl)turnTimerEl.hidden=true; return; }
+  if(turnTimerEl)turnTimerEl.hidden=false;
+  const key = game.mode==="online" ? "O:"+game.serverTurn : "L:"+((gameState&&gameState.turn)||0);
+  if(game.mode==="online" && turnRoleFor(game.serverTurn)!==game.myRole){ timerStop(); if(turnTimerEl)turnTimerEl.textContent="⏱ —"; return; }
+  if(game.mode==="ai" && aiThinking){ timerStop(); if(turnTimerEl)turnTimerEl.textContent="⏱ —"; return; }
+  if(key!==timerKey){ timerKey=key; timerStart(); }
+}
+function refreshTurn(){
+  let r;
+  if(game.mode==="online")r=turnRoleFor(game.serverTurn);
+  else if(gameState)r=turnRoleFor(gameState.turn);
+  else r="host";
+  let text;
+  if(game.over)text="Match over";
+  else if(game.mode==="ai")text=(r==="host"?"Your move":"Bot thinking…");
+  else if(game.mode==="online")text=(r===game.myRole?"Your move":roleName(r)+" to move");
+  else text=roleName(r)+" to move";
+  turnEl.textContent=text;
+  pHost.classList.toggle("on",!game.over&&r==="host");
+  pGuest.classList.toggle("on",!game.over&&r==="guest");
+  if(game.over){ pHost.classList.remove("on"); pGuest.classList.remove("on"); }
+}
+function updateButtons(){
+  if(game.mode==="online"){
+    newGameBtn.textContent=game.over?"Rematch":"New match";
+    newGameBtn.style.display=game.over?"":"none";
+    menuBtn.textContent="Exit match";
+    claimBtn.hidden=!(game.status===2&&!game.over&&!game.oppPresent);
+  }else{
+    newGameBtn.textContent="Restart";
+    newGameBtn.style.display="";
+    menuBtn.textContent="Back to lobby";
+    claimBtn.hidden=true;
+    saveBtn.style.display=!game.over?"":"none";
+  }
+  const myTurn=game.mode!=="online"||(game.sockOpen&&game.status===2&&turnRoleFor(game.serverTurn)===game.myRole);
+  const aiTurn=game.mode==="ai"&&(aiThinking||(gameState&&turnRoleFor(gameState.turn)!=="host"));
+  passBtn.disabled=game.over||game.locked||!myTurn||aiTurn;
+  if (fsEndBtn) fsEndBtn.disabled=passBtn.disabled;
+}
+function updateHexTurnMsg(){
+  const el=document.getElementById("hexTurnMsgEl");
+  if(!el)return;
+  if(!gameState){ el.innerHTML=""; return; }
+  if(game.over){ el.innerHTML="Match over."; return; }
+  if(game.mode==="online"){
+    if(!game.sockOpen)el.innerHTML="Connecting…";
+    else if(game.status===1)el.innerHTML="Waiting for an opponent to join…";
+    else if(turnRoleFor(game.serverTurn)===game.myRole)el.innerHTML="<b>Your turn</b> — move your 'Mechs, fire, then end it.";
+    else el.innerHTML=roleName(turnRoleFor(game.serverTurn))+" is moving…";
+  }else if(game.mode==="ai"){
+    el.innerHTML=turnRoleFor(gameState.turn)==="host"?"<b>Your turn</b> — move your 'Mechs, fire, then end it.":"Bot is thinking…";
+  }else{
+    el.innerHTML="<b>"+roleName(turnRoleFor(gameState.turn))+"</b> to move — move your 'Mechs, fire, then end it.";
+  }
+}
+function renderAll(){
+  updateNames();
+  refreshTurn();
+  updateBanner();
+  updateButtons();
+  renderLog();
+  syncTimer();
+  updateHexTurnMsg();
+  renderRoster();
+  renderMechPanel();
+  refreshBoard();
+}
+function refreshLog(){ renderLog(); }
+
+/* ══════════ modes ══════════ */
+function resetTable(){
+  game.log=[];
+  game.lastLoggedTurn=0;
+  game.over=false; game.winner=null; game.reason="";
+  game.locked=false;
+  timerKey=""; timerStop();
+  aiThinking=false;
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer=null; }
+  selectedMech=null; targetMech=null; measureA=null; measureB=null;
+  if(document.querySelector(".tool-btn"))setTool("move");
+}
+function startMode(mode){
+  if(game.mode==="online"&&game.socket){ exitOnline(false); }
+  resetTable();
+  game.mode=mode;
+  gameState=buildHexGame(0, game.scenario);
+  beginTurn(gameState.turnRole());
+  updateNames();
+  roomBox.hidden=mode!=="online";
+  chatBox.hidden=mode!=="online";
+  claimBtn.hidden=true;
+  lobbyCtn.hidden=true;
+  gameCtn.hidden=false;
+  hexView.setZoom(1);
+  sfx("deal");
+  renderAll();
+}
+function exitOnline(showLobby){
+  if(game.socket){ game.wantReconnect=false; try{ game.socket.close(1000,"bye"); }catch(e){} game.socket=null; }
+  game.sockOpen=false;
+  game.roomCode=null; game.myRole=null; game.mode=null;
+  chatBox.hidden=true;
+  timerStop();
+  if(showLobby){ gameCtn.hidden=true; lobbyCtn.hidden=false; }
+}
+function exitToLobby(){
+  if (window.bgnFullscreen && window.bgnFullscreen.isOpen()) window.bgnFullscreen.close();
+  gameState=null;
+  selectedMech=null; targetMech=null;
+  if(game.mode==="online"){
+    if(game.socket&&game.sockOpen)rpc("leave",game.roomCode).catch(function(){});
+    exitOnline(true);
+    refreshContinuePanel();
+  }else{
+    game.mode=null;
+    gameCtn.hidden=true;
+    lobbyCtn.hidden=false;
+    refreshContinuePanel();
+  }
+}
+
+/* ══════════ play vs AI (mode "ai") ══════════
+   The human always plays Host; the AI is Guest. This template ships
+   with a passive AI that simply passes the turn — build your own
+   computer player by overriding AI_DO_TURN() (return a string
+   describing what the AI did, or null to log nothing). The turn
+   flow, banner, turn timer, and saving are all wired up for you. */
+let aiThinking=false, aiTimer=null;
+function aiPassTurn(){
+  if(game.mode!=="ai"||game.over)return;
+  if(!gameState||turnRoleFor(gameState.turn)!=="guest")return;
+  aiThinking=true;
+  refreshTurn(); updateBanner(); updateButtons(); syncTimer();
+  aiTimer=setTimeout(function(){
+    aiTimer=null;
+    aiThinking=false;
+    if(game.mode!=="ai"){ renderAll(); return; }
+    let msg="held position";
+    try{ const m=AI_DO_TURN(); if(m)msg=m; }catch(e){ console.error("AI error:",e); }
+    gameState.addLog("guest",msg);
+    checkGameEnd();
+    if(!game.over)endTurn("guest");
+    else { saveGame(); renderAll(); }
+  },1100);
+}
+
+/* ══════════ help modal ══════════ */
+const helpOverlay=document.getElementById("helpOverlay");
+const helpBody=document.getElementById("helpBody");
+const HELP_HTML=`<h2 class="goldtext">BattleTech · 3025 — how to fight</h2>
+  <p class="muted">A two-lance 'Mech duel in the style of first-edition BattleTech, running on the BGN online table (rooms, turn order, presence, rematch, saves, chat). Each 'Mech has a record sheet: <b>armor</b> and <b>internal structure</b> per location, a weapon list with heat and ammo, and a heat scale. Destroy every enemy 'Mech to win — or force their <b>center torso</b> or <b>head</b> to zero internal structure.</p>
+  <h3>Turn order</h3>
+  <p>On your turn you may <b>move</b> each of your 'Mechs (choose Walk, Run or Jump), <b>fire</b> its weapons and make one <b>physical attack</b> — then End turn. You move once per 'Mech: movement points (MP) are spent per hex entered (woods/rough/water cost extra, climbing costs +1 MP per level — double while running). Turning to face a new direction costs <b>1 MP per 60°</b> and counts as moving (walk speed). Then your opponent does the same.</p>
+  <h3>Firing arcs</h3>
+  <p>Each weapon is mounted in the <b>Left Arm</b>, <b>Right Arm</b> or <b>Torso</b>, and can only fire at a target inside its arc — the three arcs are three 120° wedges around the 'Mech's facing: <b>Torso</b> (amber) covers straight ahead, <b>LA</b> (teal) the left side, <b>RA</b> (pink) the right side. Selecting a 'Mech paints its arcs on the board; use the <b>⟲ / ⟳ turn</b> buttons (1 MP per 60°) to swing weapons onto a target, or <b>⟲ / ⟳ twist</b> to rotate just the torso (free, ±60°, no MP — but a 'Mech that jumped can't twist). A gold marker on a 'Mech shows its twisted torso direction. Arm weapons can't touch anything behind the torso wedge; torso weapons can't touch the flanks.</p>
+  <h3>To-hit</h3>
+  <p>Base gunnery 4, plus modifiers: <b>attacker movement</b> (walk +1, run +2, jumped +3), <b>target movement</b> (+1/+2/+3 by how it moved last turn), <b>range</b> (short +0, medium +2, long +4), <b>woods</b> (+1 each, max +2; ignored at range 1), <b>minimum range</b> (+1 per hex below it), your <b>heat</b> (+1 per 4 heat above 4), gyro/sensor damage. Roll 2d6 — meet or beat the target number (2 always misses, 12 always hits).</p>
+  <h3>Damage</h3>
+  <p>Each hit rolls a <b>hit location</b>: 2 = CT, 3/4 = RA, 5/6 = LA, 7 = LT, 8 = CT, 9 = RT, 10 = RT, 11 = LL, 12 = RL. Damage eats <b>armor</b> first, then <b>internal structure</b> — structure hits can cause <b>critical hits</b>: weapons, heat sinks, jump jets, actuators, gyro, engine, ammo bins (which <b>explode</b>), sensors, life support, even the cockpit. Destroyed arms lose their weapons; destroyed legs slow the 'Mech and topple it; a destroyed side torso takes the arm with it.</p>
+  <h3>Heat</h3>
+  <p>Firing and moving build heat (jumping is hottest). Heat sinks cool it off at the end of your turn. Above 4 heat you suffer to-hit penalties; at 15+ you risk <b>shutdown</b>; at 20+ your ammo may <b>cook off</b>. Engine criticals add 5 heat every turn. Overheating is a real way to lose a 'Mech.</p>
+  <h3>Falls, pilots and melee</h3>
+  <p>Losing a leg or the gyro knocks a 'Mech over — falling damages it and hurts the pilot. Head damage wounds the pilot; three wounds knock them out (they may wake on a later turn). Adjacent to an enemy? Kick (hits a leg) or punch, up to once per turn per 'Mech.</p>
+  <h3>Three ways to sit down</h3>
+  <p><b>🛋️ Local table</b> — two players share one screen. <b>🤖 Play vs AI</b> — the bot uses the same movement engine and combat tables you do. <b>🌐 Online table</b> — create a room, share the 5-letter code, and play a friend; the host's scenario pick applies to both, and the full battlefield syncs over the network each turn.</p>
+  <button class="btn btn-gold" id="helpDoneBtn">Got it</button>`;
+function openHelp(){
+  helpBody.innerHTML=HELP_HTML;
+  document.getElementById("helpDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function closeHelp(){ helpOverlay.hidden=true; }
+
+/* ══════════ interface guide (first-visit + settings) ══════════ */
+const settingsOverlay=document.getElementById("settingsOverlay");
+const GUIDE_KEY="bt_guide_seen_v2";
+const GUIDE_HTML=`<h2 class="goldtext">BattleTech · 3025 — using the table</h2>
+  <p class="muted">Here's how to read the battlefield. This is the same screen you play on — no hidden menus. When you're done, come back any time via the <b>⚙</b> gear in the top-right corner.</p>
+  <h3>1 · Start at the lobby</h3>
+  <p>Pick a table: <b>🛋️ Local</b> (two players, one screen), <b>🤖 vs AI</b> (the bot moves and fires like you do) or <b>🌐 Online</b> (create a room, share the 5-letter code). Choose a <b>scenario</b> — each side fields the same lance. A saved game appears as <b>Continue your last table</b>.</p>
+  <h3>2 · The game table</h3>
+  <p>The <b>players bar</b> up top shows who is who and whose turn it is, plus a countdown timer. The <b>hex battlefield</b> fills the middle; hover any hex for its terrain and movement cost. The <b>side panel</b> on the right keeps the turn log, room code and chat (online), plus <b>Restart</b>, <b>Save</b> and <b>Back to lobby</b>.</p>
+  <h3>3 · Select and move</h3>
+  <p>Click one of <b>your</b> 'Mechs (or its chip under the board) to select it. Choose <b>🚶 Walk</b>, <b>🏃 Run</b> or <b>🦿 Jump</b> on the toolbar, then click a <b>green hex</b> to move there — green hexes are the hexes you can reach. <b>⟲ / ⟳ turn</b> in the record sheet swings your 'Mech's facing (1 MP per 60°) so weapons point where you want; <b>⟲ / ⟳ twist</b> rotates just the torso for free (±60°, the gold marker shows where it points). The <b>📏 Measure</b> tool clicks two hexes to show range and line of sight; <b>➖ / ➕</b> zoom.</p>
+  <h3>4 · The record sheet</h3>
+  <p>Below the board, the selected 'Mech's sheet shows its <b>facing</b>, <b>heat</b> bar, <b>armor / structure</b> bars per location (a red bar is armor, the thin bar under it is internal structure), the pilot's health, and its <b>weapons</b> — each tagged with its arc (<b>T</b> torso, <b>LA</b>, <b>RA</b>). Click a weapon to <b>fire</b> it at your current target, or hit <b>Melee</b> when adjacent.</p>
+  <h3>5 · Pick a target</h3>
+  <p>Click an <b>enemy</b> 'Mech to target it — the board then shows its firing arcs, and the record sheet becomes the target's. The target line shows its distance and whether it's in your <b>Torso/LA/RA</b> arc. Hover any 'Mech and its stat box docks on the <b>right edge of the screen</b> for a quick look.</p>
+  <h3>6 · Fullscreen</h3>
+  <p>Hit <b>⛶</b> on the toolbar (or the <b>⛶ Full screen</b> button at the top-right) to blow the battlefield up to full screen — the board fills the screen and the selected 'Mech's record sheet docks in the top-right corner so you can keep moving and firing. <b>Esc</b> or the <b>✕ Exit</b> button brings you back to the table.</p>
+  <h3>7 · End your turn</h3>
+  <p>Done moving and firing? Hit <b>End turn</b>. In a local game the other player takes the screen; vs AI the bot plays instantly. On your next turn each 'Mech gets its movement back and its heat cools.</p>
+  <button class="btn btn-gold" id="guideDoneBtn">Got it</button>`;
+function openGuide(){
+  helpBody.innerHTML=GUIDE_HTML;
+  document.getElementById("guideDoneBtn").addEventListener("click",closeHelp);
+  helpOverlay.hidden=false;
+}
+function openSettings(){
+  document.getElementById("firstVisitCb").checked=firstVisitEnabled();
+  settingsOverlay.hidden=false;
+}
+function closeSettings(){ settingsOverlay.hidden=true; }
+function firstVisitEnabled(){
+  try{ return localStorage.getItem(GUIDE_KEY)!=="off"; }catch(e){ return true; }
+}
+function setFirstVisit(on){
+  try{ if(on)localStorage.removeItem(GUIDE_KEY); else localStorage.setItem(GUIDE_KEY,"off"); }catch(e){}
+}
+function maybeShowGuide(){
+  try{
+    if(localStorage.getItem(GUIDE_KEY))return;
+    localStorage.setItem(GUIDE_KEY,"1");
+    setTimeout(openGuide,900);
+  }catch(e){}
+}
+
+/* ══════════ save / continue (local table only) ══════════ */
+const SAVE_KEY="bgn_hex_save";
+function gameJSON(){
+  const s = gameState.toJSON();
+  s.tokens = s.tokens.map(function(t){
+    const o = { id:t.id, owner:t.owner, q:t.q, r:t.r, name:t.name, icon:t.icon, mp:t.mp, rem:t.rem, range:t.range, facing:t.facing, twist:t.twist, blocked:t.blocked, meta:{} };
+    if (t.meta && t.meta.mech) o.meta.mech = t.meta.mech.toPlain();
+    else o.meta = t.meta;
+    return o;
+  });
+  return s;
+}
+function snapshotJSON(){
+  const s = gameJSON();
+  while (JSON.stringify(s).length > 15000 && s.log.length > 3) s.log.shift();
+  return JSON.stringify(s);
+}
+function saveGame(){
+  if(game.mode!=="local"&&game.mode!=="ai")return;
+  if(game.over){ deleteSave(); return; }
+  if(!gameState)return;
+  try{ localStorage.setItem(SAVE_KEY, JSON.stringify({v:3,mode:game.mode,hex:gameJSON(),savedAt:Date.now()})); }catch(e){}
+}
+function hasSave(){ try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; } }
+function deleteSave(){ try{ localStorage.removeItem(SAVE_KEY); }catch(e){} }
+function restoreGame(json){
+  const g=HexGame.fromJSON(json,RULES);
+  let ti = 0;
+  for (const t of g.tokens){
+    const m=t.meta&&t.meta.mech;
+    if(m){
+      const mech=BT.Mech.fromPlain(m);
+      mech.tokenId=t.id; mech.q=t.q; mech.r=t.r;
+      t.meta.mech=mech;
+      t.graphic=mechGraphic(mech.spec, t.owner);
+      t.graphicScale=1;
+      const plain = json.tokens ? json.tokens[ti] : null;
+      t.facing=(plain && plain.facing != null) ? plain.facing : (t.owner==="host"?90:-90);
+      t.twist=(plain && plain.twist != null) ? Math.max(-1, Math.min(1, plain.twist)) : 0;
+      t.pilot=mech.pilot;
+      t.faction=(BT.FACTIONS[t.owner]&&BT.FACTIONS[t.owner].name)||t.owner;
+    }
+    ti++;
+  }
+  return g;
+}
+function refreshContinuePanel(){
+  if(!continuePanel)return;
+  const s=hasSave();
+  continuePanel.hidden=!s;
+  if(!s)return;
+  let info="A saved table was found.";
+  try{ const o=JSON.parse(localStorage.getItem(SAVE_KEY)); if(o&&o.savedAt)info="Saved "+new Date(o.savedAt).toLocaleTimeString()+" — turn "+((o.hex&&o.hex.turn?o.hex.turn:0)+1)+"."; }catch(e){}
+  continueInfoEl.textContent=info;
+}
+function continueGame(){
+  let o; try{ o=JSON.parse(localStorage.getItem(SAVE_KEY)); }catch(e){ o=null; }
+  if(!o||!o.hex){ flashBanner("No saved table found."); return; }
+  resetTable();
+  game.mode=o.mode==="ai"?"ai":"local";
+  try{ gameState=restoreGame(o.hex); }catch(e){ flashBanner("That save looks corrupted."); return; }
+  beginTurn(gameState.turnRole());
+  updateNames();
+  roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  sfx("deal");
+  renderAll();
+  if(game.mode==="ai"&&turnRoleFor(gameState.turn)==="guest")aiPassTurn();
+}
+
+/* ══════════ turn action ══════════ */
+function passTurn(){
+  if(game.over||game.locked)return;
+  if(!gameState)return;
+  if(game.mode==="ai"){
+    if(turnRoleFor(gameState.turn)!=="host")return;
+    endTurn("host");
+    aiPassTurn();
+    return;
+  }
+  if(game.mode==="local"){
+    endTurn(turnRoleFor(gameState.turn));
+    return;
+  }
+  if(turnRoleFor(game.serverTurn)!==game.myRole)return;
+  endTurn(game.myRole);
+  game.locked=true;
+  updateButtons();
+  const evt=game.serverTurn;
+  const payload=snapshotJSON();
+  rpc("move",JSON.stringify({code:game.roomCode,evt:evt,data:payload})).then(function(r){
+    game.locked=false;
+    if(!r||!r.ok){ flashBanner("Couldn't end the turn ("+(r&&r.err?r.err:"error")+")."); }
+    sfx("turn");
+    return refreshFromServer();
+  }).catch(function(){
+    game.locked=false;
+    flashBanner("Couldn't reach the server — reconnecting…");
+  });
+}
+
+/* ══════════ online client ══════════ */
+function openedP(){
+  return new Promise(function(res){
+    if(game.sockOpen)res(true);
+    else game.openResolvers.push(res);
+  });
+}
+function connectSocket(){
+  if(game.socket)return;
+  if(!rootRef.createServerSocket){ setConnLabel("Online unavailable."); return; }
+  try{ game.socket=rootRef.createServerSocket(); }
+  catch(e){ setConnLabel("Online unavailable."); return; }
+  game.socket.addEventListener("open",function(){
+    game.sockOpen=true; game.retryDelay=800;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(true); });
+    setConnLabel();
+    if(game.roomCode)rejoinRoom();
+    updateBanner();
+  });
+  game.socket.addEventListener("message",function(ev){ if(game.mode==="online")onServerMsg(ev.data); });
+  game.socket.addEventListener("close",function(ev){
+    game.sockOpen=false;
+    const rs=game.openResolvers; game.openResolvers=[];
+    rs.forEach(function(r){ r(false); });
+    setConnLabel("Disconnected");
+    if(!game.wantReconnect||game.mode!=="online")return;
+    if(ev.code===4403){ game.wantReconnect=false; setConnLabel("Online is unavailable on this page."); return; }
+    setTimeout(function(){
+      if(game.wantReconnect&&game.mode==="online"){
+        game.retryDelay=Math.min(game.retryDelay*1.7,8000);
+        game.socket=null; connectSocket();
+      }
+    },game.retryDelay);
+  });
+}
+function rpc(method,data){
+  return new Promise(function(res,rej){
+    if(!game.socket||!game.sockOpen)return rej(new Error("socket not open"));
+    game.socket.rpc[method](data).then(function(r){
+      try{ res(JSON.parse(r)); }catch(e){ res({ok:false,err:"parse"}); }
+    }).catch(rej);
+  });
+}
+function setConnLabel(txt){
+  connEl.textContent=txt!==undefined?txt:(game.sockOpen?"Connected — sharing code with a friend starts the match":"Connecting…");
+}
+function setOnlineMsg(t){ onlineMsgEl.textContent=t; }
+function onServerMsg(raw){
+  let msg;
+  try{ msg=JSON.parse(raw); }catch(e){ return; }
+  if(msg.t==="snap")applyServerSnap(msg.snap);
+  else if(msg.t==="chat")addChat(msg.role,msg.text,msg.ts);
+}
+function refreshFromServer(){
+  return rpc("getRoom",game.roomCode).then(function(r){
+    if(r&&r.snap)applyServerSnap(r.snap);
+  }).catch(function(){});
+}
+function applyServerSnap(s){
+  game.serverTurn=s.turn;
+  game.first=s.first;
+  game.status=s.status;
+  game.scenario=s.scenario!=null?s.scenario:game.scenario;
+  game.oppPresent=game.myRole==="host"?s.guestIn:s.hostIn;
+  if(s.snapshot){
+    try{ gameState=restoreGame(JSON.parse(s.snapshot)); }
+    catch(e){ console.error("bad snapshot:",e); }
+  }else{
+    gameState=buildHexGame(s.first, game.scenario);
+  }
+  selectedMech=null; targetMech=null; measureA=null; measureB=null;
+  if(s.status===3){
+    game.over=true;
+    game.winner=s.winner;
+    game.reason=s.reason||"";
+    if(game.winner==="draw")sfx("draw2");
+    else if(game.winner===game.myRole)sfx("win");
+    else sfx("lose");
+  }else{
+    game.over=false; game.winner=null; game.reason="";
+    if(game.mode==="online"&&turnRoleFor(s.turn)===game.myRole)beginTurn(game.myRole);
+  }
+  renderAll();
+}
+function enterOnlineGame(){
+  lobbyCtn.hidden=true; gameCtn.hidden=false;
+  roomBox.hidden=false;
+  chatBox.hidden=false;
+  roomCodeEl.textContent=game.roomCode;
+  updateNames(); renderAll();
+}
+async function doCreateRoom(){
+  setOnlineMsg("Creating room…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("createRoom",String(game.scenario));
+    if(!r.ok){ setOnlineMsg("Couldn't create a room ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=r.code; game.myRole=r.role;
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    sfx("deal");
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+async function doJoinRoom(code){
+  setOnlineMsg("Joining room "+code+"…");
+  const ok=await openedP();
+  if(!ok){ setOnlineMsg("Couldn't reach the server."); return; }
+  try{
+    const r=await rpc("joinRoom",code);
+    if(!r.ok){ setOnlineMsg("Couldn't join ("+r.err+")."); return; }
+    resetTable();
+    game.mode="online"; game.roomCode=code; game.myRole=r.role;
+    setOnlineMsg("");
+    if(r.snap)applyServerSnap(r.snap);
+    enterOnlineGame();
+    sfx("deal");
+  }catch(e){ setOnlineMsg("Server error — please retry."); }
+}
+function rejoinRoom(){
+  if(!game.roomCode)return;
+  rpc("joinRoom",game.roomCode).then(function(r){
+    if(!r.ok){
+      setConnLabel("Rejoin failed ("+r.err+").");
+      if(r.err==="room_full"&&game.mode==="online"&&game.sockOpen){
+        setTimeout(function(){ if(game.mode==="online"&&game.sockOpen)rejoinRoom(); },1500);
+      }
+      return;
+    }
+    game.myRole=r.role;
+    if(r.snap)applyServerSnap(r.snap);
+    setConnLabel();
+  }).catch(function(){ setConnLabel("Rejoin failed."); });
+}
+
+/* ══════════ wire up UI ══════════ */
+document.querySelectorAll(".bgn-mode").forEach(function(btn){
+  btn.addEventListener("click",function(){
+    const m=btn.dataset.mode;
+    if(m==="online"){ onlinePanel.hidden=false; setOnlineMsg(""); joinCodeInput.focus(); return; }
+    onlinePanel.hidden=true;
+    startMode(m);
+  });
+});
+document.getElementById("createRoomBtn").addEventListener("click",function(){
+  game.wantReconnect=true; connectSocket(); doCreateRoom();
+});
+document.getElementById("joinRoomBtn").addEventListener("click",function(){
+  const c=joinCodeInput.value.trim().toUpperCase();
+  if(c.length<5){ setOnlineMsg("Enter the 5-letter room code."); return; }
+  game.wantReconnect=true; connectSocket(); doJoinRoom(c);
+});
+joinCodeInput.addEventListener("input",function(){
+  this.value=this.value.toUpperCase().replace(/[^A-Z2-9]/g,"").slice(0,5);
+});
+copyCodeBtn.addEventListener("click",function(){
+  try{ navigator.clipboard.writeText(game.roomCode||""); flashBanner("Room code copied!"); }catch(e){ flashBanner(game.roomCode||""); }
+});
+leaveBtn.addEventListener("click",function(){ exitToLobby(); });
+menuBtn.addEventListener("click",function(){ exitToLobby(); });
+passBtn.addEventListener("click",function(){ passTurn(); });
+newGameBtn.addEventListener("click",function(){
+  if(game.mode==="online"){
+    if(game.over)rpc("rematch",game.roomCode).then(function(r){ if(r&&r.ok){ refreshFromServer(); sfx("deal"); } }).catch(function(){});
+    return;
+  }
+  startMode(game.mode==="ai"?"ai":"local");
+});
+claimBtn.addEventListener("click",function(){
+  if(game.over)return;
+  rpc("claimWin",game.roomCode).then(function(r){
+    if(!r.ok)flashBanner(r.err==="opp_present"?"Your opponent came back!":"Can't claim yet.");
+  }).catch(function(){});
+});
+chatSendBtn.addEventListener("click",sendChat);
+chatInput.addEventListener("keydown",function(e){ if(e.key==="Enter")sendChat(); });
+continueBtn.addEventListener("click",continueGame);
+deleteSaveBtn.addEventListener("click",function(){ deleteSave(); refreshContinuePanel(); flashBanner("Save deleted."); });
+saveBtn.addEventListener("click",function(){ saveGame(); flashBanner("Table saved."); });
+document.getElementById("helpBtn").addEventListener("click",openHelp);
+document.getElementById("tableHelpBtn").addEventListener("click",openHelp);
+document.getElementById("helpCloseBtn").addEventListener("click",closeHelp);
+helpOverlay.addEventListener("click",function(e){ if(e.target===helpOverlay)closeHelp(); });
+
+/* settings + interface guide */
+document.getElementById("navSettingsBtn").addEventListener("click",openSettings);
+document.getElementById("settingsCloseBtn").addEventListener("click",closeSettings);
+settingsOverlay.addEventListener("click",function(e){ if(e.target===settingsOverlay)closeSettings(); });
+document.getElementById("guideBtn").addEventListener("click",function(){ closeSettings(); openGuide(); });
+document.getElementById("rulesBtn").addEventListener("click",function(){ closeSettings(); openHelp(); });
+document.getElementById("firstVisitCb").addEventListener("change",function(e){ setFirstVisit(e.target.checked); });
+setTimeout(maybeShowGuide,1200);
+
+/* hex tools */
+document.querySelectorAll(".tool-btn").forEach(function(b){
+  b.addEventListener("click",function(){ setTool(b.dataset.tool); });
+});
+document.querySelectorAll(".move-btn").forEach(function(b){
+  b.addEventListener("click",function(){ setMoveMode(b.dataset.mode); });
+});
+
+/* zoom */
+const zoomPctEl = document.getElementById("zoomPctEl");
+function updateZoomUI(){ if(zoomPctEl) zoomPctEl.textContent = Math.round(hexView.zoom * 100) + "%"; }
+document.querySelectorAll(".zoom-btn").forEach(function(b){
+  b.addEventListener("click",function(){
+    const z = b.dataset.z;
+    if (z === "reset") hexView.setZoom(1);
+    else hexView.setZoom(hexView.zoom * (z === "1" ? 1.25 : 0.8));
+    updateZoomUI();
+  });
+});
+hexView.onZoom = updateZoomUI;
+hexView.svg.addEventListener("wheel", function(e){
+  e.preventDefault();
+  hexView.setZoom(hexView.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), { x: e.clientX, y: e.clientY });
+  updateZoomUI();
+}, { passive: false });
+
+/* ══════════ fullscreen board overlay (BGN standard) ══════════
+   The hex board (.hex-board-wrap) is registered as the overlay's canvas and
+   the selected-'Mech record sheet rides in the top-right tile slot, so the
+   game stays playable fullscreen. The toolbar ⛶ button toggles the same
+   overlay that the floating #fsOpenBtn opens. */
+const fsBtn = document.getElementById("fsBtn");
+const mechPanelEl = document.getElementById("mechPanelEl");
+const fsActionsCtn = document.getElementById("fsActionsCtn");
+let fsEndBtn = null;
+
+function fsRefit(){
+  if (hexView._refit) hexView._refit();
+  refreshBoard();
+}
+function fsOnOpen(){
+  hexView.fitToContainer = true;
+  hexView.setZoom(1);
+  setTimeout(fsRefit, 30);
+  if (fsActionsCtn && !fsEndBtn) {
+    fsEndBtn = document.createElement("button");
+    fsEndBtn.className = "btn btn-gold btn-sm";
+    fsEndBtn.textContent = "⏭ End turn";
+    fsEndBtn.addEventListener("click", function(){ passTurn(); });
+    fsActionsCtn.appendChild(fsEndBtn);
+  }
+  updateButtons();
+}
+function fsOnClose(){
+  hexView.fitToContainer = false;
+  hexView.setZoom(1);
+  setTimeout(fsRefit, 30);
+  if (fsEndBtn) { fsEndBtn.remove(); fsEndBtn = null; }
+  updateButtons();
+}
+function toggleFullscreen(){
+  if (!window.bgnFullscreen) return;
+  if (window.bgnFullscreen.isOpen()) window.bgnFullscreen.close();
+  else window.bgnFullscreen.open();
+}
+let fsRegistered = false;
+function ensureFullscreen(){
+  if (fsRegistered || !window.bgnFullscreen || !hexBoardEl) return;
+  fsRegistered = true;
+  window.bgnFullscreen.register({
+    canvas: hexBoardEl,
+    tile: mechPanelEl,
+    resize: fsRefit,
+    status: function(){ return bannerEl.textContent; },
+    onOpen: fsOnOpen,
+    onClose: fsOnClose
+  });
+}
+if (fsBtn) fsBtn.addEventListener("click", toggleFullscreen);
+
+/* Esc closes help/settings modals (the fullscreen overlay has first priority
+   and is handled by the bgnFullscreen module's own keydown listener). */
+document.addEventListener("keydown", function(e){
+  if (e.key !== "Escape") return;
+  if (window.bgnFullscreen && window.bgnFullscreen.isOpen()) { window.bgnFullscreen.close(); return; }
+  if (!helpOverlay.hidden) closeHelp();
+  else if (!settingsOverlay.hidden) closeSettings();
+});
+function syncGameChrome(){ document.body.classList.toggle("bt-in-game", !gameCtn.hidden); if (!gameCtn.hidden) ensureFullscreen(); }
+new MutationObserver(syncGameChrome).observe(gameCtn, { attributes:true, attributeFilter:["hidden"] });
+syncGameChrome();
+
+
+/* scenario picker */
+const scenarioSelect=document.getElementById("scenarioSelect");
+game.scenario=0;
+if(scenarioSelect){
+  BT.SCENARIOS.forEach(function(s){
+    const o=document.createElement("option");
+    o.value=s.id; o.textContent=s.name;
+    scenarioSelect.appendChild(o);
+  });
+  scenarioSelect.value="0";
+  scenarioSelect.addEventListener("change",function(){ game.scenario=parseInt(this.value)||0; });
+}
+
+refreshContinuePanel();
+renderAll();
+
+/* debug/testing handle for browser_eval */
+window.__t = { game, gameState:()=>gameState, turnRoleFor, applyServerSnap, passTurn, startMode, exitToLobby, doCreateRoom, doJoinRoom, refreshFromServer, saveGame, continueGame, deleteSave, aiPassTurn, AI_DO_TURN, openHelp, closeHelp, openGuide, openSettings, closeSettings, setFullscreen: toggleFullscreen, fsOpen:()=>window.bgnFullscreen?window.bgnFullscreen.isOpen():false, endTurn, beginTurn, resolveEndTurn, buildHexGame, setTool, setMoveMode, turnMech, twistMech, refreshBoard, renderAll, finishGame, checkGameEnd, fireSelectedWeapon, doPhysical, standUp, connectSocket, rpc, openedP, onServerMsg, hexView:()=>hexView, flashBanner, restoreGame, renderRoster, renderMechPanel };
+
+/* ══════════ share / export (bgn-share.js) ══════════ */
+(function(){
+  var shareBtn=document.getElementById("shareBtn");
+  if(!shareBtn||!window.bgnShare)return;
+  function tplName(){ return val(rootRef.gameTitle,"BGN Hex Template"); }
+  function importTable(o){
+    if(!o||!o.hex)return false;
+    if(game.mode==="online")exitOnline(false);
+    resetTable();
+    game.mode=o.mode==="ai"?"ai":"local";
+    try{ gameState=restoreGame(o.hex); }catch(e){ return false; }
+    beginTurn(gameState.turnRole());
+    updateNames();
+    roomBox.hidden=true; chatBox.hidden=true; claimBtn.hidden=true;
+    lobbyCtn.hidden=true; gameCtn.hidden=false;
+    sfx("deal");
+    renderAll();
+    if(game.mode==="ai"&&turnRoleFor(gameState.turn)==="guest")aiPassTurn();
+    return true;
+  }
+  var panel=window.bgnShare.openPanel({
+    tpl:"bgn-hex-template",
+    gameName:tplName,
+    exportData:function(){
+      if(game.mode!=="local"&&game.mode!=="ai"||!gameState)return null;
+      return {mode:game.mode, hex:gameJSON()};
+    },
+    applySave:importTable,
+    source:function(){
+      var g=document.getElementById("gameCtn");
+      if(g&&!g.hidden)return g;
+      return document.getElementById("lobbyCtn");
+    },
+    title:tplName,
+    subtitle:function(){ return game.mode==="ai"?"vs AI":"local table"; },
+    filenameBase:function(){ return tplName().toLowerCase().replace(/[^a-z0-9]+/g,"-")||"blank"; }
+  });
+  shareBtn.addEventListener("click",function(){ panel.open(); });
+})();
+})();
+</script>
+
+<!-- BGN Lounge: one shared chat across every BGN game -->
+<style>
+.bgn-lounge-btn{position:fixed;right:22px;bottom:94px;z-index:9000;background:#2b3a55;color:#eef;border:1px solid #45557a;border-radius:999px;padding:10px 16px;cursor:pointer;font:600 14px/1 system-ui;box-shadow:0 4px 16px rgba(0,0,0,.45);}
+.bgn-lounge-btn:hover{background:#37507a;}
+.bgn-lounge-overlay{position:fixed;inset:0;z-index:9100;background:rgba(5,8,16,.6);display:none;align-items:center;justify-content:center;padding:18px;}
+.bgn-lounge-overlay.open{display:flex;}
+.bgn-lounge-frame{position:relative;width:min(430px,100%);height:min(620px,100%);background:#1a2130;border:1px solid #3a4a6a;border-radius:12px;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,.65);}
+.bgn-lounge-frame iframe{display:block;width:100%;height:100%;border:0;}
+.bgn-lounge-close{position:absolute;top:6px;right:6px;z-index:2;background:rgba(10,14,24,.65);color:#fff;border:0;border-radius:999px;width:30px;height:30px;cursor:pointer;font-size:15px;line-height:1;}
+.bgn-lounge-close:hover{background:rgba(10,14,24,.9);}
+</style>
+<button class="bgn-lounge-btn" id="loungeBtn" title="BGN Lounge - shared chat">💬 Lounge</button>
+<div class="bgn-lounge-overlay" id="loungeOverlay">
+  <div class="bgn-lounge-frame">
+    <button class="bgn-lounge-close" id="loungeCloseBtn">✕</button>
+    <iframe id="loungeFrame" src="https://perchance.org/bgn-chat?embed=1" allow="clipboard-write" loading="lazy"></iframe>
+  </div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById("loungeBtn"),ov=document.getElementById("loungeOverlay"),fr=document.getElementById("loungeFrame"),cb=document.getElementById("loungeCloseBtn");
+  if(!btn||!ov||!fr||!cb)return;
+  function openL(){ ov.classList.add("open"); try{ fr.focus(); }catch(_){} }
+  function closeL(){ ov.classList.remove("open"); }
+  btn.addEventListener("click",openL);
+  cb.addEventListener("click",closeL);
+  ov.addEventListener("click",function(e){ if(e.target===ov) closeL(); });
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape"&&ov.classList.contains("open")) closeL(); });
+  window.addEventListener("message",function(e){
+    if(e.data&&e.data.type==="bgn-lounge-sound"){ try{ if(window.BGN&&window.BGN.sfx)window.BGN.sfx.play("draw"); }catch(_){} }
+  });
+})();
+</script>

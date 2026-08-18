@@ -449,10 +449,21 @@
 
     <div class="tips reveal" id="pluginsDemo" style="margin-top:28px;">
       <h3>🎴 Live demo — running on this page right now</h3>
-      <p style="color:var(--muted); margin:6px 0 14px;">Real output from <b>card-deck-plugin</b> (inline SVG, dealt from the plugin's full 54-card pool) and <b>rathji-plugin-template</b> (the badge below).</p>
+      <p style="color:var(--muted); margin:6px 0 14px;">Real output from <b>card-deck-plugin</b> (inline SVG, dealt from the plugin's full 54-card pool), <b>rathji-plugin-template</b> (the badge below), and <b>game-math-plugin</b> (exact dice distributions).</p>
       <button class="demo-btn" id="dealBtn">🔀 Deal a new hand</button>
       <div class="demo-stage" id="demoCards" style="margin-top:10px;"></div>
       <div class="demo-stage" id="demoBadge"></div>
+      <div style="margin-top:26px; padding-top:18px; border-top:1px dashed rgba(139,92,246,.3);">
+        <h4 style="margin:0 0 4px;">🎲 game-math-plugin — dice, exactly</h4>
+        <p style="color:var(--muted); margin:0 0 10px;">Try <code>4d6dl1</code> (stat roll), <code>2d20kh1</code> (advantage), <code>2d8x</code> (exploding) or a pool like <code>5d6 t4+</code>.</p>
+        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+          <input id="gmExprInput" class="backup-field" value="4d6dl1" style="max-width:220px; flex:1;">
+          <button class="btn btn-primary" id="gmRollBtn">🎲 Roll</button>
+          <button class="btn btn-ghost" id="gmDistBtn">📊 Distribution</button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;" id="gmChips"></div>
+        <div class="demo-stage" id="gmOut" style="background:var(--bg2); border-radius:12px; padding:12px;"></div>
+      </div>
     </div>
 
     <div class="tips reveal" style="margin-top:28px;">
@@ -987,6 +998,42 @@
   var dealBtn = document.getElementById("dealBtn");
   if (dealBtn) dealBtn.addEventListener("click", dealCards);
   dealCards();
+
+  // ---------- game-math-plugin live demo ----------
+  function gmApi() {
+    return (root.gameMath && typeof root.gameMath.roll === "function") ? root.gameMath : (window.gameMath || null);
+  }
+  var gmChips = document.getElementById("gmChips");
+  if (gmChips) {
+    ["4d6dl1", "3d6", "2d20kh1", "2d8x", "5d6 t4+", "2d6rr1"].forEach(function(e) {
+      var c = document.createElement("span");
+      c.className = "chip";
+      c.style.cssText = "font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.78rem;cursor:pointer;background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.4);color:var(--accent);border-radius:99px;padding:3px 11px;";
+      c.textContent = e;
+      c.onclick = function() { document.getElementById("gmExprInput").value = e; gmDist(); };
+      gmChips.append(c);
+    });
+  }
+  function gmShow(fn) {
+    var out = document.getElementById("gmOut");
+    var api = gmApi();
+    if (!api) { out.textContent = "⏳ game-math-plugin loading…"; return; }
+    try {
+      out.innerHTML = "";
+      fn(api, out);
+    } catch (e) {
+      out.innerHTML = "<span style='color:#f87171;'>" + (e && e.message ? e.message : e) + "</span>";
+    }
+  }
+  function gmRoll() { gmShow(function(api, out) { api.roll(document.getElementById("gmExprInput").value.trim()).into(out); }); }
+  function gmDist() { gmShow(function(api, out) { api.distribution(document.getElementById("gmExprInput").value.trim()).into(out); }); }
+  var gmRollBtn = document.getElementById("gmRollBtn");
+  var gmDistBtn = document.getElementById("gmDistBtn");
+  if (gmRollBtn) gmRollBtn.addEventListener("click", gmRoll);
+  if (gmDistBtn) gmDistBtn.addEventListener("click", gmDist);
+  var gmExprInput = document.getElementById("gmExprInput");
+  if (gmExprInput) gmExprInput.addEventListener("keydown", function(e) { if (e.key === "Enter") gmDist(); });
+  gmDist();
 
   // ---------- Backup to GitHub ----------
   function ghStatus(text, isError) {

@@ -1,0 +1,553 @@
+<style>
+  :root {
+    /* DARK MODE (Default) - Pastel Palette */
+    --bg-app: #1e1e2e; --bg-sidebar: #181825; --bg-card: #313244; --bg-input: #45475a;
+    --text-main: #cdd6f4; --text-muted: #a6adc8;
+    --accent-primary: #cba6f7; --accent-secondary: #89b4fa; --accent-success: #a6e3a1; 
+    --accent-warn: #fab387; --accent-danger: #f38ba8;
+    --radius: 8px;
+    --font-main: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: 'Consolas', 'Monaco', monospace;
+  }
+
+  body { margin: 0; font-family: var(--font-main); background: var(--bg-app); color: var(--text-main); height: 100vh; overflow: hidden; display: flex; }
+  #app-container { display: flex; width: 100%; height: 100%; }
+
+  /* SIDEBAR */
+  #sidebar { width: 300px; background: var(--bg-sidebar); border-right: 1px solid var(--bg-card); display: flex; flex-direction: column; padding: 1rem; flex-shrink: 0; transition: margin-left 0.3s; }
+  .sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; color: var(--accent-primary); font-weight: bold; letter-spacing: 1px; }
+  #search-bar { width: 100%; padding: 10px; background: var(--bg-input); border: none; border-radius: var(--radius); color: var(--text-main); margin-bottom: 1rem; box-sizing: border-box; }
+  #protocol-list { flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
+  
+  .list-item { padding: 10px; background: var(--bg-card); border-radius: var(--radius); cursor: pointer; border-left: 3px solid transparent; transition: all 0.2s; }
+  .list-item:hover { background: var(--bg-input); }
+  .list-item.active { border-left-color: var(--accent-secondary); background: var(--bg-input); }
+  .item-title { font-weight: bold; font-size: 0.9rem; }
+  .item-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+  /* MAIN CONTENT */
+  #main-view { flex-grow: 1; display: flex; flex-direction: column; padding: 2rem; overflow: hidden; position: relative; background: var(--bg-app); }
+  #empty-state { display: flex; height: 100%; align-items: center; justify-content: center; color: var(--text-muted); font-style: italic; }
+  #content-area { display: none; flex-direction: column; height: 100%; }
+  
+  .content-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--bg-card); }
+  .header-titles h1 { margin: 0; font-size: 1.5rem; color: var(--accent-secondary); }
+  .header-titles span { color: var(--text-muted); font-size: 0.9rem; font-family: var(--font-mono); }
+  .action-bar { display: flex; gap: 0.5rem; }
+
+  /* BUTTONS & INPUTS */
+  button { cursor: pointer; border: none; padding: 8px 16px; border-radius: var(--radius); font-weight: 600; transition: filter 0.2s; }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  
+  .btn-primary { background: var(--accent-primary); color: #1e1e2e; }
+  .btn-copy { background: var(--accent-success); color: #1e1e2e; width: 100%; margin-bottom: 1rem; padding: 12px; font-size: 1rem; display: flex; align-items: center; justify-content: center; gap: 8px;}
+  .btn-icon { background: var(--bg-input); color: var(--text-main); padding: 8px; }
+  .btn-danger { background: var(--accent-danger); color: #1e1e2e; }
+  .btn-new { background: var(--accent-secondary); color: #1e1e2e; width: 100%; margin-top: 1rem;}
+  .btn-back { display: none; background: var(--bg-input); color: var(--text-main); margin-bottom: 10px; }
+  .btn-cloud { background: var(--accent-warn); color: #1e1e2e; width: 100%; margin-bottom: 5px; }
+
+  input, textarea { background: var(--bg-input); border: 1px solid var(--bg-card); color: var(--text-main); padding: 10px; border-radius: var(--radius); font-family: inherit; }
+  textarea { min-height: 200px; font-family: var(--font-mono); resize: vertical; }
+  #code-container { flex-grow: 1; background: #11111b; border-radius: var(--radius); padding: 1rem; overflow: auto; font-family: var(--font-mono); font-size: 0.9rem; white-space: pre-wrap; color: #a6adc8; border: 1px solid var(--bg-card); }
+
+  /* MODALS */
+  .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+  .modal-card { background: var(--bg-app); padding: 2rem; border-radius: var(--radius); width: 600px; max-width: 90%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid var(--bg-card); display: flex; flex-direction: column; gap: 1rem; max-height: 90vh; overflow-y: auto; }
+  .form-group { display: flex; flex-direction: column; gap: 5px; }
+  .form-group label { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; }
+
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--accent-success); color: #1e1e2e; padding: 10px 20px; border-radius: var(--radius); font-weight: bold; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 200; }
+
+  @media (max-width: 768px) {
+    #sidebar { width: 100%; position: absolute; height: 100%; z-index: 10; }
+    #main-view { width: 100%; padding: 1rem; }
+    .btn-back { display: block; }
+    #sidebar.hidden { display: none; }
+  }
+  
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg-sidebar); }
+  ::-webkit-scrollbar-thumb { background: var(--bg-input); border-radius: 4px; }
+</style>
+
+<div id="app-container">
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <span>PROTOCOL VAULT</span>
+      <button class="btn-icon" onclick="openSettings()" title="Settings">⚙️</button>
+    </div>
+    <input type="text" id="search-bar" placeholder="Search..." oninput="renderList()">
+    <div id="protocol-list"></div>
+    <button class="btn-new" onclick="openEditor()">+ New Protocol</button>
+  </div>
+
+  <div id="main-view">
+    <button class="btn-back" onclick="showSidebar()">← Back to List</button>
+    <div id="empty-state">Select a protocol from the sidebar</div>
+    <div id="content-area">
+      <div class="content-header">
+        <div class="header-titles"><h1 id="view-title"></h1><span id="view-meta"></span></div>
+        <div class="action-bar">
+          <button class="btn-icon" onclick="editCurrent()">✎</button>
+          <button class="btn-icon" style="color:var(--accent-danger)" onclick="deleteCurrent()">🗑️</button>
+        </div>
+      </div>
+      <button class="btn-copy" onclick="copyContent()"><span>📋 Copy to Clipboard</span></button>
+      <div id="code-container"></div>
+    </div>
+  </div>
+</div>
+
+<div id="editor-modal" class="modal-overlay">
+  <div class="modal-card">
+    <h2 id="modal-title">Edit Protocol</h2>
+    <input type="hidden" id="edit-id">
+    <div class="form-group"><label>Title</label><input type="text" id="edit-title"></div>
+    <div class="form-group"><label>Version / Meta</label><input type="text" id="edit-version"></div>
+    <div class="form-group"><label>Content</label><textarea id="edit-content"></textarea></div>
+    <div style="display:flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+      <button class="btn-icon" onclick="closeModal('editor-modal')">Cancel</button>
+      <button class="btn-primary" onclick="saveProtocol()">Save Protocol</button>
+    </div>
+  </div>
+</div>
+
+<div id="settings-modal" class="modal-overlay">
+  <div class="modal-card">
+    <h2>Vault Settings</h2>
+    
+    <div style="background:var(--bg-input); padding:1rem; border-radius:var(--radius); border:1px solid var(--accent-primary);">
+      <h3 style="margin-top:0; color:var(--accent-primary)">☁️ Cloud Sync (JSONBin)</h3>
+      <div class="form-group">
+        <label>Bin ID</label>
+        <input type="text" id="cloud-bin-id" placeholder="e.g. 677... (From JSONBin URL)">
+      </div>
+      <div class="form-group" style="margin-top:5px;">
+        <label>API Key (X-Master-Key)</label>
+        <input type="password" id="cloud-api-key" placeholder="$2b$10$..." onchange="saveCloudConfig()">
+      </div>
+      <div style="display:flex; gap:10px; margin-top:10px;">
+        <button class="btn-cloud" onclick="cloudPull()">⇩ Load from Cloud</button>
+        <button class="btn-cloud" onclick="cloudPush()">⇧ Save to Cloud</button>
+      </div>
+      <div id="cloud-status" style="font-size:0.75rem; margin-top:5px; color:var(--text-muted); text-align:right;">Status: Idle</div>
+    </div>
+
+    <div style="border-top:1px solid var(--bg-card); padding-top:1rem; margin-top:1rem;">
+       <h3 style="margin-top:0; color:var(--text-muted); font-size:1rem;">Local Backup</h3>
+       <div style="display:flex; gap: 10px; margin-bottom: 1rem;">
+        <button class="btn-primary" onclick="downloadJSON()">⇩ Download .json</button>
+        <button class="btn-new" onclick="triggerUpload()" style="margin-top:0">⇧ Import .json</button>
+        <input type="file" id="file-input" style="display:none" accept=".json" onchange="handleFileUpload(this)">
+      </div>
+    </div>
+    
+    <div style="display:flex; justify-content: flex-end;">
+      <button class="btn-icon" onclick="closeModal('settings-modal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast">Action Complete</div>
+
+<script>
+  // --- DEFAULT DATA (FALLBACK) ---
+  const DEFAULT_DATA = [
+    {
+      id: "genesis_v44",
+      title: "Genesis Project Migration Block",
+      version: "v4.4 (Direct DOM / Smart Retry)",
+      content: `📂 GENESIS PROJECT MIGRATION BLOCK
+Project Name: Genesis Image Generator (Perchance)
+Version: 4.4 (Direct DOM Injection / Smart Retry)
+Date Archived: 2025-12-30
+
+1. Project Summary
+A customized Stable Diffusion interface built on Perchance.org. It features a dual-pane layout, AI-powered prompt enhancement, and a robust "Direct Control" JavaScript engine.
+
+2. The Genesis Protocol (v4.0 Standards)
+Strict DOM Injection (The "Anti-Update" Rule):
+- Never use Perchance's update() function for the main display area.
+- Method: Use a static <img> tag with id="main-image" and modify its .src attribute via JavaScript.
+
+Universal Data Handling:
+- Code Standard: Always convert result to String first to check for data:image prefix before checking for Objects.
+
+The Retry Loop:
+- Requirement: Logic must include a while loop (max ~60s) that pauses for 1000ms and retries upon receiving "waiting" status.
+
+3. Current System Architecture
+- HTML Structure: Wrapper, Sidebar (hidden via CSS), Main Display.
+- JavaScript Logic Flow: Lock UI -> Construct Prompt -> Start Loader -> Execute t2i (Retry Loop) -> Handle Result -> Inject -> Unlock UI.
+
+4. Known Quirks
+- Iframe Null Error: Refreshing HTML crashes transformers.js. Fix: Full page F5.
+- Base64 Returns: The v4.3 logic handles occasional Base64 returns.
+
+"I am beginning work on the 'Voxel Project' project on Perchance. This is a v4.4 web app that uses the Perchance t2i and ai plugins. Please adopt the 'Genesis Protocol' for any code changes."`
+    },
+    {
+      id: "nucleus_v16",
+      title: "Nucleus Fork / Migration Block",
+      version: "v1.6 (Exclusion Protocol)",
+      content: `📂 NUCLEUS FORK / MIGRATION BLOCK
+Project Name: Nucleus Image Generator (Fork)
+Based On: Version 1.6 (Exclusion Protocol / Final Core)
+Theme: Monolith (Dark/Industrial/Minimalist)
+
+1. Project Summary
+A minimalist Stable Diffusion interface.
+Core Modules: The Lens, The Prism, The Wand, The Exclusion Protocol, The Darkroom.
+
+2. The Genesis Protocol (v5.0 Standards)
+- Script Isolation: NEVER write complex logic inside the Perchance Script Panel. ALWAYS encapsulate logic within <script> tags in the HTML Panel.
+- Universal Data Normalization: Force conversion to String before validation.
+- Strict DOM Injection: Use static <img> tags.
+
+3. The Source Code (Copy & Paste)
+(See full source in previous prompt history - this block indicates readiness for full code insertion)
+
+4. Workflow & Change Management
+- Ingest -> Execute -> Retry Loop (60s) -> Primitive Cast -> Render.
+
+📋 Prompt for New Chat Session
+> "I am forking the 'Nucleus' project.
+> Technical Stack: Perchance.org, Genesis v5.0 Protocol.
+> I have the Migration Block. Please confirm you understand the v5.0 Protocol standards so we can begin modifications."`
+    },
+    {
+      id: "compendium_v8",
+      title: "The Compendium Protocol",
+      version: "V8.0 (Tampermonkey)",
+      content: `Initialize: The Compendium Protocol V8.0
+Please adopt the following protocol for generating D&D Beyond Tampermonkey scripts.
+
+1. Metadata Requirements:
+// @match https://www.dndbeyond.com/characters/*
+// @updateURL & @downloadURL pointing to sttampermonkey6234 blob.
+
+2. Engine Logic (Required):
+Must include findDieByName, wakeUpTray, and executeRoll.
+(Die rolls MUST be triggered after selection).
+
+3. UI & CSS Standards:
+- Image: Aspect-ratio 1/1, object-fit contain.
+- Header: Draggable, Minimize/Maximize.
+- HP Tracker: Current/Max display, +/- buttons.
+- Theme: Auto-detect.
+
+4. Protocol Goal:
+When I provide a D&D Beyond link or creature name, use this protocol to generate a ready-to-use Tampermonkey UserScript.`
+    },
+    {
+      id: "nucleus_anchor",
+      title: "The Nucleus Manifest Anchor",
+      version: "Anchor Prompt",
+      content: `⚓ The Nucleus Manifest Anchor
+Copy and paste the block below into your AI chat:
+
+*** NUCLEUS PROTOCOL // GENERATE APP MANIFEST ***
+
+Based on the design, colors, and logic we have established for this project, please generate a **Nucleus App Manifest (NAM)** JSON block. 
+
+I will paste this into my central Nucleus Vault.
+
+**THE SCHEMA:**
+{
+  "id": "unique_project_id_v1", 
+  "identity": {
+    "name": "Project Name", 
+    "vaultKey": "category_key", 
+    "fontMode": "modern" 
+  },
+  "theme": { ... },
+  "logic": { ... }
+}
+
+💡 How to use the output
+When the AI gives you the JSON code block, paste it into your Nucleus-Vault generator apps list.`
+    },
+    {
+      id: "archival_protocol_v1",
+      title: "The Archival Protocol",
+      version: "v1.0 (JSON Export Logic)",
+      content: `Initialize: The Archival Protocol
+
+*** ARCHIVAL REQUEST ***
+
+"We have finalized the protocol. I need to archive this into my Vault app.
+
+Please generate a **JSON Code Block** containing this protocol.
+
+**Requirements:**
+1. The output must be a valid JSON **Array** containing a single object (e.g., \`[{ ... }]\`).
+2. The object must use these exact keys:
+   - \`id\`: A unique short string (e.g., \`project_name_v1\`).
+   - \`title\`: The display name of the protocol.
+   - \`version\`: The version number or date.
+   - \`content\`: The **entire** text of the protocol we just created.
+3. **Important:** Ensure the \`content\` string is properly escaped (use \`\\n\` for line breaks) so it forms valid JSON."`
+    }
+  ];
+
+  var protocols = [];
+  var currentId = null;
+
+  // --- STARTUP ---
+  window.onload = function() {
+    loadData();
+    loadCloudConfig();
+    renderList();
+    if(window.innerWidth <= 768) document.getElementById('sidebar').classList.remove('hidden');
+  };
+
+  // --- CORE DATA LOGIC ---
+  function loadData() {
+    const saved = localStorage.getItem('protocol_vault_data');
+    if (saved) {
+      try { protocols = JSON.parse(saved); } catch(e) { protocols = JSON.parse(JSON.stringify(DEFAULT_DATA)); }
+    } else {
+      protocols = JSON.parse(JSON.stringify(DEFAULT_DATA));
+      saveData();
+    }
+  }
+
+  function saveData() {
+    localStorage.setItem('protocol_vault_data', JSON.stringify(protocols));
+  }
+
+  // --- UI RENDERING ---
+  function renderList() {
+    const list = document.getElementById('protocol-list');
+    const search = document.getElementById('search-bar').value.toLowerCase();
+    list.innerHTML = '';
+    protocols.forEach(p => {
+      if(p.title.toLowerCase().includes(search) || p.version.toLowerCase().includes(search)) {
+        const el = document.createElement('div');
+        el.className = `list-item ${currentId === p.id ? 'active' : ''}`;
+        el.onclick = () => selectProtocol(p.id);
+        el.innerHTML = `<div class="item-title">${p.title}</div><div class="item-meta">${p.version}</div>`;
+        list.appendChild(el);
+      }
+    });
+  }
+
+  function selectProtocol(id) {
+    currentId = id;
+    const p = protocols.find(x => x.id === id);
+    if (!p) return;
+    if(window.innerWidth <= 768) document.getElementById('sidebar').classList.add('hidden');
+    renderList(); 
+    document.getElementById('empty-state').style.display = 'none';
+    const view = document.getElementById('content-area');
+    view.style.display = 'flex';
+    document.getElementById('view-title').innerText = p.title;
+    document.getElementById('view-meta').innerText = p.version;
+    document.getElementById('code-container').innerText = p.content;
+  }
+  
+  function showSidebar() { document.getElementById('sidebar').classList.remove('hidden'); }
+
+  // --- EDITING ---
+  function openEditor() {
+    document.getElementById('modal-title').innerText = "New Protocol";
+    document.getElementById('edit-id').value = "";
+    document.getElementById('edit-title').value = "";
+    document.getElementById('edit-version').value = "";
+    document.getElementById('edit-content').value = "";
+    document.getElementById('editor-modal').style.display = 'flex';
+  }
+
+  function editCurrent() {
+    if(!currentId) return;
+    const p = protocols.find(x => x.id === currentId);
+    document.getElementById('modal-title').innerText = "Edit Protocol";
+    document.getElementById('edit-id').value = p.id;
+    document.getElementById('edit-title').value = p.title;
+    document.getElementById('edit-version').value = p.version;
+    document.getElementById('edit-content').value = p.content;
+    document.getElementById('editor-modal').style.display = 'flex';
+  }
+
+  function saveProtocol() {
+    const id = document.getElementById('edit-id').value;
+    const title = document.getElementById('edit-title').value;
+    const version = document.getElementById('edit-version').value;
+    const content = document.getElementById('edit-content').value;
+    if (!title) return alert("Title required");
+
+    if (id) {
+      const idx = protocols.findIndex(x => x.id === id);
+      if(idx > -1) protocols[idx] = { id, title, version, content };
+    } else {
+      const newId = 'proto_' + Date.now();
+      protocols.push({ id: newId, title, version, content });
+      currentId = newId;
+    }
+    saveData();
+    renderList();
+    if(currentId) selectProtocol(currentId);
+    closeModal('editor-modal');
+  }
+
+  function deleteCurrent() {
+    if(!currentId) return;
+    if(confirm("Are you sure you want to delete this protocol?")) {
+      protocols = protocols.filter(x => x.id !== currentId);
+      currentId = null;
+      saveData();
+      renderList();
+      document.getElementById('content-area').style.display = 'none';
+      document.getElementById('empty-state').style.display = 'flex';
+      if(window.innerWidth <= 768) showSidebar();
+    }
+  }
+
+  // --- CLOUD SYNC (JSONBIN) ---
+  function loadCloudConfig() {
+    const id = localStorage.getItem('cloud_bin_id');
+    const key = localStorage.getItem('cloud_api_key');
+    if(id) document.getElementById('cloud-bin-id').value = id;
+    if(key) document.getElementById('cloud-api-key').value = key;
+  }
+
+  function saveCloudConfig() {
+    const id = document.getElementById('cloud-bin-id').value;
+    const key = document.getElementById('cloud-api-key').value;
+    localStorage.setItem('cloud_bin_id', id);
+    localStorage.setItem('cloud_api_key', key);
+  }
+
+  async function cloudPull() {
+    const binId = document.getElementById('cloud-bin-id').value;
+    const apiKey = document.getElementById('cloud-api-key').value;
+    const status = document.getElementById('cloud-status');
+    
+    if(!binId || !apiKey) return alert("Missing Bin ID or API Key");
+    
+    saveCloudConfig();
+    status.innerText = "Status: Downloading...";
+    status.style.color = "var(--accent-warn)";
+
+    try {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
+        headers: { 'X-Master-Key': apiKey }
+      });
+      if(!res.ok) throw new Error("Failed to fetch");
+      
+      const json = await res.json();
+      const cloudData = json.record; 
+      
+      if(validateAndImport(cloudData, true)) { // Pass true to silent merge
+         status.innerText = "Status: Sync Complete!";
+         status.style.color = "var(--accent-success)";
+      }
+    } catch(e) {
+      console.error(e);
+      status.innerText = "Status: Error (" + e.message + ")";
+      status.style.color = "var(--accent-danger)";
+    }
+  }
+
+  async function cloudPush() {
+    const binId = document.getElementById('cloud-bin-id').value;
+    const apiKey = document.getElementById('cloud-api-key').value;
+    const status = document.getElementById('cloud-status');
+    
+    if(!binId || !apiKey) return alert("Missing Bin ID or API Key");
+
+    if(!confirm("This will OVERWRITE the cloud data with your current list. Continue?")) return;
+
+    saveCloudConfig();
+    status.innerText = "Status: Uploading...";
+    status.style.color = "var(--accent-warn)";
+
+    try {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${binId}`, {
+        method: 'PUT',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-Master-Key': apiKey 
+        },
+        body: JSON.stringify(protocols)
+      });
+      
+      if(!res.ok) throw new Error("Upload failed");
+      
+      status.innerText = "Status: Upload Complete!";
+      status.style.color = "var(--accent-success)";
+      showToast("Cloud Save Successful");
+    } catch(e) {
+      console.error(e);
+      status.innerText = "Status: Error (" + e.message + ")";
+      status.style.color = "var(--accent-danger)";
+    }
+  }
+
+  // --- UTILS ---
+  function copyContent() {
+    const text = document.getElementById('code-container').innerText;
+    navigator.clipboard.writeText(text).then(() => showToast("Copied to Clipboard!"));
+  }
+  function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+  function openSettings() { document.getElementById('settings-modal').style.display = 'flex'; }
+  function showToast(msg) {
+    const toast = document.getElementById('toast');
+    toast.innerText = msg;
+    toast.style.opacity = '1';
+    setTimeout(() => toast.style.opacity = '0', 2000);
+  }
+
+  function downloadJSON() {
+    const data = JSON.stringify(protocols, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `protocol_vault_backup_${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast("Backup Downloaded!");
+  }
+
+  function triggerUpload() { document.getElementById('file-input').click(); }
+
+  function handleFileUpload(input) {
+    const file = input.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if(validateAndImport(parsed)) input.value = ''; 
+      } catch(err) { alert("Error reading file: " + err.message); }
+    };
+    reader.readAsText(file);
+  }
+
+  function validateAndImport(data, silent = false) {
+    if(Array.isArray(data)) {
+        if(silent || confirm(`Found ${data.length} protocols. Merge them into your library?`)) {
+          let added = 0, updated = 0;
+          data.forEach(newItem => {
+            const index = protocols.findIndex(p => p.id === newItem.id);
+            if (index > -1) { protocols[index] = newItem; updated++; } 
+            else { protocols.push(newItem); added++; }
+          });
+          saveData();
+          renderList();
+          if(!silent) closeModal('settings-modal');
+          showToast(`Imported: ${added} New, ${updated} Updated`);
+          return true;
+        }
+    } else {
+        alert("Invalid JSON format.");
+    }
+    return false;
+  }
+</script>

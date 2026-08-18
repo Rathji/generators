@@ -1,0 +1,99 @@
+<div id="container">
+  <h2>Text to JSON/Markdown</h2>
+  
+  <textarea id="input" placeholder="Paste URL or text here..."></textarea>
+  
+  <div class="controls">
+    <input type="file" id="fileInput">
+    <div class="buttons">
+      <button onclick="process('markdown')">To Markdown</button>
+      <button onclick="process('json')" class="secondary">To JSON</button>
+    </div>
+  </div>
+
+  <div id="status">Ready</div>
+  <pre id="output">Result will appear here...</pre>
+  
+  <div class="footer-buttons">
+    <button class="copy-btn" onclick="copyResult()">Copy Text</button>
+    <button class="download-btn" id="dlBtn" onclick="downloadResult()" style="display:none;">Download File</button>
+  </div>
+</div>
+
+<style>
+  #container { font-family: sans-serif; max-width: 600px; margin: auto; padding: 10px; }
+  textarea { width: 100%; height: 120px; border-radius: 8px; border: 1px solid #ccc; padding: 10px; box-sizing: border-box; }
+  .controls { margin: 15px 0; display: flex; flex-direction: column; gap: 10px; }
+  .buttons, .footer-buttons { display: flex; gap: 10px; }
+  button { flex: 1; padding: 15px; border: none; border-radius: 8px; background: #007bff; color: white; font-weight: bold; cursor: pointer; }
+  button:active { background: #0056b3; }
+  button.secondary { background: #6c757d; }
+  .copy-btn { background: #28a745; margin-top: 10px; }
+  .download-btn { background: #e67e22; margin-top: 10px; }
+  #status { font-size: 0.8rem; color: #666; margin-bottom: 5px; }
+  #output { background: #eee; padding: 15px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; min-height: 100px; font-size: 0.9rem; border: 1px solid #ddd; overflow-x: auto;}
+</style>
+
+<script>
+  let currentFormat = 'markdown';
+
+  async function process(format) {
+    currentFormat = format;
+    const input = document.getElementById('input').value.trim();
+    const fileEl = document.getElementById('fileInput');
+    const out = document.getElementById('output');
+    const status = document.getElementById('status');
+    const dlBtn = document.getElementById('dlBtn');
+    
+    status.innerText = "Processing...";
+    out.textContent = "";
+    dlBtn.style.display = "none";
+
+    try {
+      let md = "";
+
+      // 1. FILE UPLOAD LOGIC (Local conversion for simple text files)
+      if (fileEl.files.length > 0) {
+        const file = fileEl.files[0];
+        md = await file.text(); // Reads TXT, HTML, etc directly
+        status.innerText = "File read successfully.";
+      } 
+      // 2. URL LOGIC (Using Jina Reader - much more reliable)
+      else if (input.startsWith("http")) {
+        const resp = await fetch("https://r.jina.ai/" + input);
+        if (!resp.ok) throw new Error("Jina Reader failed to fetch URL");
+        md = await resp.text();
+      } 
+      // 3. PLAIN TEXT LOGIC
+      else {
+        md = input;
+      }
+
+      if (!md || md.trim() === "") throw new Error("No content found to convert.");
+
+      out.textContent = (format === 'json') ? JSON.stringify({ source: "TSP-Converter", content: md }, null, 2) : md;
+      status.innerText = "Done!";
+      dlBtn.style.display = "block";
+    } catch (err) {
+      status.innerText = "Error: " + err.message;
+      out.textContent = "Try pasting the text directly if the URL/File fails.";
+    }
+  }
+
+  function downloadResult() {
+    const content = document.getElementById('output').textContent;
+    const extension = currentFormat === 'json' ? '.json' : '.md';
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = "tsp_export_" + Date.now() + extension;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function copyResult() {
+    navigator.clipboard.writeText(document.getElementById('output').textContent);
+    alert("Copied!");
+  }
+</script>

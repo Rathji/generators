@@ -1,0 +1,460 @@
+<!-- External Port Scanner -->
+<style>
+  :root {
+    --bg: #0e1116;
+    --card: #171b22;
+    --line: #262c36;
+    --text: #e6e9ef;
+    --muted: #9aa4b2;
+    --green: #3ddc84;
+    --red: #ff6b6b;
+    --amber: #ffb454;
+    --blue: #5ea2ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    text-align: left;
+    min-height: 100vh;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 28px 18px 60px; }
+  header h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: .02em; }
+  header h1 .accent { color: var(--green); }
+  header p { color: var(--muted); margin: 0 0 18px; font-size: 14px; line-height: 1.5; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input[type=text] {
+    background: #0e1116; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 11px; font-size: 14px; flex: 1; min-width: 180px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--blue); }
+  select {
+    background: #0e1116; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 9px 11px; font-size: 14px; width: 100%;
+  }
+  button {
+    background: var(--blue); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px;
+    font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  button:hover { filter: brightness(1.12); }
+  button.secondary { background: #232a35; color: var(--text); }
+  button.danger { background: #43282a; color: #ffb4b4; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+  .bar { height: 8px; background: #0e1116; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg, #5ea2ff, #3ddc84); border-radius: 99px; transition: width .25s; }
+  #statusEl { font-size: 13px; color: var(--muted); margin-top: 8px; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px; border-bottom: 1px solid #1e232c; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 2px; }
+  .dot.open { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.closed { background: #3a4250; }
+  .dot.error { background: var(--amber); }
+  .portnum { font-family: "Cascadia Code", "SF Mono", Consolas, monospace; font-weight: 600; }
+  .svc { color: var(--muted); font-size: 12.5px; }
+  .status-open { color: var(--green); font-weight: 700; white-space: nowrap; }
+  .status-closed { color: #6b7480; white-space: nowrap; }
+  .status-error { color: var(--amber); white-space: nowrap; }
+  .badge { display: inline-block; font-size: 12px; padding: 3px 10px; border-radius: 99px; border: 1px solid var(--line); margin: 0 6px 6px 0; }
+  .badge.green { color: var(--green); border-color: rgba(61,220,132,.45); }
+  .badge.red { color: var(--red); border-color: rgba(255,107,107,.45); }
+  .badge.gray { color: var(--muted); }
+  .warn { border-left: 3px solid var(--amber); background: rgba(255,180,84,.06); padding: 10px 12px; border-radius: 0 8px 8px 0; font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 14px; }
+  .spin {
+    width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.2); border-top-color: var(--blue);
+    border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; vertical-align: -2px; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #summaryEl { font-size: 14px; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+  .summary-open { color: var(--green); font-weight: 700; }
+  .summary-closed { color: var(--muted); }
+  footer { color: #8b95a3; font-size: 12px; line-height: 1.6; margin-top: 18px; hyphens: none; }
+  footer b { color: #aeb6c2; }
+  footer a { color: #7a8694; }
+  @media (max-width: 560px) {
+    .wrap { padding: 16px 12px 40px; }
+    header h1 { font-size: 19px; }
+    button { flex: 1; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>External <span class="accent">Port Scanner</span></h1>
+    <p>Finds which ports on your external IP are open and reachable from the internet — so you can spot exposed services and port-forwarding mistakes.</p>
+  </header>
+
+  <div class="card">
+    <div class="label">Target IP</div>
+    <div class="row">
+      <input type="text" id="ipInput" spellcheck="false" placeholder="e.g. 203.0.113.42">
+      <button id="detectBtn" class="secondary" type="button">Detect my IP</button>
+    </div>
+    <div class="hint" id="ipHintEl"></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Ports to check</div>
+    <div class="row">
+      <select id="presetSelect"></select>
+      <input type="text" id="customInput" spellcheck="false" placeholder="e.g. 22,80,443 or 8000-8100" disabled>
+    </div>
+    <div class="hint" id="portHintEl"></div>
+  </div>
+
+  <div class="card" id="warnEl" hidden></div>
+
+  <div class="card">
+    <div class="row">
+      <button id="scanBtn" type="button">Start scan</button>
+      <button id="abortBtn" class="danger" type="button" hidden>Stop</button>
+      <button id="copyBtn" class="secondary" type="button" hidden>Copy results</button>
+    </div>
+    <div id="progressCtn" hidden>
+      <div class="bar"><div id="barFill"></div></div>
+      <div id="statusEl"></div>
+    </div>
+  </div>
+
+  <div class="card" id="resultsCard" hidden>
+    <div id="summaryEl"></div>
+    <div id="resultsEl"></div>
+    <div id="finalNoteEl"></div>
+  </div>
+
+  <footer>
+    <b>How it works:</b> browsers can't open raw TCP connections, so each port is probed by <b>check-host.net</b>'s worldwide check nodes (2 locations per port, via the superFetch proxy) and the connection results are collected here.
+    Only run this against IPs you own. Some ISPs use CGNAT, in which case nothing will appear open even if you've forwarded ports. Scans are throttled to respect the free service's rate limits.
+  </footer>
+</div>
+
+<script>
+  const CONCURRENCY = 2;
+  const NODES_PER_PORT = 2;
+  const MAX_PORTS = 60;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const PRESETS = [
+    { id: "common",    label: "Common exposed services",      ports: [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 3389, 5900, 8080, 8443, 9000, 25565, 32400] },
+    { id: "remote",    label: "Remote access & file transfer", ports: [21, 22, 2222, 873, 2049, 445, 5900, 5901, 5500, 3389] },
+    { id: "webdev",    label: "Web / dev servers",            ports: [80, 3000, 5000, 8000, 8080, 8888, 9000, 9090, 9200, 8443] },
+    { id: "games",     label: "Games & media servers",        ports: [7777, 25565, 27015, 27016, 32400, 1900, 8750, 8080] },
+    { id: "databases", label: "Databases (should be closed!)",ports: [1433, 3306, 5432, 6379, 9200, 27017, 11211] },
+    { id: "custom",    label: "Custom list / range",          ports: [] },
+  ];
+
+  const SERVICES = {
+    20: "FTP-data", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+    80: "HTTP", 110: "POP3", 111: "RPC", 135: "MS-RPC", 137: "NetBIOS", 138: "NetBIOS",
+    139: "NetBIOS", 143: "IMAP", 161: "SNMP", 389: "LDAP", 443: "HTTPS", 445: "SMB",
+    465: "SMTPS", 514: "Syslog", 587: "Submission", 593: "MS-RPC", 631: "IPP",
+    873: "rsync", 993: "IMAPS", 995: "POP3S", 1080: "SOCKS", 1433: "MSSQL", 1723: "PPTP",
+    2049: "NFS", 2222: "SSH alt", 3000: "Dev HTTP", 3306: "MySQL", 3389: "RDP",
+    5432: "PostgreSQL", 5500: "VNC", 5900: "VNC", 5901: "VNC", 6379: "Redis",
+    8000: "HTTP alt", 8008: "HTTP alt", 8080: "HTTP alt", 8443: "HTTPS alt",
+    8888: "Dev HTTP", 9000: "HTTP alt", 9090: "HTTP alt", 9200: "Elasticsearch",
+    11211: "Memcached", 1900: "UPnP", 5353: "mDNS", 25565: "Minecraft",
+    27015: "Source engine", 27016: "Source engine", 32400: "Plex", 7777: "Game server",
+  };
+
+  const state = { aborted: false, detectedIp: null, lastRows: [] };
+
+  const ipInput = document.getElementById("ipInput");
+  const ipHintEl = document.getElementById("ipHintEl");
+  const presetSelect = document.getElementById("presetSelect");
+  const customInput = document.getElementById("customInput");
+  const portHintEl = document.getElementById("portHintEl");
+  const warnEl = document.getElementById("warnEl");
+  const scanBtn = document.getElementById("scanBtn");
+  const abortBtn = document.getElementById("abortBtn");
+  const copyBtn = document.getElementById("copyBtn");
+  const detectBtn = document.getElementById("detectBtn");
+  const progressCtn = document.getElementById("progressCtn");
+  const barFill = document.getElementById("barFill");
+  const statusEl = document.getElementById("statusEl");
+  const resultsCard = document.getElementById("resultsCard");
+  const summaryEl = document.getElementById("summaryEl");
+  const resultsEl = document.getElementById("resultsEl");
+  const finalNoteEl = document.getElementById("finalNoteEl");
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function parsePorts(str) {
+    const set = new Set();
+    for (const part of str.split(",")) {
+      const p = part.trim();
+      if (!p) continue;
+      const m = p.match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+      if (!m) throw new Error("Can't read \u201c" + p + "\u201d \u2014 use comma-separated ports or a range like 8000-8100.");
+      const a = +m[1], b = m[2] ? +m[2] : a;
+      if (a < 1 || b > 65535 || b < a) throw new Error("Invalid range: " + p);
+      for (let n = a; n <= b; n++) set.add(n);
+    }
+    return [...set];
+  }
+
+  function onPresetChange() {
+    const isCustom = presetSelect.value === "custom";
+    customInput.disabled = !isCustom;
+    customInput.style.opacity = isCustom ? 1 : .45;
+    updatePortHint();
+  }
+
+  function currentPorts() {
+    if (presetSelect.value === "custom") return parsePorts(customInput.value);
+    return PRESETS.find(p => p.id === presetSelect.value).ports.slice();
+  }
+
+  function updatePortHint() {
+    try {
+      const ports = currentPorts();
+      portHintEl.textContent = ports.length
+        ? `${ports.length} port${ports.length > 1 ? "s" : ""} will be checked${ports.length > MAX_PORTS ? " \u2014 too many, max " + MAX_PORTS + " per run" : ""}. Each is probed from 2 locations; a scan takes ~1\u20132 seconds per port.`
+        : "Pick a preset or enter ports to scan.";
+    } catch (e) {
+      portHintEl.textContent = e.message;
+    }
+  }
+
+  async function getExternalIp() {
+    try {
+      const r = await fetch("https://api.ipify.org?format=json");
+      const j = await r.json();
+      if (j && j.ip) return j.ip;
+    } catch (e) {}
+    try {
+      const r = await root.superFetch("https://api.ipify.org?format=json");
+      const j = await r.json();
+      if (j && j.ip) return j.ip;
+    } catch (e) {}
+    return null;
+  }
+
+  async function detectIp() {
+    detectBtn.disabled = true;
+    detectBtn.innerHTML = '<span class="spin"></span>Detecting';
+    const ip = await getExternalIp();
+    detectBtn.disabled = false;
+    detectBtn.textContent = "Detect my IP";
+    if (ip) {
+      state.detectedIp = ip;
+      ipInput.value = ip;
+      ipHintEl.innerHTML = "Detected your external IP: <b>" + escapeHtml(ip) + "</b> (via ipify.org). This is the address the rest of the internet sees \u2014 scans test which forwarded ports are reachable on it.";
+    } else {
+      ipHintEl.textContent = "Couldn't auto-detect your IP. Type your external IP manually.";
+    }
+  }
+
+  async function checkPort(ip, port) {
+    const hostPort = ip.includes(":") ? "[" + ip + "]:" + port : ip + ":" + port;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 15000);
+    const page = await (await root.superFetch(
+      "https://check-host.net/check-tcp?host=" + encodeURIComponent(hostPort) + "&max_nodes=" + NODES_PER_PORT,
+      { signal: ctrl.signal }
+    )).text();
+    clearTimeout(t);
+    const m = page.match(/get_check_results\(\s*'([^']+)'\s*,\s*(\[[^\]]*\])/);
+    if (!m) throw new Error("the scan service rejected the request");
+    const reqId = m[1];
+    let nodes = [];
+    try { nodes = JSON.parse(m[2]); } catch (e) {}
+    if (!nodes.length) throw new Error("the scan service returned no nodes");
+    return { reqId, nodes };
+  }
+
+  async function pollResults(reqId, nodes) {
+    const deadline = Date.now() + 40000;
+    let last = {}, openCount = 0;
+    while (Date.now() < deadline && !state.aborted) {
+      await sleep(1800);
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 10000);
+        const rr = await root.superFetch("https://check-host.net/check_result/" + reqId, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body: nodes.map(n => "slaves[]=" + encodeURIComponent(n)).join("&"),
+          signal: ctrl.signal
+        });
+        clearTimeout(t);
+        const jj = await rr.json();
+        last = jj;
+        let got = 0;
+        openCount = 0;
+        for (const n of nodes) {
+          if (jj[n] !== undefined && jj[n].length) {
+            got++;
+            if (jj[n][0] && typeof jj[n][0].address === "string") openCount++;
+          }
+        }
+        if (got >= nodes.length || openCount > 0) break;
+      } catch (e) {}
+    }
+    return last;
+  }
+
+  function classify(results, nodes) {
+    let open = false, bestTime = null, errs = [], responded = 0;
+    for (const n of nodes) {
+      const r = results[n];
+      if (!r || !r.length) continue;
+      const info = r[0];
+      responded++;
+      if (info && typeof info.address === "string") {
+        open = true;
+        if (typeof info.time === "number" && (bestTime === null || info.time < bestTime)) bestTime = info.time;
+      } else if (info && info.error) {
+        errs.push(info.error);
+      }
+    }
+    return { open, time: bestTime, errs, responded };
+  }
+
+  function renderRows(rows, total) {
+    const open = rows.filter(r => r.open).length;
+    const failed = rows.filter(r => !r.ok).length;
+    const rest = rows.length - open - failed;
+    summaryEl.innerHTML =
+      `Scanned <b>${rows.length}/${total}</b> \u2014 ` +
+      `<span class="summary-open">${open} open</span> \u00b7 ` +
+      `<span class="summary-closed">${rest} closed / filtered</span>` +
+      (failed ? ` \u00b7 <span style="color:var(--amber)">${failed} errors</span>` : "");
+    const sorted = [...rows].sort((a, b) => (b.open - a.open) || (a.port - b.port));
+    resultsEl.innerHTML = `<table>
+      <thead><tr><th></th><th>Port</th><th>Service</th><th>Status</th><th>Detail</th></tr></thead>
+      <tbody>${sorted.map(r => {
+        if (!r.ok) return `<tr><td><span class="dot error"></span></td><td class="portnum">${r.port}</td><td class="svc">${SERVICES[r.port] || ""}</td><td class="status-error">check failed</td><td class="svc">${escapeHtml(r.error || "")}</td></tr>`;
+        if (r.open) return `<tr><td><span class="dot open"></span></td><td class="portnum">${r.port}</td><td class="svc">${SERVICES[r.port] || ""}</td><td class="status-open">OPEN</td><td class="svc">reachable${r.time != null ? " \u00b7 " + (r.time * 1000).toFixed(0) + " ms" : ""}</td></tr>`;
+        return `<tr><td><span class="dot closed"></span></td><td class="portnum">${r.port}</td><td class="svc">${SERVICES[r.port] || ""}</td><td class="status-closed">closed / filtered</td><td class="svc">${r.errs.length ? escapeHtml(r.errs[0]) : "no response from check nodes"}</td></tr>`;
+      }).join("")}</tbody></table>`;
+  }
+
+  function setProgress(done, total, text) {
+    barFill.style.width = Math.round((done / total) * 100) + "%";
+    statusEl.innerHTML = text ? '<span class="spin"></span>' + escapeHtml(text) + ` (${done}/${total})` : `(${done}/${total})`;
+  }
+
+  async function scanOne(ip, port) {
+    const { reqId, nodes } = await checkPort(ip, port);
+    const results = await pollResults(reqId, nodes);
+    return classify(results, nodes);
+  }
+
+  async function startScan() {
+    const ip = ipInput.value.trim();
+    if (!/^[0-9a-fA-F:.]+$/.test(ip)) {
+      statusEl.textContent = "Enter a valid IP address first.";
+      progressCtn.hidden = false;
+      return;
+    }
+    let ports;
+    try { ports = currentPorts(); }
+    catch (e) { statusEl.textContent = e.message; progressCtn.hidden = false; return; }
+    if (ports.length > MAX_PORTS) {
+      statusEl.textContent = `That's ${ports.length} ports \u2014 the free scan service allows at most ${MAX_PORTS} per run. Narrow the list or range.`;
+      progressCtn.hidden = false;
+      return;
+    }
+    if (!ports.length) {
+      statusEl.textContent = "No ports to scan.";
+      progressCtn.hidden = false;
+      return;
+    }
+
+    state.aborted = false;
+    state.lastRows = [];
+
+    if (state.detectedIp && ip !== state.detectedIp) {
+      warnEl.hidden = false;
+      warnEl.innerHTML = `<b>Heads up:</b> <b>${escapeHtml(ip)}</b> isn't your detected external IP (<b>${escapeHtml(state.detectedIp)}</b>). Only scan hosts you own \u2014 scanning someone else's infrastructure without permission is illegal.`;
+    } else {
+      warnEl.hidden = true;
+    }
+
+    resultsEl.innerHTML = "";
+    finalNoteEl.innerHTML = "";
+    summaryEl.textContent = "";
+    resultsCard.hidden = false;
+    progressCtn.hidden = false;
+    scanBtn.hidden = true;
+    abortBtn.hidden = false;
+    copyBtn.hidden = true;
+
+    let done = 0, index = 0;
+    const rows = [];
+    const worker = async () => {
+      while (index < ports.length) {
+        const port = ports[index++];
+        if (state.aborted) break;
+        setProgress(done, ports.length, "probing port " + port);
+        const row = { port, open: false, time: null, errs: [], ok: true };
+        try {
+          Object.assign(row, await scanOne(ip, port));
+        } catch (e) {
+          row.ok = false;
+          row.error = String(e && e.message || e).slice(0, 120);
+        }
+        rows.push(row);
+        state.lastRows = rows;
+        done++;
+        renderRows(rows, ports.length);
+        await sleep(400);
+      }
+    };
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+
+    setProgress(done, ports.length, state.aborted ? "scan stopped" : "scan complete");
+    scanBtn.hidden = false;
+    abortBtn.hidden = true;
+    copyBtn.hidden = rows.length ? false : true;
+
+    const open = rows.filter(r => r.open);
+    if (!state.aborted) {
+      if (open.length) {
+        finalNoteEl.innerHTML = `<div class="warn" style="margin-top:12px">${open.map(r => `<span class="badge green">${r.port} <span style="font-weight:400">\u00b7 ${SERVICES[r.port] || "unknown"}</span></span>`).join("")}<div class="hint"><b>Reachable from the whole internet:</b> every open port is exposed to anyone who scans for it. Confirm each is a service you deliberately forwarded. If a database or admin port shows OPEN, close it at your router or firewall now.</div></div>`;
+      } else {
+        finalNoteEl.innerHTML = `<div class="hint" style="margin-top:12px">No ports are reachable from the internet on this IP. If you expected some, you may be behind <b>CGNAT</b> (your ISP shares one public IP), the ports aren't forwarded, or a firewall is dropping them.</div>`;
+      }
+    }
+  }
+
+  function copyResults() {
+    const lines = ["External port scan of " + ipInput.value.trim(), "port\tstatus\tservice\tdetail"];
+    for (const r of [...state.lastRows].sort((a, b) => a.port - b.port)) {
+      const status = r.ok ? (r.open ? "OPEN" : "closed/filtered") : "error";
+      const detail = r.open ? (r.time != null ? (r.time * 1000).toFixed(0) + " ms" : "") : (r.errs[0] || (r.error || ""));
+      lines.push(`${r.port}\t${status}\t${SERVICES[r.port] || ""}\t${detail}`);
+    }
+    navigator.clipboard.writeText(lines.join("\n")).then(() => {
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => { copyBtn.textContent = "Copy results"; }, 1500);
+    }).catch(() => {});
+  }
+
+  scanBtn.addEventListener("click", startScan);
+  abortBtn.addEventListener("click", () => { state.aborted = true; });
+  copyBtn.addEventListener("click", copyResults);
+  detectBtn.addEventListener("click", () => detectIp());
+  presetSelect.addEventListener("change", onPresetChange);
+  customInput.addEventListener("input", updatePortHint);
+  ipInput.addEventListener("input", () => { warnEl.hidden = true; });
+
+  presetSelect.innerHTML = PRESETS.map(p => `<option value="${p.id}">${p.label}</option>`).join("");
+  onPresetChange();
+  detectIp();
+</script>

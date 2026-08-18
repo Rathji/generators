@@ -1,0 +1,2601 @@
+<!--
+  The Autonomous Enterprise — HTML panel (perchance calls this `outputTemplate`).
+  v1.0: IPO & The Boardroom (prestige metaprogression) — the last of the six planned
+  phases, layered on v0.0/v0.2/v0.4/v0.6/v0.8.
+
+  v1.2.0 (Bucket A — Roster & Events Legibility): a rendering addition, not a new
+  mechanic. Traits (v0.4) and the decision log (v0.6) existed in `aentState` but were
+  never shown to the player, only inspectable via devtools. Adds a read-only Roster panel
+  (`aentRenderRoster`) and a Decisions/Briefings log panel (`aentRenderEventsLog`), both
+  following `aentRenderBoardroom`'s rebuild-from-scratch-with-createElement/textContent
+  pattern. New state: `aentState.tickCount` (a simulated-second counter, incremented in
+  `aentApplyDelta`) and `aentState.briefingLog` (decisionLog's sibling, same cap-and-prune
+  shape). Each worker now also carries `hiredAtTick`, backfilled on old saves by the new
+  `aentMigrateRosterTenureFields()`. See NOTES.md's v1.2.0 section for the full citation
+  table.
+
+  v1.2.1 (Bucket B — Meta-Progression Dashboard): a read-only stats addition inside the
+  existing Boardroom view, not a new screen. `aentMetaState` already accumulated real
+  cross-run numbers (Golden Parachutes, owned patents) but never surfaced cumulative
+  totals to the player. Adds `aentRenderStatsDashboard()`, following `aentRenderBoardroom`'s
+  same rebuild-from-scratch-with-createElement/textContent pattern, called from the end of
+  `aentRenderBoardroom()` itself so both of that function's existing call sites
+  (`aentSetBoardroomOpen`'s toggle-open branch, `aentBuyPatent`'s post-purchase refresh)
+  stay in sync for free. New state: two purely additive fields on `aentFreshMetaState()`,
+  `ipoCount` and `lifetimeCapitalAllRuns`, both incremented only inside `aentPerformIPO()`
+  right next to the existing `goldenParachutes` increment. Patents-owned is deliberately
+  NOT a stored counter — it's derived at render time by counting keys on
+  `aentMetaState.patents`. See NOTES.md's v1.2.1 section for the full citation table and
+  the flagged no-backfill/tiered-patents caveats.
+
+  v0.0 (state/tick/UI/save) is plain JS/HTML/CSS with no perchance-specific API surface.
+  v0.2 added `root.generateText(...)`, reached through `root` per the confirmed calling
+  convention at
+  `corpus/AI/undefinedAI Character Chat online free no sign-up unlimited_perchance_html.md:205`
+  (`root.<name>(...)` calls a plugin bound in the Lists panel — that file calls
+  `root.superFetch(...)` the same way). The v0.2 feed is deliberately read-only narrative
+  — it only *reads* aentState to build a prompt, never mutates it. v0.6 added a second,
+  independent consumer of that same `root.generateText(...)` call — the crisis engine —
+  which DOES mutate state, but only ever from a client-side-generated modifier, never a
+  number parsed out of the model's own text. v0.8 added a third, independent consumer —
+  the morning briefing — which narrates deltas already applied by ordinary offline math,
+  never mutating state itself.
+
+  v1.2.3 (Bucket D — Roster Depth: Trait Synergies & Employee Lifecycle Events): the
+  highest-risk v1.2 bucket so far, since it's the first to change the core per-tick yield
+  math. Feature 4 adds `AENT_TRAIT_SYNERGIES` (shaped like `AENT_PATENTS`) and
+  `aentComputeSynergyMultipliers()`/`aentActiveSynergies()`, a second, deliberately separate
+  multiplier source folded into `aentApplyDelta` alongside — never merged with —
+  `aentComputeMetaMultipliers()`. It is O(n) roster-presence-check based (one `Set` built
+  from the roster, then `k` `.has()` lookups, k = 3 synergy pairs), not pairwise
+  enumeration, since it runs inside the same per-second delta the offline-catchup loop
+  replays up to `AENT_OFFLINE_CAP_SECONDS` (21,600) times. Feature 9 adds
+  `AENT_LIFECYCLE_TICK_INTERVAL` (same throttle pattern as `AENT_FEED_TICK_INTERVAL`/
+  `AENT_CRISIS_TICK_INTERVAL`, gated inside `aentProcessTick`) driving `aentTryLifecycleEvent`,
+  which either resigns a worker (weighted toward burnout-adjacent traits, spliced out via
+  `aentAppendFeedEntry` narration — no second feed mechanism) or promotes one (`worker.status
+  = 'promoted'` plus `worker.yieldMult`, the exact `.status` field `aentRenderRoster` has
+  defensively read since v1.2.0). The single highest-risk edit in the whole bucket is
+  `aentApplyDelta`'s flat `devCount * AENT_DEV_COMPUTE_PER_SEC` becoming a per-worker
+  `reduce` sum of `(worker.yieldMult || 1)` so a promotion's multiplier actually counts —
+  checked against the old formula with a standalone Node harness (see NOTES.md v1.2.3) for
+  exact-match behavior when no worker has been promoted. Hire cost
+  (`aentState.devCost`/`marketerCost`, read through `aentEffectiveCost()`) is deliberately
+  untouched by either feature — a resign does NOT lower the next hire's cost, an explicit
+  decision documented in NOTES.md to close off a resign-to-rehire-cheaper exploit loop.
+
+  v1.2.4 (Bucket E - Tiered Patents): three of `AENT_PATENTS`' four families (Scaled
+  Infrastructure, Market Reach, Lean Process Playbook) now have three escalating tiers
+  each instead of one flat one-time purchase; Efficient Hiring Pipeline is left untouched
+  (see NOTES.md v1.2.4 for why). Each tier is its OWN independent flat entry/key in the
+  same array/`patents`-map shape v1.0 already used - NOT an integer tier level stored on
+  one key - so an existing save's `patents.scaledInfrastructure === true` continues to
+  mean exactly what it always meant and no migration function was needed at all.
+  `aentBuyPatent` gained one new guard (a tier's `requires` field must already be owned)
+  on top of its existing `!owned && affordable` check; `aentComputeMetaMultipliers` is
+  completely unchanged, since it already folds in every owned key's `effect`
+  independently of tier. `aentRenderBoardroom` groups/indents a family's tiers together
+  and disables/labels a locked tier-2+ row before its prior tier is owned.
+  `aentRenderStatsDashboard`'s "Patents Owned" count is redefined to count total owned
+  flat keys across all tiers/families out of the new total (10, up from 4) - see NOTES.md
+  v1.2.4 for the alternatives considered and why this one was chosen.
+
+  v0.4 added the first real Lists-DSL data this app touches: `devTraits` and
+  `marketerTraits`, two flat lists in lists.txt. Every hire gets a random trait via
+  `root[listName].selectOne.evaluateItem` — the `dqgPick()` idiom from
+  `apps/discovery-question-generator/html.txt:149-151` — and that trait rides along with
+  the worker, feeding both the v0.2 feed prompt and the v0.6 crisis prompt.
+
+  v1.0 adds NO new `root.generateText(...)` call — it's the one phase in the spec that
+  isn't about AI at all. It's a prestige/meta-progression layer: a second, independent
+  `localStorage` key (`aentMetaState`, separate from `aentState`) holds permanent
+  cross-run currency ("Golden Parachutes") and one-time-purchase "Patents" that apply
+  multipliers to the v0.0 math engine. An "IPO" button computes a Valuation from
+  lifetime capital generated and current compute, converts it to Golden Parachutes,
+  wipes `aentState` from `localStorage`, and reloads the page — deliberately a real
+  `location.reload()` rather than an in-place reset, which sidesteps the
+  `aentTickIntervalId` double-arm hazard entirely (a fresh page load only ever starts the
+  loop once, through the ordinary `aentInit` path). See NOTES.md for the full citation
+  table and the design reasoning behind each formula.
+
+  Structure mirrors `examples/office-clicker/html.txt`'s core idle-loop shape (a `gameTick`
+  driven by `setInterval`, a save system keyed by a last-saved timestamp) and reuses the
+  save/load-with-offline-catch-up idiom confirmed at `examples/np16r7glcp/html.txt:975-994`
+  (try/catch both directions, `Object.assign(aentFreshState(), saved)` for forward-compatible
+  schema migration, a capped step-by-step offline replay rather than a closed-form
+  multiply). See NOTES.md for the citation on every borrowed pattern, including the exact
+  shape of what `root.generateText(...)` resolves to.
+-->
+
+<style>
+  /* Corporate SaaS Dashboard facelift. Scoped by prefixing every selector with #aent,
+     preserving the precaution documented for apps/discovery-question-generator/html.txt
+     (header.mode = minimal strips most page chrome but not all). Mobile-first: base rules
+     target phone widths with no media query; two breakpoints (40rem, 60rem) widen the
+     layout for tablet/desktop. Single dark theme only — no prefers-color-scheme block,
+     since this palette IS the dark theme and no light palette was ever specified. */
+  #aent {
+    --aent-bg: #0f172a;
+    --aent-surface: #1e293b;
+    --aent-surface-alt: #172033;
+    --aent-line: #334155;
+    --aent-fg: #f8fafc;
+    --aent-muted: #94a3b8;
+    --aent-accent: #38bdf8;
+    --aent-accent-strong: #0ea5e9;
+    --aent-accent-fg: #f8fafc;
+    --aent-good: #34d399;
+    --aent-bad: #f87171;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin: 0 auto;
+    padding: 1rem 0.875rem 2.5rem;
+    background: var(--aent-bg);
+    color: var(--aent-fg);
+    line-height: 1.5;
+  }
+
+  #aent *, #aent *::before, #aent *::after { box-sizing: border-box; }
+
+  @media (min-width: 40rem) {
+    #aent { max-width: 38rem; padding: 1.75rem 1.5rem 3rem; }
+  }
+
+  @media (min-width: 60rem) {
+    #aent { max-width: 56rem; }
+  }
+
+  #aent h1 {
+    font-size: 1.375rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.25rem;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-sub {
+    color: var(--aent-muted);
+    font-size: 0.875rem;
+    margin: 0 0 1.5rem;
+  }
+
+  #aent .aent-card {
+    border: 1px solid var(--aent-line);
+    border-radius: 12px;
+    padding: 1.25rem;
+    background: var(--aent-surface);
+    margin-bottom: 1rem;
+  }
+
+  @media (min-width: 60rem) {
+    #aent-company-view {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+    #aent-company-view .aent-card { margin-bottom: 0; }
+  }
+
+  #aent .aent-resource {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.45rem 0;
+  }
+
+  #aent .aent-resource + .aent-resource {
+    border-top: 1px solid var(--aent-line);
+  }
+
+  @media (min-width: 40rem) {
+    #aent-resources {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0 1.25rem;
+    }
+    #aent-resources .aent-resource {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
+    }
+    #aent-resources .aent-resource + .aent-resource { border-top: 0; }
+    #aent-stats-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 1.5rem;
+    }
+    #aent-stats-list .aent-resource + .aent-resource { border-top: 0; }
+  }
+
+  #aent .aent-resource .aent-value {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-hire-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.6rem 0;
+  }
+
+  #aent .aent-hire-row + .aent-hire-row {
+    border-top: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-label {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--aent-muted);
+    display: block;
+    margin-bottom: 0.2rem;
+  }
+
+  #aent .aent-count {
+    font-size: 1.05rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--aent-fg);
+  }
+
+  #aent button {
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--aent-accent-strong);
+    color: var(--aent-accent-fg);
+    border: 0;
+    border-radius: 8px;
+    padding: 0.65rem 1.1rem;
+    min-height: 2.75rem;
+    white-space: nowrap;
+    transition: opacity 0.15s ease, transform 0.05s ease;
+  }
+
+  #aent button:hover:not(:disabled) { opacity: 0.88; }
+  #aent button:active:not(:disabled) { transform: translateY(1px); }
+  #aent button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #aent .aent-feed-header,
+  #aent .aent-roster-header,
+  #aent .aent-log-header {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--aent-muted);
+    margin-bottom: 0.65rem;
+  }
+
+  #aent .aent-feed-list,
+  #aent .aent-roster-list {
+    max-height: 14rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  #aent .aent-feed-msg {
+    font-size: 0.875rem;
+    display: flex;
+    gap: 0.5rem;
+    align-items: baseline;
+  }
+
+  #aent .aent-feed-time {
+    color: var(--aent-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  #aent .aent-feed-text {
+    color: var(--aent-fg);
+    flex: 1 1 auto;
+  }
+
+  #aent .aent-feed-empty,
+  #aent .aent-roster-empty,
+  #aent .aent-log-empty {
+    color: var(--aent-muted);
+    font-size: 0.875rem;
+    font-style: italic;
+  }
+
+  #aent .aent-roster-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.4rem 0.6rem;
+    font-size: 0.875rem;
+    padding: 0.45rem 0;
+  }
+
+  #aent .aent-roster-row + .aent-roster-row {
+    border-top: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-roster-name,
+  #aent .aent-roster-role {
+    font-weight: 600;
+    flex-shrink: 0;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-roster-trait {
+    color: var(--aent-muted);
+    flex: 1 1 8rem;
+    text-align: left;
+  }
+
+  #aent .aent-roster-tenure,
+  #aent .aent-roster-status {
+    color: var(--aent-muted);
+    font-size: 0.8125rem;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #aent .aent-roster-synergy {
+    color: var(--aent-accent);
+    font-size: 0.8125rem;
+    margin-bottom: 0.6rem;
+  }
+
+  #aent .aent-log-section + .aent-log-section {
+    margin-top: 1.1rem;
+    border-top: 1px solid var(--aent-line);
+    padding-top: 1.1rem;
+  }
+
+  #aent .aent-log-list {
+    max-height: 11rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  #aent .aent-log-entry {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--aent-muted);
+  }
+
+  /* Modal shell — shared by the crisis (v0.6) and morning-briefing (v0.8) overlays.
+     max-height + overflow-y is a FUNCTIONAL fix, not just style: on a phone viewport an
+     AI-generated crisis description plus two full-width buttons can exceed the visible
+     height with the old rules, leaving no way to scroll down to the action buttons. dvh
+     is given with a vh fallback declared first, since this file is embedded inside
+     perchance.org's own page chrome, where mobile browser toolbars make bare 100vh
+     unreliable on its own. */
+  #aent .aent-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    z-index: 1000;
+  }
+
+  #aent .aent-modal-overlay[hidden] { display: none; }
+
+  #aent .aent-modal-box {
+    background: var(--aent-surface);
+    border: 1px solid var(--aent-line);
+    border-radius: 14px;
+    padding: 1.5rem;
+    max-width: 26rem;
+    width: 100%;
+    max-height: 90vh;
+    max-height: 90dvh;
+    overflow-y: auto;
+  }
+
+  #aent .aent-crisis-label,
+  #aent .aent-briefing-label {
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.45rem;
+  }
+
+  #aent .aent-crisis-label { color: var(--aent-bad); }
+  #aent .aent-briefing-label { color: var(--aent-accent); }
+
+  #aent .aent-crisis-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-crisis-desc,
+  #aent .aent-briefing-narrative {
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    margin: 0 0 1.25rem;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-crisis-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  #aent .aent-crisis-actions button {
+    width: 100%;
+    white-space: normal;
+    text-align: left;
+    background: var(--aent-surface-alt);
+    color: var(--aent-fg);
+    border: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-crisis-actions button:hover:not(:disabled) {
+    border-color: var(--aent-accent);
+    opacity: 1;
+  }
+
+  #aent .aent-briefing-breakdown {
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--aent-muted);
+    border-top: 1px solid var(--aent-line);
+    padding-top: 0.85rem;
+    margin: 0 0 1.25rem;
+  }
+
+  #aent .aent-briefing-ack { width: 100%; }
+
+  #aent .aent-view-toggle {
+    width: 100%;
+    margin-bottom: 1.25rem;
+    background: transparent;
+    color: var(--aent-accent);
+    border: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-view-toggle:hover:not(:disabled) {
+    border-color: var(--aent-accent);
+    opacity: 1;
+  }
+
+  #aent .aent-ipo-button { width: 100%; margin-top: 0.9rem; }
+
+  #aent .aent-patent-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.65rem 0;
+  }
+
+  #aent .aent-patent-row + .aent-patent-row {
+    border-top: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-patent-name {
+    font-weight: 600;
+    font-size: 0.9375rem;
+    color: var(--aent-fg);
+  }
+
+  #aent .aent-patent-desc {
+    font-size: 0.8125rem;
+    color: var(--aent-muted);
+    margin-top: 0.15rem;
+  }
+
+  #aent .aent-patent-row button { flex-shrink: 0; }
+
+  #aent .aent-patent-row--tier { padding-left: 1rem; }
+  #aent .aent-patent-row--tier .aent-patent-name { font-size: 0.875rem; }
+
+  #aent .aent-stats-dashboard {
+    margin-top: 1.1rem;
+    border-top: 1px solid var(--aent-line);
+    padding-top: 1.1rem;
+  }
+
+  /* ---- New utility classes for the facelift, purely additive — downstream buckets
+     consume these rather than inventing their own. ---- */
+
+  #aent .aent-badge {
+    display: inline-block;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: var(--aent-surface-alt);
+    color: var(--aent-muted);
+    border: 1px solid var(--aent-line);
+  }
+
+  #aent .aent-badge--good { color: var(--aent-good); border-color: var(--aent-good); }
+  #aent .aent-badge--accent { color: var(--aent-accent); border-color: var(--aent-accent); }
+
+  /* Thin meter bar — used for Tech Debt in the Resources card (added by bucket B2). Width
+     is set from JS via style.width as a percentage; this file only defines the chrome. */
+  #aent .aent-progress-track {
+    width: 100%;
+    height: 0.375rem;
+    border-radius: 999px;
+    background: var(--aent-surface-alt);
+    overflow: hidden;
+    margin-top: 0.35rem;
+  }
+
+  #aent .aent-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--aent-accent);
+    transition: width 0.2s ease;
+  }
+</style>
+
+<div id="aent">
+  <h1>The Autonomous Enterprise</h1>
+  <p class="aent-sub">Run the company. Survive the crises. Cash out when the valuation is right.</p>
+
+  <button type="button" id="aent-view-toggle" class="aent-view-toggle">Visit the Boardroom</button>
+
+  <div id="aent-company-view">
+    <div id="aent-resources" class="aent-card">
+      <div class="aent-resource">
+        <span class="aent-label">Capital</span>
+        <span id="aent-capital" class="aent-value">$0</span>
+      </div>
+      <div class="aent-resource">
+        <span class="aent-label">Compute</span>
+        <span id="aent-compute" class="aent-value">0</span>
+      </div>
+      <div class="aent-resource">
+        <span class="aent-label">Tech Debt</span>
+        <span id="aent-techdebt" class="aent-value">0</span>
+        <div class="aent-progress-track">
+          <div id="aent-techdebt-bar" class="aent-progress-fill" style="width: 0%;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="aent-hire" class="aent-card">
+      <div class="aent-hire-row">
+        <div>
+          <span class="aent-label">Developers</span>
+          <span id="aent-dev-count" class="aent-count">0</span>
+        </div>
+        <button type="button" id="aent-hire-dev">Hire Developer ($<span id="aent-dev-cost">100</span>)</button>
+      </div>
+      <div class="aent-hire-row">
+        <div>
+          <span class="aent-label">Marketers</span>
+          <span id="aent-marketer-count" class="aent-count">0</span>
+        </div>
+        <button type="button" id="aent-hire-marketer">Hire Marketer ($<span id="aent-marketer-cost">100</span>)</button>
+      </div>
+    </div>
+
+    <div id="aent-roster" class="aent-card">
+      <div class="aent-roster-header">Roster</div>
+      <!-- v1.2.3: filled in by aentRenderRoster() on every render; the hardcoded text here
+           is only ever visible for the instant before aentInit's first aentRenderRoster()
+           call, same convention as the .aent-roster-empty/.aent-feed-empty placeholders
+           elsewhere in this file. -->
+      <div id="aent-roster-synergy" class="aent-roster-synergy">No active trait synergy.</div>
+      <div id="aent-roster-list" class="aent-roster-list">
+        <div class="aent-roster-empty">No one hired yet.</div>
+      </div>
+    </div>
+
+    <div id="aent-feed" class="aent-card">
+      <div class="aent-feed-header">#general — company Slack</div>
+      <div id="aent-feed-list" class="aent-feed-list">
+        <div class="aent-feed-empty">Waiting for the first update from the team&hellip;</div>
+      </div>
+    </div>
+
+    <div id="aent-log" class="aent-card">
+      <div class="aent-log-section">
+        <div class="aent-log-header">Decisions</div>
+        <div id="aent-decision-log-list" class="aent-log-list">
+          <div class="aent-log-empty">No decisions yet.</div>
+        </div>
+      </div>
+      <div class="aent-log-section">
+        <div class="aent-log-header">Briefings</div>
+        <div id="aent-briefing-log-list" class="aent-log-list">
+          <div class="aent-log-empty">No briefings yet.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="aent-ipo" class="aent-card">
+      <div class="aent-resource">
+        <span class="aent-label">Valuation</span>
+        <span id="aent-valuation" class="aent-value">$0</span>
+      </div>
+      <button type="button" id="aent-ipo-button" class="aent-ipo-button">Take Company Public (IPO)</button>
+    </div>
+  </div>
+
+  <div id="aent-boardroom-view" class="aent-card" hidden>
+    <div class="aent-resource">
+      <span class="aent-label">Golden Parachutes</span>
+      <span id="aent-gp-balance" class="aent-value">0</span>
+    </div>
+    <div id="aent-patent-list"></div>
+
+    <div id="aent-stats-dashboard" class="aent-stats-dashboard">
+      <div class="aent-log-header">All-Time Stats</div>
+      <div id="aent-stats-list"></div>
+    </div>
+  </div>
+
+  <div id="aent-crisis-modal" class="aent-modal-overlay" hidden>
+    <div class="aent-modal-box">
+      <div class="aent-crisis-label">Crisis</div>
+      <div class="aent-crisis-title" id="aent-crisis-title"></div>
+      <p class="aent-crisis-desc" id="aent-crisis-desc"></p>
+      <div class="aent-crisis-actions">
+        <button type="button" id="aent-crisis-option-a"></button>
+        <button type="button" id="aent-crisis-option-b"></button>
+      </div>
+    </div>
+  </div>
+
+  <div id="aent-briefing-modal" class="aent-modal-overlay" hidden>
+    <div class="aent-modal-box">
+      <div class="aent-briefing-label">Executive Morning Briefing</div>
+      <p class="aent-briefing-narrative" id="aent-briefing-narrative"></p>
+      <div class="aent-briefing-breakdown" id="aent-briefing-breakdown"></div>
+      <button type="button" id="aent-briefing-ack" class="aent-briefing-ack">Acknowledge</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ===== TUNING CONSTANTS =====
+  // Kept simple and named so they're easy to retune later; balancing is not this phase's job.
+  var AENT_TICK_MS = 1000;
+  var AENT_AUTOSAVE_MS = 10000;
+  var AENT_SAVE_KEY = 'aent_autonomous_enterprise_save_v0';
+  var AENT_OFFLINE_CAP_SECONDS = 6 * 3600; // matches the OFF_CAP idiom in np16r7glcp/html.txt: offline math is capped, not unbounded
+  var AENT_OFFLINE_CATCHUP_THRESHOLD_SECONDS = 5; // below this, skip catch-up entirely — matches np16r7glcp/html.txt:984 (`if(elapsed>5)`)
+
+  var AENT_DEV_BASE_COST = 100;
+  var AENT_MARKETER_BASE_COST = 100;
+  var AENT_HIRE_COST_GROWTH = 1.15; // standard idle-game geometric cost scaling
+
+  var AENT_DEV_COMPUTE_PER_SEC = 2;      // each developer generates compute
+  var AENT_DEV_TECHDEBT_PER_SEC = 0.3;   // each developer also accrues tech debt while building
+  var AENT_TECHDEBT_DECAY_PER_SEC = 0.02; // fraction of outstanding tech debt paid down per second (e.g. incidental cleanup)
+  var AENT_MARKETER_CAPITAL_PER_SEC = 5; // each marketer converts attention into capital...
+  var AENT_TECHDEBT_DRAG_DIVISOR = 100;  // ...but high tech debt slows that down: drag = 1 / (1 + techDebt / this)
+
+  var AENT_FEED_TICK_INTERVAL = 30; // fire the AI feed every N ticks (~30s at a 1s tick), per the user's spec step 2 — high enough that generateText isn't hit every tick
+  var AENT_FEED_MAX_ENTRIES = 20;   // "scrolling feed", not an unbounded log
+
+  var AENT_CRISIS_TICK_INTERVAL = 120; // a crisis is a bigger interruption than a feed line — rarer cadence than AENT_FEED_TICK_INTERVAL, on purpose
+  var AENT_DECISION_LOG_MAX = 5;       // "log the decision for context" (spec step 4) — bounded, not an ever-growing history
+  var AENT_BRIEFING_LOG_MAX = 5;       // v1.2.0: same cap-and-prune idiom as AENT_DECISION_LOG_MAX, applied to past morning-briefing summaries
+
+  var AENT_META_SAVE_KEY = 'aent_autonomous_enterprise_meta_v0'; // deliberately a SEPARATE key from AENT_SAVE_KEY — the whole point is that IPO wipes one and never touches the other
+  var AENT_VALUATION_CAPITAL_DIVISOR = 100; // tuning: how much lifetime capital is "worth" per valuation point
+  var AENT_VALUATION_COMPUTE_WEIGHT = 2;    // tuning: compute counted more heavily per unit than capital, since it's the rarer resource
+  var AENT_GP_VALUATION_DIVISOR = 10;       // tuning: valuation-to-Golden-Parachutes conversion divisor inside the sqrt — chosen so patent costs (10-20 GP) are reachable after a real session, not after dozens
+
+  // Step 3 (spec): "Patents" (permanent multipliers). Originally each was a single
+  // one-time purchase - "Patents" reads as discrete inventions you either have or don't.
+  // `effect` mutates a plain multipliers object; `aentComputeMetaMultipliers` folds every
+  // owned patent's effect into one object read by the math engine and the hire-cost helper.
+  //
+  // v1.2.4 (Bucket E - Tiered Patents): three of these four families (Scaled
+  // Infrastructure, Market Reach, Lean Process Playbook) now have three tiers each,
+  // escalating in both cost and effect size - see NOTES.md v1.2.4 for the full rationale,
+  // the concrete numbers, and why Efficient Hiring Pipeline was left as the sole
+  // remaining flat one-time patent. Migration-safety approach (read this before touching
+  // this array again): a tier is its OWN independent flat key in this same array/`patents`
+  // map shape, e.g. `scaledInfrastructure` (tier 1, unchanged key/meaning from v1.0),
+  // `scaledInfrastructure2` (tier 2), `scaledInfrastructure3` (tier 3) - NEVER an integer
+  // tier level stored on one shared key. That is what lets an old save's
+  // `patents.scaledInfrastructure === true` keep meaning exactly what it always meant,
+  // with no migration function needed at all. Two new, purely optional fields exist only
+  // on tiered entries: `tier` (1/2/3, display-only, used by `aentRenderBoardroom` to
+  // group/indent a family's rows) and `requires` (the key of the immediately preceding
+  // tier in the same family, read ONLY by `aentBuyPatent`'s new prior-tier-owned gate).
+  // Untiered patents (no `requires` field at all, like `efficientHiring`) are completely
+  // unaffected by that gate. `aentComputeMetaMultipliers` below needed NO changes: it
+  // already `forEach`s this whole array and folds in every owned key's `effect`
+  // independently of tier, so the six new tier-2/3 entries are picked up automatically.
+  var AENT_PATENTS = [
+    {
+      key: 'efficientHiring',
+      name: 'Efficient Hiring Pipeline',
+      description: '-10% cost for every future hire, developers and marketers alike',
+      cost: 10,
+      effect: function (m) { m.hireCostMult *= 0.9; }
+    },
+    {
+      key: 'scaledInfrastructure',
+      name: 'Scaled Infrastructure I',
+      description: '+20% compute generated per developer',
+      cost: 15,
+      tier: 1,
+      effect: function (m) { m.computeYieldMult *= 1.2; }
+    },
+    {
+      key: 'scaledInfrastructure2',
+      name: 'Scaled Infrastructure II',
+      description: '+25% additional compute generated per developer (stacks with Tier I)',
+      cost: 40,
+      tier: 2,
+      requires: 'scaledInfrastructure',
+      effect: function (m) { m.computeYieldMult *= 1.25; }
+    },
+    {
+      key: 'scaledInfrastructure3',
+      name: 'Scaled Infrastructure III',
+      description: '+30% additional compute generated per developer (stacks with Tiers I-II)',
+      cost: 90,
+      tier: 3,
+      requires: 'scaledInfrastructure2',
+      effect: function (m) { m.computeYieldMult *= 1.3; }
+    },
+    {
+      key: 'marketReach',
+      name: 'Market Reach I',
+      description: '+20% capital generated per marketer',
+      cost: 15,
+      tier: 1,
+      effect: function (m) { m.capitalYieldMult *= 1.2; }
+    },
+    {
+      key: 'marketReach2',
+      name: 'Market Reach II',
+      description: '+25% additional capital generated per marketer (stacks with Tier I)',
+      cost: 40,
+      tier: 2,
+      requires: 'marketReach',
+      effect: function (m) { m.capitalYieldMult *= 1.25; }
+    },
+    {
+      key: 'marketReach3',
+      name: 'Market Reach III',
+      description: '+30% additional capital generated per marketer (stacks with Tiers I-II)',
+      cost: 90,
+      tier: 3,
+      requires: 'marketReach2',
+      effect: function (m) { m.capitalYieldMult *= 1.3; }
+    },
+    {
+      key: 'leanProcess',
+      name: 'Lean Process Playbook I',
+      description: '-15% tech debt accrued per developer',
+      cost: 20,
+      tier: 1,
+      effect: function (m) { m.techDebtGainMult *= 0.85; }
+    },
+    {
+      key: 'leanProcess2',
+      name: 'Lean Process Playbook II',
+      description: '-20% additional tech debt accrued per developer (stacks with Tier I)',
+      cost: 45,
+      tier: 2,
+      requires: 'leanProcess',
+      effect: function (m) { m.techDebtGainMult *= 0.8; }
+    },
+    {
+      key: 'leanProcess3',
+      name: 'Lean Process Playbook III',
+      description: '-25% additional tech debt accrued per developer (stacks with Tiers I-II)',
+      cost: 100,
+      tier: 3,
+      requires: 'leanProcess2',
+      effect: function (m) { m.techDebtGainMult *= 0.75; }
+    }
+  ];
+
+  // v1.2.3 (Bucket D — feature 4, trait synergies): specific trait PAIRS present anywhere
+  // on the combined roster at once, not owned like a patent — this fires or doesn't purely
+  // off current roster composition and can flicker on/off as workers are hired/resign.
+  // Shaped like AENT_PATENTS (array of small objects, an `effect` that mutates a plain
+  // multipliers object) per this bucket's own brief, but the multipliers object it mutates
+  // is DELIBERATELY missing a `hireCostMult` key (compare to AENT_PATENTS' `m.hireCostMult`
+  // above) — see aentComputeSynergyMultipliers below. That omission is what makes an
+  // accidental fold of a synergy into aentEffectiveCost() impossible by construction, not
+  // just a documented promise: this table's effects are scoped to yield/tech-debt only, on
+  // explicit instruction (a synergy must never affect hire cost — see NOTES.md v1.2.3).
+  // Three pairs, one per multiplier this file's math engine actually reads
+  // (computeYieldMult, capitalYieldMult, techDebtGainMult) — same "one per affectable
+  // resource" reasoning AENT_PATENTS' own comment gives for having four entries, not more or
+  // fewer. `Meticulous + Chaotic` is the user's own worked example (both devTraits);
+  // the other two deliberately cross a dev trait with a marketer trait, since nothing
+  // requires a synergy pair to come from the same role.
+  var AENT_TRAIT_SYNERGIES = [
+    {
+      key: 'meticulousChaotic',
+      label: 'Meticulous + Chaotic',
+      traitA: 'Meticulous',
+      traitB: 'Chaotic',
+      description: 'a meticulous developer keeps a chaotic one in check — tech debt accrues 20% slower',
+      effect: function (m) { m.techDebtGainMult *= 0.8; }
+    },
+    {
+      key: 'pragmaticDataDriven',
+      label: 'Pragmatic + Data-Driven',
+      traitA: 'Pragmatic',
+      traitB: 'Data-Driven',
+      description: 'pragmatic engineering paired with data-driven marketing converts attention to capital 15% faster',
+      effect: function (m) { m.capitalYieldMult *= 1.15; }
+    },
+    {
+      key: 'overcaffeinatedCharismatic',
+      label: 'Overcaffeinated + Charismatic',
+      traitA: 'Overcaffeinated',
+      traitB: 'Charismatic',
+      description: 'a charismatic marketer channels overcaffeinated energy into 10% more compute output',
+      effect: function (m) { m.computeYieldMult *= 1.1; }
+    }
+  ];
+
+  // v1.2.3 (Bucket D — feature 9, employee lifecycle events): throttle constant, following
+  // the exact naming/gating pattern of AENT_FEED_TICK_INTERVAL/AENT_CRISIS_TICK_INTERVAL
+  // above — checked inside aentProcessTick alongside those two. Chosen rarer than
+  // AENT_CRISIS_TICK_INTERVAL (120): a lifecycle event permanently reshapes the roster
+  // itself (a resign is irreversible; a promotion is a lasting yield change), which is a
+  // bigger, longer-lived consequence than either a single crisis modifier or a feed line,
+  // so it checks in less often than either.
+  var AENT_LIFECYCLE_TICK_INTERVAL = 180;
+  // Per-check probabilities, rolled independently in aentTryLifecycleEvent (resign checked
+  // first, then promote on a separate slice of the same roll) — most throttled checks
+  // produce nothing at all, which is deliberate: a lifecycle event should read as a rare,
+  // notable moment in the feed, not a constant drumbeat every three minutes.
+  var AENT_LIFECYCLE_RESIGN_CHANCE = 0.15;
+  var AENT_LIFECYCLE_PROMOTE_CHANCE = 0.15;
+  // Burnout-adjacent traits per this bucket's own brief ("e.g. Burned-Out, Chaotic") — one
+  // from each role's trait table, so both devs and marketers have a burnout-flavored trait
+  // that skews their odds of being the one who resigns.
+  var AENT_LIFECYCLE_BURNOUT_TRAITS = ['Burned-Out', 'Chaotic'];
+  var AENT_LIFECYCLE_BURNOUT_WEIGHT_MULT = 3; // a burnout-adjacent worker is 3x as likely as any other roster member to be the one picked when a resign fires
+  // +20% yield on the specific resource a promoted worker's role produces (compute for a
+  // developer, capital for a marketer) — a concrete, documented value per this bucket's own
+  // instructions. Does not stack: aentPromoteWorker excludes already-promoted workers from
+  // its candidate pool (see NOTES.md v1.2.3).
+  var AENT_PROMOTION_YIELD_MULT = 1.2;
+
+  // ===== STATE =====
+  // Step 1: a single state object holding every resource, worker roster, and
+  // per-worker cost the rest of the engine reads and mutates. Prefixed `aent` like
+  // everything else at global scope in this file: `window.update` is a confirmed
+  // page-runtime global (`corpus/General/press-enter-plugin_perchance_data.md:5`,
+  // `corpus/General/tap-anywhere-plugin_perchance_data.md:5` both call it without ever
+  // defining it), which is exactly the kind of bare-global collision this prefixing
+  // convention exists to avoid.
+  var aentState;
+
+  // Feed trigger bookkeeping. Deliberately NOT part of aentState / localStorage — it's
+  // purely a live-session throttle, not game state, and resetting it on reload is fine
+  // (worst case: one feed line fires a little earlier after a reload than it otherwise
+  // would have).
+  var aentFeedTickCounter = 0;
+  var aentFeedRequestInFlight = false;
+
+  // Crisis trigger bookkeeping — same "not game state" reasoning as the feed counters
+  // above, except `aentTickIntervalId`, which has to live outside aentState because a
+  // setInterval id is a live handle, not data: it can't be serialized to localStorage and
+  // rehydrated on load, it has to be re-created by calling setInterval again (see
+  // aentInit and aentResolveCrisis).
+  var aentTickIntervalId = null;
+  var aentCrisisTickCounter = 0;
+  var aentCrisisRequestInFlight = false;
+  var aentCrisisActive = null; // {parsed, options} while a crisis modal is showing, else null
+
+  // v1.2.5 (Bucket F — feature 6, escalation chains): recent crisis-category history,
+  // same "not game state" reasoning as every other counter in this block — deliberately
+  // a module-level variable, NOT part of aentState or localStorage. This is a second,
+  // independent instance of the exact choice NOTES.md's v0.6 section already documents
+  // (no persistence of in-progress crisis state across a page reload): a reload wiping
+  // this array, and therefore any escalation streak in progress, is the deliberate,
+  // desired behavior — not this bucket quietly reversing that v0.6 call a second time.
+  // Each entry is `{ category: string, tickCount: number }`; `tickCount` is copied from
+  // `aentState.tickCount` (already persisted/incremented elsewhere, see aentApplyDelta)
+  // purely as a recency timestamp for aentCrisisCategoryIsEscalated below — this array
+  // itself is never written back into aentState.
+  var aentCrisisCategoryHistory = [];
+  // Bounded the same way aentState.decisionLog/briefingLog are (push, then .shift() while
+  // over the max) — comfortably larger than what the escalation window below can ever
+  // actually use (see AENT_CRISIS_ESCALATION_WINDOW_TICKS' own comment), so pruning never
+  // discards an entry still inside the window.
+  var AENT_CRISIS_CATEGORY_HISTORY_MAX = 10;
+  // "Short recent window" per this bucket's own brief, expressed in the same tickCount
+  // units aentState already tracks. `aentShowCrisis` clears the tick interval for the
+  // entire time a crisis modal is up (see its own comment below), so aentState.tickCount
+  // does NOT advance while a crisis is being read/resolved — inter-crisis spacing is
+  // therefore always ~AENT_CRISIS_TICK_INTERVAL (120) ticks of simulated time regardless
+  // of how long the player takes to click a button. That's what makes "3x the normal
+  // crisis cadence" a stable, wall-clock-independent definition of "recent," rather than
+  // one that would silently shrink or grow depending on how long modals sit open.
+  var AENT_CRISIS_ESCALATION_WINDOW_TICKS = AENT_CRISIS_TICK_INTERVAL * 3; // 360
+
+  // v1.2.3: lifecycle-event trigger bookkeeping — same "not game state" reasoning as the
+  // feed/crisis counters directly above. Resetting to 0 on reload is fine (worst case: one
+  // lifecycle check fires a little earlier after a reload than it otherwise would have).
+  var aentLifecycleTickCounter = 0;
+
+  // v1.0: the permanent, cross-run save, loaded once at aentInit time (before aentLoad(),
+  // since aentApplyDelta needs aentMetaState to compute multipliers even during the
+  // offline-catchup loop). Deliberately NOT reset by aentLoad or the IPO's page reload —
+  // that persistence is the entire point of a prestige currency.
+  var aentMetaState;
+
+  // Session-only UI state: which of the two "screens" (spec step 3: "a separate screen")
+  // is showing. Not part of either save — always starts on the Company view after a
+  // fresh load, which is also always true right after an IPO reload.
+  var aentBoardroomOpen = false;
+
+  function aentFreshState() {
+    return {
+      capital: 500,
+      compute: 0,
+      techDebt: 0,
+      // Step 1 (v1.0): "based on lifetime capital generated" — distinct from `capital`
+      // (the current spendable balance, which crisis costs and hiring both reduce).
+      // Only ever incremented, in aentApplyDelta, alongside the normal capital gain;
+      // crisis modifiers that reduce `capital` do NOT touch this, since they're a cost
+      // against the balance, not a reduction in what the business actually generated.
+      lifetimeCapital: 0,
+      // Step 1/2 (v0.4): each worker is now an object (`{trait}`) rather than a bare
+      // count, so a per-worker trait has somewhere to live. `.length` stands in for the
+      // old `devCount`/`marketerCount` everywhere below.
+      devs: [],
+      marketers: [],
+      devCost: AENT_DEV_BASE_COST,
+      marketerCost: AENT_MARKETER_BASE_COST,
+      // v0.6 step 4: "log the decision for context in the next AI prompt" — a short,
+      // bounded history of past crisis choices, folded into aentDescribeSituation() so
+      // both the feed and future crisis prompts see it. Purely additive vs. v0.4's
+      // schema, so Object.assign(aentFreshState(), saved) already handles an older save
+      // missing this field with no custom migration needed (unlike devs/marketers).
+      decisionLog: [],
+      // v1.2.0: purely additive fields — Object.assign(aentFreshState(), saved) already
+      // handles an older save missing either one by falling back to these defaults, same
+      // reasoning already documented above for decisionLog. tickCount is a simulated-second
+      // counter (incremented once per second of simulated time in aentApplyDelta, covering
+      // both the live tick loop and the offline-catchup replay loop, since both call it with
+      // seconds === 1); briefingLog is decisionLog's sibling for the morning briefing —
+      // same cap-and-prune shape, see AENT_BRIEFING_LOG_MAX and aentShowMorningBriefing.
+      tickCount: 0,
+      briefingLog: [],
+      lastSave: Date.now()
+    };
+  }
+
+  // Reads one random trait from a v0.4 Lists-panel trait table, or null if `root` or the
+  // named list isn't ready yet. Same accessor chain as `dqgPick()` in
+  // apps/discovery-question-generator/html.txt:149-151
+  // (`root[listName].selectOne.evaluateItem`), cited there to
+  // examples/pixelsaga/html.txt:2562-2571. Returns null rather than throwing so callers
+  // decide how to handle "not ready yet" themselves — see aentResolveTrait below, which
+  // is what actually handles it.
+  function aentPickTrait(listName) {
+    if (typeof root === 'undefined' || !root[listName]) return null;
+    return root[listName].selectOne.evaluateItem;
+  }
+
+  // Resolves (and persists) a worker's trait the first time it's actually needed, rather
+  // than at hire/migration time. This matters because `aentInit()` can call `aentLoad()`
+  // synchronously at script-parse time (the `document.readyState === 'complete'` branch),
+  // which is exactly the window where the Lists engine may not have populated `root` yet
+  // — an earlier draft picked traits eagerly during migration/hire and would have
+  // permanently written `'Unspecified'` into a save if `root` wasn't ready at that exact
+  // moment. Deferring resolution to first-feature time (tens of seconds after load, via
+  // aentBuildCastLine) gives `root` time to be ready; `'Unspecified'` here is only ever a
+  // transient display fallback for the prompt, never written back into `worker.trait`.
+  function aentResolveTrait(worker, listName) {
+    if (worker.trait == null) {
+      var picked = aentPickTrait(listName);
+      if (picked != null) worker.trait = picked;
+    }
+    return worker.trait != null ? worker.trait : 'Unspecified';
+  }
+
+  // v1.2.2: reads one random name from the employeeNames Lists-panel table, mirroring
+  // aentPickTrait(listName) exactly, just against a single fixed list name rather than a
+  // per-role parameter (there is only one name pool, shared across devs and marketers).
+  // Same null-if-not-ready contract as aentPickTrait.
+  function aentPickName() {
+    if (typeof root === 'undefined' || !root.employeeNames) return null;
+    return root.employeeNames.selectOne.evaluateItem;
+  }
+
+  // v1.2.2: resolves (and persists) a worker's name the first time it's actually needed,
+  // mirroring aentResolveTrait above exactly — same lazy-resolution-at-first-feature-time
+  // reasoning applies verbatim: a name picked eagerly at hire time (aentHireDeveloper/
+  // aentHireMarketer) or during legacy migration could run before the Lists engine has
+  // populated `root`, permanently writing a fallback into the save. Deferred to first call
+  // from aentBuildCastLine/aentBuildCrisisCastLine instead. `worker.name == null` (not
+  // `typeof worker.name !== 'string'`) deliberately matches aentResolveTrait's own guard —
+  // it treats a missing `.name` key (an old save predating this field entirely) the same
+  // as an explicit `null`, so no separate migration function is needed for this field,
+  // same reasoning already relied on for `decisionLog`/`tickCount` (v1.2.0 table).
+  //
+  // Duplicate names across different workers are accepted by design — no roster-scanning
+  // "already taken" check is done here, deliberately, for the same reason worker traits
+  // are already allowed to repeat across the roster (aentPickTrait above has no such check
+  // either). See NOTES.md v1.2.2 for this documented as an explicit decision, not an
+  // oversight.
+  function aentResolveName(worker) {
+    if (worker.name == null) {
+      var picked = aentPickName();
+      if (picked != null) worker.name = picked;
+    }
+    return worker.name != null ? worker.name : 'Unnamed';
+  }
+
+  // ===== PRESTIGE / THE BOARDROOM (v1.0) =====
+  // Step 3 (spec): the permanent, cross-run save. A plain object of currency + owned
+  // patents, persisted under its own localStorage key (AENT_META_SAVE_KEY) — see
+  // aentLoadMeta/aentSaveMeta below. `patents` is a map of patent key -> true, not an
+  // array, for O(1) "is this one owned" lookups in aentComputeMetaMultipliers and
+  // aentRenderBoardroom, both of which run every tick or every render respectively.
+  function aentFreshMetaState() {
+    // v1.2.1: ipoCount and lifetimeCapitalAllRuns are purely additive vs. v1.0's shape —
+    // Object.assign(aentFreshMetaState(), saved) in aentLoadMeta already handles an
+    // existing meta-save missing either one by falling back to these 0 defaults, same
+    // reasoning already applied to aentState.tickCount/briefingLog (v1.2.0). Both are
+    // ONLY ever incremented in aentPerformIPO, right next to goldenParachutes — see there.
+    return { goldenParachutes: 0, patents: {}, ipoCount: 0, lifetimeCapitalAllRuns: 0 };
+  }
+
+  function aentLoadMeta() {
+    try {
+      var raw = localStorage.getItem(AENT_META_SAVE_KEY);
+      aentMetaState = raw ? Object.assign(aentFreshMetaState(), JSON.parse(raw)) : aentFreshMetaState();
+    } catch (e) {
+      aentMetaState = aentFreshMetaState();
+    }
+  }
+
+  function aentSaveMeta() {
+    try {
+      localStorage.setItem(AENT_META_SAVE_KEY, JSON.stringify(aentMetaState));
+    } catch (e) {}
+  }
+
+  // Folds every owned patent's effect into one multipliers object. Recomputed on demand
+  // (every tick, every UI update) rather than cached — AENT_PATENTS is tiny (ten entries
+  // as of v1.2.4, up from four — still tiny), so the cost of recomputing is negligible
+  // next to the cost of a stale cache going unnoticed after a purchase. v1.2.4: this
+  // function needed NO changes for tiered patents — it doesn't care whether a key
+  // represents an untiered patent or one tier of a family, it just applies every owned
+  // key's effect. Gating on a prior tier being owned is enforced only at PURCHASE time,
+  // in aentBuyPatent below, not here.
+  function aentComputeMetaMultipliers() {
+    var m = { hireCostMult: 1, computeYieldMult: 1, capitalYieldMult: 1, techDebtGainMult: 1 };
+    AENT_PATENTS.forEach(function (patent) {
+      if (aentMetaState.patents[patent.key]) patent.effect(m);
+    });
+    return m;
+  }
+
+  // Single source of truth for "what does this hire actually cost right now," used by
+  // both aentUpdateUI (display + disabled state) and aentHireDeveloper/aentHireMarketer
+  // (the actual charge) — so the displayed price and the charged price can never drift
+  // apart the way two independent copies of the same formula eventually would.
+  // `aentState.devCost`/`marketerCost` themselves are left untouched by patents: they
+  // keep growing by the same raw AENT_HIRE_COST_GROWTH regardless, and the patent
+  // discount is applied fresh every time this is called, on top of that raw progression.
+  function aentEffectiveCost(baseCost) {
+    return Math.ceil(baseCost * aentComputeMetaMultipliers().hireCostMult);
+  }
+
+  // Step 1 (spec): "calculates a 'Valuation' score based on lifetime capital generated
+  // and active compute." Original formula, not cited to anything — the spec names the
+  // two inputs but not a formula, so the exact weights are a documented guess (see
+  // NOTES.md), like every other tuning constant in this file.
+  function aentComputeValuation() {
+    return Math.floor(aentState.lifetimeCapital / AENT_VALUATION_CAPITAL_DIVISOR) +
+      Math.floor(aentState.compute * AENT_VALUATION_COMPUTE_WEIGHT);
+  }
+
+  // Step 2 (spec): "Convert the Valuation score into a persistent currency." Square-root
+  // scaling is a deliberate choice, not an arbitrary one: it keeps Golden Parachutes
+  // growing sub-linearly with valuation, so a much bigger run earns proportionally less
+  // marginal currency — the standard shape for a prestige currency in this genre, so one
+  // very long run can't trivially buy out every patent while a normal run buys none.
+  function aentComputeGoldenParachutes(valuation) {
+    return Math.floor(Math.sqrt(valuation / AENT_GP_VALUATION_DIVISOR));
+  }
+
+  // Step 4 (spec): "wipe the primary gameState from localStorage, reload the interface,
+  // and apply the metaState multipliers to the baseline math engine." Implemented
+  // LITERALLY as a real page reload rather than an in-place reset of aentState plus a
+  // manual restart of the tick loop — deliberately, not for lack of trying the other way.
+  // An in-place reset would be a THIRD call site touching aentTickIntervalId (alongside
+  // aentResolveCrisis's resume and aentShowMorningBriefing's start), repeating the same
+  // double-arm hazard aentResolveCrisis already guards against defensively. A real reload
+  // sidesteps that class of bug entirely: aentInit only ever runs once per page load, so
+  // there is exactly one place the loop gets started, same as every prior run. "Apply the
+  // metaState multipliers to the baseline math engine" then falls out for free — the
+  // reloaded page's aentApplyDelta reads aentComputeMetaMultipliers() from the very first
+  // tick, exactly as it would for any other load.
+  function aentPerformIPO() {
+    var valuation = aentComputeValuation();
+    var gpEarned = aentComputeGoldenParachutes(valuation);
+    if (gpEarned < 1) return; // aentUpdateUI already disables the button in this case; this is the defensive backstop, same pattern as the hire functions' own capital checks
+
+    var confirmed = window.confirm(
+      'Take the company public? This permanently ends the current run — capital, compute, ' +
+      'tech debt, and your whole team reset to zero. You will earn ' + aentFmt(gpEarned) +
+      ' Golden Parachutes to spend permanently in the Boardroom. This cannot be undone.'
+    );
+    if (!confirmed) return;
+
+    aentMetaState.goldenParachutes += gpEarned;
+    // v1.2.1: the only two legitimate increment sites for these cumulative counters — see
+    // aentFreshMetaState and NOTES.md. lifetimeCapitalAllRuns adds this run's own
+    // lifetimeCapital (the exact figure aentComputeValuation() just keyed off), not
+    // capital (the current spendable balance), matching the existing
+    // capital-vs-lifetimeCapital distinction documented on aentState.lifetimeCapital above.
+    aentMetaState.ipoCount += 1;
+    aentMetaState.lifetimeCapitalAllRuns += aentState.lifetimeCapital;
+    aentSaveMeta();
+
+    try {
+      localStorage.removeItem(AENT_SAVE_KEY);
+    } catch (e) {}
+
+    location.reload();
+  }
+
+  // Step 3 (spec): "Create a separate screen where players spend meta-currency on
+  // 'Patents'." Rebuilt from scratch on every render (toggled open, or right after a
+  // purchase) rather than incrementally patched — AENT_PATENTS is tiny, and rebuilding
+  // avoids a whole class of stale-DOM-vs-state bugs for a screen that's visited rarely.
+  // Uses createElement/textContent throughout, never innerHTML, even though every string
+  // here is our own authored content and not AI/user output — consistent with the
+  // no-innerHTML stance used for genuinely untrusted text elsewhere in this file, and one
+  // less thing to reason about differently in one corner of the app.
+  //
+  // v1.2.4: a patent row now has a third possible state, "locked", alongside the existing
+  // "owned"/"buyable" pair — a tier-2/3 row whose `requires` key isn't owned yet. Locked
+  // rows render disabled with a "Locked" label regardless of GP balance (checked BEFORE
+  // the affordability check, so a locked-but-affordable tier-3 row never briefly reads as
+  // buyable). AENT_PATENTS' array order already groups a family's tiers consecutively
+  // (see that array's own v1.2.4 comment), so no separate grouping/sort step is needed
+  // here — tier 2+ rows are simply given a `.aent-patent-row--tier` class for a visual
+  // indent, per this bucket's own "keep it simple" instruction.
+  function aentRenderBoardroom() {
+    document.getElementById('aent-gp-balance').textContent = aentFmt(aentMetaState.goldenParachutes);
+
+    var list = document.getElementById('aent-patent-list');
+    while (list.firstChild) list.removeChild(list.firstChild);
+
+    AENT_PATENTS.forEach(function (patent) {
+      var owned = !!aentMetaState.patents[patent.key];
+      // v1.2.4: true only for a tiered patent (has a `requires` key) whose prerequisite
+      // tier isn't owned yet — untiered patents (efficientHiring) have no `requires`
+      // field at all, so `patent.requires` is undefined and `locked` is always false for
+      // them, leaving their existing owned/buyable behavior completely unaffected.
+      var locked = !owned && !!patent.requires && !aentMetaState.patents[patent.requires];
+
+      var row = document.createElement('div');
+      row.className = 'aent-patent-row' + (patent.tier && patent.tier > 1 ? ' aent-patent-row--tier' : '');
+
+      var info = document.createElement('div');
+      var name = document.createElement('div');
+      name.className = 'aent-patent-name';
+      name.textContent = patent.name + (owned ? ' (Owned)' : '');
+      var desc = document.createElement('div');
+      desc.className = 'aent-patent-desc';
+      desc.textContent = patent.description;
+      info.appendChild(name);
+      info.appendChild(desc);
+
+      var buyBtn = document.createElement('button');
+      buyBtn.type = 'button';
+      if (owned) {
+        buyBtn.textContent = 'Owned';
+        buyBtn.disabled = true;
+      } else if (locked) {
+        // v1.2.4: locked state takes priority over the affordability check below - a
+        // locked row is never clickable no matter how many Golden Parachutes are on hand.
+        buyBtn.textContent = 'Locked (requires prior tier)';
+        buyBtn.disabled = true;
+      } else {
+        buyBtn.textContent = 'Buy (' + aentFmt(patent.cost) + ' GP)';
+        buyBtn.disabled = aentMetaState.goldenParachutes < patent.cost;
+        buyBtn.addEventListener('click', function () { aentBuyPatent(patent.key); });
+      }
+
+      row.appendChild(info);
+      row.appendChild(buyBtn);
+      list.appendChild(row);
+    });
+
+    aentRenderStatsDashboard();
+  }
+
+  // v1.2.1: read-only cumulative meta-progression stats, rendered inside the existing
+  // Boardroom view below the patent list (not a new top-level screen/toggle). Follows
+  // aentRenderBoardroom's own full-rebuild-from-scratch pattern immediately above —
+  // createElement/textContent only, never innerHTML, same defensive stance. Called from
+  // the end of aentRenderBoardroom() itself (not from aentSetBoardroomOpen or
+  // aentBuyPatent directly) so every existing call site that already renders the
+  // Boardroom stays in sync automatically, with no new call site to remember elsewhere.
+  function aentRenderStatsDashboard() {
+    var list = document.getElementById('aent-stats-list');
+    while (list.firstChild) list.removeChild(list.firstChild);
+
+    function addStat(label, value) {
+      var row = document.createElement('div');
+      row.className = 'aent-resource';
+      var labelEl = document.createElement('span');
+      labelEl.className = 'aent-label';
+      labelEl.textContent = label;
+      var valueEl = document.createElement('span');
+      valueEl.className = 'aent-value';
+      valueEl.textContent = value;
+      row.appendChild(labelEl);
+      row.appendChild(valueEl);
+      list.appendChild(row);
+    }
+
+    // Cumulative, cross-run fields on aentMetaState (see aentFreshMetaState/aentPerformIPO
+    // above). `|| 0` is defense-in-depth, not strictly required — Object.assign(
+    // aentFreshMetaState(), saved) in aentLoadMeta already backfills either field to 0 for
+    // a meta-save that predates this bucket, same as every other purely-additive field in
+    // this file.
+    addStat('Lifetime Capital (All Runs)', '$' + aentFmt(aentMetaState.lifetimeCapitalAllRuns || 0));
+    addStat('IPOs Completed', aentFmt(aentMetaState.ipoCount || 0));
+
+    // Patents owned: derived by counting keys on aentMetaState.patents at render time,
+    // deliberately NOT a separate stored counter (that would just be redundant derived
+    // state). aentBuyPatent only ever sets a key to `true`, never removes one or sets it
+    // false, so Object.keys().length is exact under the one-time-purchase-per-key schema.
+    //
+    // RESOLVED in v1.2.4 (this was flagged as a known gap by v1.2.1 - see NOTES.md
+    // v1.2.1's "FLAGGED" paragraph and v1.2.4's own citation table for the full
+    // reasoning): now that three families have three tiers each (ten total flat keys,
+    // up from four), "Patents Owned" is explicitly redefined to mean TOTAL OWNED FLAT
+    // KEYS across every family and tier, out of the total number of purchasable flat
+    // keys (AENT_PATENTS.length, now 10) - i.e. this counts individual purchases made,
+    // not distinct families started. A family with all three tiers owned contributes 3
+    // to this count, the same as three different untiered patents would. This was chosen
+    // over an alternative (counting only distinct FAMILIES with at least one tier owned,
+    // e.g. "3 / 4") because it requires no new grouping/dedup logic, scales to any future
+    // number of tiers per family without further redefinition, and most directly answers
+    // "how many patent purchases has this player made" - the plainest reading of the
+    // existing label. The expression below is UNCHANGED from v1.2.1: Object.keys() and
+    // AENT_PATENTS.length already produce the correct total under the new ten-entry
+    // schema with zero code changes, since every entry (tiered or not) is still just one
+    // flat boolean key.
+    var patentsOwned = Object.keys(aentMetaState.patents).length;
+    addStat('Patents Owned', aentFmt(patentsOwned) + ' / ' + AENT_PATENTS.length);
+
+    // Current-run stats, read directly from the main game state (aentState), not
+    // aentMetaState. tickCount is guarded with `|| 0` per this bucket's own instructions,
+    // since it's a field introduced by the prior (v1.2.0) bucket rather than one this
+    // bucket owns; devs/marketers/decisionLog have existed since v0.4/v0.6 and
+    // aentFreshState() always initializes them as arrays, but the fallback costs nothing.
+    addStat('Developers (Current Run)', aentFmt((aentState.devs || []).length || 0));
+    addStat('Marketers (Current Run)', aentFmt((aentState.marketers || []).length || 0));
+    addStat('Decisions Logged (Current Run)', aentFmt((aentState.decisionLog || []).length || 0));
+    addStat('Uptime (Current Run)', aentFmtDuration(aentState.tickCount || 0));
+  }
+
+  function aentBuyPatent(key) {
+    var patent = null;
+    for (var i = 0; i < AENT_PATENTS.length; i++) {
+      if (AENT_PATENTS[i].key === key) { patent = AENT_PATENTS[i]; break; }
+    }
+    if (!patent || aentMetaState.patents[key] || aentMetaState.goldenParachutes < patent.cost) return;
+    // v1.2.4: NEW guard, in addition to the two above - a tiered patent (has a `requires`
+    // key) cannot be bought until its prior tier is owned. `patent.requires` is undefined
+    // for every untiered patent (e.g. efficientHiring), so this line is a no-op for them -
+    // `undefined && ...` short-circuits to falsy without ever reading
+    // `aentMetaState.patents[undefined]`. This is the buy-time enforcement of the same
+    // gate aentRenderBoardroom's `locked` check already reflects in the UI - both read the
+    // exact same `patent.requires` field, so they can never disagree about which rows are
+    // purchasable.
+    if (patent.requires && !aentMetaState.patents[patent.requires]) return;
+
+    aentMetaState.goldenParachutes -= patent.cost;
+    aentMetaState.patents[key] = true;
+    aentSaveMeta();
+
+    aentRenderBoardroom(); // reflect the new balance/owned state immediately
+    aentUpdateUI(); // multipliers changed — e.g. displayed hire costs in the Company view
+  }
+
+  function aentSetBoardroomOpen(open) {
+    aentBoardroomOpen = open;
+    document.getElementById('aent-company-view').hidden = open;
+    document.getElementById('aent-boardroom-view').hidden = !open;
+    document.getElementById('aent-view-toggle').textContent = open ? 'Back to the Company' : 'Visit the Boardroom';
+    if (open) aentRenderBoardroom();
+  }
+
+  // ===== TRAIT SYNERGIES (v1.2.3 — Bucket D, feature 4) =====
+  // Trait pairs (AENT_TRAIT_SYNERGIES above) present anywhere on the combined roster grant
+  // a small multiplier, alongside — never merged into — aentComputeMetaMultipliers()'s
+  // patent multipliers. Kept as a clearly separate concern per this bucket's own
+  // instructions: aentApplyDelta below calls both and multiplies their results together,
+  // rather than one function folding patents and synergies into a single object.
+  //
+  // Perf: O(n) presence checks, not pairwise enumeration. aentBuildRosterTraitSet does a
+  // single pass over aentState.devs/marketers (n = roster size) to build one Set of every
+  // resolved trait currently present; aentActiveSynergies then does AENT_TRAIT_SYNERGIES.length
+  // (3) `.has()` lookups against that Set — O(n + k), never a loop over workers nested
+  // inside a loop over other workers. This matters here specifically because
+  // aentComputeSynergyMultipliers is called from inside aentApplyDelta, which the offline
+  // catch-up loop in aentLoad calls once per simulated second, up to
+  // AENT_OFFLINE_CAP_SECONDS (21,600) times in a single replay.
+  function aentBuildRosterTraitSet() {
+    var traits = new Set();
+    aentState.devs.forEach(function (worker) { if (worker.trait) traits.add(worker.trait); });
+    aentState.marketers.forEach(function (worker) { if (worker.trait) traits.add(worker.trait); });
+    return traits;
+  }
+
+  // Returns the AENT_TRAIT_SYNERGIES entries currently active (both of that pair's traits
+  // present somewhere on the roster) — used both by aentComputeSynergyMultipliers (the
+  // per-tick math) and aentRenderRoster (the player-facing indicator), so which pairs are
+  // "active" can never drift between what's applied and what's displayed.
+  //
+  // KNOWN CONSEQUENCE, same class already documented for worker.trait/name in v1.2.0/
+  // v1.2.2's own NOTES sections: a trait is null until aentResolveTrait actually resolves
+  // it (first time that worker is featured in the feed/crisis), so a roster that "should"
+  // qualify for a synergy by hired composition can show no active synergy — and grant no
+  // bonus — until both relevant workers have been randomly featured at least once, which
+  // is not guaranteed to ever happen for any given worker. See NOTES.md v1.2.3.
+  function aentActiveSynergies() {
+    var traits = aentBuildRosterTraitSet();
+    return AENT_TRAIT_SYNERGIES.filter(function (synergy) {
+      return traits.has(synergy.traitA) && traits.has(synergy.traitB);
+    });
+  }
+
+  // Folds every currently-active synergy's effect into one multipliers object — same shape
+  // convention as aentComputeMetaMultipliers (a plain object mutated in place by each
+  // matching entry's `effect`), but deliberately WITHOUT a `hireCostMult` key, since no
+  // synergy in AENT_TRAIT_SYNERGIES is allowed to touch hire cost (see that table's own
+  // comment and NOTES.md v1.2.3). A caller that mistakenly tried to read
+  // `.hireCostMult` off this object would get `undefined`, not silently `1` — a stronger
+  // guardrail than a comment alone.
+  function aentComputeSynergyMultipliers() {
+    var m = { computeYieldMult: 1, capitalYieldMult: 1, techDebtGainMult: 1 };
+    aentActiveSynergies().forEach(function (synergy) { synergy.effect(m); });
+    return m;
+  }
+
+  // ===== CORE MATH ENGINE =====
+  // Step 2: advances the simulation by `seconds` worth of ticks. Called with 1 from the
+  // live setInterval loop, and in a step-by-step loop (never a closed-form multiply) to
+  // replay missed offline time — the same shape as np16r7glcp/html.txt:986-987
+  // (`for(let i=0;i<steps;i++) tick(1,state)`), which avoids offline math drifting from
+  // what the live loop would actually have produced tick-by-tick.
+  function aentApplyDelta(seconds) {
+    var mult = aentComputeMetaMultipliers();
+    // v1.2.3: a second, separate multiplier source (trait synergies, feature 4) — kept
+    // apart from `mult` above rather than merged into aentComputeMetaMultipliers itself,
+    // per this bucket's own instructions. Both are folded into the same gain formulas below
+    // as independent multiplicative factors.
+    var synergyMult = aentComputeSynergyMultipliers();
+
+    // v1.2.3 (feature 9): per-worker yield sum, not a flat headcount multiply — so a
+    // promoted worker's own `yieldMult` actually counts extra. `d.yieldMult || 1` /
+    // `w.yieldMult || 1` is the same falsy-default-read pattern already used throughout
+    // this file for a field an old save/worker may not have (e.g. `worker.status ||
+    // 'active'` in aentRenderRoster) — an un-promoted worker has no `yieldMult` at all, so
+    // this sums to exactly 1 per worker, and the sum across the whole array equals that
+    // array's `.length` whenever nobody has been promoted. See NOTES.md v1.2.3 for the
+    // standalone old-vs-new formula comparison this refactor was checked against.
+    var devYieldSum = aentState.devs.reduce(function (sum, d) { return sum + (d.yieldMult || 1); }, 0);
+    var marketerYieldSum = aentState.marketers.reduce(function (sum, w) { return sum + (w.yieldMult || 1); }, 0);
+    // devCount (raw headcount, NOT the yield-weighted sum above) still drives tech-debt
+    // accrual — a promotion is documented as a yield upgrade on the resource that role
+    // actually produces (compute for a developer), not a change to how much tech debt they
+    // personally generate while doing it. Deliberate scope limit, not an oversight — see
+    // NOTES.md v1.2.3.
+    var devCount = aentState.devs.length;
+
+    var computeGain = devYieldSum * AENT_DEV_COMPUTE_PER_SEC * mult.computeYieldMult * synergyMult.computeYieldMult * seconds;
+    var techDebtGain = devCount * AENT_DEV_TECHDEBT_PER_SEC * mult.techDebtGainMult * synergyMult.techDebtGainMult * seconds;
+    var techDebtDecay = aentState.techDebt * AENT_TECHDEBT_DECAY_PER_SEC * seconds;
+    var drag = 1 / (1 + aentState.techDebt / AENT_TECHDEBT_DRAG_DIVISOR);
+    var capitalGain = marketerYieldSum * AENT_MARKETER_CAPITAL_PER_SEC * mult.capitalYieldMult * synergyMult.capitalYieldMult * drag * seconds;
+
+    aentState.compute += computeGain;
+    aentState.capital += capitalGain;
+    aentState.lifetimeCapital += capitalGain;
+    aentState.techDebt = Math.max(0, aentState.techDebt + techDebtGain - techDebtDecay);
+
+    // v1.2.0: both call sites (the live setInterval loop via aentProcessTick, and the
+    // offline-catchup replay loop in aentLoad) invoke this with seconds === 1 per simulated
+    // second, so a plain increment here is correct for both without needing a `seconds`-aware
+    // step. Backs worker tenure display in aentRenderRoster (see aentFmtDuration there).
+    aentState.tickCount++;
+  }
+
+  function aentProcessTick() {
+    aentApplyDelta(1);
+    aentUpdateUI();
+
+    // Step 2: trigger the ambient AI feed every AENT_FEED_TICK_INTERVAL ticks, not every
+    // tick — this is the throttle the user's spec calls for so the plugin isn't spammed.
+    aentFeedTickCounter += 1;
+    if (aentFeedTickCounter >= AENT_FEED_TICK_INTERVAL) {
+      aentFeedTickCounter = 0;
+      aentRequestFeedLine();
+    }
+
+    // v0.6: same throttle shape, rarer cadence, for crisis events. The `!aentCrisisActive`
+    // guard is defensive rather than load-bearing here — while a crisis modal is up,
+    // aentTickIntervalId is cleared, so aentProcessTick can't run at all during that
+    // window. It matters for the shorter window between "request sent" and "modal shown",
+    // where aentCrisisRequestInFlight (checked inside aentRequestCrisis) is the real guard.
+    aentCrisisTickCounter += 1;
+    if (!aentCrisisActive && aentCrisisTickCounter >= AENT_CRISIS_TICK_INTERVAL) {
+      aentCrisisTickCounter = 0;
+      aentRequestCrisis();
+    }
+
+    // v1.2.3 (feature 9): same throttle shape as the two above, rarer cadence — see
+    // AENT_LIFECYCLE_TICK_INTERVAL's own comment for why. NOTE: this only runs from the
+    // live tick loop, exactly like the feed/crisis throttles above it — the offline
+    // catch-up replay loop in aentLoad calls aentApplyDelta directly and never calls
+    // aentProcessTick, so no lifecycle event (resign or promotion) can ever fire during an
+    // offline catch-up, only while the tab is open and ticking live. Documented explicitly
+    // in NOTES.md v1.2.3 so "I was away six hours and nobody resigned" reads as the
+    // intended behavior, not a bug.
+    aentLifecycleTickCounter += 1;
+    if (aentLifecycleTickCounter >= AENT_LIFECYCLE_TICK_INTERVAL) {
+      aentLifecycleTickCounter = 0;
+      aentTryLifecycleEvent();
+    }
+  }
+
+  // ===== UI =====
+  // Step 3/4: aentUpdateUI() reflects aentState into the DOM every tick and after every
+  // hire, so a click feels immediate rather than waiting for the next tick.
+  function aentFmt(n) {
+    return Math.floor(n).toLocaleString();
+  }
+
+  function aentUpdateUI() {
+    document.getElementById('aent-capital').textContent = '$' + aentFmt(aentState.capital);
+    document.getElementById('aent-compute').textContent = aentFmt(aentState.compute);
+    document.getElementById('aent-techdebt').textContent = aentFmt(aentState.techDebt);
+    document.getElementById('aent-techdebt-bar').style.width = Math.max(0, Math.min(100, (aentState.techDebt / 200) * 100)) + '%';
+
+    // v1.0: displayed and charged hire costs both go through aentEffectiveCost, which
+    // folds in any owned "Efficient Hiring Pipeline" patent — see that function.
+    var effectiveDevCost = aentEffectiveCost(aentState.devCost);
+    var effectiveMarketerCost = aentEffectiveCost(aentState.marketerCost);
+
+    document.getElementById('aent-dev-count').textContent = aentState.devs.length;
+    document.getElementById('aent-marketer-count').textContent = aentState.marketers.length;
+    document.getElementById('aent-dev-cost').textContent = aentFmt(effectiveDevCost);
+    document.getElementById('aent-marketer-cost').textContent = aentFmt(effectiveMarketerCost);
+
+    var devBtn = document.getElementById('aent-hire-dev');
+    var marketerBtn = document.getElementById('aent-hire-marketer');
+    devBtn.disabled = aentState.capital < effectiveDevCost;
+    marketerBtn.disabled = aentState.capital < effectiveMarketerCost;
+
+    // v1.0: live valuation preview, and the IPO button disabled until it would actually
+    // earn at least 1 Golden Parachute — same "disable rather than let the click no-op"
+    // pattern as the hire buttons, so aentPerformIPO's own `gpEarned < 1` check is a
+    // defensive backstop rather than the primary gate.
+    var valuation = aentComputeValuation();
+    document.getElementById('aent-valuation').textContent = '$' + aentFmt(valuation);
+    document.getElementById('aent-ipo-button').disabled = aentComputeGoldenParachutes(valuation) < 1;
+  }
+
+  // Step 2 (v0.4): hiring now pushes a `{trait}` worker object rather than incrementing a
+  // bare count. The trait itself is left null here and resolved lazily by
+  // aentResolveTrait on first feature in the feed — see that function's comment for why
+  // picking it eagerly, right here at click time, would risk a permanent 'Unspecified'.
+  function aentHireDeveloper() {
+    // Charges the same aentEffectiveCost() the UI displayed, not the raw aentState.devCost
+    // — see that function's comment. aentState.devCost itself still grows by the raw
+    // AENT_HIRE_COST_GROWTH below, unaffected by any patent; the discount is reapplied
+    // fresh on top of that progression every time, not baked into the stored value.
+    var cost = aentEffectiveCost(aentState.devCost);
+    if (aentState.capital < cost) return;
+    aentState.capital -= cost;
+    // v1.2.0: hiredAtTick stamps the roster-panel tenure baseline — see aentRenderRoster,
+    // which subtracts this from aentState.tickCount and formats the result with the
+    // existing aentFmtDuration().
+    // v1.2.2: name: null alongside trait: null, same lazy-resolution reasoning — see
+    // aentResolveName's comment for why this isn't picked eagerly right here.
+    aentState.devs.push({ trait: null, name: null, hiredAtTick: aentState.tickCount });
+    aentState.devCost = Math.ceil(aentState.devCost * AENT_HIRE_COST_GROWTH);
+    aentUpdateUI();
+    aentRenderRoster();
+  }
+
+  function aentHireMarketer() {
+    var cost = aentEffectiveCost(aentState.marketerCost);
+    if (aentState.capital < cost) return;
+    aentState.capital -= cost;
+    aentState.marketers.push({ trait: null, name: null, hiredAtTick: aentState.tickCount });
+    aentState.marketerCost = Math.ceil(aentState.marketerCost * AENT_HIRE_COST_GROWTH);
+    aentUpdateUI();
+    aentRenderRoster();
+  }
+
+  // ===== ROSTER & EVENTS LOG (v1.2.0 — Roster & Events Legibility) =====
+  // Traits (aentResolveTrait, v0.4) and the decision log (aentState.decisionLog, v0.6)
+  // have existed in state since their own phases but were never rendered anywhere for the
+  // player — only inspectable via the browser console. This is a rendering addition over
+  // existing state, not a new mechanic: no new gameplay, just legibility.
+  //
+  // Both functions follow aentRenderBoardroom's exact pattern: full rebuild-from-scratch
+  // on every call, using createElement/textContent only (never innerHTML) — the same
+  // defensive stance as aentAppendFeedEntry, extended here even though roster/log strings
+  // are a mix of our own authored content and, for the log, past AI output already shown
+  // once in the feed/briefing modal (so already "trusted" in the sense of having rendered
+  // safely once — textContent costs nothing extra and keeps one rule for the whole file).
+  //
+  // Rendered on demand (after a hire, after a crisis resolves, after a briefing resolves,
+  // and once at init) — deliberately NOT called from aentProcessTick, unlike aentUpdateUI.
+  // A full DOM rebuild every second is a materially different cost than that loop's
+  // existing handful of textContent writes.
+  function aentRenderRoster() {
+    // v1.2.3 (feature 4): legibility follow-up — which synergy pair, if any, is currently
+    // active, read via aentActiveSynergies() (the exact same function aentApplyDelta's
+    // multiplier calculation uses, so displayed and applied can never disagree). Set BEFORE
+    // the empty-roster early return below so an empty roster's "no synergy" state is never
+    // left stale from a prior, now-cleared roster.
+    var synergyEl = document.getElementById('aent-roster-synergy');
+    var activeSynergies = aentActiveSynergies();
+    if (activeSynergies.length) {
+      synergyEl.textContent = 'Active synergy: ' + activeSynergies.map(function (s) {
+        return s.label + ' (' + s.description + ')';
+      }).join('; ');
+    } else {
+      synergyEl.textContent = 'No active trait synergy.';
+    }
+
+    var list = document.getElementById('aent-roster-list');
+    while (list.firstChild) list.removeChild(list.firstChild);
+
+    var allWorkers = [];
+    aentState.devs.forEach(function (worker) { allWorkers.push({ worker: worker, role: 'Developer' }); });
+    aentState.marketers.forEach(function (worker) { allWorkers.push({ worker: worker, role: 'Marketer' }); });
+
+    if (!allWorkers.length) {
+      var empty = document.createElement('div');
+      empty.className = 'aent-roster-empty';
+      empty.textContent = 'No one hired yet.';
+      list.appendChild(empty);
+      return;
+    }
+
+    allWorkers.forEach(function (entry) {
+      var worker = entry.worker;
+      var row = document.createElement('div');
+      row.className = 'aent-roster-row';
+
+      // v1.2.2: same read-only reasoning as the trait read directly below — reads
+      // worker.name directly rather than calling aentResolveName(), which both reads AND
+      // writes. 'Unnamed' mirrors 'Unspecified' below as the pre-resolution placeholder.
+      var nameEl = document.createElement('span');
+      nameEl.className = 'aent-roster-name';
+      nameEl.textContent = worker.name != null ? worker.name : 'Unnamed';
+
+      var roleEl = document.createElement('span');
+      roleEl.className = 'aent-roster-role';
+      roleEl.textContent = entry.role;
+
+      // Deliberately reads worker.trait directly rather than calling aentResolveTrait()
+      // here — that function both reads AND writes (it persists the first trait it
+      // successfully picks), and aentResolveTrait's own comment explains why picking
+      // eagerly at a time other than first-feature-in-the-feed risks permanently writing
+      // 'Unspecified' if `root` isn't ready yet. Rendering must stay read-only.
+      var traitEl = document.createElement('span');
+      traitEl.className = 'aent-roster-trait';
+      traitEl.textContent = worker.trait != null ? worker.trait : 'Unspecified';
+
+      // Tenure = tickCount at render time minus tickCount at hire time, formatted with the
+      // existing aentFmtDuration() (v0.8) rather than a second duration formatter — both
+      // count simulated seconds, so passing ticks straight into it is correct as-is.
+      var tenureEl = document.createElement('span');
+      tenureEl.className = 'aent-roster-tenure';
+      var tenureTicks = Math.max(0, aentState.tickCount - (worker.hiredAtTick || 0));
+      tenureEl.textContent = aentFmtDuration(tenureTicks);
+
+      // Defensive fallback only — nothing in this bucket ever writes worker.status; a
+      // later feature (lifecycle events) does. See NOTES.md.
+      var statusEl = document.createElement('span');
+      statusEl.className = 'aent-roster-status';
+      statusEl.textContent = worker.status || 'active';
+
+      row.appendChild(nameEl);
+      row.appendChild(roleEl);
+      row.appendChild(traitEl);
+      row.appendChild(tenureEl);
+      row.appendChild(statusEl);
+      list.appendChild(row);
+    });
+  }
+
+  // Two separate subsections (Decisions, Briefings), not one merged interleaved timeline —
+  // aentState.decisionLog is an array of plain strings that aentDescribeSituation() already
+  // does a bare .join() on to build an AI prompt; changing that element shape to support
+  // interleaving with briefingLog is out of scope for this bucket. Most-recent-first, same
+  // ordering aentAppendFeedEntry uses for the feed (insertBefore(entry, list.firstChild)).
+  function aentRenderEventsLog() {
+    var decisionList = document.getElementById('aent-decision-log-list');
+    while (decisionList.firstChild) decisionList.removeChild(decisionList.firstChild);
+    if (!aentState.decisionLog.length) {
+      var emptyDecisions = document.createElement('div');
+      emptyDecisions.className = 'aent-log-empty';
+      emptyDecisions.textContent = 'No decisions yet.';
+      decisionList.appendChild(emptyDecisions);
+    } else {
+      for (var i = aentState.decisionLog.length - 1; i >= 0; i--) {
+        var decisionEntry = document.createElement('div');
+        decisionEntry.className = 'aent-log-entry';
+        decisionEntry.textContent = aentState.decisionLog[i];
+        decisionList.appendChild(decisionEntry);
+      }
+    }
+
+    var briefingList = document.getElementById('aent-briefing-log-list');
+    while (briefingList.firstChild) briefingList.removeChild(briefingList.firstChild);
+    if (!aentState.briefingLog.length) {
+      var emptyBriefings = document.createElement('div');
+      emptyBriefings.className = 'aent-log-empty';
+      emptyBriefings.textContent = 'No briefings yet.';
+      briefingList.appendChild(emptyBriefings);
+    } else {
+      for (var j = aentState.briefingLog.length - 1; j >= 0; j--) {
+        var briefingEntry = document.createElement('div');
+        briefingEntry.className = 'aent-log-entry';
+        briefingEntry.textContent = aentState.briefingLog[j];
+        briefingList.appendChild(briefingEntry);
+      }
+    }
+  }
+
+  // v1.2.0: hiredAtTick is nested inside the devs/marketers arrays, which
+  // Object.assign(aentFreshState(), saved) does NOT deep-merge — an old save's existing
+  // workers (including any just backfilled by aentMigrateLegacyWorkerCounts, which pushes
+  // {trait: null} placeholders with no hiredAtTick of their own) predate this field
+  // entirely. Same defensive style as that function: walk the roster and default anything
+  // missing to a safe baseline, called from aentLoad immediately after it.
+  function aentMigrateRosterTenureFields() {
+    aentState.devs.forEach(function (worker) {
+      if (typeof worker.hiredAtTick !== 'number') worker.hiredAtTick = 0;
+    });
+    aentState.marketers.forEach(function (worker) {
+      if (typeof worker.hiredAtTick !== 'number') worker.hiredAtTick = 0;
+    });
+  }
+
+  // ===== EMPLOYEE LIFECYCLE EVENTS (v1.2.3 — Bucket D, feature 9) =====
+  // Resign and promote both operate over one combined view of the roster, each entry
+  // keeping a reference back to its own source array (`aentState.devs` or
+  // `aentState.marketers`) and a role label — the picking/mutating functions below need
+  // this to splice or flag the correct array without re-deriving which one a worker came
+  // from. Rebuilt fresh on every call (roster sizes here are small; not worth caching).
+  function aentAllWorkersWithRefs() {
+    var all = [];
+    aentState.devs.forEach(function (worker) { all.push({ worker: worker, list: aentState.devs, role: 'developer' }); });
+    aentState.marketers.forEach(function (worker) { all.push({ worker: worker, list: aentState.marketers, role: 'marketer' }); });
+    return all;
+  }
+
+  // Resign candidates exclude the sole remaining member of their own role's array.
+  // Deliberate guard, not an oversight: without it, a marketer-count resign at headcount 1
+  // would permanently zero `capitalGain` (aentApplyDelta) for the rest of the run, with a
+  // successful IPO as the only way out — see NOTES.md v1.2.3 for the full reasoning this
+  // guard replaces. If every role is already down to exactly one member, this returns an
+  // empty array and aentTryLifecycleEvent simply skips the resign for that cycle.
+  function aentResignCandidates(entries) {
+    return entries.filter(function (e) { return e.list.length > 1; });
+  }
+
+  // Weighted pick, used for resign only: a burnout-adjacent trait (AENT_LIFECYCLE_BURNOUT_TRAITS)
+  // makes a worker AENT_LIFECYCLE_BURNOUT_WEIGHT_MULT times as likely to be the one picked,
+  // per this bucket's own brief ("weighted toward burnout-adjacent traits"). An unresolved
+  // trait (`worker.trait` still null — see aentResolveTrait) is simply weight 1, same as any
+  // non-burnout trait; it is never treated as a special case here.
+  function aentPickWeightedForResign(entries) {
+    var weights = entries.map(function (e) {
+      return AENT_LIFECYCLE_BURNOUT_TRAITS.indexOf(e.worker.trait) !== -1 ? AENT_LIFECYCLE_BURNOUT_WEIGHT_MULT : 1;
+    });
+    var total = weights.reduce(function (sum, w) { return sum + w; }, 0);
+    var roll = Math.random() * total;
+    for (var i = 0; i < entries.length; i++) {
+      roll -= weights[i];
+      if (roll <= 0) return entries[i];
+    }
+    return entries[entries.length - 1]; // floating-point backstop; should not normally be reached
+  }
+
+  function aentPickRandomWorker(entries) {
+    return entries[Math.floor(Math.random() * entries.length)];
+  }
+
+  // Splices the picked worker out of their own source array by a fresh indexOf at removal
+  // time, not a captured index from aentAllWorkersWithRefs() — cheap O(n) insurance against
+  // a stale index, same defensive style as the pre-emptive clearInterval before re-arming in
+  // aentResolveCrisis. Announced through the existing aentAppendFeedEntry() (v0.2) — no
+  // second, parallel narration path. Deliberately does NOT touch aentState.devCost/
+  // marketerCost: see the hire-cost-ratchet decision in NOTES.md v1.2.3.
+  function aentResignWorker(candidates) {
+    var picked = aentPickWeightedForResign(candidates);
+    var displayName = picked.worker.name != null ? picked.worker.name : 'Unnamed';
+    var idx = picked.list.indexOf(picked.worker);
+    if (idx !== -1) picked.list.splice(idx, 1);
+    aentAppendFeedEntry(displayName + ' (' + picked.role + ') has resigned.');
+    aentUpdateUI(); // headcount just changed — same pattern as aentHireDeveloper/aentHireMarketer
+    aentRenderRoster();
+  }
+
+  // Sets `worker.status = 'promoted'` — the exact field aentRenderRoster already
+  // defensively reads via `worker.status || 'active'` (v1.2.0) — plus a per-worker
+  // `yieldMult` (AENT_PROMOTION_YIELD_MULT, 1.2) read by aentApplyDelta's per-worker sum
+  // above. Excludes already-promoted workers from its own candidate pool so a promotion
+  // never re-fires on (and re-announces) the same worker — promotions don't stack, per
+  // NOTES.md v1.2.3. If everyone eligible is already promoted, this is a quiet no-op for
+  // that cycle, same as a resign finding no eligible candidates.
+  function aentPromoteWorker(entries) {
+    var eligible = entries.filter(function (e) { return e.worker.status !== 'promoted'; });
+    if (!eligible.length) return;
+    var picked = aentPickRandomWorker(eligible);
+    picked.worker.status = 'promoted';
+    picked.worker.yieldMult = AENT_PROMOTION_YIELD_MULT;
+    var displayName = picked.worker.name != null ? picked.worker.name : 'Unnamed';
+    var pctText = Math.round((AENT_PROMOTION_YIELD_MULT - 1) * 100) + '%';
+    aentAppendFeedEntry(displayName + ' (' + picked.role + ') was promoted — output is up ' + pctText + '.');
+    aentUpdateUI();
+    aentRenderRoster();
+  }
+
+  // Entry point called from aentProcessTick's AENT_LIFECYCLE_TICK_INTERVAL throttle. Rolls
+  // once to decide resign vs. promote vs. nothing (most checks produce nothing — see
+  // AENT_LIFECYCLE_RESIGN_CHANCE/AENT_LIFECYCLE_PROMOTE_CHANCE's own comment), then picks a
+  // worker via the appropriate function above. An empty roster is a no-op.
+  function aentTryLifecycleEvent() {
+    var entries = aentAllWorkersWithRefs();
+    if (!entries.length) return;
+
+    var roll = Math.random();
+    if (roll < AENT_LIFECYCLE_RESIGN_CHANCE) {
+      var resignCandidates = aentResignCandidates(entries);
+      if (resignCandidates.length) aentResignWorker(resignCandidates);
+      // else: every current role is already down to its last member — skip this cycle
+      // rather than strand the run (see aentResignCandidates)
+    } else if (roll < AENT_LIFECYCLE_RESIGN_CHANCE + AENT_LIFECYCLE_PROMOTE_CHANCE) {
+      aentPromoteWorker(entries);
+    }
+    // else: quiet cycle, nothing happens — by design, not every check should produce a
+    // visible event
+  }
+
+  // v1.2.5 (Bucket F — feature 10): picks one phrasing variant at random from a small
+  // array — the exact same `Math.floor(Math.random() * arr.length)` idiom
+  // aentPickFeaturedWorker below already uses, generalized here to plain string arrays
+  // instead of worker objects, so both the "which worker gets featured" pick and the
+  // "which sentence is used" pick share one reasoning even though they're two different
+  // functions.
+  function aentPickVariant(variants) {
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+
+  // v1.2.5 (Bucket F — feature 10): 2-4 phrasing variants per resource-state bucket,
+  // replacing v0.6's single fixed sentence per bucket below. Purely additive content —
+  // the threshold conditions themselves (capital/techDebt comparisons) are byte-identical
+  // to before this bucket; only which sentence gets pushed for an already-true condition
+  // is now randomized. No new state, no migration concerns, same idle-business-sim flavor
+  // as the originals these variants sit alongside.
+  var AENT_SITUATION_CAPITAL_LOW_VARIANTS = [
+    'capital is critically low, they cannot afford to hire anyone right now',
+    'the bank account is nearly empty, no new hires are affordable at the moment',
+    'cash reserves have run dry, hiring is on hold until capital recovers'
+  ];
+  var AENT_SITUATION_CAPITAL_HIGH_VARIANTS = [
+    'capital is healthy and piling up',
+    'the company is flush with cash, reserves keep climbing',
+    'capital is comfortably stacking up faster than it is being spent',
+    'the balance sheet looks great, cash is piling up with nowhere urgent to go'
+  ];
+  var AENT_SITUATION_TECHDEBT_HIGH_VARIANTS = [
+    'tech debt is dangerously high',
+    'the codebase is buckling under a mountain of tech debt',
+    'tech debt has piled up to a genuinely risky level',
+    'engineering is drowning in shortcuts and unpaid tech debt'
+  ];
+  var AENT_SITUATION_TECHDEBT_LOW_VARIANTS = [
+    'tech debt is low, the codebase is in good shape',
+    'the codebase is clean and tech debt is barely a concern',
+    'engineering has kept tech debt low, the codebase is solid'
+  ];
+  var AENT_SITUATION_NO_EMPLOYEES_VARIANTS = [
+    'there are no employees yet, it is a one-person operation',
+    'it is still a solo operation, nobody has been hired yet',
+    'the founder is still doing everything alone, no hires yet'
+  ];
+
+  // ===== THE "SLACK" FEED (v0.2, read-only AI observer; v0.4 adds traits) =====
+  // Step 3: describe the current resource situation in plain language, then ask
+  // generateText for one in-character Slack-style reaction. aentDescribeSituation()
+  // itself only READS aentState — it must never assign into it — and is shared with the
+  // v0.6 crisis prompt below. Sharing it is safe because state mutation happens only in
+  // aentResolveCrisis, well downstream of this function and only after a player clicks;
+  // describing the situation for a prompt is not the same act as changing it.
+  function aentDescribeSituation() {
+    var parts = [];
+    var cheapestHire = Math.min(aentState.devCost, aentState.marketerCost);
+
+    if (aentState.capital < cheapestHire) parts.push(aentPickVariant(AENT_SITUATION_CAPITAL_LOW_VARIANTS));
+    else if (aentState.capital > cheapestHire * 5) parts.push(aentPickVariant(AENT_SITUATION_CAPITAL_HIGH_VARIANTS));
+
+    if (aentState.techDebt > 50) parts.push(aentPickVariant(AENT_SITUATION_TECHDEBT_HIGH_VARIANTS));
+    else if (aentState.techDebt < 10) parts.push(aentPickVariant(AENT_SITUATION_TECHDEBT_LOW_VARIANTS));
+
+    if (aentState.devs.length === 0 && aentState.marketers.length === 0) parts.push(aentPickVariant(AENT_SITUATION_NO_EMPLOYEES_VARIANTS));
+    else parts.push('the team is ' + aentState.devs.length + ' developer(s) and ' + aentState.marketers.length + ' marketer(s)');
+
+    var situation = parts.length ? parts.join('; ') + '.' : 'business is steady, nothing remarkable is happening.';
+
+    // v0.6 step 4: fold recent crisis decisions in here rather than in each prompt
+    // builder separately, so both aentBuildFeedPrompt and aentBuildCrisisPrompt get this
+    // continuity automatically through their shared call to aentDescribeSituation().
+    if (aentState.decisionLog.length) {
+      situation += ' Recent decisions: ' + aentState.decisionLog.join('; ') + '.';
+    }
+
+    return situation;
+  }
+
+  // Step 3 (v0.4): "Orchestrator Prompt Update" — picks one hired developer and one
+  // hired marketer at random and folds their traits into the prompt, following the
+  // user's own spec example almost verbatim ("The Dev is [Chaotic] and the Marketer is
+  // [Aggressive]. Write a Slack message showing them arguing over a feature.").
+  function aentPickFeaturedWorker(workers) {
+    if (!workers.length) return null;
+    return workers[Math.floor(Math.random() * workers.length)];
+  }
+
+  // v1.2.2: once a featured worker's name has resolved (aentResolveName, mirroring
+  // aentResolveTrait), the cast description leads with it — "Dana, a Chaotic developer" —
+  // per the v1.2.2 feature brief's own example. Before it resolves (worker.name still
+  // null), falls back to the exact pre-v1.2.2 trait-only phrasing below, unchanged.
+  function aentBuildCastLine() {
+    var dev = aentPickFeaturedWorker(aentState.devs);
+    var marketer = aentPickFeaturedWorker(aentState.marketers);
+    var devTrait = dev ? aentResolveTrait(dev, 'devTraits') : null;
+    var marketerTrait = marketer ? aentResolveTrait(marketer, 'marketerTraits') : null;
+    if (dev) aentResolveName(dev);
+    if (marketer) aentResolveName(marketer);
+    var devDesc = dev ? (dev.name != null ? dev.name + ', a ' + devTrait + ' developer' : 'a developer who is ' + devTrait) : null;
+    var marketerDesc = marketer ? (marketer.name != null ? marketer.name + ', a ' + marketerTrait + ' marketer' : 'a marketer who is ' + marketerTrait) : null;
+
+    if (dev && marketer) {
+      return 'Feature ' + devDesc + ' and ' + marketerDesc +
+        ' clashing (in character) over the current situation.';
+    }
+    if (dev) return 'Feature ' + devDesc + ' reacting to the current situation.';
+    if (marketer) return 'Feature ' + marketerDesc + ' reacting to the current situation.';
+    return 'No employees have been hired yet — write from the perspective of the lone founder.';
+  }
+
+  // v1.2.5 (Bucket F — feature 10): 4 framing-sentence variants replacing v0.6's single
+  // fixed opening line. Only the framing sentence varies — everything after it (the
+  // situation/cast lines and the closing formatting instructions) is unchanged, so no
+  // parsing anywhere downstream depends on this sentence's exact wording.
+  var AENT_FEED_INTROS = [
+    'You are narrating an ambient company Slack channel called #general for a scrappy startup.',
+    'You are eavesdropping on the #general Slack channel of a scrappy, chaotic startup.',
+    'You are quietly logging the #general channel of a startup that is somehow still running.',
+    'You are the silent observer of a scrappy startup\'s #general Slack channel.'
+  ];
+
+  function aentBuildFeedPrompt() {
+    return aentPickVariant(AENT_FEED_INTROS) + ' ' +
+      'Current situation: ' + aentDescribeSituation() + ' ' +
+      aentBuildCastLine() + ' ' +
+      'Write exactly one short, in-character Slack message (a single sentence) reacting naturally. ' +
+      'Reply with only that message: no quotation marks, no channel name, no timestamp, no name prefix, no explanation.';
+  }
+
+  // Prepends one feed entry and caps the DOM list at AENT_FEED_MAX_ENTRIES, per the
+  // "scrolling feed" framing in the user's spec step 1 — this is meant to be a bounded
+  // recent-activity view, not an ever-growing log.
+  function aentAppendFeedEntry(text) {
+    var list = document.getElementById('aent-feed-list');
+    var empty = list.querySelector('.aent-feed-empty');
+    if (empty) empty.remove();
+
+    var entry = document.createElement('div');
+    entry.className = 'aent-feed-msg';
+
+    var time = document.createElement('span');
+    time.className = 'aent-feed-time';
+    time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    var body = document.createElement('span');
+    body.className = 'aent-feed-text';
+    // textContent, not innerHTML: the AI plugin's output is untrusted text and must not
+    // be parsed as HTML, the same defensive stance as dqgEscape() in
+    // apps/discovery-question-generator/html.txt.
+    body.textContent = text;
+
+    entry.appendChild(time);
+    entry.appendChild(body);
+    list.insertBefore(entry, list.firstChild);
+
+    while (list.children.length > AENT_FEED_MAX_ENTRIES) {
+      list.removeChild(list.lastElementChild);
+    }
+  }
+
+  // Calls root.generateText(...) — the plugin-through-root calling convention confirmed at
+  // corpus/AI/undefinedAI Character Chat online free no sign-up unlimited_perchance_html.md:205.
+  // The resolved value is a String object with a bolted-on `.generatedText` property, read
+  // directly from the plugin's own source:
+  // corpus/AI/ai-text-plugin_perchance_data(1).md:439-441 (`let finishData = new
+  // String(chunks.join("")); ... finishData.generatedText = generatedChunks.join("");`)
+  // and :447 (`onFinishPromiseResolver(finishData)`). Read `.generatedText` explicitly
+  // rather than relying on the object's own string coercion, which also includes
+  // `startWith` (unused here, but the distinction matters if this code is copied
+  // elsewhere with a `startWith` option).
+  //
+  // No `typeof root.generateText !== 'function'` pre-check: an earlier draft returned
+  // silently in that case, which made "nothing happened" indistinguishable from "the
+  // request is just slow" during the smoke test this app hasn't run yet. Letting the call
+  // itself throw (caught below) means a bad binding surfaces as one diagnosable feed
+  // entry instead of nothing. If that entry ever shows up, the documented fallback is the
+  // bare-global form `examples/office-clicker/html.txt:12346` guards against
+  // (`"undefined"==typeof generateText`) — try `generateText(...)` directly instead of
+  // `root.generateText(...)`.
+  var aentFeedDiagnosticShown = false;
+
+  async function aentRequestFeedLine() {
+    if (aentFeedRequestInFlight) return;
+
+    aentFeedRequestInFlight = true;
+    try {
+      if (typeof root === 'undefined') {
+        throw new Error('`root` is undefined — the Lists panel has not loaded yet');
+      }
+      var result = await root.generateText(aentBuildFeedPrompt());
+      var text = String(result.generatedText != null ? result.generatedText : result).trim();
+      if (text) aentAppendFeedEntry(text);
+    } catch (e) {
+      // Ambient flavor text only. A failed request should not interrupt the game loop —
+      // log every failure, but only surface ONE visible note in the feed itself so a
+      // persistent problem (e.g. wrong binding name) is diagnosable without opening
+      // devtools, without spamming the feed every AENT_FEED_TICK_INTERVAL ticks forever.
+      console.warn('[autonomous-enterprise] feed line request failed:', e);
+      if (!aentFeedDiagnosticShown) {
+        aentFeedDiagnosticShown = true;
+        aentAppendFeedEntry('(AI feed unavailable: ' + (e && e.message ? e.message : 'see browser console') + ')');
+      }
+    } finally {
+      aentFeedRequestInFlight = false;
+    }
+  }
+
+  // ===== THE CONSEQUENCE ENGINE (v0.6, interactive AI) =====
+  // Step 1 (spec): ask generateText for a crisis in a strict, one-line, pipe-delimited
+  // format, exactly per the user's own example —
+  // "TITLE: [text] | DESC: [text] | OPTION_A: [text] | OPTION_B: [text]" — so it can be
+  // parsed with a plain regex rather than trusting free-form prose.
+  // v1.2.2: same resolve-and-lead-with-name treatment as aentBuildCastLine above, applied
+  // to the crisis cast line. Unresolved fallback phrasing is byte-for-byte the pre-v1.2.2
+  // text.
+  function aentBuildCrisisCastLine() {
+    var dev = aentPickFeaturedWorker(aentState.devs);
+    var marketer = aentPickFeaturedWorker(aentState.marketers);
+    var devTrait = dev ? aentResolveTrait(dev, 'devTraits') : null;
+    var marketerTrait = marketer ? aentResolveTrait(marketer, 'marketerTraits') : null;
+    if (dev) aentResolveName(dev);
+    if (marketer) aentResolveName(marketer);
+    var devDesc = dev ? (dev.name != null ? dev.name + ', the ' + devTrait + ' developer' : 'the ' + devTrait + ' developer') : null;
+    var marketerDesc = marketer ? (marketer.name != null ? marketer.name + ', the ' + marketerTrait + ' marketer' : 'the ' + marketerTrait + ' marketer') : null;
+
+    if (dev && marketer) return 'Involve ' + devDesc + ' and/or ' + marketerDesc + ' if it fits naturally.';
+    if (dev) return 'Involve ' + devDesc + ' if it fits naturally.';
+    if (marketer) return 'Involve ' + marketerDesc + ' if it fits naturally.';
+    return 'There are no employees yet, so this crisis lands on the lone founder directly.';
+  }
+
+  // v1.2.5 (Bucket F — feature 10): 4 framing-sentence variants, same "only the framing
+  // sentence varies" rule as AENT_FEED_INTROS above — critically, the
+  // "Reply in EXACTLY this format..." / `TITLE: ... | DESC: ... | OPTION_A: ... |
+  // OPTION_B: ...` instruction below is byte-identical to before this bucket and MUST
+  // stay that way: AENT_CRISIS_FORMAT_RE's regex depends on the AI reproducing that exact
+  // tail, and none of these variants introduce a literal `|` character that could
+  // confuse it.
+  var AENT_CRISIS_INTROS = [
+    'You are writing one short workplace crisis event for a scrappy startup business-sim game.',
+    'You are inventing a sudden workplace emergency for a scrappy startup business-sim game.',
+    'You are dreaming up an urgent, disruptive incident for a scrappy startup business-sim game.',
+    'You are scripting a stressful plot twist for a scrappy startup business-sim game.'
+  ];
+
+  function aentBuildCrisisPrompt() {
+    return aentPickVariant(AENT_CRISIS_INTROS) + ' ' +
+      'Current situation: ' + aentDescribeSituation() + ' ' +
+      aentBuildCrisisCastLine() + ' ' +
+      'Invent a crisis moment the founder must respond to right now, with two distinct possible responses. ' +
+      'Reply in EXACTLY this format, as a single line, with nothing before or after it: ' +
+      'TITLE: <short title> | DESC: <one or two sentence description> | OPTION_A: <short label for the first response> | OPTION_B: <short label for the second response>';
+  }
+
+  // Step 2 (spec): "parse the AI's output using JS Regex." Plain JS, no perchance-specific
+  // mechanism — the strict format above exists specifically to make this reliable. `.+?`
+  // (lazy) between delimiters so greedy matching doesn't let an early field swallow a
+  // literal "|" a model might put inside its own text; `i` flag tolerates the model
+  // varying the label casing despite the instruction.
+  var AENT_CRISIS_FORMAT_RE = /TITLE:\s*(.+?)\s*\|\s*DESC:\s*(.+?)\s*\|\s*OPTION_A:\s*(.+?)\s*\|\s*OPTION_B:\s*(.+)$/i;
+
+  function aentParseCrisis(text) {
+    var match = AENT_CRISIS_FORMAT_RE.exec(text);
+    if (!match) return null;
+    return {
+      title: match[1].trim(),
+      desc: match[2].trim(),
+      optionALabel: match[3].trim(),
+      optionBLabel: match[4].trim()
+    };
+  }
+
+  function aentRandRange(min, max) {
+    return Math.floor(min + Math.random() * (max - min + 1));
+  }
+
+  // Step 3 (spec): "Assign specific, randomized state modifiers to each button." The
+  // modifier — which resource, how much — is generated entirely client-side and never
+  // trusted to the AI's output; the AI only ever supplies the two option *labels*
+  // (`optionALabel`/`optionBLabel` above). This is deliberate: parsing a number out of
+  // free-form model text is fragile in a way that generating one ourselves is not.
+  //
+  // v1.2.5 (Bucket F — feature 5): each kind now carries a `category` label — 'capital',
+  // 'techDebt', or 'compute' — naming which resource it actually affects, read by
+  // aentPickCrisisCategory/aentWeightedKindIndex below. Two of the four kinds share the
+  // 'techDebt' category (one worsens it, one fixes it) because both affect the same
+  // resource; they remain two entirely distinct array entries/objects, so the existing
+  // "at least two different kinds" guarantee (object identity, not category identity —
+  // see aentGenerateCrisisOptions below) is completely unaffected by two kinds sharing a
+  // label.
+  //
+  // v1.2.5 (Bucket F — feature 6): `build` now takes an `escalated` boolean. Escalated
+  // bounds are written as their own literals (not computed from the baseline), so this
+  // table stays the single source of truth NOTES.md's numbers table cites directly — every
+  // escalated max below is exactly 1.75x (AENT_CRISIS_ESCALATION_MAX_MULT) the baseline
+  // max, rounded to a clean number. The tech-debt-REDUCTION kind is the one deliberate
+  // exception: it takes the same `escalated` parameter for signature consistency (an
+  // unused parameter, not a forgotten one) but never widens its range — escalation exists
+  // to raise the cost of repeat crises, and making the "fix" option even more generous on
+  // a repeat would undercut that, not reinforce it. See NOTES.md v1.2.5 for the full
+  // reasoning.
+  var AENT_CRISIS_ESCALATION_MAX_MULT = 1.75; // documentation only at this exact spot — the literals below already bake this in
+  var AENT_CRISIS_MODIFIER_KINDS = [
+    {
+      category: 'capital',
+      build: function (escalated) {
+        var amount = escalated ? aentRandRange(200, 1400) : aentRandRange(200, 800); // 1400 = 800 * 1.75
+        return { summary: '-$' + amount + ' capital', apply: function (s) { s.capital = Math.max(0, s.capital - amount); } };
+      }
+    },
+    {
+      category: 'techDebt',
+      build: function (escalated) {
+        var amount = escalated ? aentRandRange(20, 175) : aentRandRange(20, 100); // 175 = 100 * 1.75; matches the user's own spec example ("increases Tech Debt by 100") at baseline
+        return { summary: '+' + amount + ' tech debt', apply: function (s) { s.techDebt += amount; } };
+      }
+    },
+    {
+      category: 'techDebt',
+      // Deliberately ignores `escalated` — see the block comment above this array for why.
+      build: function (escalated) {
+        var amount = aentRandRange(10, 40);
+        return { summary: '-' + amount + ' tech debt', apply: function (s) { s.techDebt = Math.max(0, s.techDebt - amount); } };
+      }
+    },
+    {
+      category: 'compute',
+      build: function (escalated) {
+        var amount = escalated ? aentRandRange(50, 350) : aentRandRange(50, 200); // 350 = 200 * 1.75
+        return { summary: '-' + amount + ' compute', apply: function (s) { s.compute = Math.max(0, s.compute - amount); } };
+      }
+    }
+  ];
+
+  // v1.2.5 (Bucket F — feature 5): weights crisis-category selection by current
+  // aentState instead of picking uniformly among the three categories, "matching the
+  // Consequence Engine name more literally" per this bucket's own brief. Reuses the
+  // EXACT threshold expressions aentDescribeSituation() already uses for "tech debt is
+  // dangerously high" (`techDebt > 50`) and "capital is healthy and piling up"
+  // (`capital > cheapestHire * 5`) — chosen specifically so this function and the
+  // player-facing situation description can never disagree about what counts as
+  // elevated. `compute` has no analogous threshold anywhere in aentDescribeSituation()
+  // to reuse, so it is deliberately left at baseline weight rather than inventing a new
+  // magic number from scratch — see NOTES.md v1.2.5 for the citation discipline this
+  // follows.
+  //
+  // Direction chosen for capital mirrors tech debt: the HIGHER a tracked resource climbs
+  // relative to its own existing "elevated" threshold, the more its category is favored
+  // — "success invites bigger problems," not "a struggling business gets kicked while
+  // it's down." On a fresh game (capital 500, cheapestHire 100 → 500 > 500 is false),
+  // this condition does not fire — starting unbiased is intentional, not a gap.
+  var AENT_CRISIS_CATEGORY_BIAS_MULT = 3; // an elevated resource's category is 3x as likely to be the crisis's target category
+  function aentPickCrisisCategory() {
+    var cheapestHire = Math.min(aentState.devCost, aentState.marketerCost);
+    var weights = { capital: 1, techDebt: 1, compute: 1 };
+
+    if (aentState.techDebt > 50) weights.techDebt *= AENT_CRISIS_CATEGORY_BIAS_MULT;
+    if (aentState.capital > cheapestHire * 5) weights.capital *= AENT_CRISIS_CATEGORY_BIAS_MULT;
+
+    var categories = Object.keys(weights);
+    var total = 0;
+    for (var i = 0; i < categories.length; i++) total += weights[categories[i]];
+    var roll = Math.random() * total;
+    for (var j = 0; j < categories.length; j++) {
+      roll -= weights[categories[j]];
+      if (roll < 0) return categories[j];
+    }
+    return categories[categories.length - 1]; // float-rounding fallback, should be unreachable
+  }
+
+  // v1.2.5 (Bucket F — feature 5): picks an index into `kinds` (a working copy/slice of
+  // AENT_CRISIS_MODIFIER_KINDS, possibly with one entry already removed — see
+  // aentGenerateCrisisOptions below), weighting entries whose `category` matches
+  // `targetCategory` by AENT_CRISIS_CATEGORY_BIAS_MULT over every other entry. This
+  // replaces the old flat `Math.floor(Math.random() * kinds.length)` uniform pick at
+  // BOTH the first and second draw — note this deliberately changes the baseline (all
+  // weights equal) kind distribution too, not just the state-biased case: picking a
+  // category uniformly among 3 and then weighting its member kind(s) 3x is the specified
+  // behavior of feature 5, not an accident to be corrected back to a flat 1-in-4 pick
+  // over kinds. See NOTES.md v1.2.5 for the exact resulting numbers.
+  function aentWeightedKindIndex(kinds, targetCategory) {
+    var weights = kinds.map(function (k) {
+      return k.category === targetCategory ? AENT_CRISIS_CATEGORY_BIAS_MULT : 1;
+    });
+    var total = weights.reduce(function (a, b) { return a + b; }, 0);
+    var roll = Math.random() * total;
+    for (var i = 0; i < weights.length; i++) {
+      roll -= weights[i];
+      if (roll < 0) return i;
+    }
+    return weights.length - 1; // float-rounding fallback, should be unreachable
+  }
+
+  // v1.2.5 (Bucket F — feature 6): true if `category` appears in
+  // aentCrisisCategoryHistory within the last AENT_CRISIS_ESCALATION_WINDOW_TICKS of
+  // simulated time. `|| 0` guards against `aentState.tickCount` ever being undefined —
+  // without it, `now - entry.tickCount` would be `NaN`, every comparison below would be
+  // false, and escalation would silently never fire with no visible symptom.
+  function aentCrisisCategoryIsEscalated(category) {
+    var now = aentState.tickCount || 0;
+    for (var i = 0; i < aentCrisisCategoryHistory.length; i++) {
+      var entry = aentCrisisCategoryHistory[i];
+      if (entry.category === category && (now - entry.tickCount) <= AENT_CRISIS_ESCALATION_WINDOW_TICKS) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Picks two DIFFERENT modifier kinds so Option A and Option B are never mechanically
+  // identical, then rolls a randomized magnitude for each — "randomized" per spec step 3.
+  // v1.2.5 (Bucket F): the "different kinds" guarantee is unchanged in mechanism — `first`
+  // is still spliced OUT of the local `kinds` array before `second` is drawn from what's
+  // left, so the two are always different array entries/objects by construction,
+  // regardless of how the index itself is chosen. Only the "how an index is chosen" step
+  // changed, from a flat uniform pick to aentWeightedKindIndex's category-weighted pick.
+  function aentGenerateCrisisOptions() {
+    var kinds = AENT_CRISIS_MODIFIER_KINDS.slice();
+    var targetCategory = aentPickCrisisCategory();
+    var escalated = aentCrisisCategoryIsEscalated(targetCategory); // computed BEFORE the history push below, so a crisis never escalates against its own not-yet-recorded occurrence
+
+    var firstIndex = aentWeightedKindIndex(kinds, targetCategory);
+    var first = kinds.splice(firstIndex, 1)[0];
+    var secondIndex = aentWeightedKindIndex(kinds, targetCategory);
+    var second = kinds[secondIndex];
+
+    // v1.2.5 (Bucket F — feature 6): record this crisis's category AFTER it's fully
+    // decided (generated), not after the player resolves it — chosen so that
+    // aentCrisisTickCounter's own "next crisis is ~AENT_CRISIS_TICK_INTERVAL ticks after
+    // RESUMING, not after the original request" reasoning (see aentResolveCrisis below)
+    // has a consistent counterpart here: both crisis-trigger bookkeeping items are keyed
+    // off "when the request that produced this crisis fired," not "when the player
+    // eventually clicked a button." This function is only ever called from aentShowCrisis,
+    // which only runs after a crisis successfully parses — so a malformed AI response that
+    // never becomes a real crisis never touches this history either, the same "only count
+    // what actually became a real event" reasoning aentState.decisionLog already follows.
+    aentCrisisCategoryHistory.push({ category: targetCategory, tickCount: aentState.tickCount || 0 });
+    while (aentCrisisCategoryHistory.length > AENT_CRISIS_CATEGORY_HISTORY_MAX) aentCrisisCategoryHistory.shift();
+
+    return [first.build(escalated), second.build(escalated)];
+  }
+
+  function aentShowCrisis(parsed) {
+    var options = aentGenerateCrisisOptions();
+    aentCrisisActive = { parsed: parsed, options: options };
+
+    // Step 2 (spec): "clear the setInterval() to pause the math engine." Clearing
+    // aentTickIntervalId pauses aentApplyDelta/aentUpdateUI AND both the feed and crisis
+    // triggers, since all three live inside aentProcessTick — one clearInterval call
+    // pauses the whole live loop, not just the math.
+    clearInterval(aentTickIntervalId);
+    aentTickIntervalId = null;
+
+    document.getElementById('aent-crisis-title').textContent = parsed.title;
+    document.getElementById('aent-crisis-desc').textContent = parsed.desc;
+
+    var btnA = document.getElementById('aent-crisis-option-a');
+    var btnB = document.getElementById('aent-crisis-option-b');
+    // The mechanical modifier is shown alongside the AI's label rather than hidden, so
+    // the effect of each choice is honestly observable — including during the smoke test
+    // this app hasn't had yet, where "did the right resource actually change" is exactly
+    // what needs verifying.
+    btnA.textContent = parsed.optionALabel + ' (' + options[0].summary + ')';
+    btnB.textContent = parsed.optionBLabel + ' (' + options[1].summary + ')';
+
+    // {once:true}: standard DOM API, not a perchance idiom — needed because a fresh
+    // listener would otherwise stack on top of every previous crisis's listener if this
+    // used plain addEventListener across multiple crises in one session.
+    btnA.addEventListener('click', function () { aentResolveCrisis(0); }, { once: true });
+    btnB.addEventListener('click', function () { aentResolveCrisis(1); }, { once: true });
+
+    document.getElementById('aent-crisis-modal').hidden = false;
+  }
+
+  // Step 4 (spec): apply the chosen modifier, log the decision, hide the modal, restart
+  // the interval.
+  function aentResolveCrisis(optionIndex) {
+    if (!aentCrisisActive) return;
+
+    var parsed = aentCrisisActive.parsed;
+    var chosen = aentCrisisActive.options[optionIndex];
+    var chosenLabel = optionIndex === 0 ? parsed.optionALabel : parsed.optionBLabel;
+
+    chosen.apply(aentState);
+
+    aentState.decisionLog.push(parsed.title + ': chose "' + chosenLabel + '" (' + chosen.summary + ')');
+    while (aentState.decisionLog.length > AENT_DECISION_LOG_MAX) aentState.decisionLog.shift();
+
+    document.getElementById('aent-crisis-modal').hidden = true;
+    aentCrisisActive = null;
+
+    aentUpdateUI();
+    aentRenderEventsLog(); // v1.2.0: decisionLog just changed
+    // Defensive clearInterval before the re-arm: aentCrisisActive being non-null when
+    // this function starts is what should make it unreachable twice for one crisis, but
+    // clearing an already-null/stale handle is a harmless no-op, whereas skipping it and
+    // somehow double-arming would silently double every resource rate with no visible
+    // cause. Cheap insurance, not a sign a real double-arm was observed.
+    clearInterval(aentTickIntervalId);
+    aentTickIntervalId = setInterval(aentProcessTick, AENT_TICK_MS);
+    // aentCrisisTickCounter is NOT reset here — it was already zeroed when the request
+    // that led to this crisis fired (in aentProcessTick), and ticks don't advance while
+    // the modal is up. So the next crisis arrives ~AENT_CRISIS_TICK_INTERVAL ticks after
+    // resuming now, not after the original request — deliberate, not an oversight.
+  }
+
+  // Same read-only-narration → parse → mutate boundary as aentRequestFeedLine, with the
+  // crucial difference (the whole point of v0.6): a successfully parsed crisis DOES
+  // mutate state, through aentShowCrisis/aentResolveCrisis. A crisis that fails to parse
+  // is treated the same way a failed feed request is — logged and skipped, not retried
+  // immediately — because showing a broken modal (or one with missing text) would be
+  // worse than just waiting for the next AENT_CRISIS_TICK_INTERVAL.
+  async function aentRequestCrisis() {
+    if (aentCrisisRequestInFlight || aentCrisisActive) return;
+
+    aentCrisisRequestInFlight = true;
+    try {
+      if (typeof root === 'undefined') {
+        throw new Error('`root` is undefined — the Lists panel has not loaded yet');
+      }
+      var result = await root.generateText(aentBuildCrisisPrompt());
+      var text = String(result.generatedText != null ? result.generatedText : result).trim();
+      var parsed = aentParseCrisis(text);
+      if (!parsed) {
+        console.warn('[autonomous-enterprise] crisis text did not match the expected format:', text);
+        return;
+      }
+      aentShowCrisis(parsed);
+    } catch (e) {
+      console.warn('[autonomous-enterprise] crisis request failed:', e);
+    } finally {
+      aentCrisisRequestInFlight = false;
+    }
+  }
+
+  // ===== SAVE / LOAD =====
+  // Step 5: localStorage persistence plus offline catch-up. Both directions wrapped in
+  // try/catch, and load uses Object.assign(aentFreshState(), saved) so a future schema
+  // change (new field in v0.2+) doesn't crash on an older save — both idioms confirmed at
+  // examples/np16r7glcp/html.txt:975-981.
+  //
+  // v0.4 is the schema change that idiom was written for: a save from v0.0/v0.2 has
+  // numeric `devCount`/`marketerCount` and no `devs`/`marketers` arrays at all. Plain
+  // Object.assign can't repair that on its own — a missing key just keeps
+  // aentFreshState()'s empty array, silently discarding however many workers the player
+  // actually had. This backfills each legacy count into `{trait: null}` placeholders
+  // (traits resolved lazily by aentResolveTrait later, not picked here — see that
+  // function's comment for why: this runs from aentLoad, which can fire before `root` is
+  // ready) and removes the stale scalar fields. The `.length === 0` guard on each branch
+  // prevents double-migration if this ever runs against an already-migrated roster.
+  function aentMigrateLegacyWorkerCounts() {
+    if (typeof aentState.devCount === 'number' && aentState.devs.length === 0) {
+      for (var i = 0; i < aentState.devCount; i++) {
+        aentState.devs.push({ trait: null });
+      }
+      delete aentState.devCount;
+    }
+    if (typeof aentState.marketerCount === 'number' && aentState.marketers.length === 0) {
+      for (var j = 0; j < aentState.marketerCount; j++) {
+        aentState.marketers.push({ trait: null });
+      }
+      delete aentState.marketerCount;
+    }
+  }
+
+  function aentSave() {
+    aentState.lastSave = Date.now();
+    try {
+      localStorage.setItem(AENT_SAVE_KEY, JSON.stringify(aentState));
+    } catch (e) {}
+  }
+
+  // Formats a duration for the morning briefing's breakdown line. Plain "Xm" reads as
+  // "0m" for any gap under a minute, which is exactly the range the documented smoke test
+  // (>5s, unattended) hits — so seconds get their own branch instead of being floored away.
+  function aentFmtDuration(seconds) {
+    if (seconds < 60) return Math.floor(seconds) + 's';
+    return Math.floor(seconds / 60) + 'm';
+  }
+
+  // Step 1 (v0.0 + v0.8): loads the save, runs offline catch-up exactly as before, and —
+  // new for v0.8 — captures and returns the exact deltas rather than immediately
+  // rendering a one-line note itself. `aentInit` decides what to do with the return
+  // value: no offline catch-up ran → start the live loop immediately; catch-up ran →
+  // hand the deltas to aentShowMorningBriefing, which gates starting the loop behind the
+  // player clicking Acknowledge (spec step 3). Returns null when no catch-up ran, so
+  // `aentInit`'s `if (offlineResult)` check is the single decision point.
+  function aentLoad() {
+    var loadedFromExistingSave = false;
+    var savedRaw = null;
+    try {
+      var raw = localStorage.getItem(AENT_SAVE_KEY);
+      if (raw) {
+        savedRaw = JSON.parse(raw);
+        aentState = Object.assign(aentFreshState(), savedRaw);
+        loadedFromExistingSave = true;
+      } else {
+        aentState = aentFreshState();
+      }
+    } catch (e) {
+      aentState = aentFreshState();
+    }
+
+    aentMigrateLegacyWorkerCounts();
+    aentMigrateRosterTenureFields();
+
+    // v1.0: a save from before lifetimeCapital existed merges in as 0 (aentFreshState's
+    // default), understating a run that already earned real capital — the one place the
+    // whole prestige layer keys off. There's no way to recover the true historical total,
+    // so this seeds a best-available proxy (assume at least the currently-held capital was,
+    // at some point, generated) only for a save that predates the field. A brand-new game
+    // (loadedFromExistingSave false) must NOT be touched — capital:500/lifetimeCapital:0 is
+    // its correct starting state, not a legacy gap.
+    if (loadedFromExistingSave && savedRaw && typeof savedRaw.lifetimeCapital !== 'number') {
+      aentState.lifetimeCapital = Math.max(0, aentState.capital);
+    }
+
+    var now = Date.now();
+    var elapsedSeconds = Math.min((now - (aentState.lastSave || now)) / 1000, AENT_OFFLINE_CAP_SECONDS);
+    var offlineResult = null;
+
+    if (elapsedSeconds > AENT_OFFLINE_CATCHUP_THRESHOLD_SECONDS) {
+      // Step 1 (spec): "capture the exact deltas" — all three resources, not just
+      // capital/compute like the pre-v0.8 one-line note did. techDebt's delta can be
+      // negative over an offline gap (decay can outpace dev-driven accrual with few or
+      // no developers hired), so it genuinely needs before/after capture like the others
+      // rather than being inferred from the current value.
+      var before = { capital: aentState.capital, compute: aentState.compute, techDebt: aentState.techDebt };
+      var steps = Math.floor(elapsedSeconds);
+      for (var i = 0; i < steps; i++) aentApplyDelta(1);
+      offlineResult = {
+        elapsedSeconds: elapsedSeconds,
+        deltas: {
+          capital: aentState.capital - before.capital,
+          compute: aentState.compute - before.compute,
+          techDebt: aentState.techDebt - before.techDebt
+        }
+      };
+    }
+
+    aentState.lastSave = now;
+    return offlineResult;
+  }
+
+  // ===== THE MORNING BRIEFING (v0.8, offline narrative) =====
+  // Formats one delta with an explicit sign, since regular aentFmt() (used for absolute
+  // resource displays) floors toward negative infinity — appropriate for "how much do we
+  // have" but wrong for "how much did this change", where -0.4 flooring to -1 would
+  // overstate a decrease that's really just noise. Math.round is the correct rounding
+  // rule for a delta; aentFmt's Math.floor is a deliberately different choice for a
+  // different question, not an inconsistency.
+  function aentFmtSignedDelta(n, prefixSymbol) {
+    var rounded = Math.round(n);
+    var sign = rounded >= 0 ? '+' : '-';
+    return sign + (prefixSymbol || '') + Math.abs(rounded).toLocaleString();
+  }
+
+  // Step 1 (spec): "capture the exact deltas (e.g., +$50,000 Capital, +400 Tech Debt)" —
+  // this is that exact string, reused both as the AI prompt's input and as the literal
+  // math breakdown shown in the modal, so the two can never say different numbers.
+  function aentBuildDeltaText(deltas) {
+    return aentFmtSignedDelta(deltas.capital, '$') + ' capital, ' +
+      aentFmtSignedDelta(deltas.compute) + ' compute, ' +
+      aentFmtSignedDelta(deltas.techDebt) + ' tech debt';
+  }
+
+  // Step 2 (spec): pass the delta string to generateText, asking specifically for an
+  // "Executive Morning Briefing" explaining what the autonomous agents did overnight to
+  // produce those numbers. Deliberately scoped to the deltas alone — unlike
+  // aentBuildFeedPrompt/aentBuildCrisisPrompt, this does NOT fold in
+  // aentDescribeSituation()/traits/decisionLog. The spec is specific about the input here
+  // ("Pass the delta string to the AI plugin"), and richer context could be added later
+  // without difficulty, but wasn't part of what this step asked for.
+  // v1.2.5 (Bucket F — feature 10): 4 framing-sentence variants, same rule as
+  // AENT_FEED_INTROS/AENT_CRISIS_INTROS above — the "Do not invent additional numbers..."
+  // / "Reply with only the briefing text..." instructions after it are unchanged, since
+  // aentShowMorningBriefing's exact-math-breakdown guarantee depends on the AI not
+  // inventing its own figures.
+  var AENT_BRIEFING_INTROS = [
+    'You are writing a short "Executive Morning Briefing" for a scrappy startup business-sim game.',
+    'You are drafting a brief overnight status report for a scrappy startup business-sim game.',
+    'You are composing a short "Executive Morning Briefing" memo for a scrappy, chaotic startup.',
+    'You are summarizing what happened overnight in a short "Executive Morning Briefing" for a startup business-sim game.'
+  ];
+
+  function aentBuildBriefingPrompt(deltaText) {
+    return aentPickVariant(AENT_BRIEFING_INTROS) + ' ' +
+      'While the founder was away, the autonomous developer and marketer agents kept working, resulting in exactly these changes: ' + deltaText + '. ' +
+      'Write two or three sentences, in the voice of an in-character executive briefing, explaining in broad strokes what the agents likely did overnight to produce numbers like these. ' +
+      'Do not invent additional numbers or statistics beyond what was given. ' +
+      'Reply with only the briefing text: no title, no greeting, no sign-off.';
+  }
+
+  // Step 3 (spec): "Pause the game loop on load. Display the generated narrative
+  // alongside the exact math breakdown in a modal. Require the player to click
+  // 'Acknowledge' to begin the live loop." Only called when aentLoad() returned a
+  // non-null offlineResult — see aentInit.
+  //
+  // Unlike aentRequestFeedLine/aentRequestCrisis, a failed generateText call here does
+  // NOT skip showing the modal — real, already-applied state changes need to be
+  // acknowledged either way, so the exact breakdown is shown immediately and the
+  // narrative degrades to a plain fallback sentence on failure rather than the whole
+  // modal disappearing. The modal is shown right away with a "preparing" placeholder
+  // rather than only after the AI call resolves, so the page isn't sitting inert and
+  // unexplained for however many seconds generateText takes.
+  async function aentShowMorningBriefing(offlineResult) {
+    var modal = document.getElementById('aent-briefing-modal');
+    var narrativeEl = document.getElementById('aent-briefing-narrative');
+    var breakdownEl = document.getElementById('aent-briefing-breakdown');
+    var deltaText = aentBuildDeltaText(offlineResult.deltas);
+
+    narrativeEl.textContent = 'Preparing this morning\'s briefing...';
+    breakdownEl.textContent = 'While you were away (' + aentFmtDuration(offlineResult.elapsedSeconds) + '): ' + deltaText + '.';
+    modal.hidden = false;
+
+    // Acknowledge is wired up BEFORE the await below, not after. The button is visible
+    // and the breakdown is already fully readable during the "Preparing..." window, so a
+    // player clicking it then is a real, expected case, not an edge case — and if this
+    // listener were attached only after `generateText` resolves, a click during that
+    // window would silently do nothing (worse: if the promise never settles at all, the
+    // loop would never start and the game would be stuck with no recovery path, the same
+    // class of failure `document.readyState` was checked for back in v0.0). The handler
+    // itself only needs the modal and the interval, neither of which depend on the
+    // narrative — it can safely fire before or after the narrative text is filled in.
+    document.getElementById('aent-briefing-ack').addEventListener('click', function () {
+      modal.hidden = true;
+      aentTickIntervalId = setInterval(aentProcessTick, AENT_TICK_MS);
+    }, { once: true });
+
+    var narrative = null;
+    try {
+      if (typeof root === 'undefined') {
+        throw new Error('`root` is undefined — the Lists panel has not loaded yet');
+      }
+      var result = await root.generateText(aentBuildBriefingPrompt(deltaText));
+      narrative = String(result.generatedText != null ? result.generatedText : result).trim();
+    } catch (e) {
+      console.warn('[autonomous-enterprise] morning briefing request failed:', e);
+    }
+
+    // Harmless even if the player already acknowledged and hid the modal while this was
+    // in flight: writing textContent on a hidden element is a normal, silent no-op.
+    var narrativeText = narrative ||
+      'The overnight report didn\'t come through, but the numbers above are exact.';
+    narrativeEl.textContent = narrativeText;
+
+    // v1.2.0: append this briefing to aentState.briefingLog using the exact same
+    // cap-and-prune idiom as aentState.decisionLog above (push, then .shift() while over
+    // the max) — see AENT_BRIEFING_LOG_MAX. Recorded even on a failed generateText call,
+    // since the delta breakdown is still real, already-applied state either way.
+    aentState.briefingLog.push('While away (' + aentFmtDuration(offlineResult.elapsedSeconds) + '): ' + deltaText + '. ' + narrativeText);
+    while (aentState.briefingLog.length > AENT_BRIEFING_LOG_MAX) aentState.briefingLog.shift();
+    aentRenderEventsLog(); // v1.2.0: briefingLog just changed
+  }
+
+  // ===== INIT =====
+  // Load (and grant offline progress) before starting the live loop, exactly as the user's
+  // spec orders v0.0 step 5. `aentInit` attaches the only two hire listeners and starts
+  // the autosave interval unconditionally — if it never runs, the page is permanently
+  // inert with no click-to-recover path (unlike discovery-question-generator, where the
+  // "Generate another" button is inline `onclick` and recovers on click). So this checks
+  // `document.readyState` rather than trusting a bare `window.addEventListener('load', ...)`
+  // to still be pending by the time this script executes.
+  //
+  // v0.8 step 3: "Pause the game loop on load" — aentTickIntervalId is now started
+  // conditionally rather than unconditionally. When aentLoad() reports no offline
+  // catch-up ran (offlineResult is null — a fresh game, or a reload within
+  // AENT_OFFLINE_CATCHUP_THRESHOLD_SECONDS), the loop starts immediately exactly as
+  // before v0.8. When catch-up DID run, aentShowMorningBriefing owns starting the loop,
+  // gated behind the player clicking Acknowledge — see that function.
+  //
+  // v1.0: aentLoadMeta() runs FIRST, before aentLoad() — aentLoad()'s offline catch-up
+  // calls aentApplyDelta, which reads aentComputeMetaMultipliers(), which reads
+  // aentMetaState. Loading the permanent save after the session save would leave that
+  // read hitting undefined during the very first offline catch-up after an IPO.
+  function aentInit() {
+    aentLoadMeta();
+    var offlineResult = aentLoad();
+    aentUpdateUI();
+    // v1.2.0: initial render of both new panels so a loaded save's existing roster/logs
+    // show immediately, rather than the HTML's hardcoded empty-state placeholders — the
+    // same "render on demand, not every tick" cadence as the other call sites below,
+    // just triggered once here by the load itself rather than by a later player action.
+    aentRenderRoster();
+    aentRenderEventsLog();
+
+    document.getElementById('aent-hire-dev').addEventListener('click', aentHireDeveloper);
+    document.getElementById('aent-hire-marketer').addEventListener('click', aentHireMarketer);
+    document.getElementById('aent-ipo-button').addEventListener('click', aentPerformIPO);
+    document.getElementById('aent-view-toggle').addEventListener('click', function () {
+      aentSetBoardroomOpen(!aentBoardroomOpen);
+    });
+
+    setInterval(aentSave, AENT_AUTOSAVE_MS);
+    window.addEventListener('beforeunload', aentSave);
+
+    if (offlineResult) {
+      aentShowMorningBriefing(offlineResult);
+    } else {
+      // Stored in aentTickIntervalId (not discarded) so a v0.6 crisis can
+      // clearInterval/setInterval it again — see aentShowCrisis/aentResolveCrisis.
+      aentTickIntervalId = setInterval(aentProcessTick, AENT_TICK_MS);
+    }
+  }
+
+  if (document.readyState === 'complete') {
+    aentInit();
+  } else {
+    window.addEventListener('load', aentInit);
+  }
+</script>

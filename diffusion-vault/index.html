@@ -1,0 +1,382 @@
+<div id="app-container">
+  
+  <div id="sidebar">
+    <div class="sidebar-header">
+      <h2>Diffusion Vault</h2>
+      <button onclick="createNew()" class="btn-primary">+ New</button>
+    </div>
+    <div class="search-box">
+      <input type="text" id="search-input" placeholder="Search prompts..." onkeyup="renderList()">
+    </div>
+    <ul id="item-list">
+      </ul>
+    <div class="sidebar-footer">
+      <button onclick="openSettings()" class="btn-text">⚙️ Sync & Data</button>
+    </div>
+  </div>
+
+  <div id="main-view">
+    <div id="empty-state" class="hidden">
+      <h3>Select a Prompt or Create New</h3>
+    </div>
+
+    <div id="editor-form">
+      <div class="toolbar">
+        <input type="text" id="inp-title" placeholder="Prompt Title (e.g. Cyberpunk City)" oninput="markDirty()">
+        <div class="actions">
+          <button onclick="copyPayload()" class="btn-action" title="Copy Positive Prompt">📋 Copy</button>
+          <button onclick="saveCurrent()" class="btn-save" title="Save Changes">💾 Save</button>
+          <button onclick="deleteCurrent()" class="btn-danger" title="Delete">🗑️</button>
+        </div>
+      </div>
+
+      <div class="form-grid">
+        <div class="form-group full-width">
+          <label>Positive Prompt</label>
+          <textarea id="inp-positive" rows="6" placeholder="What do you want to see? (e.g. A futuristic city, neon lights...)" oninput="markDirty()"></textarea>
+        </div>
+
+        <div class="form-group full-width">
+          <label>Negative Prompt</label>
+          <textarea id="inp-negative" rows="3" placeholder="What to avoid? (e.g. blurry, low quality, bad anatomy...)" oninput="markDirty()"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Style / Model</label>
+          <input type="text" id="inp-style" placeholder="e.g. Realistic Vision, Oil Painting" oninput="markDirty()">
+        </div>
+
+        <div class="form-group">
+          <label>Seed</label>
+          <input type="number" id="inp-seed" placeholder="-1 for Random" oninput="markDirty()">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Vault Settings</h3>
+        <button onclick="closeSettings()" class="close-btn">&times;</button>
+      </div>
+      
+      <div class="settings-section">
+        <h4>☁️ JSONBin Cloud Sync</h4>
+        <p class="desc">Sync your prompts across devices. (Requires a free account at jsonbin.io)</p>
+        <label>Bin ID</label>
+        <input type="text" id="cloud-bin-id" placeholder="e.g. 64ae... (The Bin ID)">
+        <label>API Key (X-Master-Key)</label>
+        <input type="password" id="cloud-api-key" placeholder="e.g. $2b$10...">
+        
+        <div class="sync-actions">
+          <button onclick="cloudPull()" class="btn-secondary">⬇️ Pull from Cloud</button>
+          <button onclick="cloudPush()" class="btn-secondary">⬆️ Push to Cloud</button>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h4>💾 File I/O</h4>
+        <button onclick="exportJSON()" class="btn-text">Export .JSON Backup</button>
+        <input type="file" id="import-file" onchange="importJSON(this)" style="margin-top:10px;">
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<style>
+  :root {
+    --bg-dark: #121212;
+    --bg-panel: #1e1e1e;
+    --bg-input: #2a2a2a;
+    --accent: #7c4dff;
+    --accent-hover: #651fff;
+    --text-main: #e0e0e0;
+    --text-dim: #a0a0a0;
+    --border: #333;
+    --danger: #ff5252;
+  }
+
+  body, html { margin:0; padding:0; height:100%; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--bg-dark); color: var(--text-main); overflow: hidden; }
+  
+  #app-container { display: flex; height: 100vh; }
+  
+  /* SIDEBAR */
+  #sidebar { width: 300px; background: var(--bg-panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+  .sidebar-header { padding: 15px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .sidebar-header h2 { margin: 0; font-size: 1.2rem; }
+  .search-box { padding: 10px; }
+  #search-input { width: 100%; padding: 8px; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-main); border-radius: 4px; box-sizing: border-box;}
+  
+  #item-list { list-style: none; padding: 0; margin: 0; flex-grow: 1; overflow-y: auto; }
+  .list-item { padding: 12px 15px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.2s; }
+  .list-item:hover { background: var(--bg-input); }
+  .list-item.active { background: var(--bg-input); border-left: 3px solid var(--accent); }
+  .list-item .title { display: block; font-weight: bold; }
+  .list-item .preview { display: block; font-size: 0.8rem; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  
+  .sidebar-footer { padding: 10px; border-top: 1px solid var(--border); text-align: center; }
+
+  /* MAIN VIEW */
+  #main-view { flex-grow: 1; display: flex; flex-direction: column; background: var(--bg-dark); }
+  #editor-form { display: flex; flex-direction: column; height: 100%; }
+  
+  .toolbar { padding: 15px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: var(--bg-panel); }
+  #inp-title { font-size: 1.5rem; background: transparent; border: none; color: var(--text-main); width: 60%; outline: none; }
+  
+  .form-grid { padding: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; overflow-y: auto; }
+  .full-width { grid-column: span 2; }
+  
+  .form-group label { display: block; margin-bottom: 8px; color: var(--text-dim); font-size: 0.9rem; text-transform: uppercase; letter-spacing: 1px; }
+  .form-group input, .form-group textarea { width: 100%; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-main); padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.95rem; box-sizing: border-box; }
+  .form-group textarea { resize: vertical; }
+  .form-group input:focus, .form-group textarea:focus { border-color: var(--accent); outline: none; }
+
+  /* BUTTONS */
+  button { cursor: pointer; border: none; border-radius: 4px; padding: 8px 12px; font-weight: bold; transition: 0.2s; }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-save { background: #2e7d32; color: white; margin-left: 5px; }
+  .btn-danger { background: #c62828; color: white; margin-left: 5px; }
+  .btn-action { background: #1565c0; color: white; margin-left: 5px; }
+  .btn-text { background: transparent; color: var(--text-dim); text-decoration: underline; }
+  .btn-secondary { background: var(--bg-input); color: var(--text-main); border: 1px solid var(--border); margin-right: 5px; }
+
+  /* UTILS */
+  .hidden { display: none !important; }
+  
+  /* MODAL */
+  .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+  .modal-content { background: var(--bg-panel); padding: 25px; border-radius: 8px; width: 400px; border: 1px solid var(--border); }
+  .modal-header { display: flex; justify-content: space-between; margin-bottom: 20px; }
+  .settings-section { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .desc { font-size: 0.8rem; color: var(--text-dim); margin-top: -10px; margin-bottom: 10px; }
+  .close-btn { background: transparent; font-size: 1.5rem; color: var(--text-main); padding: 0; }
+</style>
+
+<script>
+  // CONFIGURATION
+  const STORAGE_KEY = 'diffusion_vault_v1';
+  const DEFAULT_DATA = [
+    {
+      id: 'example_01',
+      title: 'Cyberpunk Portrait',
+      positive: 'cyberpunk, neon lights, portrait of a cyborg woman, highly detailed, sharp focus, 8k, ray tracing',
+      negative: 'blurry, low quality, bad anatomy, missing limbs',
+      style: 'Realistic Vision V5',
+      seed: 123456789
+    }
+  ];
+
+  // STATE
+  var library = [];
+  var currentId = null;
+
+  // INITIALIZATION
+  window.onload = function() {
+    loadData();
+    loadCloudConfig();
+    if(library.length > 0) {
+      selectItem(library[0].id);
+    } else {
+      createNew();
+    }
+  };
+
+  // CORE FUNCTIONS
+  function loadData() {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try { 
+        library = JSON.parse(saved); 
+        if(library.length === 0) library = JSON.parse(JSON.stringify(DEFAULT_DATA));
+      } catch(e) { 
+        library = JSON.parse(JSON.stringify(DEFAULT_DATA)); 
+      }
+    } else {
+      library = JSON.parse(JSON.stringify(DEFAULT_DATA));
+      saveData();
+    }
+    renderList();
+  }
+
+  function saveData() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(library));
+    renderList(); // Re-render to update titles in list
+  }
+
+  function renderList() {
+    const list = document.getElementById('item-list');
+    const search = document.getElementById('search-input').value.toLowerCase();
+    list.innerHTML = '';
+
+    library.forEach(item => {
+      if(item.title.toLowerCase().includes(search) || item.positive.toLowerCase().includes(search)) {
+        const li = document.createElement('li');
+        li.className = `list-item ${item.id === currentId ? 'active' : ''}`;
+        li.onclick = () => selectItem(item.id);
+        li.innerHTML = `
+          <span class="title">${item.title || 'Untitled'}</span>
+          <span class="preview">${item.style} • ${item.positive}</span>
+        `;
+        list.appendChild(li);
+      }
+    });
+  }
+
+  function selectItem(id) {
+    currentId = id;
+    const item = library.find(x => x.id === id);
+    if(!item) return;
+
+    // Populate Fields
+    document.getElementById('inp-title').value = item.title;
+    document.getElementById('inp-positive').value = item.positive;
+    document.getElementById('inp-negative').value = item.negative;
+    document.getElementById('inp-style').value = item.style;
+    document.getElementById('inp-seed').value = item.seed;
+
+    renderList(); // Update active highlight
+  }
+
+  function createNew() {
+    const newId = 'prompt_' + Date.now();
+    const newItem = {
+      id: newId,
+      title: 'New Prompt',
+      positive: '',
+      negative: '',
+      style: '',
+      seed: -1
+    };
+    library.unshift(newItem); // Add to top
+    saveData();
+    selectItem(newId);
+  }
+
+  function saveCurrent() {
+    if(!currentId) return;
+    const item = library.find(x => x.id === currentId);
+    
+    item.title = document.getElementById('inp-title').value;
+    item.positive = document.getElementById('inp-positive').value;
+    item.negative = document.getElementById('inp-negative').value;
+    item.style = document.getElementById('inp-style').value;
+    item.seed = document.getElementById('inp-seed').value;
+
+    saveData();
+    alert('Saved Locally');
+  }
+  
+  function deleteCurrent() {
+    if(!currentId) return;
+    if(!confirm("Are you sure you want to delete this prompt?")) return;
+    
+    library = library.filter(x => x.id !== currentId);
+    saveData();
+    
+    if(library.length > 0) selectItem(library[0].id);
+    else createNew();
+  }
+  
+  function copyPayload() {
+    const text = document.getElementById('inp-positive').value;
+    navigator.clipboard.writeText(text).then(() => {
+        alert("Positive Prompt Copied!");
+    });
+  }
+  
+  function markDirty() {
+    // Optional: Visual indicator that changes are unsaved could go here
+  }
+
+  // --- CLOUD SYNC (JSONBin.io) ---
+  function openSettings() { document.getElementById('settings-modal').classList.remove('hidden'); }
+  function closeSettings() { document.getElementById('settings-modal').classList.add('hidden'); }
+
+  function loadCloudConfig() {
+    const id = localStorage.getItem('cloud_bin_id');
+    const key = localStorage.getItem('cloud_api_key');
+    if(id) document.getElementById('cloud-bin-id').value = id;
+    if(key) document.getElementById('cloud-api-key').value = key;
+  }
+
+  async function cloudPush() {
+    const binId = document.getElementById('cloud-bin-id').value;
+    const apiKey = document.getElementById('cloud-api-key').value;
+    
+    if(!binId || !apiKey) return alert("Missing Credentials (Bin ID or API Key)");
+    if(!confirm("Overwrite Cloud Data with Local Data?")) return;
+
+    localStorage.setItem('cloud_bin_id', binId);
+    localStorage.setItem('cloud_api_key', apiKey);
+
+    try {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${binId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': apiKey },
+        body: JSON.stringify(library)
+      });
+      if(!res.ok) throw new Error("Upload Failed");
+      alert("Cloud Save Complete");
+    } catch(e) { console.error(e); alert("Error: " + e.message); }
+  }
+
+  async function cloudPull() {
+    const binId = document.getElementById('cloud-bin-id').value;
+    const apiKey = document.getElementById('cloud-api-key').value;
+    
+    if(!binId || !apiKey) return alert("Missing Credentials");
+    
+    try {
+      const res = await fetch(`https://api.jsonbin.io/v3/b/${binId}/latest`, {
+        headers: { 'X-Master-Key': apiKey }
+      });
+      if(!res.ok) throw new Error("Download Failed");
+      
+      const json = await res.json();
+      const cloudData = json.record;
+      
+      // Merge Strategy: Overwrite Local with Cloud (Simple Sync)
+      if(confirm("Replace local prompts with cloud version?")) {
+        library = cloudData;
+        saveData();
+        selectItem(library[0]?.id);
+        alert("Cloud Sync Complete");
+      }
+    } catch(e) { console.error(e); alert("Error: " + e.message); }
+  }
+
+  // --- FILE EXPORT/IMPORT ---
+  function exportJSON() {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(library));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "diffusion_vault_backup.json");
+    document.body.appendChild(downloadAnchorNode);
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+  }
+
+  function importJSON(input) {
+    const file = input.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        const imported = JSON.parse(e.target.result);
+        if(Array.isArray(imported)) {
+          if(confirm("Merge imported prompts into current library?")) {
+             library = library.concat(imported);
+             saveData();
+             alert("Import Successful");
+          }
+        } else {
+          alert("Invalid JSON format");
+        }
+      } catch(err) { alert("Error reading file"); }
+    };
+    reader.readAsText(file);
+  }
+</script>

@@ -1,0 +1,1235 @@
+<!-- ════════════════════════════════════════════════════════════════
+     BGN STANDARDS CHECKER — index.html
+     Audits Boardgame Network generators against the house standards:
+     list structure & $meta (main.pjs), design-system CSS, HTML layout,
+     the online-play feature set, and the fullscreen-board standard.
+     Fetches public generator source
+     through the perchance API and reports a grade card per generator.
+     ════════════════════════════════════════════════════════════════ -->
+
+<link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"> <!-- BGN design system (hosted) -->
+
+<style>
+  body{text-align:left}
+  .btnrow{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px }
+  #statusEl{ min-height:18px }
+  .progress{ height:6px; border-radius:5px; background:rgba(255,255,255,.07); overflow:hidden; margin-top:10px; display:none }
+  .progress>div{ height:100%; width:0; background:var(--bgn-accent,#d4af37); transition:width .2s }
+  .chkrow{ display:flex; align-items:center; gap:8px; margin-top:14px; font-size:13px; color:var(--bgn-muted,#a49bb4); cursor:pointer }
+  .chkrow input{ accent-color:var(--bgn-accent,#d4af37) }
+
+  .audit-card{ background:rgba(255,255,255,.035); border:1px solid var(--bgn-line,rgba(212,175,55,.16)); border-radius:14px; padding:18px 20px; margin-bottom:18px }
+  .audit-head{ display:flex; align-items:center; gap:12px; flex-wrap:wrap }
+  .grade-badge{ font:700 15px/1 var(--bgn-serif,Cinzel,serif); padding:9px 13px; border-radius:10px; letter-spacing:.5px; flex:none }
+  .grade-a{ background:rgba(47,174,140,.15); color:#3fd3a6; border:1px solid rgba(47,174,140,.45) }
+  .grade-b{ background:rgba(212,175,55,.14); color:#f2dc8b; border:1px solid rgba(212,175,55,.45) }
+  .grade-c{ background:rgba(217,164,65,.14); color:#e6b95e; border:1px solid rgba(217,164,65,.45) }
+  .grade-d{ background:rgba(224,91,91,.13); color:#ef8f8f; border:1px solid rgba(224,91,91,.45) }
+  .grade-f{ background:rgba(224,91,91,.22); color:#ff9c9c; border:2px solid rgba(224,91,91,.6) }
+  .audit-title{ font:700 21px/1.2 var(--bgn-serif,Cinzel,serif); color:#f2dc8b; text-decoration:none }
+  .audit-title:hover{ color:#ffedb0 }
+  .chip{ font-size:11px; padding:3px 9px; border-radius:20px; border:1px solid var(--bgn-line,rgba(212,175,55,.16)); color:var(--bgn-muted,#a49bb4); white-space:nowrap }
+  .chip.beta{ border-color:rgba(217,164,65,.5); color:#e6b95e }
+  .chip.comingsoon{ border-color:rgba(224,91,91,.4); color:#ef8f8f }
+  .scorebar{ height:8px; border-radius:6px; background:rgba(255,255,255,.06); margin:14px 0 4px; overflow:hidden }
+  .scorebar>div{ height:100%; border-radius:6px; background:linear-gradient(90deg,var(--bgn-accent,#d4af37),#f2dc8b) }
+  .scorem{ display:flex; justify-content:space-between; font-size:12px; color:var(--bgn-muted,#a49bb4); margin-bottom:8px }
+  .catrow{ display:flex; gap:8px; flex-wrap:wrap; margin:4px 0 2px }
+  .catchip{ font-size:11px; padding:4px 10px; border-radius:8px; border:1px solid var(--bgn-line,rgba(212,175,55,.16)); color:var(--bgn-text,#ece7da) }
+  .catchip b{ color:#f2dc8b; font-weight:600 }
+  .cardtools{ display:flex; gap:8px; margin:10px 0 2px }
+  .reporttools{ display:flex; gap:10px; flex-wrap:wrap; margin:0 0 18px }
+  .details-toggle{ background:none; border:1px solid var(--bgn-line,rgba(212,175,55,.16)); color:var(--bgn-muted,#a49bb4); border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer }
+  .details-toggle:hover{ color:var(--text); border-color:var(--bgn-accent,#d4af37) }
+  .chklist{ margin-top:10px; border-top:1px dashed var(--bgn-line,rgba(212,175,55,.16)); padding-top:8px }
+  .chk{ display:flex; gap:8px; font-size:13px; padding:4px 0; align-items:flex-start }
+  .chk .ic{ width:18px; text-align:center; flex:none }
+  .chk .lbl{ flex:1 }
+  .chk .det{ color:var(--bgn-muted,#a49bb4); font-size:12px }
+  .chk.pass{ color:var(--bgn-muted,#a49bb4) }
+  .chk.fail .lbl{ color:#ff9c9c }
+  .chk.warn .lbl{ color:#e6b95e }
+  .chk.na .lbl{ color:#7a7391 }
+  .chk .hint{ display:block; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:#cbb7e8; background:rgba(255,255,255,.045); border-radius:6px; padding:6px 9px; margin-top:4px; white-space:pre-wrap; word-break:break-word }
+  .errnote{ color:#ef8f8f; font-size:13px; margin-top:6px }
+
+  .onepicker{ margin-top:10px; background:rgba(255,255,255,.03); border:1px dashed var(--bgn-line,rgba(212,175,55,.3)); border-radius:10px; padding:10px 12px }
+  .onepick-title{ font-size:12px; color:var(--bgn-muted,#a49bb4); margin-bottom:8px }
+  .onepick-row{ display:flex; align-items:center; gap:8px; font-size:12px; padding:3px 0 }
+  .onepick-lbl{ flex:1; color:var(--bgn-text,#ece7da) }
+  .onepick-row .details-toggle{ padding:3px 8px }
+  .chkfix{ padding:2px 9px; font-size:12px; flex:none; margin-left:2px }
+
+  body.embed .bgn-nav, body.embed .game-hero, body.embed .bgn-footer, body.embed #stdPanel, body.embed #selfCheckSection, body.embed #auditInputCtn, body.embed #showPassGensRow{ display:none }
+  body.embed main{ padding:18px 0 12px }
+  #selfCheckPrompt{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:#cbb7e8 }
+
+  #auditPopup{ position:fixed; inset:0; z-index:9800; background:rgba(5,7,12,.88); display:flex; align-items:center; justify-content:center; padding:18px }
+  #auditPopup[hidden]{ display:none }
+  .audit-popup-box{ width:min(920px,94vw); height:min(82vh,780px); background:#0a0912; border:1px solid rgba(212,175,55,.35); border-radius:14px; overflow:hidden; display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,.6) }
+  .audit-popup-head{ display:flex; justify-content:space-between; align-items:center; padding:9px 14px; color:#f2dc8b; font:600 14px var(--bgn-serif,Cinzel,serif); border-bottom:1px solid rgba(212,175,55,.16) }
+  .audit-popup-head button{ background:none; border:1px solid rgba(212,175,55,.3); color:#f2dc8b; border-radius:6px; cursor:pointer; font-size:13px; padding:3px 9px }
+  .audit-popup-head button:hover{ color:#fff; border-color:var(--bgn-accent,#d4af37) }
+  #auditPopupFrame{ flex:1; width:100%; border:0; background:#0a0912 }
+  .footer-audit-link{ color:var(--bgn-accent2,#f2dc8b); text-decoration:none }
+  .footer-audit-link:hover{ color:#ffedb0 }
+
+  details.stdbox{ margin-top:26px; background:rgba(255,255,255,.03); border:1px solid var(--bgn-line,rgba(212,175,55,.16)); border-radius:12px; padding:6px 18px }
+  details.stdbox summary{ cursor:pointer; color:#f2dc8b; font:600 14px var(--bgn-serif,Cinzel,serif); padding:10px 0; letter-spacing:.5px }
+  details.stdbox p, details.stdbox li{ color:var(--bgn-muted,#a49bb4); font-size:13px }
+  details.stdbox pre{ background:rgba(255,255,255,.045); border-radius:8px; padding:10px 12px; font-size:12px; color:#cbb7e8; overflow-x:auto; white-space:pre-wrap }
+</style>
+
+<nav class="bgn-nav">
+  <div class="wrap">
+    <a class="bgn-nav-brand" href="[hubUrl]">
+      <svg width="26" height="26" viewBox="0 0 26 26" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="bgnG" x1="4" y1="2" x2="22" y2="24"><stop stop-color="#f6e6a4"/><stop offset=".55" stop-color="#d4af37"/><stop offset="1" stop-color="#8f721d"/></linearGradient></defs>
+        <path d="M13 1.5l2.7 7.1 7.6.4-6 4.6 2 7.3-6.3-4.2-6.3 4.2 2-7.3-6-4.6 7.6-.4z" fill="url(#bgnG)" stroke="#8f721d" stroke-width=".8"/>
+      </svg>
+      Boardgame Network
+    </a>
+    <span class="bgn-nav-title">[gameTitle]</span>
+  </div>
+</nav>
+
+<header class="game-hero" id="gameHero">
+  <div class="wrap">
+    <div class="hero-kicker">[gameKicker]</div>
+    <h1 class="hero-title goldtext">[gameTitle]</h1>
+    <p class="hero-sub">[gameTagline]</p>
+    <div class="hero-meta">
+      <span class="tag">[gameGenre]</span>
+      <span class="tag">[gamePlayers]</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="toolCtn" class="bgn-lobby">
+    <div class="sec-head">
+      <div class="sec-eyebrow">Quality gate</div>
+      <h2 class="sec-title goldtext">Audit a generator</h2>
+      <p class="sec-sub">Drop in names or links and get a standards report card — or scan the whole network shelf in one go.</p>
+    </div>
+    <div class="panel">
+      <div id="auditInputCtn">
+        <p style="margin:0 0 10px"><b>Generators to audit</b> — names or perchance.org links, comma-separated (e.g. <i>bgn-chess, bgn-checkers</i>).</p>
+        <textarea id="namesInput" class="field" rows="2" placeholder="bgn-chess, bgn-checkers, https://perchance.org/bgn-scrabble" spellcheck="false"></textarea>
+        <div class="btnrow">
+          <button class="btn btn-gold" id="auditBtn">🔎 Audit generator(s)</button>
+          <button class="btn btn-ghost" id="scanBtn">🛰️ Scan the network shelf</button>
+        </div>
+        <div class="progress" id="progressWrap"><div id="progFill"></div></div>
+      </div>
+      <p class="muted small" id="statusEl"></p>
+      <label class="chkrow" id="showPassGensRow"><input type="checkbox" id="showPassGensChk"> Show passing generators <span style="color:var(--bgn-muted,#a49bb4)">(checked = show clean grade-A reports; unchecked hides them)</span></label>
+    </div>
+    <div class="panel" id="selfCheckSection">
+      <p style="margin:0 0 10px"><b>🛡️ Self-check</b> — any BGN generator can check itself with a single <b>Audit</b> link in its footer. Clicking it pops up this checker — pre-loaded with that generator's own name — and runs the audit automatically.</p>
+      <p><a href="#" id="aiPromptLink" class="btn btn-ghost" style="text-decoration:none">🤖 Get the AI-helper prompt to add the Audit button</a></p>
+      <textarea id="selfCheckPrompt" class="field" rows="7" readonly spellcheck="false" onfocus="this.select()" hidden></textarea>
+      <p class="muted small" style="margin-top:8px">Clicking the link copies the install prompt to your clipboard and shows it here — paste it into the generator's AI helper and it adds the <b>Audit</b> link to the footer, beside "Browse the shelf".</p>
+      <p class="muted small" style="margin-top:10px">▶ <b>Try it live:</b> hit <b>Audit</b> in the footer below — it opens the popup and runs this generator's own self-check.</p>
+    </div>
+  </section>
+
+  <p class="muted small" id="genVisibilityNote" style="min-height:16px;margin:0 0 10px"></p>
+
+  <section id="resultsEl"></section>
+
+  <details class="stdbox" id="stdPanel">
+  <summary>The BGN standard — what this tool checks for</summary>
+  <p>Every network generator is graded against the same checklist the flagship games follow. <b>Required</b> items are worth 3 points each, <b>recommended</b> items 1 point; a missing required item drops the grade to at most <b>C</b>. <b>Tool</b> and <b>Reference</b> pages (genre <i>Tool</i> or <i>Reference</i> — reference templates like <code>bgn-reference-template</code> count as tools) are graded to their own standard: game-specific items — online play, the fullscreen board, turn order &amp; teams, chat/lounge/audio, the card-deck plugin — are marked <i>n/a</i>, while the shared standards still apply (meta, design system, layout basics, no secrets, hub footer). Tools are additionally held to the self-check <b>Audit</b> link; reference pages get it waived. Every generator must declare its <code>genre</code> in <code>$meta</code> — matching the category used on the hub shelf; it's the flag that decides which standards apply.</p>
+  <p><b>List structure (main.pjs)</b> — balanced <code>\[ \]</code> / <code>\{ \}</code> brackets, no lines starting with a bracket, 2-space indentation, and the config block:</p>
+  <pre>$meta
+  title = Game Title
+  description = ...
+  tags = ...
+  image = https://user.uploads.dev/file/....
+  genre = Strategy   ← required, must match the hub shelf (Strategy, Cards, Tool, Reference, …)
+
+hubUrl = https://perchance.org/bgn-boardgame-network
+gameTitle = ...   gameTagline = ...   gameKicker = ...   gameGenre = ...
+gamePlayers = ...   accentColor = ...   heroImage = ...
+createServerSocket = \{import:server-plugin\}</pre>
+  <p><b>CSS &amp; design</b> — the shared BGN design system stylesheet, a <code>body\{text-align:left\}</code> override (Perchance centre-aligns content otherwise), and a viewport meta:</p>
+  <pre>&lt;link rel="stylesheet" href="https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css"&gt;
+&lt;meta name="viewport" content="width=device-width, initial-scale=1"&gt;</pre>
+  <p><b>HTML &amp; layout</b> — a lobby with mode cards (<code>data-mode="local"</code> hotseat + <code>data-mode="online"</code>), an online panel (<code>createRoomBtn</code>, <code>joinCodeInput</code>), the game table (<code>.bgn-table</code>, <code>.bgn-board</code>), a room box (<code>roomCodeEl</code>, <code>copyCodeBtn</code>, <code>leaveBtn</code>), turn indicator, game log, action buttons (<code>newGameBtn</code>/<code>claimBtn</code>/<code>menuBtn</code>), help overlay, and the footer with a link back to the hub. No duplicate element ids.</p>
+  <p><b>Online features</b> — an authoritative <code>&lt;script type="text/x-server-plugin"&gt;</code> with durable <code>state</code> slots, room codes and snapshot broadcasting; a client <code>connectSocket</code> wired to it; plus the shared network extras: BGN audio (<code>window.BGN_AUDIO</code>, starting muted), the Lounge, in-game chat, save/continue, the share/export toolkit, and the self-check footer link (<b>Audit</b> — a popup that embeds the standards checker pre-loaded with the game's own name).</p>
+  <p><b>Turn order &amp; teams</b> — every multiplayer game (2+ players) gets the 🎲 panel, openable from the lobby <i>and</i> the in-table side panel: a who-goes-first roller that drives the real turn order (<code>game.first</code> locally/AI, a <code>setFirst</code> rpc online, <code>createRoom</code> honoring a lobby roll), a team splitter and a seat draw rendered on the player cards with a 🎯 starts marker on the starting player — all persisting through save/continue/share-import. Single-player games are exempt.</p>
+  <p><b>Fullscreen board</b> — a ⛶ <b>Full screen</b> button (hidden until the board registers) top-right of the board area, and a full-window overlay that maximises the playing area. Opening moves the live canvas, pass button, tile-in-hand and meeple chooser into the overlay (never clones) and restores them to their exact original spots on close (✕ or Escape). Exposes <code>window.bgnFullscreen.register(\{canvas, tile, meeple, resize\})</code>, <code>.open()</code>, <code>.close()</code>, <code>.isOpen()</code>.</p>
+  <p><b>Game assets</b> — games that play with a standard deck of cards (poker, blackjack, bridge, solitaire, …) must import the shared <code>card-deck-plugin</code> and render through it, so the whole network uses one deck:</p>
+  <pre>cardDeck = \{import:card-deck-plugin\}
+cardEl.innerHTML = cardDeck("AS");   // cardDeck("10C"), cardDeck("back"), …</pre>
+  <p>These checks are flagged <i>n/a</i> for games that don't use a standard deck, and waived for reference/tool pages.</p>
+</details>
+</main>
+
+<div id="auditPopup" hidden>
+  <div class="audit-popup-box">
+    <div class="audit-popup-head"><span>🛡️ BGN standards check</span><button id="auditPopupCloseBtn" title="Close">✕</button></div>
+    <iframe id="auditPopupFrame" title="BGN standards check"></iframe>
+  </div>
+</div>
+
+<footer class="bgn-footer">
+  <div class="wrap">
+    <div class="ornament"><span>✦</span></div>
+    <p>Part of <b style="color:var(--bgn-accent2,#f2dc8b)">The Boardgame Network</b> · <a href="[hubUrl]">Browse the shelf</a> · <a href="#" id="footerAuditLink" class="footer-audit-link" title="Audit this generator against the BGN standards — opens in a popup">Audit</a></p>
+    <p class="footnote">This tool audits network games — it isn't a game itself, so don't audit it expecting game checks.</p>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const HUB_SLUG = "bgn-boardgame-network";
+const HUB_URL = "https://perchance.org/" + HUB_SLUG;
+const CANONICAL_CSS = "https://user.uploads.dev/file/67107d8c89844a7378e599e5110c369f.css";
+
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function has(s,re){ re.lastIndex = 0; return re.test(s||""); }
+function cnt(s,re){
+  if(!re.flags.includes("g")) re = new RegExp(re.source, re.flags + "g");
+  return (s.match(re)||[]).length;
+}
+function cleanVal(v){ return String(v||"").replace(/(^|\s)\/\/.*$/,"$1").trim().replace(/^"|"$/g,""); }
+
+function sf(url){
+  const f = (typeof superFetch === "function") ? superFetch : root.superFetch;
+  return Promise.race([
+    Promise.resolve().then(()=>f(url)),
+    new Promise((_,rej)=>setTimeout(()=>rej(new Error("request timed out")), 30000))
+  ]);
+}
+
+function parseNames(raw){
+  return String(raw||"").split(/[\s,;]+/).map(t=>t.trim()).filter(Boolean).map(tok=>{
+    const m = tok.match(/perchance\.org\/([A-Za-z0-9-]+)/);
+    if (m) return m[1].toLowerCase();
+    return tok.toLowerCase().replace(/[^a-z0-9-]/g,"").replace(/-+/g,"-");
+  }).filter(t=>/^[a-z0-9][a-z0-9-]*$/.test(t));
+}
+
+function metaKeys(pjs){
+  const keys = {};
+  const m = pjs.match(/^\s*\$meta\s*$/m);
+  if (!m) return keys;
+  const rest = pjs.slice(m.index + m[0].length);
+  for (const ln of rest.split("\n")) {
+    const t = ln.trim();
+    if (!t || t.startsWith("//")) continue;
+    if (/^\S/.test(ln)) break;
+    const kv = t.match(/^([a-zA-Z][\w]*)\s*=\s*(.*)$/);
+    if (kv) keys[kv[1]] = cleanVal(kv[2]);
+  }
+  return keys;
+}
+
+const REQ = "req", REC = "rec", INFO = "info";
+const PJS = "List structure", CSS = "CSS & design", HTML = "HTML & layout", FEA = "Online features", FS = "Fullscreen board", GA = "Game assets", TO = "Turn order & teams";
+
+function nonGameType(g){
+  const x = (g||"").toLowerCase().replace(/[^a-z0-9 ]/g,"");
+  if(x === "reference") return "reference";
+  if(x === "tool" || x === "reference template") return "tool";
+  return false;
+}
+
+function isSinglePlayer(st){
+  const p = ((st.chrome.gamePlayers||"") + " " + ((st.shelfEntry && st.shelfEntry.players)||"")).trim();
+  if(!p) return false;
+  if(/\d+\s*[–-]\s*\d+\s*players?/i.test(p)) return false;
+  return /\b1\s*player\b|\bsolo\b|single[- ]?player\b/i.test(p);
+}
+
+function isCardGame(st){
+  if(st.cardGame != null) return st.cardGame;
+  const hay = [st.name, st.genre||"", st.meta.title||"", st.meta.description||"", st.chrome.gameTitle||"", st.chrome.gameTagline||""].join(" | ").replace(/-/g," ");
+  if(/\b(poker|texas|hold['’]?em|blackjack|twenty[- ]?one|baccarat|bridge|hearts|spades|golf|solitaire|patience|rummy|gin\s*rummy|euchre|cribbage|canasta|pinochle|whist|faro|old\s*maid|crazy\s*eights|go[- ]fish|klondike|yukon|pyramid|beggar[- ]my[- ]neighbor|oh\s*hell|durak|piquet|bezique|briscola)\b/i.test(hay)) return st.cardGame = true;
+  if(/\b(playing\s*cards|standard\s*deck|52[- ]?card|deck\s*of\s*cards|poker\s*deck)\b/i.test(hay)) return st.cardGame = true;
+  const code = (st.pjs||"") + "\n" + (st.html||"");
+  if(/(?:card-deck-plugin|cardDeck)/.test(code)) return st.cardGame = true;
+  if(/(?:52[- ]?card|\bsuits?\b)/i.test(code) && /\b(card|deck)\b/i.test(code)) return st.cardGame = true;
+  return st.cardGame = false;
+}
+
+function makeChecks(){
+  return [
+    {id:"p1", cat:PJS, level:REQ, label:"$meta block present",
+     hint:"Add at the top of main.pjs:\n$meta\n  title = ...\n  description = ...\n  tags = ...\n  image = ...",
+     f:st=>({st:has(st.pjs,/^\s*\$meta\s*$/m)?"pass":"fail"})},
+    {id:"p2", cat:PJS, level:REQ, label:"$meta.title set",
+     f:st=>({st: st.meta.title ? "pass" : "fail"})},
+    {id:"p3", cat:PJS, level:REQ, label:"$meta.description set",
+     f:st=>({st: st.meta.description ? "pass" : "fail"})},
+    {id:"p4", cat:PJS, level:REQ, label:"$meta.image set (listings & social cards)",
+     hint:"Add inside $meta:\n  image = https://user.uploads.dev/file/....jpg",
+     f:st=>({st: st.meta.image ? "pass" : "fail"})},
+    {id:"p5", cat:PJS, level:REC, label:"$meta.tags set",
+     f:st=>({st: st.meta.tags ? "pass" : "fail"})},
+    {id:"p6", cat:PJS, level:REQ, label:"hubUrl points at the BGN hub",
+     hint:"hubUrl = https://perchance.org/bgn-boardgame-network",
+     f:st=>{
+       if(!st.hubUrl) return {st:"fail", det:"missing"};
+       if(has(st.hubUrl,new RegExp(HUB_SLUG))) return {st:"pass"};
+       return {st:"warn", det:"points to " + st.hubUrl + " — expected " + HUB_URL};
+     }},
+    {id:"p7", cat:PJS, level:REQ, label:"Chrome config: gameTitle, accentColor, heroImage",
+     hint:"gameTitle = ...   accentColor = #d4af37   heroImage = https://...",
+     f:st=>{
+       const miss = ["gameTitle","accentColor","heroImage"].filter(k=>!st.chrome[k]);
+       return miss.length?{st:"fail", det:"missing: " + miss.join(", ")}:{st:"pass"};
+     }},
+    {id:"p8", cat:PJS, level:REC, label:"Chrome config: gameTagline, gameKicker, gameGenre, gamePlayers",
+     f:st=>{
+       const miss = ["gameTagline","gameKicker","gameGenre","gamePlayers"].filter(k=>!st.chrome[k]);
+       return miss.length?{st:"warn", det:"missing: " + miss.join(", ")}:{st:"pass"};
+     }},
+    {id:"p9", cat:PJS, level:REQ, label:"createServerSocket imports server-plugin",
+     hint:"createServerSocket = {import:server-plugin}",
+     f:st=>({st:has(st.pjs,/createServerSocket\s*=\s*\{import:\s*server-plugin\s*\}/)?"pass":"fail"})},
+    {id:"p10", cat:PJS, level:REQ, label:"Square brackets balanced ([ vs ])",
+     f:st=>{
+       const c = st.counts;
+       return c.o===c.c?{st:"pass"}:{st:"fail", det:"open " + c.o + " / close " + c.c};
+     }},
+    {id:"p11", cat:PJS, level:REQ, label:"Curly braces balanced ({ vs })",
+     f:st=>{
+       const c = st.counts;
+       return c.bo===c.bc?{st:"pass"}:{st:"fail", det:"open " + c.bo + " / close " + c.bc};
+     }},
+    {id:"p12", cat:PJS, level:REC, label:"No lines start with [ or ] (DSL safety)",
+     f:st=>{
+       const n = cnt(st.pjs,/^\s*[\[\]]/m);
+       return n?{st:"warn", det:n + " line(s)"}:{st:"pass"};
+     }},
+    {id:"p13", cat:PJS, level:REC, label:"No tab indentation (2-space standard)",
+     f:st=>{
+       const n = cnt(st.pjs,/^\t/m);
+       return n?{st:"warn", det:n + " line(s)"}:{st:"pass"};
+     }},
+    {id:"p14", cat:PJS, level:REC, label:"Indentation in 2-space steps",
+     f:st=>{
+       const n = st.pjs.split("\n").filter(ln=>/^\s+\S/.test(ln) && (ln.match(/^ */)[0].length % 2) === 1).length;
+       return n>2?{st:"warn", det:n + " line(s)"}:{st:"pass"};
+     }},
+    {id:"p15", cat:PJS, level:REQ, label:"Genre declared in main.pjs — matching the hub shelf",
+     hint:"Add inside $meta in main.pjs:\n  genre = Strategy\n\nThe genre is the flag that decides which standards apply (games: online-play + fullscreen; Tool/Reference: their own). It must match the category used on the hub shelf — bgn-boardgame-network.",
+     f:st=>{
+       const own = (st.ownGenre||"").trim();
+       if(!own){
+         if(st.shelfGenre) return {st:"fail", det:"no genre in main.pjs — the hub lists this as \"" + st.shelfGenre + "\"; add  genre = " + st.shelfGenre + "  inside $meta"};
+         return {st:"fail", det:"no genre declared in main.pjs — add e.g.  genre = Strategy  inside $meta"};
+       }
+       if(!st.shelfGenre) return {st:"pass", det:"declared \"" + own + "\" (not listed on the hub shelf)"};
+       const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g,"");
+       const on = norm(own), sn = norm(st.shelfGenre);
+       if(on === sn) return {st:"pass", det:"declared \"" + own + "\" — matches the shelf"};
+       const oT = nonGameType(own), sT = nonGameType(st.shelfGenre);
+       if(Boolean(oT) !== Boolean(sT)) return {st:"warn", det:"declares \"" + own + "\" (a " + (oT||"game") + ") but the hub shelf files it under \"" + st.shelfGenre + "\" (" + (sT||"game") + ") — align the two"};
+       if(on.replace(/s$/,"") === sn.replace(/s$/,"")) return {st:"warn", det:"declares \"" + own + "\", shelf uses \"" + st.shelfGenre + "\" — same category, align the spelling"};
+       return {st:"fail", det:"declares \"" + own + "\" but the hub shelf lists \"" + st.shelfGenre + "\""};
+     }},
+
+    {id:"c1", cat:CSS, level:REQ, label:"BGN design-system stylesheet linked",
+     hint:'<link rel="stylesheet" href="' + CANONICAL_CSS + '">',
+     f:st=>{
+       if(has(st.html,new RegExp(CANONICAL_CSS.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")))) return {st:"pass"};
+       if(has(st.html,/<link[^>]*stylesheet/i)) return {st:"warn", det:"uses a different stylesheet"};
+       return {st:"fail"};
+     }},
+    {id:"c2", cat:CSS, level:REQ, label:"body{text-align:left} override present",
+     hint:"body{text-align:left}  (Perchance centre-aligns content otherwise)",
+     f:st=>({st:has(st.html,/text-align\s*:\s*left/i)?"pass":"fail"})},
+    {id:"c3", cat:CSS, level:INFO, label:"Viewport meta present (mobile layout) — informational",
+     f:st=>({st:has(st.html,/name=["']viewport["']/i)?"pass":"fail"})},
+    {id:"c4", cat:CSS, level:REC, label:"Uses the BGN design-system classes (bgn-*)",
+     f:st=>{
+       const n = cnt(st.html,/class=["'][^"']*\bbgn-/i);
+       return n?{st:"pass", det:n + " class(es)"}:{st:"fail", det:"no bgn- classes found"};
+     }},
+    {id:"c5", cat:CSS, level:REC, label:"No insecure http:// resource URLs",
+     f:st=>{
+       const n = cnt(st.html,/http:\/\//g);
+       return n?{st:"warn", det:n + " reference(s) — use https"}:{st:"pass"};
+     }},
+
+    {id:"h1", cat:HTML, level:REQ, label:"Authoritative server-plugin script present",
+     hint:"<scr" + "ipt type=\"text/x-server-plugin\"> … </scr" + "ipt>",
+     f:st=>({st:has(st.html,/<script[^>]*type=["']text\/x-server-plugin["']/i)?"pass":"fail"})},
+    {id:"h2", cat:HTML, level:REQ, label:"Lobby mode cards (hotseat + online)",
+     hint:'<button class="bgn-mode" data-mode="local">...  <button class="bgn-mode" data-mode="online">...',
+     f:st=>{
+       const modes = new Set((st.html.match(/data-mode=["']([a-z]+)["']/gi)||[]).map(m=>m.toLowerCase()));
+       if(modes.size>=2) return {st:"pass", det:[...modes].join(", ")};
+       return {st:"fail", det:modes.size?[...modes].join(", ") : "none"};
+     }},
+    {id:"h3", cat:HTML, level:REQ, label:"Create-room button (online play)",
+     f:st=>({st:has(st.html,/createRoomBtn|createRoomButton/i)?"pass":"fail"})},
+    {id:"h4", cat:HTML, level:REQ, label:"Join-code input (online play)",
+     hint:'<input id="joinCodeInput" maxlength="5" ...>',
+     f:st=>({st:has(st.html,/joinCodeInput|joinCodeEl/i)?"pass":"fail"})},
+    {id:"h5", cat:HTML, level:REQ, label:"Game board / table container",
+     f:st=>({st:has(st.html,/\bbgn-board\b|\bid=["']board["']|\bbgn-table\b/)?"pass":"fail"})},
+    {id:"h6", cat:HTML, level:REQ, label:"Room-code display for online games",
+     hint:'<b id="roomCodeEl">—</b>',
+     f:st=>({st:has(st.html,/roomCodeEl|roomCode/i)?"pass":"fail"})},
+    {id:"h7", cat:HTML, level:REC, label:"Copy-code button",
+     f:st=>({st:has(st.html,/copyCodeBtn|copyRoomCodeBtn/i)?"pass":"fail"})},
+    {id:"h8", cat:HTML, level:REC, label:"Resign / leave button",
+     f:st=>({st:has(st.html,/leaveBtn|id=["']resignBtn["']/i)?"pass":"fail"})},
+    {id:"h9", cat:HTML, level:REC, label:"Turn indicator",
+     f:st=>({st:has(st.html,/turnEl|turnTimerEl|turn-indicator|\bbgn-turn\b/i)?"pass":"fail"})},
+    {id:"h10", cat:HTML, level:REC, label:"Game log",
+     f:st=>({st:has(st.html,/logEl|\bbgn-log\b/i)?"pass":"fail"})},
+    {id:"h11", cat:HTML, level:REC, label:"Action buttons (new game / claim / menu)",
+     f:st=>{
+       const n = cnt(st.html,/newGameBtn|rematchBtn|id=["']claimBtn["']|id=["']menuBtn["']/i);
+       return n?{st:"pass", det:n + " found"}:{st:"fail"};
+     }},
+    {id:"h12", cat:HTML, level:REC, label:"BGN footer with hub link",
+     f:st=>({st:has(st.html,/\bbgn-footer\b/i)?"pass":"fail"})},
+    {id:"h13", cat:HTML, level:REC, label:"Help / how-to-play overlay",
+     f:st=>({st:has(st.html,/helpBtn|\bbgn-help\b|helpOverlay/i)?"pass":"fail"})},
+    {id:"h14", cat:HTML, level:REQ, label:"No duplicate element ids",
+     f:st=>{
+       const ids = st.html.match(/id=["']([^"']+)["']/g)||[];
+       const seen = {}, dup = [];
+       for(const a of ids){ const id=a.slice(4,-1); if(seen[id])dup.push(id); seen[id]=1; }
+       return dup.length?{st:"fail", det:"duplicate: " + dup.join(", ")}:{st:"pass"};
+     }},
+    {id:"h15", cat:HTML, level:REC, label:"BGN nav bar (frame chrome)",
+     f:st=>({st:has(st.html,/\bbgn-nav\b/i)?"pass":"fail"})},
+
+    {id:"f1", cat:FEA, level:REC, label:"BGN audio system (window.BGN_AUDIO)",
+     f:st=>({st:has(st.html,/window\.BGN_AUDIO/i)?"pass":"fail"})},
+    {id:"f2", cat:FEA, level:REC, label:"BGN Lounge (shared network chat)",
+     f:st=>({st:has(st.html,/\bbgn-lounge\b|loungeFrame/i)?"pass":"fail"})},
+    {id:"f3", cat:FEA, level:REC, label:"In-game chat in online rooms",
+     f:st=>({st:has(st.html,/\bbgn-chat\b|id=["']chatInput["']/i)?"pass":"fail"})},
+    {id:"f4", cat:FEA, level:REC, label:"Save / continue",
+     f:st=>({st:has(st.html,/continuePanel|continueBtn|\bsaveBtn\b/i)?"pass":"fail"})},
+    {id:"f5", cat:FEA, level:REC, label:"Share / export toolkit (PNG + JSON)",
+     f:st=>({st:has(st.html,/2ca2c779727012d212d20a0f915d73df\.js|\bshareBtn\b/i)?"pass":"fail"})},
+    {id:"f6", cat:FEA, level:REQ, label:"Client wired to the server (connectSocket / createServerSocket)",
+     f:st=>({st:has(st.html,/connectSocket\s*\(|createServerSocket\b/i)?"pass":"fail"})},
+    {id:"f7", cat:FEA, level:REC, label:"Reconnect / rejoin by code",
+     f:st=>({st:has(st.html,/rejoin/i)?"pass":"fail"})},
+    {id:"f8", cat:FEA, level:REC, label:"Server enforces turn order (not_your_turn)",
+     f:st=>({st:has(st.html,/not_your_turn|expectedTurn/i)?"pass":"fail"})},
+    {id:"f9", cat:FEA, level:REQ, label:"Durable room state (state slots / snapshot)",
+     f:st=>({st:has(st.html,/\bstate\s*\[|latestSnapshot|applyServerSnap/i)?"pass":"fail"})},
+    {id:"f10", cat:FEA, level:REC, label:"Chat input sanitized",
+     f:st=>({st:has(st.html,/cleanText|sanitize|escapeHtml/i)?"pass":"fail"})},
+    {id:"f11", cat:FEA, level:REC, label:"No secrets in public source",
+     f:st=>{
+       const n = cnt(st.html + "\n" + st.pjs,/(api[_-]?key|pass(?:word)?|secret|private[_-]?key|bearer)\s*[:=]\s*["'][^"']{8,}/i);
+       return n?{st:"warn", det:n + " likely secret(s) exposed — this is public source"}:{st:"pass"};
+     }},
+    {id:"f12", cat:FEA, level:REC, label:"Win / claim logic present",
+     f:st=>({st:has(st.html,/\bclaimWin\b|\bwinner\b/i)?"pass":"fail"})},
+    {id:"f13", cat:FEA, level:REQ, label:"Sound disabled by default (BGN_AUDIO muted:true)",
+     f:st=>{
+       if(!has(st.html,/\bwindow\.BGN_AUDIO\s*=\s*\{/i)) return {st:"pass", det:"no BGN_AUDIO config — nothing plays by default"};
+       if(has(st.html,/\bwindow\.BGN_AUDIO\s*=\s*\{[^}]*\bmuted\s*:\s*(?:true|!0|1)\b/i)) return {st:"pass"};
+       return {st:"fail", det:"BGN_AUDIO config present but sound starts enabled — set muted:true"};
+     }},
+    {id:"f14", cat:FEA, level:REQ, label:"Self-check footer link (Audit + popup) — shared network standard",
+     hint:"Give the game a one-click self-check: an 'Audit' link in the footer that pops up the standards checker pre-loaded with this generator's own name. Open the Self-check panel on https://perchance.org/bgn-standards-checker, click 'Get the AI-helper prompt to add the Audit button', and paste that prompt into this generator's AI helper.",
+     f:st=>{
+       const ok = has(st.html,/\bopenBgnAudit\s*\(/) &&
+         has(st.html,/\bbgnAuditOverlay\b/) &&
+         has(st.html,/\bbgnAuditFrame\b/) &&
+         has(st.html,/>\s*Audit\s*</) &&
+         has(st.html,/(?:a8d7e032445565364ff28d0e6ddda014\.perchance\.org|perchance\.org)\/bgn-standards-checker/);
+       return {st:ok?"pass":"fail"};
+     }},
+
+    // ══════ fullscreen board (maximized playing area) ══════
+    {id:"fs1", cat:FS, level:REQ, label:"Full screen button present (fsOpenBtn, title \"Full screen map\", hidden by default)",
+     hint:'<button class="fs-open-btn" id="fsOpenBtn" title="Full screen map" hidden>⛶ Full screen</button>',
+     f:st=>{
+       const ok = has(st.html,/\bfsOpenBtn\b/) && has(st.html,/title=["']Full screen map["']/i) && has(st.html,/\bid=["']fsOpenBtn["'][^>]*\bhidden\b/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs2", cat:FS, level:REC, label:"Button styled per standard (absolute top-right, glassy, gold hover)",
+     hint:"Style the button: position:absolute; top:10px; right:10px; z-index:6; background:rgba(10,14,24,.72); backdrop blur; white border; rounded corners; gold border on hover (var(--bgn-accent)).",
+     f:st=>{
+       const miss = [];
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*position\s*:\s*absolute/i)) miss.push("position:absolute");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*top\s*:\s*10px/i)) miss.push("top:10px");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*right\s*:\s*10px/i)) miss.push("right:10px");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*rgba\(10,14,24/i)) miss.push("glassy dark background");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*backdrop-filter/i)) miss.push("backdrop blur");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*rgba\(255,\s*255,\s*255/i)) miss.push("white border");
+       if(!has(st.html,/(?:\.fs-open-btn|#fsOpenBtn)\s*\{[^}]*border-radius/i)) miss.push("rounded corners");
+       if(!has(st.html,/\.fs-open-btn:hover\s*\{[^}]*--bgn-accent/i)) miss.push("gold border on hover");
+       return miss.length?{st:"warn", det:"missing: "+miss.join(", ")}:{st:"pass"};
+     }},
+    {id:"fs3", cat:FS, level:REQ, label:"Fullscreen overlay present (#fsOverlay: fixed, inset:0, z-index ~9500, hidden by default)",
+     hint:'<div id="fsOverlay" hidden>…</div>\n#fsOverlay CSS: position:fixed; inset:0; z-index:9500; background:#0b0e15; display:flex; flex-direction:column',
+     f:st=>{
+       const ok = has(st.html,/\bid=["']fsOverlay["']/) &&
+         has(st.html,/\bid=["']fsOverlay["'][^>]*\bhidden\b/) &&
+         has(st.html,/#fsOverlay\s*\{[^}]*position\s*:\s*fixed/i) &&
+         has(st.html,/#fsOverlay\s*\{[^}]*inset\s*:\s*0/i) &&
+         has(st.html,/#fsOverlay\s*\{[^}]*z-index\s*:\s*9500/i) &&
+         has(st.html,/#fsOverlay\s*\{[^}]*flex-direction\s*:\s*column/i);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs4", cat:FS, level:REQ, label:"Overlay top bar: status line, actions slot, ✕ Exit button",
+     hint:'<div class="fs-topbar"><span id="fsStatusEl"></span><span id="fsActionsCtn"></span><button id="fsExitBtn" class="btn btn-gold">✕ Exit</button></div>',
+     f:st=>{
+       const ok = has(st.html,/\bfsStatusEl\b/) && has(st.html,/\bfsActionsCtn\b/) && has(st.html,/\bfsExitBtn\b/) && has(st.html,/\.fs-topbar/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs5", cat:FS, level:REQ, label:"Board area stretches the canvas edge-to-edge",
+     hint:"Board-area CSS: flex:1; min-height:0; position:relative. Canvas CSS: position:absolute; inset:0; width:100%; height:100%",
+     f:st=>{
+       const ok = has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*\{[^}]*flex\s*:\s*1/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*\{[^}]*min-height\s*:\s*0/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*\{[^}]*position\s*:\s*relative/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*(?:canvas|>canvas)\s*\{[^}]*position\s*:\s*absolute/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*(?:canvas|>canvas)\s*\{[^}]*inset\s*:\s*0/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*(?:canvas|>canvas)\s*\{[^}]*width\s*:\s*100%/i) &&
+         has(st.html,/(?:\.fs-board|#fsBoardWrap)\s*(?:canvas|>canvas)\s*\{[^}]*height\s*:\s*100%/i);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs6", cat:FS, level:REC, label:"Corner slots for tile-in-hand & meeple chooser (:empty hidden)",
+     hint:"Tile slot: absolute top-right corner, hidden when empty (:empty, display:none). Meeple slot: absolute bottom-right corner, hidden when empty (:empty, display:none)",
+     f:st=>{
+       const ok = has(st.html,/\bfsTileCtn\b/) && has(st.html,/\bfsMeepleCtn\b/) &&
+         has(st.html,/\.fs-tile\s*\{[^}]*top\s*:/i) && has(st.html,/\.fs-meeple\s*\{[^}]*bottom\s*:/i) &&
+         has(st.html,/\.fs-tile:empty\s*\{[^}]*display\s*:\s*none/i) && has(st.html,/\.fs-meeple:empty\s*\{[^}]*display\s*:\s*none/i);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs7", cat:FS, level:REQ, label:"Public API window.bgnFullscreen (register / open / close / isOpen)",
+     hint:"Public API shape: window.bgnFullscreen — an object with register(o), open, close and isOpen methods",
+     f:st=>{
+       const ok = has(st.html,/\bwindow\.bgnFullscreen\s*=\s*\{/) &&
+         has(st.html,/register\s*:\s*function/i) &&
+         has(st.html,/open\s*:\s*(?:openFullscreen|function)/i) &&
+         has(st.html,/close\s*:\s*(?:closeFullscreen|function)/i) &&
+         has(st.html,/isOpen\s*:\s*function/i);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs8", cat:FS, level:REQ, label:"register() reads canvas, tile, meeple, resize — canvas reveals the ⛶ button",
+     hint:"register(o): o.canvas is required and sets fsOpenBtn.hidden=false; tile/meeple/resize optional.",
+     f:st=>{
+       const ok = has(st.html,/register\s*:\s*function\s*\([^)]*\)\s*\{/) &&
+         has(st.html,/\bo\.canvas\b/) &&
+         has(st.html,/fsOpenBtn\.hidden\s*=\s*(?:false|!1|0)/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs9", cat:FS, level:REQ, label:"Elements MOVED (never cloned) and restored to original parent/order",
+     hint:"Stash parentNode + nextSibling before moving; on close insertBefore each element back (reverse order).",
+     f:st=>{
+       const ok = has(st.html,/\._fsOrig\b|_fsOrig\s*=/) &&
+         has(st.html,/\bparentNode\b/) && has(st.html,/\bnextSibling\b/) && has(st.html,/\binsertBefore\b/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs10", cat:FS, level:REC, label:"Overlay status line stays in sync with banner changes",
+     hint:"Where bannerEl.textContent is written, also write fsStatusEl.textContent while the overlay is open.",
+     f:st=>{
+       const ok = has(st.html,/fsStatusEl\.textContent\s*=\s*bannerEl/i) &&
+         has(st.html,/if\s*\(\s*!fsOverlay\.hidden\s*\)\s*fsStatusEl/i);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs11", cat:FS, level:REQ, label:"Escape closes the overlay before other modals",
+     hint:"In the Escape handler, close the overlay first — if(!fsOverlay.hidden) then closeFullscreen() and return — before help/leaderboard handling.",
+     f:st=>{
+       const ok = has(st.html,/key\s*===\s*["']Escape["']|key\s*==\s*["']Escape["']/i) &&
+         has(st.html,/if\s*\(\s*!fsOverlay\.hidden\s*\)/) &&
+         has(st.html,/closeFullscreen\s*\(\s*\)/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs12", cat:FS, level:REQ, label:"Page scroll locked while open, restored on close",
+     hint:'document.body.style.overflow="hidden" on open; document.body.style.overflow="" on close.',
+     f:st=>{
+       const ok = has(st.html,/document\.body\.style\.overflow\s*=\s*["']hidden["']/) &&
+         has(st.html,/document\.body\.style\.overflow\s*=\s*["']["']/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"fs13", cat:FS, level:REC, label:"Refit on open/close & window resize; browser fullscreen attempted safely",
+     hint:"Call the game's resize/render after open and close; refit on window resize while open; try overlay.requestFullscreen() inside try/catch.",
+     f:st=>{
+       const ok = has(st.html,/\bfsRefit\s*\(/) &&
+         has(st.html,/requestFullscreen/) &&
+         has(st.html,/try\s*\{[^}]*requestFullscreen/) &&
+         has(st.html,/addEventListener\s*\(\s*["']resize["']/);
+       return {st:ok?"pass":"fail"};
+     }},
+
+    // ══════ game assets (standard-deck card games) ══════
+    {id:"g1", cat:GA, level:REQ, label:"Standard-deck games import the shared card-deck-plugin",
+     hint:"cardDeck = {import:card-deck-plugin}\n\nGames that play with a standard deck of cards (poker, blackjack, bridge, solitaire, …) should import the shared card-deck-plugin so every network game uses the same deck: cardDeck(\"AS\"), cardDeck(\"10C\"), cardDeck(\"back\"), …",
+     f:st=>{
+       if(!isCardGame(st)) return {st:"na", det:"not a standard-deck card game — n/a"};
+       if(has(st.pjs,/\{import:\s*card-deck-plugin\s*\}/i) || (st.imports||[]).includes("card-deck-plugin")) return {st:"pass"};
+       return {st:"fail", det:"a standard deck is in play — import the shared plugin"};
+     }},
+    {id:"g2", cat:GA, level:REC, label:"Cards render through cardDeck() (not a hand-rolled deck)",
+     hint:"Bind the plugin and render with it:\ncardDeck = {import:card-deck-plugin}\n…\ncardEl.innerHTML = cardDeck(\"AS\");  // also cardDeck(\"10C\"), cardDeck(\"back\"), …\nSee the plugin's $meta for the full API (70 ids, backs, colourways).",
+     f:st=>{
+       if(!isCardGame(st)) return {st:"na", det:"not a standard-deck card game — n/a"};
+       const m = st.pjs.match(/\b([A-Za-z_$][\w$]*)\s*=\s*\{import:\s*card-deck-plugin\s*\}/i);
+       if(!m){
+         if((st.imports||[]).includes("card-deck-plugin")) return {st:"warn", det:"plugin imported but never called"};
+         return {st:"na", det:"no cardDeck import — see the check above"};
+       }
+       const name = m[1];
+       const called = has(st.pjs + "\n" + st.html, new RegExp("\\b" + name + "\\s*\\("));
+       return called ? {st:"pass"} : {st:"warn", det:"plugin bound as " + name + " but never called"};
+     }},
+
+    // ══════ turn order & teams (multiplayer games) ══════
+    {id:"t1", cat:TO, level:REQ, label:"🎲 Turn order & teams panel — openable from the lobby and the in-table side panel",
+     hint:"Add the turn-order modal plus two openers: toBtn in the lobby and tableToBtn in the in-table side panel (copy the 'Turn order & teams' section from bgn-blank-template).",
+     f:st=>{
+       if(isSinglePlayer(st)) return {st:"na", det:"single-player game — n/a"};
+       const ok = has(st.html,/\btoModal\b/) && has(st.html,/\btoBtn\b/) && has(st.html,/\btableToBtn\b/) && has(st.html,/\btoCloseBtn\b/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"t2", cat:TO, level:REQ, label:"Who-goes-first roller drives the real turn order (game.first / setFirst rpc)",
+     hint:"Local/AI set game.first directly (the turn pill and banner follow it); online the host sets it server-side via the setFirst rpc, and createRoom accepts a lobby roll (guestFirst).",
+     f:st=>{
+       if(isSinglePlayer(st)) return {st:"na", det:"single-player game — n/a"};
+       const ok = has(st.html,/\bgame\.first\b/) && has(st.html,/\bsetFirst\b/) && has(st.html,/\bguestFirst\b/) && has(st.html,/\btoFirstBtn\b/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"t3", cat:TO, level:REQ, label:"Team splitter + seat draw (teams & seat names on the player cards)",
+     hint:"game.teams draws a random pair (Lions/Dragons, Sun/Moon…) onto the two seats and game.localNames draws who sits left/right; a 🎯 starts marker appears on the starting player's card.",
+     f:st=>{
+       if(isSinglePlayer(st)) return {st:"na", det:"single-player game — n/a"};
+       const ok = has(st.html,/\bgame\.teams\b/) && has(st.html,/\blocalNames\b/) && has(st.html,/\btoTeamBtn\b/) && has(st.html,/\btoSeatBtn\b/) && has(st.html,/🎯 starts/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"t4", cat:TO, level:REQ, label:"First/teams/seats persist through save, continue & share-import",
+     hint:"Include first, teams and localNames in the save payload, the load/continue path and the share snapshot so a drawn table survives reloads.",
+     f:st=>{
+       if(isSinglePlayer(st)) return {st:"na", det:"single-player game — n/a"};
+       const ok = has(st.html,/\bfirst\s*:\s*game\.first\b/) && has(st.html,/\bteams\s*:\s*game\.teams\b/) && has(st.html,/\blocalNames\s*:\s*game\.localNames\b/);
+       return {st:ok?"pass":"fail"};
+     }},
+    {id:"t5", cat:TO, level:REC, label:"AI mode honors a guest-first roll (bot turn auto-opens)",
+     hint:"When an AI match starts on a guest-first roll, auto-open the bot's turn — call aiPassTurn() when turnRoleFor() is guest.",
+     f:st=>{
+       if(isSinglePlayer(st)) return {st:"na", det:"single-player game — n/a"};
+       const ok = has(st.html,/\baiPassTurn\b/) && has(st.html,/\bturnRoleFor\b/);
+       return {st:ok?"pass":"fail"};
+     }}
+  ];
+}
+
+const GAME_CHECKS = ["p7","p8","p9","h1","h2","h3","h4","h5","h6","h7","h8","h9","h10","h11","h13",
+  "f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f12",
+  "fs1","fs2","fs3","fs4","fs5","fs6","fs7","fs8","fs9","fs10","fs11","fs12","fs13","g1","g2",
+  "t1","t2","t3","t4","t5"];
+const WAIVED = {};
+for(const id of GAME_CHECKS) WAIVED[id] = true;
+
+async function auditName(name){
+  const st = { name, pjs:null, html:null, error:null, lastEdit:null, imports:[], meta:{}, chrome:{}, hubUrl:null, genre:null, ref:false };
+  try {
+    const r = await sf("https://perchance.org/api/getGeneratorsAndDependencies?generatorNames=" + encodeURIComponent(name));
+    const j = await r.json().catch(()=>null);
+    const g = j && j.generators ? j.generators[name] : null;
+    if(!g || j.success === false){ st.error = (j && j.error) || "not found — generator is missing, private, or the name is wrong"; return st; }
+    st.pjs = g.code || "";
+    st.imports = g.imports || [];
+    st.lastEdit = g.lastEditTime;
+    const hr = await sf("https://perchance.org/api/getGeneratorHtml?generatorName=" + encodeURIComponent(name));
+    st.html = await hr.text().catch(()=>"");
+  } catch(e){
+    if(!st.error) st.error = String((e && e.message) || e);
+    return st;
+  }
+  if(!st.pjs){ st.error = "no list source returned"; return st; }
+
+  st.meta = metaKeys(st.pjs);
+  const gm = st.pjs.match(/^\s*gameGenre\s*=\s*(.*)$/m);
+  st.ownGenre = gm ? cleanVal(gm[1]) : (st.meta.genre || null);
+  const shelf = await getHubGames();
+  st.shelfEntry = shelf.find(g => g.slug === name) || null;
+  st.shelfGenre = st.shelfEntry ? st.shelfEntry.genre : null;
+  st.genre = st.ownGenre || st.shelfGenre;
+  st.ref = nonGameType(st.genre);
+  const hm = st.pjs.match(/^\s*hubUrl\s*=\s*(\S+)/m);
+  st.hubUrl = hm ? cleanVal(hm[1]) : null;
+  for(const k of ["gameTitle","gameTagline","gameKicker","gameGenre","gamePlayers","accentColor","heroImage"]){
+    const m = st.pjs.match(new RegExp("^\\s*" + k + "\\s*=\\s*(.*)$", "m"));
+    st.chrome[k] = m ? cleanVal(m[1]) : null;
+  }
+  const c = st.pjs.replace(/\\\[/g,"").replace(/\\\]/g,"").replace(/\\\{/g,"").replace(/\\\}/g,"");
+  st.counts = { o: cnt(c,/\[/g), c: cnt(c,/\]/g), bo: cnt(c,/\{/g), bc: cnt(c,/\}/g) };
+
+  const checks = makeChecks();
+  st.checks = checks;
+  for(const ch of checks){
+    if(st.ref && WAIVED[ch.id]){ ch.status = "na"; ch.detail = "n/a — " + (st.ref === "tool" ? "Tool" : "Reference") + " page (game-specific check)"; continue; }
+    if(st.ref === "reference" && ch.id === "f14"){ ch.status = "na"; ch.detail = "n/a — reference page (self-check link optional)"; continue; }
+    let res;
+    try { res = ch.f(st); } catch(e){ res = {st:"warn", det:"check error: " + String(e && e.message||e)}; }
+    ch.status = res.st;
+    ch.detail = res.det || "";
+  }
+  return st;
+}
+
+function gradeReport(st){
+  let total = 0, penalty = 0;
+  const counts = {pass:0, fail:0, warn:0, na:0, reqFail:0};
+  for(const ch of st.checks){
+    if(ch.level === INFO){ counts.pass++; continue; }
+    const w = ch.level === REQ ? 3 : 1;
+    total += w;
+    if(ch.status === "pass") counts.pass++;
+    else if(ch.status === "fail"){ counts.fail++; penalty += w; if(ch.level === REQ) counts.reqFail++; }
+    else if(ch.status === "warn"){ counts.warn++; penalty += 0.5; }
+    else counts.na++;
+  }
+  const score = total ? Math.max(0, Math.round(100 * (1 - penalty / total))) : 0;
+  let grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 60 ? "D" : "F";
+  if(counts.reqFail > 0 && grade !== "F") grade = "C";
+  const verdict = grade === "A" ? "Meets standards" : grade === "B" ? "Minor gaps" : grade === "C" ? "Needs polish" : grade === "D" ? "Below standard" : "Fails standards";
+  st.score = score; st.grade = grade; st.verdict = verdict; st.counts = counts;
+  return st;
+}
+
+function parseHubGames(code){
+  const lines = String(code||"").split("\n");
+  const games = [];
+  let cur = null, blockIndent = -1;
+  for(const ln of lines){
+    const ind = (ln.match(/^ */)||[""])[0].replace(/\t/g,"  ").length;
+    const t = ln.trim();
+    if(!t || t.startsWith("//")) continue;
+    if(t === "game"){
+      if(cur && cur.slug) games.push(cur);
+      cur = {slug:null, title:null, genre:null, players:null, comingSoon:false, beta:false, matchmaking:false};
+      blockIndent = ind;
+      continue;
+    }
+    if(!cur) continue;
+    if(ind <= blockIndent && cur.slug){ games.push(cur); cur = null; continue; }
+    const kv = t.match(/^([a-zA-Z]+)\s*=\s*(.*)$/);
+    if(kv){
+      const k = kv[1], v = cleanVal(kv[2]);
+      if(k === "slug") cur.slug = v;
+      else if(k === "title") cur.title = v;
+      else if(k === "genre") cur.genre = v;
+      else if(k === "players") cur.players = v;
+      else if(k === "comingSoon") cur.comingSoon = v === "true";
+      else if(k === "beta") cur.beta = v === "true";
+      else if(k === "matchmaking") cur.matchmaking = v === "true";
+    }
+  }
+  if(cur && cur.slug) games.push(cur);
+  const seen = {};
+  const out = [];
+  for(const g of games){
+    if(seen[g.slug]){
+      const a = seen[g.slug];
+      if(!a.genre && g.genre) a.genre = g.genre;
+      if(!a.players && g.players) a.players = g.players;
+      if(!a.title && g.title) a.title = g.title;
+      continue;
+    }
+    seen[g.slug] = g;
+    out.push(g);
+  }
+  return out;
+}
+
+function copyReport(sts){
+  const lines = ["# BGN Standards Report — " + new Date().toISOString().slice(0,10), ""];
+  for(const st of sts){
+    if(st.error){ lines.push("## " + st.name + " — ERROR: " + st.error); lines.push(""); continue; }
+    lines.push("## " + st.name + " — Grade " + st.grade + " (" + st.score + "%) — " + st.verdict);
+    lines.push("score " + st.score + "% · pass " + st.counts.pass + " · fail " + st.counts.fail + " · warn " + st.counts.warn + " · n/a " + st.counts.na);
+    let cat = null;
+    for(const ch of st.checks){
+      if(ch.cat !== cat){ cat = ch.cat; lines.push(""); lines.push("**" + cat + "**"); }
+      const ic = ch.status === "pass" ? "OK" : ch.status === "fail" ? "FAIL" : ch.status === "warn" ? "WARN" : "--";
+      lines.push("- [" + ic + "] " + ch.label + (ch.detail ? " — " + ch.detail : ""));
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+const FIX_HINTS = {
+  p2:'Set the game\'s display name inside $meta, e.g.:\n$meta\n  title = My Game Title',
+  p3:'Set a 1-2 sentence description inside $meta, e.g.:\n$meta\n  description = A quick description used for the listing and social cards.',
+  p5:'Add a comma-separated tag list inside $meta:\n$meta\n  tags = boardgame, strategy, two-player',
+  p8:"Add the remaining chrome config to main.pjs:\ngameTagline = ...\ngameKicker = ...\ngameGenre = ...\ngamePlayers = ...",
+  p10:"Square brackets must be balanced (every [ matched by a ]). Find the unbalanced region and fix it.",
+  p11:"Curly braces must be balanced (every { matched by a }). Find the unbalanced region and fix it.",
+  p12:"No line may start with [ or ] — rework the lines so they start with text (Perchance DSL safety).",
+  p13:"Convert tab indentation to 2-space indentation.",
+  p14:"Indent every nesting level in 2-space steps (no odd indentation widths).",
+  c4:"Use the BGN design-system classes (bgn-nav, bgn-mode, bgn-board, bgn-log, bgn-footer, …) instead of ad-hoc class names.",
+  c5:"Replace http:// resource URLs with https://.",
+  h3:'Add a "Create room" button for online play, e.g.:\n<button id="createRoomBtn" class="btn btn-gold">Create room</button>',
+  h5:'Add the game board/table container, e.g.:\n<div class="bgn-board" id="board">…</div>',
+  h7:'Add a "Copy code" button:\n<button id="copyCodeBtn" class="btn btn-ghost">Copy code</button>',
+  h8:'Add a "Leave" button in the room box:\n<button id="leaveBtn" class="btn btn-ghost">Leave</button>',
+  h9:'Add a turn indicator, e.g.:\n<b id="turnEl">Your turn</b>',
+  h10:'Add a game log, e.g.:\n<div id="logEl" class="bgn-log">…</div>',
+  h11:"Add the action buttons newGameBtn (new/rematch), claimBtn (claim win) and menuBtn (menu).",
+  h12:'Add a footer:\n<footer class="bgn-footer"><a href="https://perchance.org/bgn-boardgame-network">The Boardgame Network</a></footer>',
+  h13:"Add a help overlay opened by helpBtn (class bgn-help).",
+  h14:"Make every element id unique — remove or rename duplicates.",
+  h15:'Add the BGN nav bar:\n<nav class="bgn-nav"><a class="bgn-nav-brand" href="https://perchance.org/bgn-boardgame-network">Boardgame Network</a></nav>',
+  f1:"Add the shared audio system (window.BGN_AUDIO) — see a flagship game like bgn-chess for the reference snippet.",
+  f2:"Embed the BGN Lounge for shared network chat (class bgn-lounge).",
+  f3:'Add in-game chat to online rooms, e.g. an input id="chatInput" plus a message list.',
+  f4:"Add save/continue support (continueBtn / saveBtn) so a game can be resumed after a reload.",
+  f5:"Add the share/export toolkit (shareBtn) that exports a PNG screenshot and JSON game state.",
+  f6:"Wire the client to the server: call connectSocket() and subscribe to the room RPCs.",
+  f7:"Add reconnect/rejoin-by-code handling (rejoin) so a refresh brings the player back to their room.",
+  f8:"Enforce turn order server-side — reject moves from the wrong player (not_your_turn).",
+  f9:"Persist durable room state in the server state slots and broadcast snapshots (latestSnapshot / applyServerSnap).",
+  f10:"Sanitize chat input before rendering (escapeHtml / cleanText).",
+  f11:"Remove any API keys, passwords, or secrets from public source — everything a player can download is visible to everyone.",
+  f12:"Add win/claim detection (claimWin / winner) and end-of-game handling.",
+  f13:'Start with sound off — set muted:true in the BGN_AUDIO config:\nwindow.BGN_AUDIO = { music: "https://...mp3", muted: true };',
+  g1:'Import the shared card-deck-plugin at the top of main.pjs:\ncardDeck = {import:card-deck-plugin}\nThen render cards with it — cardDeck("AS"), cardDeck("10C"), cardDeck("back"), …\nSee https://perchance.org/card-deck-plugin for the full API.',
+  g2:"Use the plugin's API instead of hand-rolling your own card rendering:\ncardDeck = {import:card-deck-plugin}\n…\ncardEl.innerHTML = cardDeck(\"AS\");\nIf it's imported but never called, wire the actual card rendering through cardDeck().",
+  f14:'Add the footer self-check: an "Audit" link that pops up the standards checker pre-loaded with this generator\'s own name. Open https://perchance.org/bgn-standards-checker, click "Get the AI-helper prompt to add the Audit button" in the Self-check panel, and paste that prompt into this generator\'s AI helper.',
+  p15:'Declare the generator\'s genre in main.pjs, matching the hub shelf: add  genre = <Genre>  inside the $meta block (e.g.  genre = Strategy ,  genre = Tool ,  genre = Reference ). Check the category used for this generator on https://perchance.org/bgn-boardgame-network.',
+  t1:'Add the 🎲 Turn order & teams panel: the modal (toModal) plus two openers — a toBtn in the lobby and a tableToBtn in the in-table side panel. Copy the "Turn order & teams" section from bgn-blank-template.',
+  t2:'Make who-goes-first drive the real turn order: set game.first for local/AI (the turn pill and banner follow it), honor it server-side via a setFirst rpc, and accept a lobby roll in createRoom (guestFirst).',
+  t3:'Add the team splitter (game.teams draws a random pair onto the two seats) and seat draw (game.localNames draws who sits left/right), rendered on the player cards with a 🎯 starts marker on the starting player.',
+  t4:'Persist first, teams and localNames through save, continue/load and the share snapshot so a drawn table survives reloads.',
+  t5:'In AI mode, if a guest-first roll lands, auto-open the bot\'s turn — call aiPassTurn() when turnRoleFor() is guest.'
+};
+
+function buildFixPrompt(st){
+  if(st.error) return "# " + st.name + "\n\nCannot build a fix prompt: " + st.error;
+  const issues = st.checks.filter(c => (c.status === "fail" || c.status === "warn") && c.level !== INFO);
+  const fails = issues.filter(c => c.status === "fail");
+  const warns = issues.filter(c => c.status === "warn");
+  const lines = ["# BGN Standards Fix Prompt — " + st.name, ""];
+  lines.push("You are an experienced BGN (Boardgame Network) generator developer. Audit the code of this generator against the BGN house standards and fix every issue listed below. Work through them one at a time, in order. For each issue: locate the relevant code, make the smallest change that resolves it, and leave everything else — gameplay, content, existing features — untouched.");
+  lines.push("");
+  lines.push("Generator: " + st.name + " — https://perchance.org/" + st.name);
+  lines.push("Current grade: " + st.grade + " (" + st.score + "%) — " + st.verdict);
+  lines.push("Issues to fix: " + fails.length + " required failure(s), " + warns.length + " warning(s)" + (st.ref ? " (non-game page — game checks not required)" : ""));
+  lines.push("");
+  lines.push("## Issues");
+  lines.push("");
+  let cat = null, n = 0;
+  for(const c of issues){
+    if(c.cat !== cat){ cat = c.cat; lines.push("### " + cat); lines.push(""); }
+    n++;
+    lines.push("**" + n + ". " + c.label + "** — " + (c.level === REQ ? "required" : "recommended") + " · " + c.status.toUpperCase());
+    if(c.detail) lines.push("- Found: " + c.detail);
+    const fix = c.hint ? c.hint : (FIX_HINTS[c.id] || "Make sure this item is present and correct.");
+    if(fix.includes("\n")){
+      lines.push("- Fix:");
+      lines.push("```");
+      lines.push(fix);
+      lines.push("```");
+    } else {
+      lines.push("- Fix: " + fix);
+    }
+    lines.push("");
+  }
+  lines.push("## Final checks");
+  lines.push("- The generator loads and runs without errors.");
+  lines.push("- Every issue above is resolved — re-run the standards checker to confirm.");
+  lines.push("- No unrelated gameplay, content, or features were changed.");
+  return lines.join("\n");
+}
+
+function buildOneFixPrompt(st, check){
+  if(st.error) return "# " + st.name + "\n\nCannot build a fix prompt: " + st.error;
+  const fix = check.hint ? check.hint : (FIX_HINTS[check.id] || "Make sure this item is present and correct.");
+  const lines = ["# BGN Fix Prompt — " + st.name + " — " + check.label, ""];
+  lines.push("You are an experienced BGN (Boardgame Network) generator developer. This prompt covers exactly ONE issue and nothing else. Make the smallest change that resolves it, and leave everything else — gameplay, content, existing features — untouched.");
+  lines.push("");
+  lines.push("Generator: " + st.name + " — https://perchance.org/" + st.name);
+  lines.push("Current grade: " + st.grade + " (" + st.score + "%) — " + st.verdict);
+  lines.push("");
+  lines.push("## The one issue to fix");
+  lines.push("");
+  lines.push("**" + check.label + "** — " + (check.level === REQ ? "required" : "recommended") + " · " + check.status.toUpperCase());
+  if(check.detail) lines.push("- Found: " + check.detail);
+  if(fix.includes("\n")){
+    lines.push("- Fix:");
+    lines.push("```");
+    lines.push(fix);
+    lines.push("```");
+  } else {
+    lines.push("- Fix: " + fix);
+  }
+  lines.push("");
+  lines.push("## Done when");
+  lines.push("- This one issue is resolved — re-run the standards checker to confirm.");
+  lines.push("- Nothing else in the generator was changed.");
+  return lines.join("\n");
+}
+
+function renderCard(st){
+  const card = document.createElement("div");
+  card.className = "audit-card";
+  if(st.error){
+    card.innerHTML = '<div class="audit-head"><span class="grade-badge grade-f">✗</span><a class="audit-title" target="_blank" href="https://perchance.org/' + esc(st.name) + '#edit">' + esc(st.name) + '</a></div><p class="errnote">' + esc(st.error) + "</p>";
+    return card;
+  }
+  const gcls = "grade-" + st.grade.toLowerCase();
+  const chips = ["genre: " + esc(st.genre||"?")];
+  if(st.listed){
+    if(st.listed.title) chips.push(esc(st.listed.title));
+    if(st.listed.players) chips.push(esc(st.listed.players));
+    if(st.listed.beta) chips.push("beta");
+    if(st.listed.comingSoon) chips.push("coming soon");
+  }
+  const byCat = {};
+  for(const ch of st.checks){ (byCat[ch.cat] = byCat[ch.cat] || {pass:0,total:0}); byCat[ch.cat].total++; if(ch.status === "pass") byCat[ch.cat].pass++; }
+  const cats = Object.keys(byCat).map(c=>'<span class="catchip">' + esc(c) + " <b>" + byCat[c].pass + "/" + byCat[c].total + "</b></span>").join("");
+
+  const head = '<div class="audit-head">'
+    + '<span class="grade-badge ' + gcls + '">' + st.grade + "</span>"
+    + '<a class="audit-title" target="_blank" href="https://perchance.org/' + esc(st.name) + '#edit">' + esc(st.name) + "</a>"
+    + chips.map(c=>'<span class="chip' + (c==="beta"?" beta":c==="coming soon"?" comingsoon":"") + '">' + c + "</span>").join("")
+    + "</div>"
+    + '<div class="scorebar"><div style="width:' + st.score + '%"></div></div>'
+    + '<div class="scorem"><span>' + st.score + "% · " + esc(st.verdict) + "</span><span>" + st.counts.pass + " pass · " + st.counts.fail + " fail · " + st.counts.warn + " warn</span></div>"
+    + '<div class="catrow">' + cats + "</div>"
+    + '<div class="cardtools"><button class="details-toggle" data-t="show">Show checks</button><button class="details-toggle" data-c="copy">Copy report</button><button class="details-toggle" data-d="md">Download .md</button><button class="details-toggle" data-c="prompt" title="Copy a prompt you can paste into the generator\'s AI helper to fix these issues">📋 Fix prompt</button><button class="details-toggle" data-d="promptmd" title="Download the fix prompt as a Markdown file you can attach in the generator\'s AI helper">⬇ Fix prompt .md</button><button class="details-toggle" data-c="oneprompt" title="Pick ONE failing check and get a fix prompt focused only on that issue — the AI helper can concentrate on just that">🎯 Fix one issue</button></div>'
+    + '<div class="onepicker" style="display:none"></div>'
+    + '<div class="chklist" style="display:none"></div>';
+
+  card.innerHTML = head;
+  const list = card.querySelector(".chklist");
+  for(const ch of st.checks){
+    const status = ch.level === INFO ? "info" : ch.status;
+    const icon = status === "pass" ? "✔" : status === "fail" ? "✘" : status === "warn" ? "⚠" : status === "info" ? "ℹ" : "–";
+    const icc = status === "pass" ? "#3fd3a6" : status === "fail" ? "#ff8f8f" : status === "warn" ? "#e6b95e" : status === "info" ? "#9a8fc0" : "#7a7391";
+    const row = document.createElement("div");
+    row.className = "chk " + status;
+    row.innerHTML = '<span class="ic" style="color:' + icc + '">' + icon + '</span>'
+      + '<span class="lbl">' + esc(ch.label) + (ch.level === REQ ? ' <span class="det">(required)</span>' : "")
+      + (ch.detail ? ' <span class="det">' + esc(ch.detail) + "</span>" : "")
+      + (ch.hint && status !== "pass" && status !== "info" ? '<span class="hint">' + esc(ch.hint) + "</span>" : "")
+      + "</span>";
+    if(status === "fail" || status === "warn"){
+      const fb = document.createElement("button");
+      fb.className = "details-toggle chkfix";
+      fb.textContent = "🎯";
+      fb.title = "Copy a fix prompt focused on just this one issue";
+      fb.onclick = ev => { ev.stopPropagation(); copyText(buildOneFixPrompt(st, ch)); };
+      row.appendChild(fb);
+    }
+    list.appendChild(row);
+  }
+  const issues = st.checks.filter(c => (c.status === "fail" || c.status === "warn") && c.level !== INFO);
+  const picker = card.querySelector(".onepicker");
+  const onepBtn = card.querySelector('[data-c="oneprompt"]');
+  onepBtn.onclick = () => {
+    const open = picker.style.display !== "none";
+    picker.style.display = open ? "none" : "block";
+    onepBtn.textContent = open ? "🎯 Fix one issue" : "🎯 Close picker";
+    if(!open && !picker.childElementCount){
+      const title = document.createElement("div");
+      title.className = "onepick-title";
+      title.textContent = "Pick one issue to focus on — copy or download a single-issue fix prompt:";
+      picker.appendChild(title);
+      if(!issues.length){
+        const row = document.createElement("div");
+        row.className = "onepick-row";
+        row.innerHTML = '<span class="onepick-lbl">No failed or warning checks — nothing to fix.</span>';
+        picker.appendChild(row);
+      }
+      for(const ch of issues){
+        const row = document.createElement("div");
+        row.className = "onepick-row";
+        row.innerHTML = '<span class="onepick-lbl">' + (ch.status === "fail" ? "✘ " : "⚠ ") + esc(ch.label) + "</span>"
+          + '<button class="details-toggle" data-pick-copy="1">📋 Copy</button>'
+          + '<button class="details-toggle" data-pick-dl="1">⬇ .md</button>';
+        row.querySelector('[data-pick-copy]').onclick = () => copyText(buildOneFixPrompt(st, ch));
+        row.querySelector('[data-pick-dl]').onclick = () => downloadText(buildOneFixPrompt(st, ch), st.name + "-bgn-fix-" + ch.id + ".md");
+        picker.appendChild(row);
+      }
+    }
+  };
+  const tog = card.querySelector('[data-t="show"]');
+  tog.onclick = () => { const open = list.style.display !== "none"; list.style.display = open ? "none" : "block"; tog.textContent = open ? "Show checks" : "Hide checks"; };
+  card.querySelector('[data-c="copy"]').onclick = () => copyText(copyReport([st]));
+  card.querySelector('[data-d="md"]').onclick = () => downloadMd([st], st.name + "-bgn-report.md");
+  card.querySelector('[data-c="prompt"]').onclick = () => copyText(buildFixPrompt(st));
+  card.querySelector('[data-d="promptmd"]').onclick = () => downloadText(buildFixPrompt(st), st.name + "-bgn-fix-prompt.md");
+  card.dataset.pass = (st.grade === "A" && !st.error) ? "1" : "0";
+  return card;
+}
+
+function applyGenVisibility(){
+  const show = $("showPassGensChk") ? $("showPassGensChk").checked : true;
+  let hidden = 0;
+  document.querySelectorAll(".audit-card").forEach(card => {
+    const pass = card.dataset.pass === "1";
+    card.hidden = pass && !show;
+    if(pass && !show) hidden++;
+  });
+  const note = $("genVisibilityNote");
+  if(note) note.textContent = hidden ? hidden + " passing generator(s) hidden — tick the box above to show them." : "";
+}
+
+function downloadText(text, filename){
+  const blob = new Blob([text], {type:"text/markdown;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 3000);
+  setStatus("Downloaded " + filename + ".");
+}
+function downloadMd(sts, filename){ downloadText(copyReport(sts), filename); }
+
+function addReportTools(sts){
+  if(sts.length < 2) return;
+  const bar = document.createElement("div");
+  bar.className = "reporttools";
+  bar.innerHTML = '<button class="btn btn-ghost" id="dlAllBtn">⬇ Download all as .md</button>'
+    + '<button class="btn btn-ghost" id="copyAllBtn">📋 Copy all reports</button>'
+    + '<button class="btn btn-ghost" id="dlPromptBtn" title="Download one fix prompt per audited generator — paste or attach each in the generator\'s AI helper">⬇ Download fix prompts</button>';
+  const res = $("resultsEl");
+  res.insertBefore(bar, res.firstChild);
+  $("dlAllBtn").onclick = () => downloadMd(sts, "bgn-standards-reports.md");
+  $("copyAllBtn").onclick = () => copyText(copyReport(sts));
+  $("dlPromptBtn").onclick = () => {
+    const prompts = sts.filter(s => !s.error).map(s => buildFixPrompt(s));
+    downloadText(prompts.join("\n\n---\n\n"), "bgn-fix-prompts.md");
+  };
+}
+
+function copyText(text, msg){
+  msg = msg || "Report copied to clipboard.";
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(()=>setStatus(msg), ()=>fallbackCopy(text, msg)); }
+  else fallbackCopy(text, msg);
+}
+function fallbackCopy(text, msg){
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try{ document.execCommand("copy"); setStatus(msg || "Report copied to clipboard."); }catch(e){ setStatus("Could not copy — select the text manually."); }
+  document.body.removeChild(ta);
+}
+
+let scanRunning = false;
+function setStatus(msg){ $("statusEl").textContent = msg || ""; }
+
+async function runAudits(names){
+  const res = $("resultsEl");
+  res.innerHTML = "";
+  const sts = [];
+  for(let i = 0; i < names.length; i++){
+    setStatus("Auditing " + names[i] + " (" + (i+1) + "/" + names.length + ")…");
+    const st = await auditName(names[i]);
+    if(!st.error) gradeReport(st);
+    sts.push(st);
+    res.appendChild(renderCard(st));
+    applyGenVisibility();
+  }
+  addReportTools(sts);
+  setStatus("Done — " + names.length + " generator(s) audited.");
+}
+
+let hubGamesCache = null;
+async function getHubGames(){
+  if(hubGamesCache) return hubGamesCache;
+  setStatus("Fetching the hub shelf (" + HUB_URL + ")…");
+  try{
+    const r = await sf("https://perchance.org/api/getGeneratorsAndDependencies?generatorNames=" + HUB_SLUG);
+    const j = await r.json().catch(()=>null);
+    const code = j && j.generators && j.generators[HUB_SLUG] ? j.generators[HUB_SLUG].code : "";
+    hubGamesCache = parseHubGames(code);
+  }catch(e){ hubGamesCache = []; }
+  return hubGamesCache;
+}
+
+async function scanNetwork(limit){
+  if(scanRunning) return;
+  scanRunning = true;
+  $("auditBtn").disabled = true; $("scanBtn").disabled = true;
+  $("progFill").style.width = "0";
+  $("progressWrap").style.display = "block";
+  try{
+    const games = await getHubGames();
+    if(!games.length){ setStatus("Could not read the shelf from " + HUB_URL); return; }
+    const targets = limit && limit > 0 ? games.slice(0, limit) : games;
+    const res = $("resultsEl");
+    res.innerHTML = "";
+    const sts = [];
+    let i = 0;
+    for(const g of targets){
+      i++;
+      await new Promise(r => setTimeout(r, 40));
+      $("progFill").style.width = Math.round(100 * (i - 1) / targets.length) + "%";
+      setStatus("[" + i + "/" + targets.length + "] " + g.title + " (" + g.slug + ")…");
+      const st = await auditName(g.slug);
+      if(!st.error) gradeReport(st);
+      st.listed = g;
+      sts.push(st);
+      res.appendChild(renderCard(st));
+      applyGenVisibility();
+      if(i % 5 === 0) await new Promise(r => setTimeout(r, 60));
+    }
+    $("progFill").style.width = "100%";
+    addReportTools(sts);
+    setStatus("Shelf scan complete — " + targets.length + " games on the network.");
+  } catch(e){
+    setStatus("Scan failed: " + String((e && e.message) || e));
+  } finally {
+    scanRunning = false;
+    $("auditBtn").disabled = false; $("scanBtn").disabled = false;
+    setTimeout(()=>{ $("progressWrap").style.display = "none"; }, 1500);
+  }
+}
+
+$("auditBtn").onclick = () => {
+  const names = parseNames($("namesInput").value);
+  if(!names){ setStatus("Enter at least one generator name or link."); return; }
+  runAudits(names);
+};
+$("scanBtn").onclick = scanNetwork;
+$("namesInput").addEventListener("keydown", e => { if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); $("auditBtn").click(); } });
+$("showPassGensChk").addEventListener("change", applyGenVisibility);
+
+function openAuditPopup(){
+  const f = $("auditPopupFrame");
+  f.src = CHECKER_EMBED + "?g=" + encodeURIComponent(window.generatorName || "bgn-standards-checker") + "&embed=1&v=" + Date.now();
+  $("auditPopup").hidden = false;
+  document.body.style.overflow = "hidden";
+}
+function closeAuditPopup(){
+  $("auditPopup").hidden = true;
+  document.body.style.overflow = "";
+}
+$("footerAuditLink").addEventListener("click", e => { e.preventDefault(); openAuditPopup(); });
+$("auditPopupCloseBtn").addEventListener("click", closeAuditPopup);
+$("auditPopup").addEventListener("click", e => { if(e.target === $("auditPopup")) closeAuditPopup(); });
+document.addEventListener("keydown", e => { if(e.key === "Escape") closeAuditPopup(); });
+
+function openEditBg(e){
+  const a = e.target && e.target.closest ? e.target.closest("a.audit-title") : null;
+  if(!a) return;
+  e.preventDefault();
+  const w = window.open(a.href, "_blank");
+  if(w){
+    const refocus = () => {
+      try{ w.blur(); }catch(_){}
+      try{ window.focus(); }catch(_){}
+      try{ if(window.top) window.top.focus(); }catch(_){}
+    };
+    refocus();
+    setTimeout(refocus, 60);
+    setTimeout(refocus, 250);
+    setTimeout(refocus, 800);
+  } else {
+    document.removeEventListener("click", openEditBg);
+    a.click();
+  }
+}
+document.addEventListener("click", openEditBg);
+
+const CHECKER_EMBED = "https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker";
+const SELF_SNIPPET =
+  '<!-- BGN self-check: paste next to "Browse the shelf" in your footer -->\n'
+  + '<a href="#" onclick="openBgnAudit();return false;" style="margin-left:12px;color:var(--bgn-accent2,#f2dc8b);font-weight:600;text-decoration:none" title="Check this generator against the BGN standards">Audit</a>\n'
+  + '<div id="bgnAuditOverlay" hidden><div class="bgn-audit-box"><div class="bgn-audit-head"><span>🛡️ BGN standards check</span><button onclick="closeBgnAudit()">✕</button></div><iframe id="bgnAuditFrame"></iframe></div></div>\n'
+  + '<style>\n'
+  + '#bgnAuditOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}\n'
+  + '#bgnAuditOverlay[hidden]{display:none}\n'
+  + '.bgn-audit-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0912;border:1px solid rgba(212,175,55,.35);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}\n'
+  + '.bgn-audit-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#f2dc8b;font:600 14px Cinzel,serif;border-bottom:1px solid rgba(212,175,55,.16)}\n'
+  + '.bgn-audit-head button{background:none;border:1px solid rgba(212,175,55,.3);color:#f2dc8b;border-radius:6px;cursor:pointer}\n'
+  + '</style>\n'
+  + '<script>\n'
+  + 'function openBgnAudit(){\n'
+  + '  var f=document.getElementById("bgnAuditFrame");\n'
+  + '  f.src="https://a8d7e032445565364ff28d0e6ddda014.perchance.org/bgn-standards-checker?g="+encodeURIComponent(window.generatorName)+"&embed=1&v="+Date.now();\n'
+  + '  document.getElementById("bgnAuditOverlay").hidden=false;\n'
+  + '  document.body.style.overflow="hidden";\n'
+  + '}\n'
+  + 'function closeBgnAudit(){\n'
+  + '  document.getElementById("bgnAuditOverlay").hidden=true;\n'
+  + '  document.body.style.overflow="";\n'
+  + '}\n'
+  + 'document.addEventListener("keydown",function(e){ if(e.key==="Escape") closeBgnAudit(); });\n'
+  + 'document.getElementById("bgnAuditOverlay").addEventListener("click",function(e){ if(e.target.id==="bgnAuditOverlay") closeBgnAudit(); });\n'
+  + '</scr' + 'ipt>';
+const SELF_AI_INSTRUCTIONS =
+  "Add the BGN self-check \"Audit\" link to this generator's footer.\n"
+  + "\n"
+  + "1. In index.html, find the footer block (<footer class=\"bgn-footer\">) and the line that reads: Part of The Boardgame Network · Browse the shelf.\n"
+  + "2. Paste the snippet below unchanged, directly after that footer <p>. It adds a single \"Audit\" link next to \"Browse the shelf\" plus a hidden popup (overlay + style + script).\n"
+  + "3. Clicking \"Audit\" opens the BGN Standards Checker embedded with THIS generator's own name (window.generatorName) and runs the standards audit automatically.\n"
+  + "4. Do not modify anything else in the generator.\n"
+  + "\n"
+  + "SNIPPET TO PASTE:\n"
+  + SELF_SNIPPET;
+
+(function initSelfCheck(){
+  const promptTa = $("selfCheckPrompt");
+  const link = $("aiPromptLink");
+  if(link && promptTa) link.onclick = e => {
+    e.preventDefault();
+    promptTa.value = SELF_AI_INSTRUCTIONS;
+    promptTa.hidden = false;
+    promptTa.select();
+    copyText(SELF_AI_INSTRUCTIONS, "AI-helper prompt copied — paste it into the generator's AI helper to add the footer Audit link.");
+  };
+})();
+
+window.bgnChecker = {
+  check: (names) => runAudits(parseNames(names)),
+  audit: auditName,
+  grade: gradeReport
+};
+
+window.addEventListener("message", async ev => {
+  const d = ev.data;
+  if(!d || typeof d !== "object" || d.type !== "bgn-check") return;
+  const names = parseNames(Array.isArray(d.generators) ? d.generators.join(", ") : String(d.generators || ""));
+  const reply = obj => { try{ ev.source.postMessage(obj, ev.origin); }catch(e){} };
+  if(!names.length){ reply({type:"bgn-check-result", error:"no valid generator names in request"}); return; }
+  const res = $("resultsEl");
+  res.innerHTML = "";
+  const sts = [];
+  for(let i = 0; i < names.length; i++){
+    setStatus("Self-checking " + names[i] + "…");
+    const st = await auditName(names[i]);
+    if(!st.error) gradeReport(st);
+    sts.push(st);
+    res.appendChild(renderCard(st));
+    applyGenVisibility();
+    reply({type:"bgn-check-result", generator:st.name, grade:st.grade||null, score:st.score||null, verdict:st.verdict||null, error:st.error||null});
+  }
+  addReportTools(sts);
+  setStatus("Self-check complete — " + names.length + " generator(s) audited.");
+});
+
+(function initFromUrl(){
+  const q = new URLSearchParams(location.search);
+  if(q.get("embed") === "1" || q.get("embed") === "true") document.body.classList.add("embed");
+  if(q.get("scan") === "1"){ setTimeout(()=>scanNetwork(), 200); return; }
+  const g = q.get("g") || q.get("gen") || q.get("generator");
+  if(g){
+    const names = parseNames(g);
+    if(names.length){
+      $("namesInput").value = names.join(", ");
+      setTimeout(()=>runAudits(names), 200);
+    }
+  }
+})();
+
+window.__check = { auditName, gradeReport, parseNames, parseHubGames, scanNetwork, runAudits, copyReport, renderCard, metaKeys, makeChecks, sf, downloadMd, downloadText, addReportTools, buildFixPrompt, buildOneFixPrompt, applyGenVisibility };
+</script>

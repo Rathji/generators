@@ -1,0 +1,267 @@
+<style>
+  :root {
+    --bg: #151515;
+    --panel: #1e1e1e;
+    --panel2: #262626;
+    --border: #3a3a3a;
+    --text: #e8e8e8;
+    --muted: #9c9c9c;
+    --accent: #4a9eff;
+  }
+  * { box-sizing: border-box }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    text-align: left;
+    min-height: 100vh;
+  }
+  header {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 650 }
+  main { max-width: 940px; margin: 0 auto; padding: 16px 16px 60px }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  label { display: block; font-size: .78rem; color: var(--muted); margin-bottom: 5px }
+  textarea, select, input[type="text"] {
+    width: 100%;
+    background: var(--panel2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font: inherit;
+  }
+  textarea { resize: vertical; min-height: 76px }
+  select { cursor: pointer }
+  .field { margin-bottom: 12px }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end }
+  .grow { flex: 1; min-width: 150px }
+  .btn {
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 9px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent) }
+  #generateBtn {
+    display: block;
+    width: 100%;
+    margin-top: 4px;
+    background: var(--accent);
+    border: 1px solid var(--accent);
+    color: #fff;
+    font-weight: 600;
+    font-size: 1rem;
+    padding: 12px;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  #generateBtn:disabled { opacity: .55; cursor: wait }
+  #statusEl { text-align: center; color: var(--muted); font-size: .85rem; padding: 8px 0; min-height: 1.4em }
+  #statusEl.busy { color: var(--accent) }
+  #outputCtn { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .tile img { width: 100%; display: block; background: #000 }
+  .tile .row { padding: 8px 10px; gap: 6px }
+  .tile .seed { font-size: .7rem; color: var(--muted); padding: 0 10px }
+  .tile .prompt {
+    font-size: .7rem;
+    color: var(--muted);
+    padding: 4px 10px 10px;
+    word-break: break-word;
+    max-height: 3.6em;
+    overflow: auto;
+  }
+  .tile .btn { font-size: .75rem; padding: 5px 10px }
+  .error { color: #ff7b72; font-size: .8rem; padding: 4px 0 }
+  .muted { color: var(--muted); font-size: .78rem }
+  @media (max-width: 560px) {
+    #outputCtn { grid-template-columns: 1fr }
+  }
+</style>
+
+<header>
+  <h1>AI Art Template</h1>
+  <span class="muted" style="margin-left:auto">free · no sign-up</span>
+  <button id="clearBtn" class="btn">Clear</button>
+</header>
+
+<main>
+  <div class="panel">
+    <div class="field">
+      <label for="promptInput">Prompt</label>
+      <textarea id="promptInput" placeholder="Describe the image you want to generate..."></textarea>
+    </div>
+    <div class="row">
+      <div class="field grow">
+        <label for="categorySelect">Style category</label>
+        <select id="categorySelect"></select>
+      </div>
+      <div class="field grow">
+        <label for="styleSelect">Style</label>
+        <select id="styleSelect"></select>
+      </div>
+      <div class="field">
+        <label for="shapeSelect">Resolution</label>
+        <select id="shapeSelect">
+          <option value="512x512">Square · 512×512</option>
+          <option value="768x768">Square · 768×768</option>
+          <option value="512x768">Portrait · 512×768</option>
+          <option value="768x512">Landscape · 768×512</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="countSelect">Images</label>
+        <select id="countSelect">
+          <option>1</option>
+          <option>2</option>
+          <option>3</option>
+          <option>4</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="cfgInput">CFG (1–30)</label>
+        <select id="cfgInput"></select>
+      </div>
+      <div class="field">
+        <label for="seedInput">Seed (blank = random)</label>
+        <input id="seedInput" type="text" placeholder="random">
+      </div>
+    </div>
+    <button id="generateBtn">✨ Generate</button>
+    <div id="statusEl"></div>
+  </div>
+
+  <div id="outputCtn"></div>
+</main>
+
+<script>
+  const NO_OPTIONS = "No Configured Options";
+
+  function addTile(res, prompt) {
+    const seed = res.inputs && res.inputs.seed;
+    const tile = document.createElement("div");
+    tile.className = "tile";
+
+    const img = document.createElement("img");
+    img.src = res.dataUrl;
+    img.alt = prompt.slice(0, 80);
+    tile.appendChild(img);
+
+    const row = document.createElement("div");
+    row.className = "row";
+    const dl = document.createElement("button");
+    dl.className = "btn";
+    dl.textContent = "⬇ Save";
+    dl.onclick = () => {
+      const a = document.createElement("a");
+      a.href = res.dataUrl;
+      a.download = `art-${seed && seed > 0 ? seed : "rand"}.png`;
+      a.click();
+    };
+    row.appendChild(dl);
+    tile.appendChild(row);
+
+    const seedEl = document.createElement("div");
+    seedEl.className = "seed";
+    seedEl.textContent = seed && seed > 0 ? `seed ${seed}` : "random seed";
+    tile.appendChild(seedEl);
+
+    const promptEl = document.createElement("div");
+    promptEl.className = "prompt";
+    promptEl.textContent = prompt;
+    tile.appendChild(promptEl);
+
+    outputCtn.prepend(tile);
+  }
+
+  function addError(msg) {
+    const el = document.createElement("div");
+    el.className = "error";
+    el.textContent = "⚠ " + msg.slice(0, 300);
+    outputCtn.prepend(el);
+  }
+
+  async function generate() {
+    if (generateBtn.disabled) return;
+    const promptText = promptInput.value.trim();
+    const prompt = promptText || "beautiful artwork";
+
+    const count = Number(countSelect.value);
+    const baseSeed = seedInput.value.trim() === "" ? null : Number(seedInput.value.trim());
+    const opts = {
+      resolution: shapeSelect.value,
+      guidanceScale: Number(cfgInput.value),
+      saveTitle: prompt.slice(0, 150),
+    };
+
+    generateBtn.disabled = true;
+    statusEl.textContent = "Generating...";
+    statusEl.classList.add("busy");
+    try {
+      for (let i = 0; i < count; i++) {
+        if (baseSeed !== null) opts.seed = baseSeed + i;
+        statusEl.textContent = `Generating ${i + 1}/${count}...`;
+        try {
+          const res = await root.generateImage(prompt, { ...opts });
+          addTile(res, prompt);
+        } catch (err) {
+          addError(String((err && err.message) || err));
+        }
+      }
+    } finally {
+      generateBtn.disabled = false;
+      statusEl.classList.remove("busy");
+      statusEl.textContent = "Done.";
+    }
+  }
+
+  function init() {
+    const catOpt = document.createElement("option");
+    catOpt.value = NO_OPTIONS;
+    catOpt.textContent = NO_OPTIONS;
+    categorySelect.appendChild(catOpt);
+
+    const styleOpt = document.createElement("option");
+    styleOpt.value = NO_OPTIONS;
+    styleOpt.textContent = NO_OPTIONS;
+    styleSelect.appendChild(styleOpt);
+
+    for (let i = 1; i <= 30; i++) {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = i === 7 ? "7 (default)" : String(i);
+      cfgInput.appendChild(o);
+    }
+    cfgInput.value = 7;
+    generateBtn.addEventListener("click", generate);
+    clearBtn.addEventListener("click", () => { outputCtn.innerHTML = "" });
+    promptInput.addEventListener("keydown", e => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) generate();
+    });
+  }
+
+  init();
+</script>

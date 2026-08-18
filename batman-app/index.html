@@ -1,0 +1,267 @@
+<style>
+  :root {
+    --cave-black: #050505;
+    --kevlar-grey: #1a1a1b;
+    --utility-yellow: #ffcc00;
+    --intel-grey: #d1d1d1;
+    --border-edge: #333333;
+  }
+
+  body {
+    background-color: var(--cave-black);
+    color: var(--intel-grey);
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+    text-align: left;
+  }
+
+  /* THE LENS (Output Display) */
+  #the-lens {
+    width: 100%;
+    max-width: 480px;
+    aspect-ratio: 3 / 4;
+    border: 2px solid var(--utility-yellow);
+    background: #000;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #display {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: none;
+  }
+
+  #status-intel {
+    padding: 20px;
+    font-size: 0.8rem;
+    letter-spacing: 1px;
+    color: var(--utility-yellow);
+  }
+
+  /* Scanning overlay while the signal is being decoded */
+  #scan-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    pointer-events: none;
+  }
+
+  #scan-overlay .scan-bar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--utility-yellow);
+    box-shadow: 0 0 20px rgba(255, 204, 0, 0.8);
+    animation: scanmove 1.4s linear infinite;
+  }
+
+  @keyframes scanmove {
+    0%   { top: 0; }
+    100% { top: calc(100% - 3px); }
+  }
+
+  #scan-overlay .scan-text {
+    font-size: 0.8rem;
+    letter-spacing: 2px;
+    color: var(--utility-yellow);
+    animation: blink 1s steps(2, start) infinite;
+  }
+
+  @keyframes blink {
+    to { visibility: hidden; }
+  }
+
+  #decoded-intel {
+    max-width: 480px;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: #8f8f8f;
+    border-left: 2px solid var(--utility-yellow);
+    padding-left: 10px;
+    margin: 0 auto 14px;
+  }
+
+  /* THE PRISM (Input Container) */
+  .prism-container {
+    width: 100%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+  }
+
+  label {
+    color: var(--utility-yellow);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+
+  textarea {
+    background: var(--kevlar-grey);
+    border: 1px solid var(--border-edge);
+    color: white;
+    padding: 10px;
+    border-radius: 0;
+    resize: vertical;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    min-height: 60px;
+  }
+
+  textarea:focus {
+    outline: none;
+    border-color: var(--utility-yellow);
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+  }
+
+  .wand-btn {
+    flex: 1;
+    background: var(--utility-yellow);
+    color: #000000;
+    border: none;
+    padding: 15px;
+    font-weight: 900;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    transition: all 0.2s ease-in-out;
+    font-family: 'Courier New', monospace;
+  }
+
+  .wand-btn:hover:not(:disabled) {
+    background: #e6b800;
+    box-shadow: 0 0 20px rgba(255, 204, 0, 0.4);
+  }
+
+  .wand-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .random-btn {
+    background: var(--kevlar-grey);
+    color: var(--utility-yellow);
+    border: 1px solid var(--border-edge);
+    padding: 15px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-family: 'Courier New', monospace;
+    transition: all 0.2s ease-in-out;
+  }
+
+  .random-btn:hover {
+    border-color: var(--utility-yellow);
+  }
+
+  .hint {
+    font-size: 0.7rem;
+    color: #666;
+    letter-spacing: 1px;
+    margin-top: -8px;
+  }
+</style>
+
+<div class="prism-container">
+  <label for="the-lens">The Lens (Visual Output)</label>
+  <div id="the-lens">
+    <img id="display" src="" alt="">
+    <span id="status-intel">READY FOR COMMAND...</span>
+    <div id="scan-overlay" hidden>
+      <div class="scan-bar"></div>
+      <span class="scan-text">DECRYPTING SIGNAL...</span>
+    </div>
+  </div>
+  <p id="decoded-intel" hidden></p>
+
+  <label for="prompt-input">The Prism (Prompt Input)</label>
+  <textarea id="prompt-input"
+    placeholder="Enter coordinates for Gotham..."></textarea>
+  <span class="hint">PRESS ENTER TO TRANSMIT &nbsp;|&nbsp; RANDOM FOR NEW COORDINATES</span>
+
+  <div class="btn-row">
+    <button class="wand-btn" id="wand-btn">Activate The Wand</button>
+    <button class="random-btn" id="random-btn">Random</button>
+  </div>
+</div>
+
+<script>
+  const statusEl = document.getElementById('status-intel');
+  const displayImg = document.getElementById('display');
+  const promptInput = document.getElementById('prompt-input');
+  const wandBtn = document.getElementById('wand-btn');
+  const randomBtn = document.getElementById('random-btn');
+  const scanOverlay = document.getElementById('scan-overlay');
+  const decodedEl = document.getElementById('decoded-intel');
+
+  promptInput.value = root.randomPrompts.selectOne.evaluateItem;
+  try { root.generateText({ preload: true }); } catch (e) {}
+
+  wandBtn.onclick = executeWand;
+
+  randomBtn.onclick = () => {
+    promptInput.value = root.randomPrompts.selectOne.evaluateItem;
+    executeWand();
+  };
+
+  promptInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      executeWand();
+    }
+  });
+
+  async function executeWand() {
+    const prompt = (promptInput.value || '').trim() || root.defaultPrompt.evaluateItem;
+    displayImg.style.display = 'none';
+    decodedEl.hidden = true;
+    statusEl.textContent = 'SIGNAL SENT TO GOTHAM...';
+    wandBtn.disabled = true;
+    wandBtn.textContent = 'Transmitting...';
+    scanOverlay.hidden = false;
+
+    try {
+      const enhanced = (await root.generateText('Gritty Gotham noir description: ' + prompt)).trim();
+      decodedEl.textContent = 'INTEL DECODED: ' + enhanced;
+      decodedEl.hidden = false;
+      statusEl.textContent = 'DECRYPTING IMAGE SIGNAL...';
+
+      const result = await root.generateImage({
+        prompt: enhanced + '\n' + root.noirStyle.evaluateItem,
+        negativePrompt: root.negativePrompt.evaluateItem,
+        resolution: '512x768',
+      });
+
+      displayImg.src = result.dataUrl;
+      displayImg.style.display = 'block';
+      statusEl.textContent = 'INTEL RECEIVED.';
+    } catch (e) {
+      console.error('Gotham System Error:', e);
+      statusEl.textContent = 'ENCRYPTION FAILED. RETRY.';
+    } finally {
+      wandBtn.disabled = false;
+      wandBtn.textContent = 'Activate The Wand';
+      scanOverlay.hidden = true;
+    }
+  }
+</script>

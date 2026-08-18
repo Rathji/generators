@@ -777,11 +777,11 @@ self.rpc = {
     </a>
     <div class="nav-links">
       <a href="#about">About</a>
-      <a href="#games">Games</a>
+      <a href="#shelf">Games</a>
       <a href="#beta">Beta</a>
       <a href="#community">Community</a>
-      <a href="#templates">Templates</a>
-      <a href="#tools">Tools</a>
+      <a href="#template-shelf">Templates</a>
+      <a href="#tool-shelf">Tools</a>
       <a href="#submit">Submit</a>
       <a href="#" id="helpLink" title="Reopen the welcome tour">?</a>
       <a href="#top">Home</a>
@@ -824,7 +824,7 @@ self.rpc = {
     <h1 class="hero-title goldtext" id="heroTitle"></h1>
     <p class="hero-sub" id="heroSub"></p>
     <div class="hero-cta">
-      <a class="btn btn-gold" href="#games">Enter the Game Room</a>
+      <a class="btn btn-gold" href="#shelf">Enter the Game Room</a>
       <a class="btn btn-ghost" href="#about">Meet the Network</a>
     </div>
   </div>
@@ -867,7 +867,7 @@ self.rpc = {
 </section>
 
 <!-- ═══════════ GAMES ═══════════ -->
-<section id="games" style="scroll-margin-top:80px;padding-top:40px">
+<section id="shelf" style="scroll-margin-top:80px;padding-top:40px">
   <div class="wrap">
     <div class="sec-head">
       <div class="sec-eyebrow">⚄ The Shelf</div>
@@ -885,7 +885,7 @@ self.rpc = {
 </section>
 
 <!-- ═══════════ TEMPLATES ═══════════ -->
-<section id="templates" style="scroll-margin-top:80px;padding-top:40px">
+<section id="template-shelf" style="scroll-margin-top:80px;padding-top:40px">
   <div class="wrap">
     <div class="sec-head">
       <div class="sec-eyebrow">🛠 The Workshop</div>
@@ -897,11 +897,11 @@ self.rpc = {
 </section>
 
 <!-- ═══════════ TOOLS ═══════════ -->
-<section id="tools" style="scroll-margin-top:80px;padding-top:40px">
+<section id="tool-shelf" style="scroll-margin-top:80px;padding-top:40px">
   <div class="wrap">
     <div class="sec-head">
       <div class="sec-eyebrow">🧰 The Toolkit</div>
-      <h2 class="sec-title goldtext">Network Tools</h2>
+      <h2 class="sec-title goldtext">Boardgame Network Tools</h2>
       <p class="sec-sub">Small but mighty utilities for the network — audit a generator against the house standards, or craft cover art for the shelf.</p>
     </div>
     <div class="grid" id="toolsGrid"></div>
@@ -992,7 +992,7 @@ self.rpc = {
       <div><b>🧰 Tools</b><span>Network utilities — audit a generator against the house standards, or craft cover art.</span></div>
     </div>
     <div class="welcome-cta">
-      <a class="btn btn-gold" href="#games">Enter the Game Room</a>
+      <a class="btn btn-gold" href="#shelf">Enter the Game Room</a>
       <a class="btn btn-ghost" href="#beta">See In Beta</a>
       <button class="welcome-skip" id="welcomeSkipBtn">Got it</button>
     </div>
@@ -1563,6 +1563,49 @@ self.rpc = {
   });
 
   connect();
+})();
+</script>
+
+<!-- ═══════════ BUG-EXPORT BRIDGE (driven by bgn-management-dashboard) ═══════════ -->
+<script>
+(function(){
+  if(location.search.indexOf("bgnBugExport=1")===-1) return;
+  var openerOk = !!window.opener && !window.opener.closed;
+  function report(payload){ try{ if(openerOk) window.opener.postMessage(payload, "*"); }catch(e){} }
+  var overlay=document.createElement("div");
+  overlay.style.cssText="position:fixed;inset:0;z-index:999999;background:#141124;color:#f2dc8b;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;font:600 16px/1.5 Cinzel,Georgia,serif;letter-spacing:.05em;text-align:center";
+  overlay.innerHTML='<div style="font-size:42px">🐞</div><div>Syncing the bug inbox…</div><div style="color:#a49bb4;font-size:12px">This window closes itself when done.</div>';
+  document.body.appendChild(overlay);
+  function finish(msg){
+    overlay.innerHTML='<div style="font-size:42px">'+(msg&&msg.ok?'✓':'⚠')+'</div><div>'+(msg&&msg.ok?'Sent to the dashboard — closing.':'Failed — closing.')+'</div>';
+    report(msg||{t:"bgnBugExport", ok:false, err:"unknown"});
+    setTimeout(function(){ try{ window.close(); }catch(e){} }, 400);
+  }
+  function fail(err){ finish({t:"bgnBugExport", ok:false, err:String(err||"failed")}); }
+  function run(){
+    if(!window.root || !root.createServerSocket) return fail("hub page has no server socket");
+    var pw=window.prompt("BGN review password:");
+    if(pw===null || pw==="") return finish({t:"bgnBugExport", ok:false, err:"cancelled"});
+    var s=root.createServerSocket();
+    s.binaryType="arraybuffer";
+    var done=false;
+    function once(fn){ return function(){ if(done) return; done=true; fn.apply(null,arguments); }; }
+    s.addEventListener("open", once(function(){
+      s.rpc.adminLogin(String(pw)).then(function(r){
+        if(r!=="ok") return fail("wrong password");
+        return s.rpc.bugs("").then(function(raw){
+          var m; try{ m=JSON.parse(raw); }catch(e){ return fail("bad bug payload"); }
+          finish({t:"bgnBugExport", ok:true, list:(m&&m.list)||[], at:Date.now()});
+        }).catch(function(e){ fail((e&&e.message)||e); });
+      }).catch(function(e){ fail((e&&e.message)||e); });
+    }));
+    s.addEventListener("close", once(function(ev){
+      if(ev && ev.code===1000) return;
+      fail("socket closed (code "+(ev&&ev.code)+")");
+    }));
+    setTimeout(function(){ fail("timed out"); }, 20000);
+  }
+  setTimeout(run, 400);
 })();
 </script>
 
