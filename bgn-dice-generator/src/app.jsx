@@ -62,6 +62,9 @@ function buildPalette(baseHex) {
     mark: lum > 0.62 ? "#1c1c1e" : "#ffffff",
     markShade: lum > 0.62 ? "#ffffff" : "#000000",
     light: lum > 0.62,
+    sideDeep: hslToHex(h, clamp(s + 8, 0, 100), clamp(l - 38, 2, 100)),
+    sideMid: hslToHex(h, clamp(s + 6, 0, 100), clamp(l - 26, 3, 100)),
+    sideLit: hslToHex(h, clamp(s + 4, 0, 100), clamp(l - 18, 3, 100)),
   };
 }
 
@@ -79,17 +82,35 @@ const SHAPES = {
   pentagon: { label: "Pentagon", radius: 30 },
   barrel: { label: "Barrel", radius: 44 },
   circle: { label: "Disc", radius: 0 },
+  d20view: { label: "d20 top", radius: 30 },
 };
 
 // What each die is actually shaped like in the wild.
 function autoShape(n) {
   if (n === 2) return "circle";
   if (n === 3 || n === 6) return "square";
-  if (n === 4 || n === 8 || n === 20) return "triangle";
+  if (n === 4 || n === 8) return "triangle";
+  if (n === 20) return "d20view";
   if (n === 12) return "pentagon";
   if ([10, 14, 16, 18].includes(n)) return "kite";
   return "barrel"; // 5, 7, 9, 11, 13, 15, 17, 19 — spindle dice
 }
+
+/* Top view of an icosahedron, face-on: the top face plus the three adjacent
+   faces projected orthographically (all faces visible when the die rests on a
+   face). Unit coordinates, centred on the die. */
+const D20_TOP = (() => {
+  const r3 = Math.sqrt(3), phi = (1 + Math.sqrt(5)) / 2;
+  const y0 = (phi - 1) / r3; // shift so the hexagon silhouette is centred
+  const P = {
+    A: [1, 1 / r3 - y0], B: [-1, 1 / r3 - y0], C: [0, -2 / r3 - y0],
+    X: [0, 2 * phi / r3 - y0],
+    D1: [phi, -phi / r3 - y0], D2: [-phi, -phi / r3 - y0],
+  };
+  P.topCentroid = [0, (P.A[1] + P.B[1] + P.C[1]) / 3];
+  return P;
+})();
+const D20_TOP_SCALE = 904 / (D20_TOP.D1[0] - D20_TOP.D2[0]); // width matches the square plate
 
 function vertices(shape) {
   const poly = (count, R, rot = -90) =>
@@ -100,6 +121,10 @@ function vertices(shape) {
   switch (shape) {
     case "square": return poly(4, 452, -45);
     case "triangle": return poly(3, 386);
+    case "d20view": {
+      const order = ["C", "D2", "B", "X", "A", "D1"];
+      return order.map((k) => [CX + D20_TOP[k][0] * D20_TOP_SCALE, CY + D20_TOP[k][1] * D20_TOP_SCALE]);
+    }
     case "pentagon": return poly(5, 356);
     case "kite": return [[CX, 176], [CX + 276, 438], [CX, 848], [CX - 276, 438]];
     case "barrel": {
@@ -166,8 +191,8 @@ function tightDim(shape, size) {
 
 // Numerals need to sit at the optical centre, which is not the
 // bounding-box centre on triangles, kites or pentagons.
-const MARK_OFFSET = { triangle: 46, pentagon: 22, kite: 8, square: 0, barrel: 0, circle: 0 };
-const MARK_SIZE = { square: 320, triangle: 250, pentagon: 290, kite: 268, barrel: 300, circle: 340 };
+const MARK_OFFSET = { triangle: 46, pentagon: 22, kite: 8, square: 0, barrel: 0, circle: 0, d20view: Math.round(D20_TOP.topCentroid[1] * D20_TOP_SCALE) };
+const MARK_SIZE = { square: 320, triangle: 250, pentagon: 290, kite: 268, barrel: 300, circle: 340, d20view: 250 };
 
 /* Pip lattice, d6 convention */
 const CELLS = { TL: [0, 0], TC: [1, 0], TR: [2, 0], ML: [0, 1], MC: [1, 1], MR: [2, 1], BL: [0, 2], BC: [1, 2], BR: [2, 2] };
@@ -230,6 +255,42 @@ function buildFace({ value, shape, palette: c, marking, underline69, transparent
       }).join("")
     : "";
 
+  // d20view draws the die's four visible facets — the top face lit, the three
+  // adjacent faces dimmed with a gradient falling away from their inner edge —
+  // instead of one flat plate. Interior seams keep the facets crisp.
+  let body = "", defsExtra = "";
+  if (shape === "d20view") {
+    const pt = (k) => [CX + D20_TOP[k][0] * D20_TOP_SCALE, CY + D20_TOP[k][1] * D20_TOP_SCALE];
+    const P = { A: pt("A"), B: pt("B"), C: pt("C"), X: pt("X"), D1: pt("D1"), D2: pt("D2") };
+    const tri = (ps) => `M ${ps.map((p) => `${p[0].toFixed(1)} ${p[1].toFixed(1)}`).join(" L ")} Z`;
+    const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const sideGrad = (n, from, to) =>
+      `<linearGradient id="${id(n)}" gradientUnits="userSpaceOnUse" x1="${from[0].toFixed(1)}" y1="${from[1].toFixed(1)}" x2="${to[0].toFixed(1)}" y2="${to[1].toFixed(1)}">` +
+      `<stop offset="0%" stop-color="${c.sideDeep}"/><stop offset="55%" stop-color="${c.sideMid}"/><stop offset="100%" stop-color="${c.sideLit}"/></linearGradient>`;
+    defsExtra =
+      sideGrad("sideT", mid(P.A, P.B), P.X) +
+      sideGrad("sideR", mid(P.A, P.C), P.D1) +
+      sideGrad("sideL", mid(P.B, P.C), P.D2);
+    const topFace = tri([P.A, P.B, P.C]);
+    body =
+      `<path d="${tri([P.X, P.A, P.B])}" fill="url(#${id("sideT")})"/>` +
+      `<path d="${tri([P.A, P.C, P.D1])}" fill="url(#${id("sideR")})"/>` +
+      `<path d="${tri([P.B, P.C, P.D2])}" fill="url(#${id("sideL")})"/>` +
+      `<path d="${topFace}" fill="url(#${id("body")})"/>` +
+      `<path d="${topFace}" fill="url(#${id("core")})"/>` +
+      `<path d="${topFace}" fill="url(#${id("sheen")})"/>` +
+      `<path d="${topFace}" fill="url(#${id("gloss")})"/>` +
+      `<path d="${topFace}" fill="none" stroke="#000000" stroke-opacity="0.34" stroke-width="5"/>`;
+  } else {
+    body =
+      `<rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("body")})"/>` +
+      `<rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("core")})"/>` +
+      ghost +
+      `<rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("sheen")})"/>` +
+      `<rect x="${bb.x0}" y="${bb.y1 - tall * 0.34}" width="${span}" height="${tall * 0.34}" fill="url(#${id("foot")})"/>` +
+      `<rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall * 0.17}" fill="url(#${id("gloss")})"/>`;
+  }
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${dim.w}" height="${dim.h}" viewBox="${viewBox}">
 <defs>
   <radialGradient id="${id("bg")}" cx="50%" cy="38%" r="78%">
@@ -268,16 +329,12 @@ function buildFace({ value, shape, palette: c, marking, underline69, transparent
     <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
   </radialGradient>
   <clipPath id="${id("clip")}"><path d="${path}"/></clipPath>
+  ${defsExtra}
 </defs>
 ${transparent || tight ? "" : `<rect width="${S}" height="${S}" fill="url(#${id("bg")})"/>`}
 ${transparent || tight ? "" : `<ellipse cx="${CX}" cy="${bb.y1 + 34}" rx="${span * 0.52}" ry="52" fill="url(#${id("shadow")})"/>`}
 <g clip-path="url(#${id("clip")})" fill-opacity="${bodyFillOpacity}">
-  <rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("body")})"/>
-  <rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("core")})"/>
-  ${ghost}
-  <rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall}" fill="url(#${id("sheen")})"/>
-  <rect x="${bb.x0}" y="${bb.y1 - tall * 0.34}" width="${span}" height="${tall * 0.34}" fill="url(#${id("foot")})"/>
-  <rect x="${bb.x0}" y="${bb.y0}" width="${span}" height="${tall * 0.17}" fill="url(#${id("gloss")})"/>
+${body}
 </g>
 <path d="${path}" fill="none" stroke="#ffffff" stroke-opacity="0.42" stroke-width="4"/>
 <path d="${path}" fill="none" stroke="#000000" stroke-opacity="0.16" stroke-width="2"/>

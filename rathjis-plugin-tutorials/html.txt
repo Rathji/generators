@@ -526,6 +526,42 @@
     </div>
 
     <div class="tips reveal" style="margin-top:28px;">
+      <h3>🎵 zelda-audio-plugin — 792 tracks of Zelda</h3>
+      <p style="color:var(--muted); margin:6px 0 14px;">Live demo of <b>zelda-audio-plugin</b>: Ocarina of Time, A Link to the Past, The Wind Waker, Breath of the Wild, plus the 331-track ZREO orchestral library. Pick a game, search, and click a track to play.</p>
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;" id="zaChips"></div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+        <input id="zaSearch" class="backup-field" placeholder="Search tracks — name, game, category, album…" style="max-width:420px; flex:1;">
+      </div>
+      <div class="demo-stage" id="zaList" style="background:var(--bg2); border-radius:12px; padding:4px 8px 6px; max-height:300px; overflow-y:auto;"></div>
+      <div id="zaNowPlaying" style="margin-top:12px; padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--bg-soft);">
+        <div style="display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center;">
+          <div style="min-width:0;">
+            <div id="zaTitle" style="font-weight:700; font-size:.95rem;">Nothing playing</div>
+            <div id="zaSub" style="color:var(--muted); font-size:.8rem;"></div>
+          </div>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <button class="btn btn-ghost" id="zaPrevBtn" title="Previous" style="width:52px; height:44px; padding:0; font-size:1.1rem; display:inline-flex; align-items:center; justify-content:center;">«</button>
+            <button class="btn btn-primary" id="zaPlayBtn" title="Play/Pause" style="width:96px; height:44px; padding:0 14px; font-size:1rem; display:inline-flex; align-items:center; justify-content:center; gap:6px;">▶ Play</button>
+            <button class="btn btn-ghost" id="zaNextBtn" title="Next" style="width:52px; height:44px; padding:0; font-size:1.1rem; display:inline-flex; align-items:center; justify-content:center;">»</button>
+            <button class="btn btn-ghost" id="zaStopBtn" title="Stop" style="width:52px; height:44px; padding:0; font-size:1.1rem; display:inline-flex; align-items:center; justify-content:center;"><span style="color:var(--accent2); font-size:1rem;">■</span></button>
+          </div>
+        </div>
+        <div style="margin-top:10px;">
+          <div style="height:6px; background:var(--border); border-radius:99px; overflow:hidden;">
+            <div id="zaProgress" style="width:0%; height:100%; background:var(--grad); transition:width .2s linear;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:6px;">
+            <span id="zaTime" style="font-size:.75rem; color:var(--muted);">0:00 / 0:00</span>
+            <label style="display:flex; align-items:center; gap:6px; color:var(--muted); font-size:.75rem; white-space:nowrap;">
+              🔊 <input id="zaVolume" type="range" min="0" max="1" step="0.05" value="0.8" style="width:110px;">
+            </label>
+          </div>
+        </div>
+      </div>
+      <p class="backup-status" id="zaStatus" style="margin-top:10px;"></p>
+    </div>
+
+    <div class="tips reveal" style="margin-top:28px;">
       <h3>💾 Backup this site to GitHub</h3>
       <p style="color:var(--muted); margin:6px 0 14px;">Powered by my <b>github-data-plugin</b>: pushes this generator's last-saved <code>main.pjs</code> and <code>index.html</code> to a repo you own, as a single commit with a link to it.</p>
       <div style="display:grid; gap:10px; max-width:520px;">
@@ -1020,6 +1056,9 @@
       { name: "data-visualization-plugin", varName: "charts", color: "#fbbf24",
         desc: "Responsive SVG charts from plain data — vertical/horizontal bars, multi-series lines with fill, labeled pies, donuts with center totals, and histograms that accept a game-math distribution (like 4d6dl1) directly. Pure SVG + vanilla JS, zero dependencies, never throws.",
         use: "[charts.bar([{label: \"A\", value: 12}, {label: \"B\", value: 8}])]\n[charts.line(traffic, {fill: true})]        // multi-series\n[charts.donut(data, {centerTotal: true})]\n[charts.histogram(gameMath.distribution(\"4d6dl1\"))]" },
+      { name: "zelda-audio-plugin", varName: "zeldaAudio", color: "#a16207",
+        desc: "792-track Legend of Zelda soundtrack plugin — Ocarina of Time, A Link to the Past, The Wind Waker, Breath of the Wild and the full ZREO orchestral library (331 tracks). Play, shuffle, search, next/prev, crossfade, favorites and deep-linkable playlists.",
+        use: "let oot = root.zeldaAudio.find(\"oot\")       // 86 OoT tracks\nroot.zeldaAudio.play(\"Lost Woods\")         // search + play\nroot.zeldaAudio.playShuffle(\"orchestral\")  // 331 tracks, shuffled" },
     ];
     mine.forEach(function(p) {
       var card = el("article", "card");
@@ -1308,6 +1347,180 @@
         hearing.catch(function() {});
       });
     }
+  })();
+
+  // ---------- zelda-audio-plugin live demo ----------
+  (function() {
+    var zaChips = document.getElementById("zaChips");
+    if (!zaChips) return;
+    // The import gives us the plugin's root list; calling getZeldaAudio()
+    // initializes the full API (cached on window.__zeldaAudioApi).
+    var api = window.__zeldaAudioApi || (root.zeldaAudio && root.zeldaAudio.getZeldaAudio ? root.zeldaAudio.getZeldaAudio() : null);
+    var zaStatus = document.getElementById("zaStatus");
+    if (!api || !api.find) {
+      if (zaStatus) zaStatus.textContent = "⏳ zelda-audio-plugin loading…";
+      return;
+    }
+    var zaList = document.getElementById("zaList");
+    var zaSearch = document.getElementById("zaSearch");
+    var zaTitle = document.getElementById("zaTitle");
+    var zaSub = document.getElementById("zaSub");
+    var zaTime = document.getElementById("zaTime");
+    var zaProgress = document.getElementById("zaProgress");
+    var zaPlayBtn = document.getElementById("zaPlayBtn");
+    var zaPrevBtn = document.getElementById("zaPrevBtn");
+    var zaNextBtn = document.getElementById("zaNextBtn");
+    var zaStopBtn = document.getElementById("zaStopBtn");
+    var zaVolume = document.getElementById("zaVolume");
+
+    var games = api.games;
+    var allTracks = api.tracks;
+    var currentFilter = "all";
+    var shortGame = function(g) { return games[g] ? games[g].label.replace(/^The Legend of Zelda: /, "") : g; };
+
+    function chip(label, id) {
+      var c = document.createElement("button");
+      c.className = "chip" + (id === currentFilter ? " active" : "");
+      c.textContent = label;
+      c.dataset.filter = id;
+      c.onclick = function() {
+        currentFilter = id;
+        zaChips.querySelectorAll(".chip").forEach(function(ch) { ch.classList.toggle("active", ch.dataset.filter === id); });
+        renderList();
+      };
+      return c;
+    }
+    zaChips.append(chip("🎮 All (" + allTracks.length + ")", "all"));
+    Object.keys(games).forEach(function(g) {
+      zaChips.append(chip(shortGame(g).replace(/^Ocarina of Time/, "OoT").replace(/^A Link to the Past/, "LttP").replace(/^The Wind Waker/, "WW").replace(/^Breath of the Wild/, "BotW").replace(/^Orchestral/, "Orchestral") + " (" + games[g].trackCount + ")", g));
+    });
+    zaChips.append(chip("♥ Favorites", "fav"));
+
+    function filtered() {
+      var base = currentFilter === "fav" ? api.favorites() : (currentFilter === "all" ? allTracks : api.find(currentFilter));
+      var q = (zaSearch.value || "").trim().toLowerCase();
+      if (q) {
+        base = base.filter(function(t) {
+          return String(t.name).toLowerCase().indexOf(q) !== -1 ||
+            String(t.album || "").toLowerCase().indexOf(q) !== -1 ||
+            String(t.track).indexOf(q) !== -1;
+        });
+      }
+      return base;
+    }
+
+    function renderList() {
+      var list = filtered();
+      zaList.innerHTML = "";
+      if (!list.length) {
+        var empty = document.createElement("div");
+        empty.style.cssText = "color:var(--muted); font-size:.85rem; padding:14px; text-align:center;";
+        empty.textContent = currentFilter === "fav" ? "No favorites yet — click ♥ nowhere…" : "No tracks match your search.";
+        zaList.append(empty);
+        return;
+      }
+      var max = Math.min(list.length, 50);
+      for (var i = 0; i < max; i++) {
+        var t = list[i];
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex; gap:10px; align-items:center; padding:7px 10px; border-radius:8px; cursor:pointer; border-bottom:1px solid var(--border);";
+        row.onmouseenter = function() { this.style.background = "var(--card)"; };
+        row.onmouseleave = function() { this.style.background = "transparent"; };
+        (function(t, idx) {
+          row.onclick = function() {
+            if (api.current() && api.current().url === t.url && api.isPlaying()) { api.pause(); return; }
+            if (api.current() && api.current().url === t.url) { api.resume(); return; }
+            api.startPlaylist(list.slice(idx), { volume: Number(zaVolume.value) });
+          };
+        })(t, i);
+        var nm = document.createElement("div");
+        nm.style.cssText = "flex:1; min-width:0;";
+        var nameEl = document.createElement("div");
+        nameEl.style.cssText = "font-size:.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text);";
+        nameEl.textContent = (t.track ? t.track + ". " : "") + t.name;
+        var subEl = document.createElement("div");
+        subEl.style.cssText = "font-size:.72rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;";
+        subEl.textContent = shortGame(t.game) + (t.album ? " · " + t.album : "") + (t.disc ? " · Disc " + t.disc : "");
+        nm.append(nameEl, subEl);
+        row.append(nm);
+        var dur = document.createElement("span");
+        dur.style.cssText = "font-size:.75rem; color:var(--muted);";
+        dur.textContent = t.length || "";
+        row.append(dur);
+        var playMark = document.createElement("span");
+        playMark.style.cssText = "font-size:.85rem; color:var(--accent2);";
+        playMark.textContent = "▶";
+        row.append(playMark);
+        zaList.append(row);
+      }
+      if (list.length > max) {
+        var more = document.createElement("div");
+        more.style.cssText = "text-align:center; color:var(--muted); font-size:.78rem; padding:9px;";
+        more.textContent = "… and " + (list.length - max) + " more matching tracks — refine the search to see them.";
+        zaList.append(more);
+      }
+    }
+
+    function fmtTime(s) {
+      if (!isFinite(s)) return "0:00";
+      var m = Math.floor(s / 60), sec = Math.floor(s % 60);
+      return m + ":" + (sec < 10 ? "0" : "") + sec;
+    }
+
+    function setPlaying(t) {
+      if (!t) return;
+      zaTitle.textContent = "▶ " + t.name;
+      zaSub.textContent = shortGame(t.game) + (t.album ? " · " + t.album : "");
+      zaPlayBtn.textContent = "❚❚ Pause";
+      if (zaStatus) zaStatus.textContent = "";
+    }
+
+    function tick() {
+      var el = api.audioEl();
+      if (!api.current() && zaTitle.textContent !== "Nothing playing") {
+        zaTitle.textContent = "Nothing playing";
+        zaSub.textContent = "";
+        zaPlayBtn.textContent = "▶ Play";
+        zaTime.textContent = "0:00 / 0:00";
+        zaProgress.style.width = "0%";
+        return;
+      }
+      if (el && isFinite(el.duration) && el.duration > 0) {
+        zaTime.textContent = fmtTime(el.currentTime) + " / " + fmtTime(el.duration);
+        zaProgress.style.width = Math.min(100, el.currentTime / el.duration * 100) + "%";
+      } else {
+        zaTime.textContent = "0:00 / 0:00";
+        zaProgress.style.width = "0%";
+      }
+    }
+
+    api.onTrackChange(setPlaying);
+    api.onEnd(function() { zaPlayBtn.textContent = "▶ Play"; });
+
+    zaPlayBtn.onclick = function() {
+      if (api.isPlaying()) { api.pause(); zaPlayBtn.textContent = "▶ Play"; }
+      else if (api.current()) { api.resume(); zaPlayBtn.textContent = "❚❚ Pause"; }
+      else {
+        var list = filtered();
+        if (list.length) api.startPlaylist(list, { volume: Number(zaVolume.value) });
+        else if (zaStatus) zaStatus.textContent = "Nothing to play — pick a track.";
+      }
+    };
+    zaPrevBtn.onclick = function() { api.prev(); };
+    zaNextBtn.onclick = function() { api.next(); };
+    zaStopBtn.onclick = function() {
+      api.stop();
+      zaPlayBtn.textContent = "▶ Play";
+      zaTitle.textContent = "Nothing playing";
+      zaSub.textContent = "";
+      zaTime.textContent = "0:00 / 0:00";
+      zaProgress.style.width = "0%";
+    };
+    zaVolume.oninput = function() { api.setVolume(Number(zaVolume.value)); };
+    zaSearch.addEventListener("input", renderList);
+    api.setVolume(Number(zaVolume.value));
+    setInterval(tick, 400);
+    renderList();
   })();
 
   // ---------- Backup to GitHub ----------
