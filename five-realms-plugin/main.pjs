@@ -1,0 +1,1468 @@
+// Five Realms Plugin -- Lists panel
+//
+// Phase 1 of an MTG-compatible rules engine: state model, zones, game objects, turn
+// structure, priority, mana, deterministic RNG, and a single applyAction reducer. Card
+// data, type grammar, and mana-cost grammar are fixed by
+// docs/specs/2026-08-21-five-realms-card-model.md -- conformed to exactly. Stack
+// resolution/targeting, combat damage assignment, state-based actions, layers, replacement
+// effects, and keyword abilities beyond the 12 fixture cards are explicitly deferred to a
+// later phase; this file leaves clean seams for them (frStackResolveTop is a minimal zone-
+// transition stub, not a rules-text interpreter).
+//
+// All top-level names are prefixed `fr` so they cannot collide with a consuming
+// generator's own names once imported. One import of our own: simpleGenFooter, the
+// standard Perchance footer (rathji-plugin-template's convention), used only by this
+// docs page. See NOTES.md for a citation on every non-obvious DSL construct used below;
+// the engine logic itself is our own composition and is not DSL, so it carries no
+// citation.
+//
+// $output (the plugin's public API) is a later bucket -- not written here.
+
+$meta
+  title = Five Realms Plugin
+  description = Phase 1 of an MTG-compatible rules engine, a 12-card database, and a 52-asset inline-SVG card renderer, behind one 13-op $output. Zones, turn structure, priority, mana, seeded shuffling, and an action reducer. Stack resolution, combat damage, state-based actions and layers are deferred to later phases.
+  tags = cards, tcg, rules-engine, plugin, five-realms
+  header
+    mode = minimal
+
+simpleGenFooter = {import:simple-gen-footer}
+
+
+// =====================================================================
+// DETERMINISTIC RNG
+// =====================================================================
+//
+// A seeded xorshift32 PRNG. State is a plain integer so it lives directly in game state
+// and survives JSON.stringify/parse -- no Math.random anywhere in this file.
+
+frRngCreate(seed) =>
+  let s = seed | 0;
+  if(s === 0) s = 1;
+  return s >>> 0;
+
+frRngNext(state) =>
+  let s = state >>> 0;
+  s ^= s << 13; s >>>= 0;
+  s ^= s >>> 17; s >>>= 0;
+  s ^= s << 5; s >>>= 0;
+  let value = s / 4294967296;
+  return { value: value, state: s };
+
+frShuffle(array, rngState) =>
+  let a = array.slice();
+  let state = rngState;
+  for(let i = a.length - 1; i > 0; i--) {
+    let r = frRngNext(state);
+    state = r.state;
+    let j = Math.floor(r.value * (i + 1));
+    let tmp = a[i];
+    a[i] = a[j];
+    a[j] = tmp;
+  }
+  return { array: a, state: state };
+
+
+// =====================================================================
+// CARD DATABASE
+// =====================================================================
+//
+// The 12 fixture cards from docs/specs/2026-08-21-five-realms-card-model.md section 6,
+// transcribed field-for-field. Land cards omit manaCost entirely (not ""), per the spec's
+// field-optionality table. This is game data, not a DSL construct.
+
+frCardDb() =>
+  return {
+    "sunward-sentinel": {
+      id: "sunward-sentinel",
+      name: "Sunward Sentinel",
+      manaCost: "{1}{W}",
+      cmc: 2,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Spirit"],
+      rulesText: "When Sunward Sentinel enters, you gain 2 life.",
+      power: 2,
+      toughness: 2,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "vow-of-radiance": {
+      id: "vow-of-radiance",
+      name: "Vow of Radiance",
+      manaCost: "{2}{W}",
+      cmc: 3,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Enchantment"],
+      subtypes: ["Aura"],
+      rulesText: "Enchant creature. Enchanted creature gets +2/+2.",
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "bramble-warden": {
+      id: "bramble-warden",
+      name: "Bramble Warden",
+      manaCost: "{2}{G}",
+      cmc: 3,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Bramblekin"],
+      rulesText: "Whenever Bramble Warden attacks, put a +1/+1 counter on it.",
+      power: 3,
+      toughness: 3,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "verdant"
+    },
+    "verdant-surge": {
+      id: "verdant-surge",
+      name: "Verdant Surge",
+      manaCost: "{G}{G}",
+      cmc: 2,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Target creature gets +3/+3 until end of turn.",
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "verdant"
+    },
+    "nautilus-seer": {
+      id: "nautilus-seer",
+      name: "Nautilus Seer",
+      manaCost: "{1}{U}{U}",
+      cmc: 3,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Tideborn"],
+      rulesText: "When Nautilus Seer enters, draw a card, then discard a card.",
+      power: 2,
+      toughness: 3,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "tide"
+    },
+    "tidefall-rebuke": {
+      id: "tidefall-rebuke",
+      name: "Tidefall Rebuke",
+      manaCost: "{U}",
+      cmc: 1,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Counter target spell unless its controller pays {2}.",
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "tide"
+    },
+    "cinderfang-marauder": {
+      id: "cinderfang-marauder",
+      name: "Cinderfang Marauder",
+      manaCost: "{1}{R}{R}",
+      cmc: 3,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Cinderfang"],
+      rulesText: "Cinderfang Marauder can't block.",
+      power: 3,
+      toughness: 2,
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "ember"
+    },
+    "faceted-ember-core": {
+      id: "faceted-ember-core",
+      name: "Faceted Ember Core",
+      manaCost: "{3}{R}",
+      cmc: 4,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Artifact"],
+      subtypes: ["Relic"],
+      rulesText: "{T}: Add {R}. {3}, {T}, Sacrifice Faceted Ember Core: It deals 3 damage to any target.",
+      producesMana: "R",
+      rarity: "Ascendant",
+      frame: "ascendant",
+      glyph: "ember"
+    },
+    "thornshroud-stalker": {
+      id: "thornshroud-stalker",
+      name: "Thornshroud Stalker",
+      manaCost: "{1}{B}",
+      cmc: 2,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Shadowkin"],
+      rulesText: "Whenever Thornshroud Stalker deals combat damage to a player, that player discards a card.",
+      power: 2,
+      toughness: 1,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "umbra"
+    },
+    "withering-grasp": {
+      id: "withering-grasp",
+      name: "Withering Grasp",
+      manaCost: "{B}{B}",
+      cmc: 2,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Destroy target creature with toughness 3 or less.",
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "umbra"
+    },
+    "halo-reliquary": {
+      id: "halo-reliquary",
+      name: "Halo Reliquary",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["W"],
+      supertypes: ["Legendary"],
+      types: ["Land"],
+      subtypes: ["Halo"],
+      rulesText: "{T}: Add {W}.",
+      producesMana: "W",
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "umbral-barrow": {
+      id: "umbral-barrow",
+      name: "Umbral Barrow",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Land"],
+      subtypes: ["Barrow"],
+      rulesText: "{T}: Add {B}. Umbral Barrow enters tapped.",
+      producesMana: "B",
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "umbra"
+    }
+  };
+
+frCardGet(id) =>
+  let db = frCardDb();
+  return db[id] || null;
+
+
+// =====================================================================
+// MANA
+// =====================================================================
+//
+// Cost strings parse per the spec's grammar (section 5). `{T}` is the tap symbol, not a
+// mana symbol -- it is rejected here and only ever appears inside rulesText.
+
+frManaParseSymbol(body) =>
+  if(body === "T") {
+    throw new Error("{T} is the tap symbol, not a mana symbol; it is not valid inside manaCost");
+  }
+  if(/^[0-9]+$/.test(body)) {
+    let n = parseInt(body, 10);
+    return { kind: "generic", n: n, cmc: n, colors: [] };
+  }
+  if(body === "X") {
+    return { kind: "variable", cmc: 0, colors: [] };
+  }
+  if(body === "C") {
+    return { kind: "colorless", cmc: 1, colors: [] };
+  }
+  if(/^[WUBRG]$/.test(body)) {
+    return { kind: "colored", color: body, cmc: 1, colors: [body] };
+  }
+  if(/^[WUBRG]\/[WUBRG]$/.test(body)) {
+    let parts = body.split("/");
+    return { kind: "hybridColored", options: parts, cmc: 1, colors: parts };
+  }
+  if(/^[0-9]+\/[WUBRG]$/.test(body)) {
+    let parts = body.split("/");
+    let n = parseInt(parts[0], 10);
+    return { kind: "hybridGeneric", n: n, color: parts[1], cmc: n, colors: [parts[1]] };
+  }
+  throw new Error("malformed manaCost symbol: {" + body + "}");
+
+frManaParseCost(costStr) =>
+  let str = costStr || "";
+  let symbols = [];
+  let i = 0;
+  while(i < str.length) {
+    if(str[i] !== "{") {
+      throw new Error("malformed manaCost: expected { at index " + i);
+    }
+    let close = str.indexOf("}", i);
+    if(close === -1) {
+      throw new Error("malformed manaCost: unterminated { at index " + i);
+    }
+    let body = str.slice(i + 1, close);
+    symbols.push(frManaParseSymbol(body));
+    i = close + 1;
+  }
+  let cmc = 0;
+  let colors = [];
+  for(let s = 0; s < symbols.length; s++) {
+    cmc += symbols[s].cmc;
+    for(let c = 0; c < symbols[s].colors.length; c++) {
+      let color = symbols[s].colors[c];
+      if(colors.indexOf(color) === -1) colors.push(color);
+    }
+  }
+  return { symbols: symbols, cmc: cmc, colors: colors };
+
+frManaEmptyPool() =>
+  return { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
+
+frManaSymbolOrder(kind) =>
+  let order = { colored: 0, colorless: 0, hybridColored: 1, hybridGeneric: 2, generic: 3, variable: 4 };
+  return order[kind];
+
+frManaTryPay(pool, parsedCost) =>
+  let working = {};
+  for(let k in pool) working[k] = pool[k];
+  let symbols = parsedCost.symbols.slice();
+  symbols.sort((a, b) => frManaSymbolOrder(a.kind) - frManaSymbolOrder(b.kind));
+  let genericNeeded = 0;
+  for(let i = 0; i < symbols.length; i++) {
+    let sym = symbols[i];
+    if(sym.kind === "colored") {
+      if(working[sym.color] > 0) {
+        working[sym.color] -= 1;
+      } else {
+        return { ok: false, pool: null };
+      }
+    } else if(sym.kind === "colorless") {
+      if(working.C > 0) {
+        working.C -= 1;
+      } else {
+        return { ok: false, pool: null };
+      }
+    } else if(sym.kind === "hybridColored") {
+      let paid = false;
+      for(let o = 0; o < sym.options.length; o++) {
+        let c = sym.options[o];
+        if(working[c] > 0) {
+          working[c] -= 1;
+          paid = true;
+          break;
+        }
+      }
+      if(!paid) return { ok: false, pool: null };
+    } else if(sym.kind === "hybridGeneric") {
+      if(working[sym.color] > 0) {
+        working[sym.color] -= 1;
+      } else {
+        genericNeeded += sym.n;
+      }
+    } else if(sym.kind === "generic") {
+      genericNeeded += sym.n;
+    }
+    // "variable" ({X}): Phase 1 has no fixture using it; treated as costing 0, per the
+    // spec's cmc table. A real X-value choice is deferred.
+  }
+  if(genericNeeded > 0) {
+    let total = 0;
+    for(let k in working) total += working[k];
+    if(total < genericNeeded) return { ok: false, pool: null };
+    let remaining = genericNeeded;
+    for(let k in working) {
+      if(remaining <= 0) break;
+      let take = Math.min(working[k], remaining);
+      working[k] -= take;
+      remaining -= take;
+    }
+  }
+  return { ok: true, pool: working };
+
+frManaCanPay(pool, parsedCost) =>
+  return frManaTryPay(pool, parsedCost).ok;
+
+frManaPay(pool, parsedCost) =>
+  let result = frManaTryPay(pool, parsedCost);
+  if(!result.ok) return null;
+  return result.pool;
+
+frManaAbilityColor(cardId) =>
+  let card = frCardGet(cardId);
+  if(!card) return null;
+  return card.producesMana || null;
+
+
+// =====================================================================
+// ZONES
+// =====================================================================
+//
+// library/hand/graveyard/exile are per-player arrays of object ids; battlefield and stack
+// are shared arrays on the game state itself.
+
+frZoneContainer(state, zone, player) =>
+  if(zone === "battlefield") return state.battlefield;
+  if(zone === "stack") return state.stack;
+  let pl = state.players[player];
+  if(zone === "hand") return pl.hand;
+  if(zone === "library") return pl.library;
+  if(zone === "graveyard") return pl.graveyard;
+  if(zone === "exile") return pl.exile;
+  return null;
+
+frZoneRemove(state, objId, zone, player) =>
+  let arr = frZoneContainer(state, zone, player);
+  let idx = arr.indexOf(objId);
+  if(idx !== -1) arr.splice(idx, 1);
+  return state;
+
+frZoneAdd(state, objId, zone, player) =>
+  let arr = frZoneContainer(state, zone, player);
+  arr.push(objId);
+  return state;
+
+frZoneMove(state, objId, fromZone, toZone, player) =>
+  let obj = state.objects[objId];
+  frZoneRemove(state, objId, fromZone, player);
+  frZoneAdd(state, objId, toZone, player);
+  obj.zone = toZone;
+  obj.controller = player;
+  return state;
+
+
+// =====================================================================
+// GAME OBJECTS
+// =====================================================================
+//
+// A game object is a card instance, distinct from its (immutable) card definition in
+// frCardDb. Ids are unique strings, assigned once at game creation and stable for the
+// whole game regardless of which zone the object visits.
+
+frObjectNew(id, cardId, owner) =>
+  return {
+    id: id,
+    cardId: cardId,
+    owner: owner,
+    controller: owner,
+    zone: "library",
+    tapped: false,
+    summoningSickness: true,
+    counters: {},
+    attachedTo: null,
+    damage: 0,
+    attacking: false,
+    blocking: null
+  };
+
+
+// =====================================================================
+// PLAYERS AND GAME SETUP
+// =====================================================================
+//
+// frGameNew builds a fresh, plain-object game state: two (or more) players at 20 life,
+// empty mana pools, a shuffled library each (seeded, reproducible), and a 7-card opening
+// hand each. Turn 1 begins at the upkeep step (there is nothing to untap yet).
+
+frGameDefaultDeck() =>
+  // A playable stand-in built from the fixture card database: every card twice, padded
+  // with basic-style mana sources so the deck can actually cast what it draws. Exists so
+  // frGameNew is callable with no arguments -- a consumer that just wants a game should
+  // not have to supply a decklist, and $output must never throw on a bare "newGame".
+  let ids = Object.keys(frCardDb());
+  let deck = [];
+  for(let i = 0; i < ids.length; i++) {
+    deck.push(ids[i]);
+    deck.push(ids[i]);
+  }
+  let lands = ["halo-reliquary", "umbral-barrow"];
+  while(deck.length < 40) {
+    deck.push(lands[deck.length % lands.length]);
+  }
+  return deck;
+
+frGameNew(config) =>
+  // Tolerant of a missing or partial config: a bare frGameNew() yields a valid two-player
+  // game on the default deck. Phase 1 has no deck-legality rules, so any card list is
+  // accepted as given.
+  let cfg = config || {};
+  let seed = cfg.seed === undefined ? 1 : cfg.seed;
+  let decks = Array.isArray(cfg.decks) && cfg.decks.length > 0
+    ? cfg.decks
+    : [frGameDefaultDeck(), frGameDefaultDeck()];
+  let rngState = frRngCreate(seed);
+  let players = [];
+  let objects = {};
+  let nextId = 1;
+  for(let p = 0; p < decks.length; p++) {
+    let deck = Array.isArray(decks[p]) ? decks[p] : frGameDefaultDeck();
+    let libraryIds = [];
+    for(let d = 0; d < deck.length; d++) {
+      let objId = "obj" + nextId;
+      nextId += 1;
+      objects[objId] = frObjectNew(objId, deck[d], p);
+      libraryIds.push(objId);
+    }
+    let shuffled = frShuffle(libraryIds, rngState);
+    rngState = shuffled.state;
+    players.push({
+      id: p,
+      life: 20,
+      manaPool: frManaEmptyPool(),
+      library: shuffled.array,
+      hand: [],
+      graveyard: [],
+      exile: [],
+      landPlayedThisTurn: false,
+      lost: false
+    });
+  }
+  let state = {
+    seed: seed,
+    rngState: rngState,
+    turnNumber: 1,
+    activePlayer: 0,
+    priorityPlayer: 0,
+    passedPlayers: [],
+    step: "upkeep",
+    battlefield: [],
+    stack: [],
+    objects: objects,
+    nextObjectId: nextId,
+    players: players,
+    gameOver: false,
+    winner: null,
+    lastActionError: null,
+    firstTurnDrawSkipped: false
+  };
+  for(let p = 0; p < state.players.length; p++) {
+    state = frGameDrawN(state, p, 7);
+  }
+  return state;
+
+frGameDrawOne(state, player) =>
+  let pl = state.players[player];
+  if(pl.library.length === 0) {
+    pl.lost = true;
+    state.gameOver = true;
+    state.winner = frTurnOtherPlayer(state, player);
+    return state;
+  }
+  let objId = pl.library.shift();
+  pl.hand.push(objId);
+  state.objects[objId].zone = "hand";
+  return state;
+
+frGameDrawN(state, player, n) =>
+  for(let i = 0; i < n; i++) {
+    state = frGameDrawOne(state, player);
+  }
+  return state;
+
+frCloneState(state) =>
+  return JSON.parse(JSON.stringify(state));
+
+
+// =====================================================================
+// TURN STRUCTURE AND PRIORITY
+// =====================================================================
+//
+// Untap and cleanup are turn-based-action-only steps and grant no priority in the normal
+// case; every other step grants priority to the active player first. Mana pools empty at
+// every step/phase boundary. All-players-pass either resolves the top of the stack (a
+// minimal zone-transition stub -- see frStackResolveTop) or ends the step.
+
+frTurnStepOrder() =>
+  return [
+    "untap", "upkeep", "draw",
+    "precombat_main",
+    "begin_combat", "declare_attackers", "declare_blockers", "combat_damage", "end_combat",
+    "postcombat_main",
+    "end_step", "cleanup"
+  ];
+
+frTurnPhaseForStep(step) =>
+  let map = {
+    untap: "beginning",
+    upkeep: "beginning",
+    draw: "beginning",
+    precombat_main: "precombat_main",
+    begin_combat: "combat",
+    declare_attackers: "combat",
+    declare_blockers: "combat",
+    combat_damage: "combat",
+    end_combat: "combat",
+    postcombat_main: "postcombat_main",
+    end_step: "ending",
+    cleanup: "ending"
+  };
+  return map[step];
+
+frTurnGrantsPriority(step) =>
+  return step !== "untap" && step !== "cleanup";
+
+frTurnNextPlayer(state, player) =>
+  return (player + 1) % state.players.length;
+
+frTurnOtherPlayer(state, player) =>
+  return (player + 1) % state.players.length;
+
+frStepUntap(state) =>
+  let active = state.activePlayer;
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let obj = state.objects[state.battlefield[i]];
+    if(obj.controller === active) {
+      obj.tapped = false;
+      obj.summoningSickness = false;
+      obj.attacking = false;
+      obj.blocking = null;
+    }
+  }
+  return state;
+
+frStepDraw(state) =>
+  if(state.turnNumber === 1 && state.activePlayer === 0 && !state.firstTurnDrawSkipped) {
+    state.firstTurnDrawSkipped = true;
+    return state;
+  }
+  return frGameDrawOne(state, state.activePlayer);
+
+frStepCleanup(state) =>
+  for(let i = 0; i < state.battlefield.length; i++) {
+    state.objects[state.battlefield[i]].damage = 0;
+  }
+  // Hand-size cleanup and other state-based actions (704) are deferred to a later phase.
+  return state;
+
+frTurnRunStepAutomatic(state) =>
+  if(state.step === "untap") return frStepUntap(state);
+  if(state.step === "draw") return frStepDraw(state);
+  if(state.step === "cleanup") return frStepCleanup(state);
+  return state;
+
+frTurnAdvance(state) =>
+  for(let p = 0; p < state.players.length; p++) {
+    state.players[p].manaPool = frManaEmptyPool();
+  }
+  let order = frTurnStepOrder();
+  let idx = order.indexOf(state.step);
+  if(idx === order.length - 1) {
+    state.activePlayer = frTurnNextPlayer(state, state.activePlayer);
+    state.turnNumber += 1;
+    for(let p = 0; p < state.players.length; p++) {
+      state.players[p].landPlayedThisTurn = false;
+    }
+    state.step = order[0];
+  } else {
+    state.step = order[idx + 1];
+  }
+  state = frTurnRunStepAutomatic(state);
+  if(!frTurnGrantsPriority(state.step)) {
+    return frTurnAdvance(state);
+  }
+  state.priorityPlayer = state.activePlayer;
+  state.passedPlayers = [];
+  return state;
+
+frStackResolveTop(state) =>
+  let objId = state.stack.pop();
+  let obj = state.objects[objId];
+  let card = frCardGet(obj.cardId);
+  let permanentTypes = ["Creature", "Artifact", "Enchantment"];
+  let isPermanent = false;
+  for(let t = 0; t < card.types.length; t++) {
+    if(permanentTypes.indexOf(card.types[t]) !== -1) isPermanent = true;
+  }
+  if(isPermanent) {
+    frZoneAdd(state, objId, "battlefield", obj.controller);
+    obj.zone = "battlefield";
+  } else {
+    frZoneAdd(state, objId, "graveyard", obj.owner);
+    obj.zone = "graveyard";
+  }
+  delete obj.stackKind;
+  // The card's rulesText is not interpreted here -- full resolution/targeting semantics
+  // (608) are deferred to a later phase. This only performs the zone transition.
+  return state;
+
+
+// =====================================================================
+// ACTIONS
+// =====================================================================
+//
+// frApplyAction(state, action) is the single reducer. It never mutates its input: it
+// clones state first, then either returns a changed clone or the same clone with
+// lastActionError set to why the action was rejected.
+
+frActionPassPriority(state, action) =>
+  let player = action.player;
+  if(state.priorityPlayer !== player) {
+    state.lastActionError = "player " + player + " does not have priority";
+    return state;
+  }
+  if(state.passedPlayers.indexOf(player) === -1) {
+    state.passedPlayers.push(player);
+  }
+  if(state.passedPlayers.length < state.players.length) {
+    state.priorityPlayer = frTurnNextPlayer(state, player);
+    return state;
+  }
+  if(state.stack.length > 0) {
+    state = frStackResolveTop(state);
+    state.passedPlayers = [];
+    state.priorityPlayer = state.activePlayer;
+    return state;
+  }
+  state.passedPlayers = [];
+  return frTurnAdvance(state);
+
+frActionPlayLand(state, action) =>
+  let player = action.player;
+  if(state.activePlayer !== player) {
+    state.lastActionError = "only the active player may play a land";
+    return state;
+  }
+  if(state.priorityPlayer !== player) {
+    state.lastActionError = "player does not have priority";
+    return state;
+  }
+  if(state.step !== "precombat_main" && state.step !== "postcombat_main") {
+    state.lastActionError = "lands may only be played during a main phase";
+    return state;
+  }
+  if(state.stack.length > 0) {
+    state.lastActionError = "cannot play a land while the stack is non-empty";
+    return state;
+  }
+  let pl = state.players[player];
+  if(pl.landPlayedThisTurn) {
+    state.lastActionError = "already played a land this turn";
+    return state;
+  }
+  let objId = action.objectId;
+  let obj = state.objects[objId];
+  if(!obj || obj.zone !== "hand" || obj.owner !== player) {
+    state.lastActionError = "object is not in player's hand";
+    return state;
+  }
+  let card = frCardGet(obj.cardId);
+  if(!card || card.types.indexOf("Land") === -1) {
+    state.lastActionError = "object is not a land";
+    return state;
+  }
+  frZoneMove(state, objId, "hand", "battlefield", player);
+  obj.tapped = false;
+  obj.summoningSickness = false;
+  pl.landPlayedThisTurn = true;
+  state.passedPlayers = [];
+  state.priorityPlayer = player;
+  return state;
+
+frActionCastSpell(state, action) =>
+  let player = action.player;
+  if(state.priorityPlayer !== player) {
+    state.lastActionError = "player does not have priority";
+    return state;
+  }
+  let objId = action.objectId;
+  let obj = state.objects[objId];
+  if(!obj || obj.zone !== "hand" || obj.owner !== player) {
+    state.lastActionError = "object is not in player's hand";
+    return state;
+  }
+  let card = frCardGet(obj.cardId);
+  if(!card) {
+    state.lastActionError = "unknown card";
+    return state;
+  }
+  if(card.types.indexOf("Land") !== -1) {
+    state.lastActionError = "lands are played, not cast";
+    return state;
+  }
+  let sorcerySpeedTypes = ["Creature", "Sorcery", "Enchantment", "Artifact"];
+  let isSorcerySpeed = false;
+  for(let t = 0; t < card.types.length; t++) {
+    if(sorcerySpeedTypes.indexOf(card.types[t]) !== -1) isSorcerySpeed = true;
+  }
+  if(isSorcerySpeed) {
+    if(state.activePlayer !== player) {
+      state.lastActionError = "sorcery-speed spell requires being the active player";
+      return state;
+    }
+    if(state.step !== "precombat_main" && state.step !== "postcombat_main") {
+      state.lastActionError = "sorcery-speed spell requires a main phase";
+      return state;
+    }
+    if(state.stack.length > 0) {
+      state.lastActionError = "sorcery-speed spell requires an empty stack";
+      return state;
+    }
+  }
+  let parsedCost = frManaParseCost(card.manaCost);
+  let pl = state.players[player];
+  let payResult = frManaTryPay(pl.manaPool, parsedCost);
+  if(!payResult.ok) {
+    state.lastActionError = "cannot pay mana cost";
+    return state;
+  }
+  pl.manaPool = payResult.pool;
+  frZoneMove(state, objId, "hand", "stack", player);
+  obj.stackKind = "spell";
+  state.passedPlayers = [];
+  state.priorityPlayer = player;
+  return state;
+
+frActionActivateAbility(state, action) =>
+  let player = action.player;
+  if(state.priorityPlayer !== player) {
+    state.lastActionError = "player does not have priority";
+    return state;
+  }
+  let objId = action.objectId;
+  let obj = state.objects[objId];
+  if(!obj || obj.zone !== "battlefield" || obj.controller !== player) {
+    state.lastActionError = "object is not a permanent you control";
+    return state;
+  }
+  let card = frCardGet(obj.cardId);
+  let color = frManaAbilityColor(obj.cardId);
+  if(!color) {
+    state.lastActionError = "no known mana ability on this permanent";
+    return state;
+  }
+  if(obj.tapped) {
+    state.lastActionError = "permanent is already tapped";
+    return state;
+  }
+  if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) {
+    state.lastActionError = "summoning sickness prevents activating a tap ability";
+    return state;
+  }
+  obj.tapped = true;
+  state.players[player].manaPool[color] += 1;
+  state.passedPlayers = [];
+  state.priorityPlayer = player;
+  return state;
+
+frActionTapPermanent(state, action) =>
+  let player = action.player;
+  let objId = action.objectId;
+  let obj = state.objects[objId];
+  if(!obj || obj.zone !== "battlefield" || obj.controller !== player) {
+    state.lastActionError = "object is not a permanent you control";
+    return state;
+  }
+  if(obj.tapped) {
+    state.lastActionError = "permanent is already tapped";
+    return state;
+  }
+  obj.tapped = true;
+  return state;
+
+frActionDeclareAttackers(state, action) =>
+  let player = action.player;
+  if(state.step !== "declare_attackers") {
+    state.lastActionError = "not the declare attackers step";
+    return state;
+  }
+  if(state.activePlayer !== player) {
+    state.lastActionError = "only the active player declares attackers";
+    return state;
+  }
+  let ids = action.attackers || [];
+  for(let i = 0; i < ids.length; i++) {
+    let obj = state.objects[ids[i]];
+    if(!obj || obj.zone !== "battlefield" || obj.controller !== player) {
+      state.lastActionError = "invalid attacker: " + ids[i];
+      return state;
+    }
+    let card = frCardGet(obj.cardId);
+    if(card.types.indexOf("Creature") === -1) {
+      state.lastActionError = "not a creature: " + ids[i];
+      return state;
+    }
+    if(obj.tapped) {
+      state.lastActionError = "tapped creature cannot attack: " + ids[i];
+      return state;
+    }
+    if(obj.summoningSickness) {
+      state.lastActionError = "summoning sickness: " + ids[i];
+      return state;
+    }
+  }
+  for(let i = 0; i < ids.length; i++) {
+    let obj = state.objects[ids[i]];
+    obj.attacking = true;
+    obj.tapped = true;
+  }
+  state.combatAttackers = ids;
+  return state;
+
+frActionDeclareBlockers(state, action) =>
+  let player = action.player;
+  if(state.step !== "declare_blockers") {
+    state.lastActionError = "not the declare blockers step";
+    return state;
+  }
+  if(state.activePlayer === player) {
+    state.lastActionError = "the active player does not declare blockers";
+    return state;
+  }
+  let blocks = action.blocks || [];
+  for(let i = 0; i < blocks.length; i++) {
+    let blocker = state.objects[blocks[i].blocker];
+    let attacker = state.objects[blocks[i].attacker];
+    if(!blocker || blocker.zone !== "battlefield" || blocker.controller !== player) {
+      state.lastActionError = "invalid blocker: " + blocks[i].blocker;
+      return state;
+    }
+    if(!attacker || !attacker.attacking) {
+      state.lastActionError = "not an attacking creature: " + blocks[i].attacker;
+      return state;
+    }
+    if(blocker.tapped) {
+      state.lastActionError = "tapped creature cannot block: " + blocks[i].blocker;
+      return state;
+    }
+  }
+  for(let i = 0; i < blocks.length; i++) {
+    state.objects[blocks[i].blocker].blocking = blocks[i].attacker;
+  }
+  state.combatBlocks = blocks;
+  return state;
+
+frActionConcede(state, action) =>
+  let player = action.player;
+  if(!state.players[player]) {
+    state.lastActionError = "no such player: " + player;
+    return state;
+  }
+  state.players[player].lost = true;
+  state.gameOver = true;
+  state.winner = frTurnOtherPlayer(state, player);
+  return state;
+
+frApplyAction(state, action) =>
+  // The reducer is the engine's outermost gate: $output("act", ...) routes straight into
+  // it, and the plugin's contract is that nothing throws on hostile input. Every action
+  // shape that is not an object with a string `type` is rejected here as a recorded
+  // error on the returned state rather than an exception.
+  let next = frCloneState(state);
+  next.lastActionError = null;
+  if(!action || typeof action !== "object" || typeof action.type !== "string") {
+    next.lastActionError = "malformed action";
+    return next;
+  }
+  if(next.gameOver) {
+    next.lastActionError = "game is over";
+    return next;
+  }
+  if(action.type === "concede") return frActionConcede(next, action);
+  if(action.type === "passPriority") return frActionPassPriority(next, action);
+  if(action.type === "playLand") return frActionPlayLand(next, action);
+  if(action.type === "castSpell") return frActionCastSpell(next, action);
+  if(action.type === "activateAbility") return frActionActivateAbility(next, action);
+  if(action.type === "tapPermanent") return frActionTapPermanent(next, action);
+  if(action.type === "declareAttackers") return frActionDeclareAttackers(next, action);
+  if(action.type === "declareBlockers") return frActionDeclareBlockers(next, action);
+  next.lastActionError = "unknown action type: " + action.type;
+  return next;
+
+// =====================================================================
+// QUERY HELPERS
+// =====================================================================
+//
+// Fixed reference lists and a best-effort legal-action enumerator. frRealmList/
+// frRarityList are the realm-identity and rarity-tier orderings fixed by
+// docs/specs/2026-08-21-five-realms-card-model.md sections 1 and 2 -- game data, not DSL,
+// same footing as frCardDb.
+
+frRealmList() =>
+  return ["solara", "verdant", "tide", "ember", "umbra"];
+
+frRarityList() =>
+  return ["Field", "Marked", "Vaulted", "Sovereign", "Ascendant"];
+
+frCardTypeLine(card) =>
+  let parts = card.supertypes.concat(card.types);
+  let line = parts.join(" ");
+  if(card.subtypes.length > 0) line += " \u2014 " + card.subtypes.join(" ");
+  return line;
+
+// Best-effort legal-action enumeration for $output("legalActions", state). Mirrors each
+// frAction*'s own guard clauses rather than re-deriving legality independently, so this
+// can drift stale against a guard-clause edit but never contradicts one at the point it
+// was written. Deliberately NOT a full legality solver: it does not simulate a mana
+// ability activated first and then spent (only the current floating manaPool is checked,
+// matching frActionCastSpell's own requirement), and it surfaces combat declarations as a
+// single yes/no stub rather than every legal attacker/blocker subset -- the same "clean
+// seam, not a shortcut" posture NOTES.md already recorded for frStackResolveTop. Returns
+// [] rather than throwing on any malformed state (see NOTES.md, "Never throws").
+
+frLegalActions(state) =>
+  let actions = [];
+  if(!state || typeof state !== "object" || !Array.isArray(state.players)) return actions;
+  if(state.gameOver) return actions;
+  let priority = state.priorityPlayer;
+  let pl = state.players[priority];
+  if(!pl) return actions;
+
+  actions.push({ type: "passPriority", player: priority });
+  actions.push({ type: "concede", player: priority });
+
+  let mainPhase = state.step === "precombat_main" || state.step === "postcombat_main";
+  let emptyStack = state.stack.length === 0;
+
+  if(priority === state.activePlayer && mainPhase && emptyStack && !pl.landPlayedThisTurn) {
+    for(let i = 0; i < pl.hand.length; i++) {
+      let objId = pl.hand[i];
+      let obj = state.objects[objId];
+      let card = obj ? frCardGet(obj.cardId) : null;
+      if(card && card.types.indexOf("Land") !== -1) {
+        actions.push({ type: "playLand", player: priority, objectId: objId });
+      }
+    }
+  }
+
+  let sorcerySpeedTypes = ["Creature", "Sorcery", "Enchantment", "Artifact"];
+  for(let i = 0; i < pl.hand.length; i++) {
+    let objId = pl.hand[i];
+    let obj = state.objects[objId];
+    let card = obj ? frCardGet(obj.cardId) : null;
+    if(!card || card.types.indexOf("Land") !== -1) continue;
+    let isSorcerySpeed = false;
+    for(let t = 0; t < card.types.length; t++) {
+      if(sorcerySpeedTypes.indexOf(card.types[t]) !== -1) isSorcerySpeed = true;
+    }
+    if(isSorcerySpeed && !(priority === state.activePlayer && mainPhase && emptyStack)) continue;
+    let parsedCost = frManaParseCost(card.manaCost);
+    if(frManaCanPay(pl.manaPool, parsedCost)) {
+      actions.push({ type: "castSpell", player: priority, objectId: objId });
+    }
+  }
+
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let objId = state.battlefield[i];
+    let obj = state.objects[objId];
+    if(!obj || obj.controller !== priority || obj.tapped) continue;
+    let card = frCardGet(obj.cardId);
+    if(!card) continue;
+    let color = frManaAbilityColor(obj.cardId);
+    if(!color) continue;
+    if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) continue;
+    actions.push({ type: "activateAbility", player: priority, objectId: objId });
+  }
+
+  if(state.step === "declare_attackers" && priority === state.activePlayer) {
+    actions.push({ type: "declareAttackers", player: priority });
+  }
+  if(state.step === "declare_blockers" && priority !== state.activePlayer) {
+    actions.push({ type: "declareBlockers", player: priority });
+  }
+
+  return actions;
+
+
+// =====================================================================
+// ART PAYLOAD (glyphs, fronts, back, symbols, numerals, ui, gems -- from ../game-assets'
+// five-realms family)
+// =====================================================================
+//
+// frInitPayload() lazily populates window.FIVE_REALMS_PAYLOAD exactly once, mirroring
+// initCardDeck() (card-deck-plugin/lists.txt:29-44, in turn citing
+// examples/wheel-plugin/lists.txt:118 for the lazy-init-a-window-global guard and
+// examples/wheel-plugin/lists.txt:348-352,355 for a bulk vendored/generated literal
+// assigned inside a plain window.NAME = {...} in one JS statement). The object literal
+// below is copied BYTE-FOR-BYTE from game-assets/build/perchance/five-realms-payload.js
+// -- only the `const NAME =` wrapper differs -- and that source file states its own
+// rebuild is proven "52/52 reconstructed byte-identical" by that repo's
+// tools/verify_payload.py before this file ever saw it. Do not hand-edit the object
+// literal below; regenerate it in game-assets and re-paste.
+//
+// 52 assets (B11, grown from B8's original 12) --
+//   glyphs (5): glyph-solara/verdant/tide/ember/umbra -- colourless still has NO glyph
+//     asset, see NOTES.md, "Only 5 glyphs, not 6".
+//   fronts (14): front-solara/verdant/tide/ember/umbra/colourless (the original 6, each
+//     carrying its own k.palette), front-land/gold/artifact (card-class fronts, no
+//     k.palette published), and front-basicland-solara/verdant/tide/ember/umbra (no
+//     colourless basic land exists). See NOTES.md, "Front selection" for which card gets
+//     which, and "No frame assets yet" -- still true: rarity is a gem overlay, not a
+//     frame variant.
+//   back (1): the card back, unchanged since B8.
+//   symbols (6): symbol-solara/verdant/tide/ember/umbra/colourless -- cost-size mana
+//     symbols, one per realm plus colourless.
+//   numerals (12): numeral-0..9, numeral-X, and symbol-tap (the {T} ability-cost glyph;
+//     not a mana symbol -- see card-model spec section 1).
+//   ui (6): phase-untap/draw/main/combat/end and life-gem -- not consumed by this bucket's
+//     renderer; carried through for a future turn/life-tracker consumer.
+//   gems (8): gem-marked/vaulted/sovereign/ascendant, each with a "-small" companion for
+//     a type-line-sized rendering. Field (basic lands) has no gem -- see frGemForCard.
+//
+// Every front's own k.safe_areas is read as published, not assumed -- three different
+// shapes exist (the original six-plus-gold-plus-artifact shape with ptBox, front-land's
+// shape with resourcePip and a taller art window, and the basic-land shape with neither
+// and a smaller costArea). Only the original six fronts carry k.palette; front-land,
+// front-gold, front-artifact, and every front-basicland-* front do not, so
+// frRenderCard's `palette` field is undefined for those -- documented, not patched over.
+
+frInitPayload() =>
+  window.FIVE_REALMS_PAYLOAD = {"v":1,"sources":[{"family":"five-realms","style":"glyphs","target_px":40,"view_box":[0,0,200,200],"count":5},{"family":"five-realms","style":"fronts","target_px":48,"view_box":[0,0,300,420],"count":14},{"family":"five-realms","style":"back","target_px":48,"view_box":[0,0,300,420],"count":1},{"family":"five-realms","style":"symbols","target_px":24,"view_box":[0,0,40,40],"count":6},{"family":"five-realms","style":"numerals","target_px":40,"view_box":[0,0,200,200],"count":12},{"family":"five-realms","style":"ui","target_px":32,"view_box":[0,0,50,50],"count":6},{"family":"five-realms","style":"gems","target_px":36,"view_box":[0,0,60,60],"count":8}],"templates":[["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <radialGradient id=\"fr-glyph-solara-bg\" cx=\"50%\" cy=\"45%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#FBEFD1\"/>\n      <stop offset=\"100%\" stop-color=\"#E8C877\"/>\n    </radialGradient>\n    <linearGradient id=\"fr-glyph-solara-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#B8860B\"/>\n      <stop offset=\"100%\" stop-color=\"#7A5C0E\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"100\" cy=\"100\" r=\"96\" fill=\"url(#fr-glyph-solara-bg)\" stroke=\"url(#fr-glyph-solara-line)\" stroke-width=\"4\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"86\" fill=\"none\" stroke=\"url(#fr-glyph-solara-line)\" stroke-width=\"2\"/>\n\n  <!-- filigree ticks at compass points -->\n  <g fill=\"url(#fr-glyph-solara-line)\">\n    <circle cx=\"100\" cy=\"16\" r=\"4\"/>\n    <circle cx=\"100\" cy=\"184\" r=\"4\"/>\n    <circle cx=\"16\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"184\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"41\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"41\" cy=\"159\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"159\" r=\"2.5\"/>\n  </g>\n\n  <!-- radiant compass star (8-pointed, alternating long/short rays) -->\n  <g stroke=\"url(#fr-glyph-solara-line)\" stroke-width=\"2.5\" stroke-linejoin=\"round\" fill=\"#FFF7E0\">\n    <path d=\"M100,40 L112,88 L100,100 L88,88 Z\"/>\n    <path d=\"M100,160 L112,112 L100,100 L88,112 Z\"/>\n    <path d=\"M40,100 L88,88 L100,100 L88,112 Z\"/>\n    <path d=\"M160,100 L112,112 L100,100 L112,88 Z\"/>\n    <path d=\"M63,63 L94,89 L100,100 L89,94 Z\" fill=\"#F4D9A0\"/>\n    <path d=\"M137,137 L106,111 L100,100 L111,106 Z\" fill=\"#F4D9A0\"/>\n    <path d=\"M63,137 L89,106 L100,100 L94,111 Z\" fill=\"#F4D9A0\"/>\n    <path d=\"M137,63 L111,94 L100,100 L106,89 Z\" fill=\"#F4D9A0\"/>\n  </g>\n\n  <circle cx=\"100\" cy=\"100\" r=\"14\" fill=\"#FFF7E0\" stroke=\"url(#fr-glyph-solara-line)\" stroke-width=\"3\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"6\" fill=\"url(#fr-glyph-solara-line)\"/>\n</svg>\n"],["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <radialGradient id=\"fr-glyph-verdant-bg\" cx=\"50%\" cy=\"45%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#E3F0D3\"/>\n      <stop offset=\"100%\" stop-color=\"#A9C98A\"/>\n    </radialGradient>\n    <linearGradient id=\"fr-glyph-verdant-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#3B6B35\"/>\n      <stop offset=\"100%\" stop-color=\"#254A22\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"100\" cy=\"100\" r=\"96\" fill=\"url(#fr-glyph-verdant-bg)\" stroke=\"url(#fr-glyph-verdant-line)\" stroke-width=\"4\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"86\" fill=\"none\" stroke=\"url(#fr-glyph-verdant-line)\" stroke-width=\"2\"/>\n\n  <g fill=\"url(#fr-glyph-verdant-line)\">\n    <circle cx=\"100\" cy=\"16\" r=\"4\"/>\n    <circle cx=\"100\" cy=\"184\" r=\"4\"/>\n    <circle cx=\"16\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"184\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"41\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"41\" cy=\"159\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"159\" r=\"2.5\"/>\n  </g>\n\n  <!-- spiral vine stem -->\n  <path d=\"M100,150 C60,150 55,110 85,100 C105,93 100,70 78,72 C60,74 58,92 72,96\"\n        fill=\"none\" stroke=\"url(#fr-glyph-verdant-line)\" stroke-width=\"5\" stroke-linecap=\"round\"/>\n\n  <!-- three leaves along the vine -->\n  <g stroke=\"url(#fr-glyph-verdant-line)\" stroke-width=\"2\" fill=\"#CDE6B0\">\n    <path d=\"M100,150 C90,130 108,118 122,128 C118,144 108,152 100,150 Z\"/>\n    <path d=\"M85,100 C68,92 68,72 86,66 C96,80 94,96 85,100 Z\"/>\n    <path d=\"M78,72 C64,66 64,50 80,46 C90,56 90,68 78,72 Z\"/>\n  </g>\n\n  <circle cx=\"100\" cy=\"150\" r=\"4\" fill=\"url(#fr-glyph-verdant-line)\"/>\n</svg>\n"],["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <radialGradient id=\"fr-glyph-tide-bg\" cx=\"50%\" cy=\"45%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#DCF1F1\"/>\n      <stop offset=\"100%\" stop-color=\"#8FC4D6\"/>\n    </radialGradient>\n    <linearGradient id=\"fr-glyph-tide-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#1B5A78\"/>\n      <stop offset=\"100%\" stop-color=\"#12374A\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"100\" cy=\"100\" r=\"96\" fill=\"url(#fr-glyph-tide-bg)\" stroke=\"url(#fr-glyph-tide-line)\" stroke-width=\"4\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"86\" fill=\"none\" stroke=\"url(#fr-glyph-tide-line)\" stroke-width=\"2\"/>\n\n  <g fill=\"url(#fr-glyph-tide-line)\">\n    <circle cx=\"100\" cy=\"16\" r=\"4\"/>\n    <circle cx=\"100\" cy=\"184\" r=\"4\"/>\n    <circle cx=\"16\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"184\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"41\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"41\" cy=\"159\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"159\" r=\"2.5\"/>\n  </g>\n\n  <!-- nautilus spiral -->\n  <path d=\"M100,100\n           m0,-38\n           a38,38 0 1 1 -27,65\n           a27,27 0 1 1 19,-46\n           a17,17 0 1 1 -12,29\n           a8,8 0 1 1 6,-14\"\n        fill=\"none\" stroke=\"url(#fr-glyph-tide-line)\" stroke-width=\"5\" stroke-linecap=\"round\"/>\n\n  <!-- flanking wave crests -->\n  <path d=\"M40,140 C55,130 65,150 80,140\" fill=\"none\" stroke=\"url(#fr-glyph-tide-line)\" stroke-width=\"4\" stroke-linecap=\"round\"/>\n  <path d=\"M120,150 C135,140 145,160 160,150\" fill=\"none\" stroke=\"url(#fr-glyph-tide-line)\" stroke-width=\"4\" stroke-linecap=\"round\"/>\n\n  <circle cx=\"100\" cy=\"62\" r=\"4\" fill=\"url(#fr-glyph-tide-line)\"/>\n</svg>\n"],["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <radialGradient id=\"fr-glyph-ember-bg\" cx=\"50%\" cy=\"45%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#FBDFC7\"/>\n      <stop offset=\"100%\" stop-color=\"#E4967D\"/>\n    </radialGradient>\n    <linearGradient id=\"fr-glyph-ember-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#8C2E1C\"/>\n      <stop offset=\"100%\" stop-color=\"#5C1712\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"100\" cy=\"100\" r=\"96\" fill=\"url(#fr-glyph-ember-bg)\" stroke=\"url(#fr-glyph-ember-line)\" stroke-width=\"4\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"86\" fill=\"none\" stroke=\"url(#fr-glyph-ember-line)\" stroke-width=\"2\"/>\n\n  <g fill=\"url(#fr-glyph-ember-line)\">\n    <circle cx=\"100\" cy=\"16\" r=\"4\"/>\n    <circle cx=\"100\" cy=\"184\" r=\"4\"/>\n    <circle cx=\"16\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"184\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"41\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"41\" cy=\"159\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"159\" r=\"2.5\"/>\n  </g>\n\n  <!-- faceted crystalline flame, angular not curvy -->\n  <polygon points=\"100,44 118,90 108,88 122,120 100,112 78,120 92,88 82,90\"\n           fill=\"#F6C68F\" stroke=\"url(#fr-glyph-ember-line)\" stroke-width=\"3\" stroke-linejoin=\"round\"/>\n  <polygon points=\"100,112 116,124 106,150 100,156 94,150 84,124\"\n           fill=\"#F0A876\" stroke=\"url(#fr-glyph-ember-line)\" stroke-width=\"3\" stroke-linejoin=\"round\"/>\n  <line x1=\"100\" y1=\"60\" x2=\"100\" y2=\"150\" stroke=\"url(#fr-glyph-ember-line)\" stroke-width=\"1.5\" opacity=\"0.5\"/>\n\n  <circle cx=\"100\" cy=\"150\" r=\"3.5\" fill=\"url(#fr-glyph-ember-line)\"/>\n</svg>\n"],["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <radialGradient id=\"fr-glyph-umbra-bg\" cx=\"50%\" cy=\"45%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#DCD4E8\"/>\n      <stop offset=\"100%\" stop-color=\"#9686AF\"/>\n    </radialGradient>\n    <linearGradient id=\"fr-glyph-umbra-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#3A2947\"/>\n      <stop offset=\"100%\" stop-color=\"#1E1526\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"100\" cy=\"100\" r=\"96\" fill=\"url(#fr-glyph-umbra-bg)\" stroke=\"url(#fr-glyph-umbra-line)\" stroke-width=\"4\"/>\n  <circle cx=\"100\" cy=\"100\" r=\"86\" fill=\"none\" stroke=\"url(#fr-glyph-umbra-line)\" stroke-width=\"2\"/>\n\n  <g fill=\"url(#fr-glyph-umbra-line)\">\n    <circle cx=\"100\" cy=\"16\" r=\"4\"/>\n    <circle cx=\"100\" cy=\"184\" r=\"4\"/>\n    <circle cx=\"16\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"184\" cy=\"100\" r=\"4\"/>\n    <circle cx=\"41\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"41\" r=\"2.5\"/>\n    <circle cx=\"41\" cy=\"159\" r=\"2.5\"/>\n    <circle cx=\"159\" cy=\"159\" r=\"2.5\"/>\n  </g>\n\n  <!-- crescent moon -->\n  <path d=\"M115,50 A50,50 0 1 0 115,150 A38,38 0 1 1 115,50 Z\"\n        fill=\"#4B3A5C\" stroke=\"url(#fr-glyph-umbra-line)\" stroke-width=\"3\" stroke-linejoin=\"round\"/>\n\n  <!-- thorned vine wrapping the crescent -->\n  <path d=\"M60,60 C50,90 50,110 60,140 C68,155 90,158 108,150\"\n        fill=\"none\" stroke=\"url(#fr-glyph-umbra-line)\" stroke-width=\"3.5\" stroke-linecap=\"round\"/>\n  <g stroke=\"url(#fr-glyph-umbra-line)\" stroke-width=\"2.5\" stroke-linecap=\"round\">\n    <line x1=\"53\" y1=\"80\" x2=\"42\" y2=\"76\"/>\n    <line x1=\"51\" y1=\"100\" x2=\"40\" y2=\"100\"/>\n    <line x1=\"53\" y1=\"120\" x2=\"42\" y2=\"124\"/>\n    <line x1=\"66\" y1=\"138\" x2=\"60\" y2=\"148\"/>\n  </g>\n\n  <circle cx=\"60\" cy=\"60\" r=\"3.5\" fill=\"url(#fr-glyph-umbra-line)\"/>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"","\">\n  <defs>\n    <linearGradient id=\"","\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"","\"/><stop offset=\"100%\" stop-color=\"","\"/>\n    </linearGradient>\n    <linearGradient id=\"","\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"","\"/><stop offset=\"100%\" stop-color=\"","\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"","\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <circle cx=\"270\" cy=\"34\" r=\"17\" fill=\"","\" stroke=\"","\" stroke-width=\"2.5\"/>\n  <path d=\"M273,25 A9,9 0 1 0 273,43 A7,7 0 1 1 273,25 Z\" fill=\"","\"/>\n\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"150\" fill=\"","\" stroke=\"","\" stroke-width=\"2.5\"/>\n\n  <rect x=\"20\" y=\"210\" width=\"260\" height=\"24\" rx=\"4\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"240\" width=\"260\" height=\"130\" rx=\"4\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <circle cx=\"270\" cy=\"392\" r=\"16\" fill=\"","\" stroke=\"","\" stroke-width=\"2.5\"/>\n\n  <g transform=\"translate(38,392)\" opacity=\"0.55\">\n    <circle r=\"14\" fill=\"none\" stroke=\"","\" stroke-width=\"1.5\"/>\n    <path d=\"M3,-9 A9,9 0 1 0 3,9 A7,7 0 1 1 3,-9 Z\" fill=\"","\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms Land card front\">\n  <defs>\n    <linearGradient id=\"fr-front-land-border\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#D9C49C\"/><stop offset=\"100%\" stop-color=\"#6B4A2B\"/>\n    </linearGradient>\n    <linearGradient id=\"fr-front-land-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#6B4A2B\"/><stop offset=\"100%\" stop-color=\"#4A3018\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"url(#fr-front-land-border)\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"#EFE4CB\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2\"/>\n\n  <!-- title bar -->\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"#D9C49C\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2\"/>\n\n  <!-- tap-for-resource icon (no mana cost on lands) -->\n  <circle cx=\"270\" cy=\"34\" r=\"17\" fill=\"#FAF3E1\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2.5\"/>\n  <path d=\"M262,42 L278,26 M266,26 L278,26 L278,38\"\n        fill=\"none\" stroke=\"#6B4A2B\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n\n  <!-- art window (full bleed, taller — lands favor landscape art) -->\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"182\" fill=\"#C9B182\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2.5\"/>\n\n  <!-- type line -->\n  <rect x=\"20\" y=\"242\" width=\"260\" height=\"24\" rx=\"4\" fill=\"#D9C49C\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2\"/>\n\n  <!-- rules text box (shorter — lands usually hold one tap ability line) -->\n  <rect x=\"20\" y=\"272\" width=\"260\" height=\"98\" rx=\"4\" fill=\"#FAF3E1\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2\"/>\n\n  <!-- resource pip bottom-left: slot for realm icon this land produces -->\n  <circle cx=\"38\" cy=\"392\" r=\"16\" fill=\"#FAF3E1\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"2.5\"/>\n\n  <!-- land watermark: mountain/terrain motif -->\n  <g transform=\"translate(270,392)\" opacity=\"0.5\">\n    <circle r=\"14\" fill=\"none\" stroke=\"url(#fr-front-land-line)\" stroke-width=\"1.5\"/>\n    <path d=\"M-9,4 L-3,-6 L2,1 L6,-4 L9,4 Z\" fill=\"#6B4A2B\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms Gold card front\">\n  <defs>\n    <linearGradient id=\"fr-front-gold-border\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#F6E6B4\"/>\n      <stop offset=\"100%\" stop-color=\"#A9791A\"/>\n    </linearGradient>\n    <linearGradient id=\"fr-front-gold-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#A9791A\"/><stop offset=\"100%\" stop-color=\"#6E4E0F\"/>\n    </linearGradient>\n    <!-- iridescent sliver blending all 5 realm hues, used only as thin accent -->\n    <linearGradient id=\"fr-front-gold-iris\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\">\n      <stop offset=\"0%\" stop-color=\"#E8C877\"/>\n      <stop offset=\"25%\" stop-color=\"#8FC4D6\"/>\n      <stop offset=\"50%\" stop-color=\"#A9C98A\"/>\n      <stop offset=\"75%\" stop-color=\"#E4967D\"/>\n      <stop offset=\"100%\" stop-color=\"#9686AF\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"url(#fr-front-gold-border)\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"#FBF2D6\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2\"/>\n\n  <!-- iridescent accent strip just inside the outer border, hints at multiple realms -->\n  <rect x=\"14\" y=\"14\" width=\"272\" height=\"392\" rx=\"8\" fill=\"none\" stroke=\"url(#fr-front-gold-iris)\" stroke-width=\"2\" opacity=\"0.85\"/>\n\n  <!-- title bar -->\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"#EBD8A0\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2\"/>\n\n  <!-- split cost gem: two-tone wedge representing hybrid/multicolor cost -->\n  <circle cx=\"270\" cy=\"34\" r=\"17\" fill=\"#FFF8E6\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2.5\"/>\n  <path d=\"M270,17 A17,17 0 0 1 270,51 Z\" fill=\"#E4967D\" opacity=\"0.85\"/>\n  <path d=\"M270,17 A17,17 0 0 0 270,51 Z\" fill=\"#8FC4D6\" opacity=\"0.85\"/>\n  <line x1=\"270\" y1=\"17\" x2=\"270\" y2=\"51\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"1.5\"/>\n\n  <!-- art window -->\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"150\" fill=\"#E1CE94\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2.5\"/>\n\n  <!-- type line -->\n  <rect x=\"20\" y=\"210\" width=\"260\" height=\"24\" rx=\"4\" fill=\"#EBD8A0\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2\"/>\n\n  <!-- rules text box -->\n  <rect x=\"20\" y=\"240\" width=\"260\" height=\"130\" rx=\"4\" fill=\"#FFF8E6\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2\"/>\n\n  <!-- bottom stat gem -->\n  <circle cx=\"270\" cy=\"392\" r=\"16\" fill=\"#FFF8E6\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"2.5\"/>\n\n  <!-- multicolor watermark: five small dots orbiting a gold core -->\n  <g transform=\"translate(38,392)\" opacity=\"0.6\">\n    <circle r=\"14\" fill=\"none\" stroke=\"url(#fr-front-gold-line)\" stroke-width=\"1.5\"/>\n    <circle cx=\"0\" cy=\"-9\" r=\"2.4\" fill=\"#E8C877\"/>\n    <circle cx=\"8.5\" cy=\"-2.7\" r=\"2.4\" fill=\"#E4967D\"/>\n    <circle cx=\"5.3\" cy=\"7.3\" r=\"2.4\" fill=\"#8FC4D6\"/>\n    <circle cx=\"-5.3\" cy=\"7.3\" r=\"2.4\" fill=\"#9686AF\"/>\n    <circle cx=\"-8.5\" cy=\"-2.7\" r=\"2.4\" fill=\"#A9C98A\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms Artifact card front\">\n  <defs>\n    <linearGradient id=\"fr-front-artifact-border\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#D9DCE1\"/><stop offset=\"100%\" stop-color=\"#5C6570\"/>\n    </linearGradient>\n    <linearGradient id=\"fr-front-artifact-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#5C6570\"/><stop offset=\"100%\" stop-color=\"#33393F\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"url(#fr-front-artifact-border)\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"#E8EAED\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2\"/>\n\n  <!-- title bar -->\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"#B7BEC6\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2\"/>\n\n  <!-- cost gem: hex bolt/rivet motif for artifacts -->\n  <circle cx=\"270\" cy=\"34\" r=\"17\" fill=\"#F4F5F7\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2.5\"/>\n  <polygon points=\"270,24 278,29 278,39 270,44 262,39 262,29\"\n           fill=\"none\" stroke=\"#5C6570\" stroke-width=\"2\"/>\n  <circle cx=\"270\" cy=\"34\" r=\"3\" fill=\"#5C6570\"/>\n\n  <!-- art window -->\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"150\" fill=\"#C3C9D0\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2.5\"/>\n\n  <!-- type line -->\n  <rect x=\"20\" y=\"210\" width=\"260\" height=\"24\" rx=\"4\" fill=\"#B7BEC6\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2\"/>\n\n  <!-- rules text box -->\n  <rect x=\"20\" y=\"240\" width=\"260\" height=\"130\" rx=\"4\" fill=\"#F4F5F7\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2\"/>\n\n  <!-- bottom stat gem -->\n  <circle cx=\"270\" cy=\"392\" r=\"16\" fill=\"#F4F5F7\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"2.5\"/>\n\n  <!-- neutral watermark: gear/rivet ring -->\n  <g transform=\"translate(38,392)\" opacity=\"0.55\">\n    <circle r=\"14\" fill=\"none\" stroke=\"url(#fr-front-artifact-line)\" stroke-width=\"1.5\"/>\n    <polygon points=\"0,-8 7,-4 7,4 0,8 -7,4 -7,-4\" fill=\"none\" stroke=\"#5C6570\" stroke-width=\"1.8\"/>\n    <circle r=\"2.5\" fill=\"#5C6570\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms Solara basic land card front\">\n  <defs>\n    <linearGradient id=\"fr-front-basicland-solara-border\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#F4D9A0\"/><stop offset=\"100%\" stop-color=\"#B8860B\"/>\n    </linearGradient>\n    <linearGradient id=\"fr-front-basicland-solara-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#B8860B\"/><stop offset=\"100%\" stop-color=\"#7A5C0E\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"url(#fr-front-basicland-solara-border)\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"#FBEFD1\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"#E8C877\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2\"/>\n\n  <circle cx=\"270\" cy=\"34\" r=\"14\" fill=\"#FFF7E0\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"182\" fill=\"#D8C08A\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2.5\"/>\n\n  <rect x=\"20\" y=\"242\" width=\"260\" height=\"24\" rx=\"4\" fill=\"#E8C877\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"272\" width=\"260\" height=\"98\" rx=\"4\" fill=\"#FFF7E0\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2\"/>\n\n  <circle cx=\"38\" cy=\"392\" r=\"16\" fill=\"#FFF7E0\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"2.5\"/>\n  <path d=\"M38,378 L41,388 L51,392 L41,396 L38,406 L35,396 L25,392 L35,388 Z\" fill=\"#B8860B\" transform=\"translate(19.5,10.5) scale(0.45)\"/>\n\n  <g transform=\"translate(270,392)\" opacity=\"0.5\">\n    <circle r=\"14\" fill=\"none\" stroke=\"url(#fr-front-basicland-solara-line)\" stroke-width=\"1.5\"/>\n    <path d=\"M-9,4 L-3,-6 L2,1 L6,-4 L9,4 Z\" fill=\"#B8860B\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"","\">\n  <defs>\n    <linearGradient id=\"","\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"","\"/><stop offset=\"100%\" stop-color=\"","\"/>\n    </linearGradient>\n    <linearGradient id=\"","\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"","\"/><stop offset=\"100%\" stop-color=\"","\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"","\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <circle cx=\"270\" cy=\"34\" r=\"14\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"182\" fill=\"","\" stroke=\"","\" stroke-width=\"2.5\"/>\n\n  <rect x=\"20\" y=\"242\" width=\"260\" height=\"24\" rx=\"4\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"272\" width=\"260\" height=\"98\" rx=\"4\" fill=\"","\" stroke=\"","\" stroke-width=\"2\"/>\n\n  <circle cx=\"38\" cy=\"392\" r=\"16\" fill=\"","\" stroke=\"","\" stroke-width=\"2.5\"/>\n  <path d=\"","\" fill=\"","\"/>\n\n  <g transform=\"translate(270,392)\" opacity=\"0.5\">\n    <circle r=\"14\" fill=\"none\" stroke=\"","\" stroke-width=\"1.5\"/>\n    <path d=\"M-9,4 L-3,-6 L2,1 L6,-4 L9,4 Z\" fill=\"","\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms Tide basic land card front\">\n  <defs>\n    <linearGradient id=\"fr-front-basicland-tide-border\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#BEE9E8\"/><stop offset=\"100%\" stop-color=\"#1B5A78\"/>\n    </linearGradient>\n    <linearGradient id=\"fr-front-basicland-tide-line\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#1B5A78\"/><stop offset=\"100%\" stop-color=\"#12374A\"/>\n    </linearGradient>\n  </defs>\n\n  <rect width=\"300\" height=\"420\" rx=\"16\" fill=\"url(#fr-front-basicland-tide-border)\"/>\n  <rect x=\"10\" y=\"10\" width=\"280\" height=\"400\" rx=\"10\" fill=\"#DCF1F1\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"20\" width=\"260\" height=\"28\" rx=\"6\" fill=\"#8FC4D6\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2\"/>\n\n  <circle cx=\"270\" cy=\"34\" r=\"14\" fill=\"#EFFAFA\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"54\" width=\"260\" height=\"182\" fill=\"#A9D6DA\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2.5\"/>\n\n  <rect x=\"20\" y=\"242\" width=\"260\" height=\"24\" rx=\"4\" fill=\"#8FC4D6\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2\"/>\n\n  <rect x=\"20\" y=\"272\" width=\"260\" height=\"98\" rx=\"4\" fill=\"#EFFAFA\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2\"/>\n\n  <circle cx=\"38\" cy=\"392\" r=\"16\" fill=\"#EFFAFA\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"2.5\"/>\n  <path d=\"M29,394 C32,388 35,388 38,394 C41,388 44,388 47,394\" fill=\"none\" stroke=\"#1B5A78\" stroke-width=\"2.5\" stroke-linecap=\"round\"/>\n\n  <g transform=\"translate(270,392)\" opacity=\"0.5\">\n    <circle r=\"14\" fill=\"none\" stroke=\"url(#fr-front-basicland-tide-line)\" stroke-width=\"1.5\"/>\n    <path d=\"M-9,4 L-3,-6 L2,1 L6,-4 L9,4 Z\" fill=\"#1B5A78\"/>\n  </g>\n</svg>\n"],["<svg viewBox=\"0 0 300 420\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms card back\">\n    <defs>\n        <linearGradient id=\"fr-back-grad1\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(280 0 0 400 10 10)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad2\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(264 0 0 384 18 18)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad3\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(26 0 0 26 18 18)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad4\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(26 0 0 26 256 18)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad5\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(26 0 0 26 256 376)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad6\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(26 0 0 26 18 376)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad7\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(7 0 0 7 14.5 14.5)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad8\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(7 0 0 7 278.5 14.5)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad9\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(7 0 0 7 14.5 398.5)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad10\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(7 0 0 7 278.5 398.5)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad11\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(180 0 0 24 60 44)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad14\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(156.68213 0 0 21.58838 71.658936 43.57715)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad15\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(236 0 0 236 -118 -118)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad16\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(212 0 0 212 -106 -106)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad17\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(168 0 0 160 -84 -88)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad18\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(168 0 0 160 -84 -88)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad19\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(22 0 0 22 -11 -99)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad20\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(22 0 0 22 73 -38)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad21\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(22 0 0 22 41 61)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad22\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(22 0 0 22 -63 61)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad23\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(22 0 0 22 -95 -38)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad24\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(44 0 0 44 -22 -22)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad25\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(24 0 0 24 -12 -12)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-grad26\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(120 0 0 8 90 372)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <linearGradient id=\"fr-back-gold\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(6 0 0 6 147 378)\">\n            <stop offset=\"0\" stop-color=\"#e9cd82\"/>\n            <stop offset=\"0.5\" stop-color=\"#b8860b\"/>\n            <stop offset=\"1\" stop-color=\"#8a6410\"/>\n        </linearGradient>\n        <radialGradient id=\"fr-back-bg\" cx=\"0.5\" cy=\"0.42\" r=\"0.75\" fx=\"0.5\" fy=\"0.42\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(300 0 0 420 -0 0)\">\n            <stop offset=\"0\" stop-color=\"#2a2140\"/>\n            <stop offset=\"1\" stop-color=\"#120e1e\"/>\n        </radialGradient>\n        <radialGradient id=\"fr-back-glow\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fx=\"0.5\" fy=\"0.5\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(236 0 0 236 -118 -118)\">\n            <stop offset=\"0\" stop-color=\"#3a2f55\"/>\n            <stop offset=\"1\" stop-color=\"#1a1428\"/>\n        </radialGradient>\n    </defs>\n    <path fill=\"url(#fr-back-bg)\" stroke=\"none\" d=\"M 18 0 L 282 0 C 291.94113 0 300 8.058874 300 18 L 300 402 C 300 411.94116 291.94113 420 282 420 L 18 420 C 8.058874 420 0 411.94116 0 402 L 0 18 C -0 8.058874 8.058874 0 18 0 Z\"/>\n    <path fill=\"none\" stroke=\"url(#fr-back-grad1)\" stroke-width=\"5\" d=\"M 24 10 L 276 10 C 283.732 10 290 16.268013 290 24 L 290 396 C 290 403.732 283.732 410 276 410 L 24 410 C 16.268013 410 10 403.732 10 396 L 10 24 C 10 16.268013 16.268013 10 24 10 Z\"/>\n    <path fill=\"none\" stroke=\"url(#fr-back-grad2)\" stroke-width=\"1.5\" d=\"M 28 18 L 272 18 C 277.52286 18 282 22.47715 282 28 L 282 392 C 282 397.52286 277.52286 402 272 402 L 28 402 C 22.47715 402 18 397.52286 18 392 L 18 28 C 18 22.47715 22.47715 18 28 18 Z\"/>\n    <g>\n        <path fill=\"none\" stroke=\"url(#fr-back-grad3)\" stroke-width=\"2.5\" stroke-linecap=\"round\" d=\"M 18 44 Q 18 18 44 18\"/>\n        <path fill=\"none\" stroke=\"url(#fr-back-grad4)\" stroke-width=\"2.5\" stroke-linecap=\"round\" d=\"M 256 18 Q 282 18 282 44\"/>\n        <path fill=\"none\" stroke=\"url(#fr-back-grad5)\" stroke-width=\"2.5\" stroke-linecap=\"round\" d=\"M 282 376 Q 282 402 256 402\"/>\n        <path fill=\"none\" stroke=\"url(#fr-back-grad6)\" stroke-width=\"2.5\" stroke-linecap=\"round\" d=\"M 44 402 Q 18 402 18 376\"/>\n    </g>\n    <g>\n        <path fill=\"url(#fr-back-grad7)\" stroke=\"none\" d=\"M 21.500002 18 C 21.500002 19.932997 19.932997 21.500002 18 21.500002 C 16.067003 21.500002 14.5 19.932997 14.5 18 C 14.5 16.067003 16.067003 14.5 18 14.5 C 19.932997 14.5 21.500002 16.067003 21.500002 18 Z\"/>\n        <path fill=\"url(#fr-back-grad8)\" stroke=\"none\" d=\"M 285.5 18 C 285.5 19.932997 283.93298 21.500002 282 21.500002 C 280.06702 21.500002 278.5 19.932997 278.5 18 C 278.5 16.067003 280.06702 14.5 282 14.5 C 283.93298 14.5 285.5 16.067003 285.5 18 Z\"/>\n        <path fill=\"url(#fr-back-grad9)\" stroke=\"none\" d=\"M 21.500002 402 C 21.500002 403.93298 19.932997 405.5 18 405.5 C 16.067003 405.5 14.5 403.93298 14.5 402 C 14.5 400.06702 16.067003 398.5 18 398.5 C 19.932997 398.5 21.500002 400.06702 21.500002 402 Z\"/>\n        <path fill=\"url(#fr-back-grad10)\" stroke=\"none\" d=\"M 285.5 402 C 285.5 403.93298 283.93298 405.5 282 405.5 C 280.06702 405.5 278.5 403.93298 278.5 402 C 278.5 400.06702 280.06702 398.5 282 398.5 C 283.93298 398.5 285.5 400.06702 285.5 402 Z\"/>\n    </g>\n    <g>\n        <path fill=\"#1a1428\" stroke=\"url(#fr-back-grad11)\" stroke-width=\"2\" d=\"M 60 44 L 240 44 L 228 68 L 72 68 Z\"/>\n        <g>\n            <path fill=\"url(#fr-back-grad14)\" stroke=\"none\" d=\"M 82.78247 51.12891 L 82.08667 51.12891 Q 81.891846 50.395996 81.2749 49.561035 Q 80.65796 48.726074 80.09204 48.642582 Q 79.80444 48.605473 79.41016 48.586914 Q 79.01587 48.56836 78.51489 48.56836 L 76.306885 48.56836 L 76.306885 53.856445 L 77.81909 53.856445 Q 78.505615 53.856445 78.88599 53.712646 Q 79.26636 53.56885 79.5354 53.271973 Q 79.72095 53.067875 79.87402 52.63647 Q 80.0271 52.20508 80.07349 51.71338 L 80.778564 51.71338 L 80.778564 56.88086 L 80.07349 56.88086 Q 80.045654 56.472656 79.8833 55.953125 Q 79.72095 55.433594 79.5354 55.20166 Q 79.25708 54.8584 78.83496 54.733154 Q 78.41284 54.607906 77.81909 54.607906 L 76.306885 54.607906 L 76.306885 59.14453 Q 76.306885 59.450684 76.42749 59.691895 Q 76.548096 59.933105 76.85425 60.081543 Q 76.99341 60.146484 77.457275 60.239258 Q 77.92114 60.33203 78.16235 60.34131 L 78.16235 61 L 72.45679 61 L 72.45679 60.34131 Q 72.73511 60.322754 73.198975 60.281006 Q 73.66284 60.239258 73.802 60.174316 Q 74.08032 60.053707 74.20557 59.81714 Q 74.33081 59.580563 74.33081 59.246582 L 74.33081 49.746582 Q 74.33081 49.44043 74.22876 49.203854 Q 74.12671 48.967285 73.802 48.818848 Q 73.55151 48.69824 73.129395 48.605473 Q 72.707275 48.512695 72.45679 48.49414 L 72.45679 47.83545 L 82.78247 47.83545 L 82.78247 51.12891 Z M 92.70336 61 L 86.77514 61 L 86.77514 60.34131 Q 87.025635 60.322754 87.49878 60.285645 Q 87.971924 60.248535 88.16675 60.174316 Q 88.4729 60.053707 88.61207 59.84497 Q 88.75121 59.63623 88.75121 59.265137 L 88.75121 49.728027 Q 88.75121 49.40332 88.64918 49.1853 Q 88.54713 48.967285 88.16675 48.818848 Q 87.88843 48.707516 87.46631 48.61011 Q 87.04419 48.512695 86.77514 48.49414 L 86.77514 47.83545 L 92.70336 47.83545 L 92.70336 48.49414 Q 92.41577 48.503418 92.016846 48.56372 Q 91.61791 48.624027 91.321045 48.716793 Q 90.968506 48.828125 90.8479 49.078613 Q 90.72729 49.3291 90.72729 49.635258 L 90.72729 59.163086 Q 90.72729 59.469242 90.86182 59.70581 Q 90.99634 59.942383 91.321045 60.081543 Q 91.51588 60.15576 91.95654 60.243896 Q 92.39722 60.33203 92.70336 60.34131 L 92.70336 61 Z M 109.49878 48.49414 Q 109.25756 48.503418 108.91431 48.600834 Q 108.571045 48.69824 108.34839 48.837402 Q 108.03296 49.032227 107.84277 49.33838 Q 107.65259 49.644535 107.46704 50.06201 Q 106.84546 51.53711 105.602295 54.658936 Q 104.35912 57.78076 103.04175 61.166992 L 102.27172 61.166992 Q 100.93579 57.576656 99.69263 54.246094 Q 98.44946 50.915527 98.00415 49.746582 Q 97.89282 49.458984 97.707275 49.240967 Q 97.52173 49.02295 97.21558 48.828125 Q 96.96509 48.670406 96.658936 48.591553 Q 96.352776 48.512695 96.09302 48.49414 L 96.09302 47.83545 L 101.53882 47.83545 L 101.53882 48.49414 Q 100.84302 48.53125 100.36523 48.633305 Q 99.88745 48.73535 99.88745 48.995117 Q 99.88745 49.09717 99.92456 49.23633 Q 99.96167 49.37549 99.9895 49.458984 Q 100.332756 50.368164 101.10278 52.423096 Q 101.8728 54.478027 103.29223 58.27246 Q 103.997314 56.556156 104.91577 54.21826 Q 105.83423 51.88037 106.149666 51.0083 Q 106.45581 50.16406 106.506836 49.839355 Q 106.55786 49.51465 106.55786 49.310547 Q 106.55786 49.09717 106.367676 48.95337 Q 106.1775 48.80957 105.86206 48.707516 Q 105.55591 48.61475 105.24047 48.56836 Q 104.92505 48.521973 104.60034 48.49414 L 104.60034 47.83545 L 109.49878 47.83545 L 109.49878 48.49414 Z M 124.08618 57.12207 L 123.835686 61 L 112.90699 61 L 112.90699 60.34131 Q 113.1853 60.322754 113.64917 60.26245 Q 114.11304 60.20215 114.2522 60.137207 Q 114.54907 59.99805 114.66504 59.77539 Q 114.78101 59.55273 114.78101 59.209473 L 114.78101 49.746582 Q 114.78101 49.44043 114.678955 49.203854 Q 114.576904 48.967285 114.2522 48.818848 Q 114.0017 48.69824 113.57959 48.605473 Q 113.15747 48.512695 112.90699 48.49414 L 112.90699 47.83545 L 123.093506 47.83545 L 123.093506 51.0083 L 122.397705 51.0083 Q 122.21216 50.303223 121.595215 49.51001 Q 120.97827 48.716793 120.42163 48.642582 Q 120.13403 48.605473 119.735115 48.586914 Q 119.33618 48.56836 118.825935 48.56836 L 116.75709 48.56836 L 116.75709 53.80078 L 118.241455 53.80078 Q 118.9558 53.80078 119.28516 53.66626 Q 119.6145 53.53174 119.86498 53.21631 Q 120.06909 52.947266 120.21289 52.497314 Q 120.35669 52.047363 120.403076 51.648434 L 121.09888 51.648434 L 121.09888 56.797363 L 120.403076 56.797363 Q 120.36597 56.35205 120.20361 55.855713 Q 120.04126 55.359375 119.86498 55.136715 Q 119.57739 54.774902 119.21094 54.663574 Q 118.844475 54.55225 118.241455 54.55225 L 116.75709 54.55225 L 116.75709 58.5044 Q 116.75709 59.098145 116.84058 59.441406 Q 116.924065 59.784668 117.16528 59.96094 Q 117.406494 60.137207 117.82398 60.188232 Q 118.241455 60.239258 119.011475 60.239258 Q 119.31763 60.239258 119.818596 60.239258 Q 120.31958 60.239258 120.66284 60.20215 Q 121.01538 60.16504 121.39111 60.067623 Q 121.76685 59.97022 121.92456 59.803223 Q 122.35132 59.35791 122.81982 58.45337 Q 123.28833 57.548824 123.41821 57.12207 L 124.08618 57.12207 Z M 148.8357 61 L 145.29175 61 Q 144.11353 59.15381 143.1626 57.808594 Q 142.21167 56.46338 141.09839 55.03467 L 139.75317 55.03467 L 139.75317 59.209473 Q 139.75317 59.534176 139.85522 59.78003 Q 139.95728 60.025875 140.29126 60.15576 Q 140.45825 60.220703 140.87573 60.276367 Q 141.29321 60.33203 141.58081 60.34131 L 141.58081 61 L 136.0144 61 L 136.0144 60.34131 Q 136.23706 60.322754 136.65918 60.276367 Q 137.0813 60.22998 137.24829 60.15576 Q 137.52661 60.035152 137.65186 59.803223 Q 137.7771 59.571285 137.7771 59.209473 L 137.7771 49.690914 Q 137.7771 49.36621 137.68433 49.115726 Q 137.59155 48.865234 137.24829 48.73535 Q 137.01636 48.65186 136.64526 48.582275 Q 136.27417 48.512695 136.0144 48.49414 L 136.0144 47.83545 L 142.09106 47.83545 Q 142.92603 47.83545 143.65894 48.00708 Q 144.39185 48.178707 144.9856 48.559082 Q 145.56079 48.930176 145.90405 49.528564 Q 146.24731 50.126957 146.24731 50.97119 Q 146.24731 51.731934 146.01538 52.316406 Q 145.78345 52.90088 145.32886 53.327637 Q 144.91138 53.726563 144.3269 54.0188 Q 143.74243 54.311035 143.03735 54.515137 Q 144.01147 55.804688 144.65625 56.686035 Q 145.30103 57.56738 146.23804 58.8291 Q 146.64624 59.385742 146.97559 59.650146 Q 147.30493 59.91455 147.62964 60.081543 Q 147.87085 60.20215 148.23267 60.26709 Q 148.59448 60.33203 148.8357 60.34131 L 148.8357 61 Z M 143.95581 51.184566 Q 143.95581 49.987793 143.26929 49.287354 Q 142.58276 48.586914 141.33032 48.586914 L 139.75317 48.586914 L 139.75317 54.236816 L 140.9685 54.236816 Q 142.24878 54.236816 143.1023 53.41577 Q 143.95581 52.59473 143.95581 51.184566 Z M 163.41382 57.12207 L 163.16333 61 L 152.23462 61 L 152.23462 60.34131 Q 152.51294 60.322754 152.9768 60.26245 Q 153.44067 60.20215 153.57983 60.137207 Q 153.87671 59.99805 153.99268 59.77539 Q 154.10864 59.55273 154.10864 59.209473 L 154.10864 49.746582 Q 154.10864 49.44043 154.00659 49.203854 Q 153.90454 48.967285 153.57983 48.818848 Q 153.32935 48.69824 152.90723 48.605473 Q 152.4851 48.512695 152.23462 48.49414 L 152.23462 47.83545 L 162.42114 47.83545 L 162.42114 51.0083 L 161.72534 51.0083 Q 161.5398 50.303223 160.92285 49.51001 Q 160.30591 48.716793 159.74927 48.642582 Q 159.46167 48.605473 159.06274 48.586914 Q 158.66382 48.56836 158.15356 48.56836 L 156.08472 48.56836 L 156.08472 53.80078 L 157.56909 53.80078 Q 158.28345 53.80078 158.6128 53.66626 Q 158.94214 53.53174 159.19263 53.21631 Q 159.39673 52.947266 159.54053 52.497314 Q 159.68433 52.047363 159.73071 51.648434 L 160.42651 51.648434 L 160.42651 56.797363 L 159.73071 56.797363 Q 159.6936 56.35205 159.53125 55.855713 Q 159.3689 55.359375 159.19263 55.136715 Q 158.90503 54.774902 158.53857 54.663574 Q 158.17212 54.55225 157.56909 54.55225 L 156.08472 54.55225 L 156.08472 58.5044 Q 156.08472 59.098145 156.16821 59.441406 Q 156.25171 59.784668 156.49292 59.96094 Q 156.73413 60.137207 157.15161 60.188232 Q 157.56909 60.239258 158.33911 60.239258 Q 158.64526 60.239258 159.14624 60.239258 Q 159.64722 60.239258 159.99048 60.20215 Q 160.34302 60.16504 160.71875 60.067623 Q 161.09448 59.97022 161.2522 59.803223 Q 161.67896 59.35791 162.14746 58.45337 Q 162.61597 57.548824 162.74585 57.12207 L 163.41382 57.12207 Z M 180.03296 61 L 174.55006 61 L 174.55006 60.34131 Q 175.27368 60.29492 175.75145 60.15576 Q 176.22925 60.016598 176.22925 59.8125 Q 176.22925 59.729004 176.2107 59.6084 Q 176.19214 59.487797 176.15503 59.39502 L 175.0603 56.444824 L 170.44946 56.444824 Q 170.1897 57.094234 170.02734 57.576656 Q 169.86499 58.05908 169.7351 58.467285 Q 169.6145 58.86621 169.56812 59.1167 Q 169.52173 59.367188 169.52173 59.5249 Q 169.52173 59.895996 170.1062 60.100098 Q 170.69067 60.3042 171.42358 60.34131 L 171.42358 61 L 166.46948 61 L 166.46948 60.34131 Q 166.7107 60.322754 167.07251 60.23462 Q 167.43433 60.146484 167.66626 59.99805 Q 168.03735 59.74756 168.24146 59.47388 Q 168.44556 59.200195 168.64038 58.717773 Q 169.63306 56.240723 170.82983 53.151363 Q 172.02661 50.06201 172.96361 47.649906 L 173.70581 47.649906 L 178.094 59.005375 Q 178.23315 59.367188 178.40942 59.589844 Q 178.58571 59.8125 178.90111 60.025875 Q 179.1145 60.15576 179.45776 60.243896 Q 179.80103 60.33203 180.03296 60.34131 L 180.03296 61 Z M 174.72633 55.619137 L 172.7317 50.5166 L 170.77417 55.619137 L 174.72633 55.619137 Z M 194.07301 57.084957 L 193.79468 61 L 183.5061 61 L 183.5061 60.34131 Q 183.72876 60.322754 184.15088 60.276367 Q 184.57298 60.22998 184.73999 60.15576 Q 185.01831 60.035152 185.14355 59.803223 Q 185.2688 59.571285 185.2688 59.209473 L 185.2688 49.78369 Q 185.2688 49.46826 185.16212 49.22705 Q 185.05542 48.98584 184.73999 48.837402 Q 184.5266 48.726074 184.1416 48.61939 Q 183.75659 48.512695 183.5061 48.49414 L 183.5061 47.83545 L 189.06323 47.83545 L 189.06323 48.49414 Q 188.80347 48.503418 188.39063 48.586914 Q 187.97778 48.670406 187.79224 48.73535 Q 187.4768 48.84668 187.36086 49.115726 Q 187.24487 49.384766 187.24487 49.690914 L 187.24487 58.53223 Q 187.24487 59.14453 187.30519 59.48316 Q 187.36548 59.821777 187.58813 60.007328 Q 187.80151 60.174316 188.22363 60.22534 Q 188.64575 60.276367 189.4065 60.276367 Q 189.74976 60.276367 190.12086 60.257813 Q 190.49193 60.239258 190.82593 60.183594 Q 191.15063 60.12793 191.4243 60.030514 Q 191.698 59.933105 191.82788 59.784668 Q 192.20827 59.35791 192.71387 58.490482 Q 193.21948 57.623047 193.4143 57.084957 L 194.07301 57.084957 Z M 213.81859 61 L 208.0017 61 L 208.0017 60.34131 Q 208.31714 60.33203 208.81349 60.276367 Q 209.30981 60.220703 209.49536 60.118652 Q 209.78297 59.942383 209.91748 59.715088 Q 210.05199 59.487797 210.05199 59.14453 L 210.05199 49.570313 L 209.91283 49.570313 L 205.4226 60.78662 L 204.95874 60.78662 L 200.68188 49.33838 L 200.56128 49.33838 L 200.56128 57.19629 Q 200.56128 58.337402 200.70508 58.931152 Q 200.84888 59.5249 201.14575 59.784668 Q 201.34985 59.979496 201.98997 60.15576 Q 202.63013 60.33203 202.82495 60.34131 L 202.82495 61 L 197.50903 61 L 197.50903 60.34131 Q 197.92653 60.3042 198.38574 60.20215 Q 198.84497 60.100098 199.09546 59.895996 Q 199.42017 59.63623 199.54077 59.098145 Q 199.66138 58.560055 199.66138 57.29834 L 199.66138 50.56299 Q 199.66138 49.978516 199.52222 49.607426 Q 199.38306 49.23633 199.12329 49.004395 Q 198.8357 48.753906 198.41821 48.633305 Q 198.00075 48.512695 197.59253 48.49414 L 197.59253 47.83545 L 202.08275 47.83545 L 205.84938 57.706543 L 209.0686 49.449707 Q 209.24487 48.995117 209.37012 48.49878 Q 209.49536 48.00244 209.50464 47.83545 L 213.80006 47.83545 L 213.80006 48.49414 Q 213.54028 48.503418 213.13672 48.577637 Q 212.73315 48.65186 212.5476 48.716793 Q 212.23218 48.828125 212.12085 49.08789 Q 212.0095 49.347656 212.0095 49.653805 L 212.0095 59.14453 Q 212.0095 59.469242 212.12085 59.691895 Q 212.23218 59.91455 212.5476 60.081543 Q 212.7146 60.174316 213.14136 60.253174 Q 213.56813 60.33203 213.81859 60.34131 L 213.81859 61 Z M 226.78247 54.96045 Q 227.19997 55.424316 227.39941 55.97632 Q 227.59886 56.528324 227.59886 57.26123 Q 227.59886 59.005375 226.30933 60.137207 Q 225.01978 61.269043 223.10864 61.269043 Q 222.2273 61.269043 221.34596 60.995365 Q 220.4646 60.72168 219.82446 60.33203 L 219.42555 61.009274 L 218.68335 61.009274 L 218.55347 56.500492 L 219.30495 56.500492 Q 219.53685 57.33545 219.84766 58.00806 Q 220.15845 58.680664 220.6687 59.265137 Q 221.15112 59.8125 221.7959 60.137207 Q 222.44067 60.461918 223.2942 60.461918 Q 223.93433 60.461918 224.41212 60.29492 Q 224.8899 60.12793 225.18677 59.821777 Q 225.48363 59.51563 225.62744 59.102783 Q 225.77124 58.68994 225.77124 58.151855 Q 225.77124 57.36328 225.32594 56.681396 Q 224.88062 55.99951 223.99927 55.646973 Q 223.39626 55.40576 222.61694 55.11352 Q 221.83765 54.82129 221.27174 54.561527 Q 220.15845 54.06055 219.5415 53.24878 Q 218.92456 52.43701 218.92456 51.12891 Q 218.92456 50.37744 219.23071 49.728027 Q 219.53685 49.078613 220.10278 48.56836 Q 220.64087 48.085938 221.3738 47.812256 Q 222.10669 47.538574 222.90454 47.538574 Q 223.81372 47.538574 224.5327 47.816895 Q 225.25172 48.095215 225.84546 48.46631 L 226.22583 47.83545 L 226.96802 47.83545 L 227.04224 52.20508 L 226.29077 52.20508 Q 226.08667 51.453613 225.83154 50.76709 Q 225.5764 50.08057 225.16821 49.523926 Q 224.76929 48.98584 224.19409 48.665768 Q 223.61888 48.345703 222.78394 48.345703 Q 221.90259 48.345703 221.28102 48.91162 Q 220.65942 49.47754 220.65942 50.293945 Q 220.65942 51.147457 221.05835 51.70874 Q 221.45729 52.27002 222.21802 52.631832 Q 222.89526 52.956543 223.54932 53.193115 Q 224.20337 53.429688 224.81567 53.69873 Q 225.37233 53.93994 225.8872 54.246094 Q 226.4021 54.55225 226.78247 54.96045 Z\"/>\n        </g>\n    </g>\n    <g transform=\"matrix(1 0 0 1 150 236)\">\n        <path fill=\"url(#fr-back-glow)\" stroke=\"url(#fr-back-grad15)\" stroke-width=\"2\" d=\"M 118 0 C 118 65.1696 65.1696 118 0 118 C -65.1696 118 -118 65.1696 -118 0 C -118 -65.1696 -65.1696 -118 -0 -118 C 65.1696 -118 118 -65.1696 118 -0 Z\"/>\n        <g opacity=\"0.6\">\n            <path fill=\"none\" stroke=\"url(#fr-back-grad16)\" d=\"M 106 0 C 106 58.542183 58.542183 106 0 106 C -58.542183 106 -106 58.542183 -106 0 C -106 -58.542183 -58.542183 -106 -0 -106 C 58.542183 -106 106 -58.542183 106 0 Z\"/>\n        </g>\n        <path fill=\"none\" stroke=\"url(#fr-back-grad17)\" stroke-width=\"2.5\" d=\"M 0 -88 L 84 -27 L 52 72 L -52 72 L -84 -27 Z\"/>\n        <g opacity=\"0.5\">\n            <path fill=\"none\" stroke=\"url(#fr-back-grad18)\" d=\"M 0 -88 L 52 72 L -84 -27 L 84 -27 L -52 72 Z\"/>\n        </g>\n        <path fill=\"#e8c877\" stroke=\"url(#fr-back-grad19)\" stroke-width=\"2\" d=\"M 11 -88 C 11 -81.924866 6.0751324 -77 0 -77 C -6.0751324 -77 -11 -81.924866 -11 -88 C -11 -94.075134 -6.0751324 -99 -0 -99 C 6.0751324 -99 11 -94.075134 11 -88 Z\"/>\n        <path fill=\"#e4967d\" stroke=\"url(#fr-back-grad20)\" stroke-width=\"2\" d=\"M 95 -27 C 95 -20.924868 90.075134 -16 84 -16 C 77.924866 -16 73 -20.924868 73 -27 C 73 -33.07513 77.924866 -38 84 -38 C 90.075134 -38 95 -33.07513 95 -27 Z\"/>\n        <path fill=\"#8fc4d6\" stroke=\"url(#fr-back-grad21)\" stroke-width=\"2\" d=\"M 63 72 C 63 78.075134 58.07513 83 52 83 C 45.92487 83 41 78.075134 41 72 C 41 65.924866 45.92487 61 52 61 C 58.07513 61 63 65.924866 63 72 Z\"/>\n        <path fill=\"#9686af\" stroke=\"url(#fr-back-grad22)\" stroke-width=\"2\" d=\"M -41 72 C -41 78.075134 -45.92487 83 -52 83 C -58.07513 83 -63 78.075134 -63 72 C -63 65.924866 -58.07513 61 -52 61 C -45.92487 61 -41 65.924866 -41 72 Z\"/>\n        <path fill=\"#a9c98a\" stroke=\"url(#fr-back-grad23)\" stroke-width=\"2\" d=\"M -73 -27 C -73 -20.924868 -77.924866 -16 -84 -16 C -90.075134 -16 -95 -20.924868 -95 -27 C -95 -33.07513 -90.075134 -38 -84 -38 C -77.924866 -38 -73 -33.07513 -73 -27 Z\"/>\n        <path fill=\"#1a1428\" stroke=\"url(#fr-back-grad24)\" stroke-width=\"3\" d=\"M 22 0 C 22 12.150265 12.150265 22 0 22 C -12.150265 22 -22 12.150265 -22 0 C -22 -12.150265 -12.150265 -22 -0 -22 C 12.150265 -22 22 -12.150265 22 0 Z\"/>\n        <path fill=\"url(#fr-back-grad25)\" stroke=\"none\" d=\"M 12 0 C 12 6.627417 6.627417 12 0 12 C -6.627417 12 -12 6.627417 -12 0 C -12 -6.627417 -6.627417 -12 -0 -12 C 6.627417 -12 12 -6.627417 12 0 Z\"/>\n    </g>\n    <path fill=\"none\" stroke=\"url(#fr-back-grad26)\" stroke-width=\"2\" stroke-linecap=\"round\" d=\"M 90 372 Q 150 388 210 372\"/>\n    <path fill=\"url(#fr-back-gold)\" stroke=\"none\" d=\"M 153 381 C 153 382.6569 151.65686 384 150 384 C 148.34314 384 147 382.6569 147 381 C 147 379.34314 148.34314 378 150 378 C 151.65686 378 153 379.34314 153 381 Z\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#C9A227\" stroke=\"#7A5C0E\" stroke-width=\"1.5\"/>\n  <!-- bold 4-point star, no fine detail -->\n  <path d=\"M20,5 L24,16 L35,20 L24,24 L20,35 L16,24 L5,20 L16,16 Z\"\n        fill=\"#FFF7E0\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#3B6B35\" stroke=\"#1F3A1C\" stroke-width=\"1.5\"/>\n  <!-- bold single leaf, no vine/spiral detail -->\n  <path d=\"M20,32 C10,26 10,12 20,7 C30,12 30,26 20,32 Z\" fill=\"#CDE6B0\"/>\n  <line x1=\"20\" y1=\"32\" x2=\"20\" y2=\"14\" stroke=\"#3B6B35\" stroke-width=\"2\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#1B5A78\" stroke=\"#12374A\" stroke-width=\"1.5\"/>\n  <!-- bold single wave crest, no spiral detail -->\n  <path d=\"M7,24 C12,16 16,16 20,24 C24,16 28,16 33,24\"\n        fill=\"none\" stroke=\"#BEE9E8\" stroke-width=\"4.5\" stroke-linecap=\"round\"/>\n  <circle cx=\"20\" cy=\"13\" r=\"3\" fill=\"#BEE9E8\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#8C2E1C\" stroke=\"#5C1712\" stroke-width=\"1.5\"/>\n  <!-- bold single flame silhouette, no facet lines -->\n  <path d=\"M20,6 C26,14 28,20 24,26 C26,22 22,20 20,24 C18,20 14,22 16,26 C12,20 14,14 20,6 Z\"\n        fill=\"#F6C68F\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#3A2947\" stroke=\"#1E1526\" stroke-width=\"1.5\"/>\n  <!-- bold crescent, no thorn/vine detail -->\n  <path d=\"M25,7 A14,14 0 1 0 25,33 A10.5,10.5 0 1 1 25,7 Z\" fill=\"#C9C2D9\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"20\" cy=\"20\" r=\"19\" fill=\"#8B8D91\" stroke=\"#5C6570\" stroke-width=\"1.5\"/>\n  <!-- bold single diamond, no facet shading -->\n  <polygon points=\"20,6 30,20 20,34 10,20\" fill=\"#F0F1F3\"/>\n</svg>\n"],["<svg viewBox=\"0 0 200 200\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"","\">\n    <defs>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(192 0 0 192 4 4)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(172 0 0 172 14 14)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(8 0 0 8 96 12)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(8 0 0 8 96 180)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(8 0 0 8 12 96)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(8 0 0 8 180 96)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(5 0 0 5 38.5 38.5)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(5 0 0 5 156.5 38.5)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(5 0 0 5 38.5 156.5)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(5 0 0 5 156.5 156.5)\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <linearGradient id=\"","\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"","\">\n            <stop offset=\"0\" stop-color=\"#5c6570\"/>\n            <stop offset=\"1\" stop-color=\"#33393f\"/>\n        </linearGradient>\n        <radialGradient id=\"","\" cx=\"0.5\" cy=\"0.45\" r=\"0.65\" fx=\"0.5\" fy=\"0.45\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"matrix(192 0 0 192 4 4)\">\n            <stop offset=\"0\" stop-color=\"#e4e6e9\"/>\n            <stop offset=\"1\" stop-color=\"#a8adb4\"/>\n        </radialGradient>\n    </defs>\n    <path fill=\"","\" stroke=\"","\" stroke-width=\"4\" d=\"M 196 100 C 196 153.01933 153.01933 196 100 196 C 46.980663 196 4 153.01933 4 100 C 4 46.980663 46.980663 4 100 4 C 153.01933 4 196 46.980663 196 100 Z\"/>\n    <path fill=\"none\" stroke=\"","\" stroke-width=\"2\" d=\"M 186 100 C 186 147.49649 147.49649 186 100 186 C 52.50351 186 14 147.49649 14 100 C 14 52.50351 52.50351 14 100 14 C 147.49649 14 186 52.50351 186 100 Z\"/>\n    <g>\n        <path fill=\"","\" stroke=\"none\" d=\"M 104 16 C 104 18.209139 102.20914 20 100 20 C 97.79086 20 96 18.209139 96 16 C 96 13.790861 97.79086 12 100 12 C 102.20914 12 104 13.790861 104 16 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 104 184 C 104 186.20914 102.20914 188 100 188 C 97.79086 188 96 186.20914 96 184 C 96 181.79086 97.79086 180 100 180 C 102.20914 180 104 181.79086 104 184 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 20 100 C 20 102.20914 18.209139 104 16 104 C 13.790861 104 12 102.20914 12 100 C 12 97.79086 13.790861 96 16 96 C 18.209139 96 20 97.79086 20 100 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 188 100 C 188 102.20914 186.20914 104 184 104 C 181.79086 104 180 102.20914 180 100 C 180 97.79086 181.79086 96 184 96 C 186.20914 96 188 97.79086 188 100 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 43.5 41 C 43.5 42.38071 42.38071 43.5 41 43.5 C 39.61929 43.5 38.5 42.38071 38.5 41 C 38.5 39.61929 39.61929 38.5 41 38.5 C 42.38071 38.5 43.5 39.61929 43.5 41 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 161.5 41 C 161.5 42.38071 160.3807 43.5 159 43.5 C 157.6193 43.5 156.5 42.38071 156.5 41 C 156.5 39.61929 157.6193 38.5 159 38.5 C 160.3807 38.5 161.5 39.61929 161.5 41 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 43.5 159 C 43.5 160.3807 42.38071 161.5 41 161.5 C 39.61929 161.5 38.5 160.3807 38.5 159 C 38.5 157.6193 39.61929 156.5 41 156.5 C 42.38071 156.5 43.5 157.6193 43.5 159 Z\"/>\n        <path fill=\"","\" stroke=\"none\" d=\"M 161.5 159 C 161.5 160.3807 160.3807 161.5 159 161.5 C 157.6193 161.5 156.5 160.3807 156.5 159 C 156.5 157.6193 157.6193 156.5 159 156.5 C 160.3807 156.5 161.5 157.6193 161.5 159 Z\"/>\n    </g>\n    <g>\n        <path fill=\"","\" stroke=\"none\" d=\"","\"/>\n    </g>\n</svg>\n"],["<svg viewBox=\"0 0 60 60\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <linearGradient id=\"fr-numeral-tap-bg\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#3A3A3A\"/>\n      <stop offset=\"100%\" stop-color=\"#141414\"/>\n    </linearGradient>\n  </defs>\n\n  <circle cx=\"30\" cy=\"30\" r=\"27\" fill=\"url(#fr-numeral-tap-bg)\" stroke=\"#E8E8E8\" stroke-width=\"2.5\"/>\n  <circle cx=\"30\" cy=\"30\" r=\"21\" fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"1\" opacity=\"0.5\"/>\n\n  <!-- bent arrow: card rotating 90° clockwise to tap -->\n  <path d=\"M20,40 L40,20 M27,20 L40,20 L40,33\"\n        fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 50 50\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"25\" cy=\"25\" r=\"23\" fill=\"#3A3A3A\" stroke=\"#E8E8E8\" stroke-width=\"2\"/>\n  <path d=\"M32,17 L15,17 M15,17 L15,30 M15,17 L28,30\"\n        fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"3.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 50 50\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"25\" cy=\"25\" r=\"23\" fill=\"#3A3A3A\" stroke=\"#E8E8E8\" stroke-width=\"2\"/>\n  <rect x=\"16\" y=\"12\" width=\"18\" height=\"26\" rx=\"2\" fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"3\"/>\n  <path d=\"M25,20 L25,30 M20,25 L30,25\" stroke=\"#E8E8E8\" stroke-width=\"3\" stroke-linecap=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 50 50\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"25\" cy=\"25\" r=\"23\" fill=\"#3A3A3A\" stroke=\"#E8E8E8\" stroke-width=\"2\"/>\n  <polygon points=\"25,12 36,25 25,38 14,25\" fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"3\" stroke-linejoin=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 50 50\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"25\" cy=\"25\" r=\"23\" fill=\"#3A3A3A\" stroke=\"#E8E8E8\" stroke-width=\"2\"/>\n  <path d=\"M14,14 L36,36 M32,36 L36,36 L36,32\" fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n  <path d=\"M36,14 L14,36 M18,36 L14,36 L14,32\" fill=\"none\" stroke=\"#E8E8E8\" stroke-width=\"3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 50 50\" xmlns=\"http://www.w3.org/2000/svg\">\n  <circle cx=\"25\" cy=\"25\" r=\"23\" fill=\"#3A3A3A\" stroke=\"#E8E8E8\" stroke-width=\"2\"/>\n  <line x1=\"18\" y1=\"12\" x2=\"18\" y2=\"38\" stroke=\"#E8E8E8\" stroke-width=\"3\" stroke-linecap=\"round\"/>\n  <path d=\"M18,14 L34,18 L18,26 Z\" fill=\"#E8E8E8\"/>\n</svg>\n"],["<svg viewBox=\"0 0 100 100\" xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Five Realms life total gem\">\n  <defs>\n    <radialGradient id=\"fr-ui-life-bg\" cx=\"50%\" cy=\"40%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#C0392B\"/>\n      <stop offset=\"100%\" stop-color=\"#6B1B12\"/>\n    </radialGradient>\n  </defs>\n\n  <circle cx=\"50\" cy=\"50\" r=\"47\" fill=\"url(#fr-ui-life-bg)\" stroke=\"#F0D9C8\" stroke-width=\"3\"/>\n  <circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"none\" stroke=\"#F0D9C8\" stroke-width=\"1\" opacity=\"0.4\"/>\n\n  <!-- small heart glyph above the number, marks this as life not generic counter -->\n  <path d=\"M50,26 C46,20 36,21 36,29 C36,36 50,44 50,44 C50,44 64,36 64,29 C64,21 54,20 50,26 Z\"\n        fill=\"#F0D9C8\" opacity=\"0.85\"/>\n\n  <!-- life total placeholder -->\n</svg>\n"],["<svg viewBox=\"0 0 60 60\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <linearGradient id=\"fr-gem-marked-grad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#B4B7BC\"/>\n      <stop offset=\"55%\" stop-color=\"#8B8D91\"/>\n      <stop offset=\"100%\" stop-color=\"#5A5C60\"/>\n    </linearGradient>\n  </defs>\n  <polygon points=\"30,6 42,16 38,32 30,54 22,32 18,16\"\n           fill=\"url(#fr-gem-marked-grad)\" stroke=\"#414347\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n  <polygon points=\"30,6 42,16 30,20 18,16\" fill=\"#CFD1D5\" stroke=\"#414347\" stroke-width=\"1\"/>\n  <line x1=\"30\" y1=\"20\" x2=\"30\" y2=\"54\" stroke=\"#414347\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"18\" y1=\"16\" x2=\"30\" y2=\"20\" stroke=\"#414347\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"42\" y1=\"16\" x2=\"30\" y2=\"20\" stroke=\"#414347\" stroke-width=\"1\" opacity=\"0.5\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <polygon points=\"20,4 30,11 20,36 10,11\" fill=\"","\" stroke=\"","\" stroke-width=\"2\" stroke-linejoin=\"round\"/>\n</svg>\n"],["<svg viewBox=\"0 0 60 60\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <linearGradient id=\"fr-gem-vaulted-grad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#E7EEF3\"/>\n      <stop offset=\"55%\" stop-color=\"#B9C6D1\"/>\n      <stop offset=\"100%\" stop-color=\"#7A8894\"/>\n    </linearGradient>\n  </defs>\n  <polygon points=\"30,6 42,16 38,32 30,54 22,32 18,16\"\n           fill=\"url(#fr-gem-vaulted-grad)\" stroke=\"#4C5964\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n  <polygon points=\"30,6 42,16 30,20 18,16\" fill=\"#F5F8FA\" stroke=\"#4C5964\" stroke-width=\"1\"/>\n  <line x1=\"30\" y1=\"20\" x2=\"30\" y2=\"54\" stroke=\"#4C5964\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"18\" y1=\"16\" x2=\"30\" y2=\"20\" stroke=\"#4C5964\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"42\" y1=\"16\" x2=\"30\" y2=\"20\" stroke=\"#4C5964\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <path d=\"M46,20 l2,4 l-2,4 l-2,-4 Z\" fill=\"#F5F8FA\" opacity=\"0.9\"/>\n</svg>\n"],["<svg viewBox=\"0 0 60 60\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <linearGradient id=\"fr-gem-sovereign-grad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#F6E6B4\"/>\n      <stop offset=\"55%\" stop-color=\"#E9CD82\"/>\n      <stop offset=\"100%\" stop-color=\"#B8860B\"/>\n    </linearGradient>\n  </defs>\n  <polygon points=\"30,4 44,15 39,33 30,56 21,33 16,15\"\n           fill=\"url(#fr-gem-sovereign-grad)\" stroke=\"#7A5C0E\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n  <polygon points=\"30,4 44,15 30,19 16,15\" fill=\"#FBF2D6\" stroke=\"#7A5C0E\" stroke-width=\"1\"/>\n  <line x1=\"30\" y1=\"19\" x2=\"30\" y2=\"56\" stroke=\"#7A5C0E\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"16\" y1=\"15\" x2=\"30\" y2=\"19\" stroke=\"#7A5C0E\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"44\" y1=\"15\" x2=\"30\" y2=\"19\" stroke=\"#7A5C0E\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"21\" y1=\"33\" x2=\"30\" y2=\"19\" stroke=\"#7A5C0E\" stroke-width=\"0.8\" opacity=\"0.4\"/>\n  <line x1=\"39\" y1=\"33\" x2=\"30\" y2=\"19\" stroke=\"#7A5C0E\" stroke-width=\"0.8\" opacity=\"0.4\"/>\n  <path d=\"M48,18 l2,4 l-2,4 l-2,-4 Z\" fill=\"#FBF2D6\" opacity=\"0.9\"/>\n  <path d=\"M12,32 l1.6,3.2 l-1.6,3.2 l-1.6,-3.2 Z\" fill=\"#FBF2D6\" opacity=\"0.8\"/>\n</svg>\n"],["<svg viewBox=\"0 0 60 60\" xmlns=\"http://www.w3.org/2000/svg\">\n  <defs>\n    <linearGradient id=\"fr-gem-ascendant-grad\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">\n      <stop offset=\"0%\" stop-color=\"#FFC66B\"/>\n      <stop offset=\"45%\" stop-color=\"#F0793A\"/>\n      <stop offset=\"100%\" stop-color=\"#B21F2D\"/>\n    </linearGradient>\n    <radialGradient id=\"fr-gem-ascendant-glow\" cx=\"50%\" cy=\"35%\" r=\"65%\">\n      <stop offset=\"0%\" stop-color=\"#FFD9A0\" stop-opacity=\"0.9\"/>\n      <stop offset=\"100%\" stop-color=\"#FFD9A0\" stop-opacity=\"0\"/>\n    </radialGradient>\n  </defs>\n  <circle cx=\"30\" cy=\"26\" r=\"24\" fill=\"url(#fr-gem-ascendant-glow)\"/>\n  <polygon points=\"30,3 45,14 40,33 30,58 20,33 15,14\"\n           fill=\"url(#fr-gem-ascendant-grad)\" stroke=\"#7A1414\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n  <polygon points=\"30,3 45,14 30,18 15,14\" fill=\"#FFE3B8\" stroke=\"#7A1414\" stroke-width=\"1\"/>\n  <line x1=\"30\" y1=\"18\" x2=\"30\" y2=\"58\" stroke=\"#7A1414\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"15\" y1=\"14\" x2=\"30\" y2=\"18\" stroke=\"#7A1414\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"45\" y1=\"14\" x2=\"30\" y2=\"18\" stroke=\"#7A1414\" stroke-width=\"1\" opacity=\"0.5\"/>\n  <line x1=\"20\" y1=\"33\" x2=\"30\" y2=\"18\" stroke=\"#7A1414\" stroke-width=\"0.8\" opacity=\"0.45\"/>\n  <line x1=\"40\" y1=\"33\" x2=\"30\" y2=\"18\" stroke=\"#7A1414\" stroke-width=\"0.8\" opacity=\"0.45\"/>\n  <path d=\"M49,15 l2.4,4.8 l-2.4,4.8 l-2.4,-4.8 Z\" fill=\"#FFE3B8\" opacity=\"0.95\"/>\n  <path d=\"M10,32 l2,4 l-2,4 l-2,-4 Z\" fill=\"#FFE3B8\" opacity=\"0.85\"/>\n  <path d=\"M30,58 l1.6,-3.2 l1.6,3.2 l-1.6,3.2 Z\" fill=\"#FFE3B8\" opacity=\"0.7\"/>\n</svg>\n"],["<svg viewBox=\"0 0 40 40\" xmlns=\"http://www.w3.org/2000/svg\">\n  <polygon points=\"20,4 30,11 20,36 10,11\" fill=\"#F0793A\" stroke=\"#7A1414\" stroke-width=\"2\" stroke-linejoin=\"round\"/>\n  <polygon points=\"10,11 30,11 20,20\" fill=\"#FFC66B\"/>\n</svg>\n"]],"strings":["Five Realms Solara card front","fr-front-solara-border","#F6E5BB","#B8860B","fr-front-solara-line","#7A5C0E","url(#fr-front-solara-border)","#FBEFD1","url(#fr-front-solara-line)","#E8C877","#FDF7E7","#F0D99E","Five Realms Verdant card front","fr-front-verdant-border","#D5E6C1","#3B6B35","fr-front-verdant-line","#254A22","url(#fr-front-verdant-border)","#E3F0D3","url(#fr-front-verdant-line)","#A9C98A","#F0F7E8","#C2DAA9","Five Realms Tide card front","fr-front-tide-border","#C9E6EA","#1B5A78","fr-front-tide-line","#12374A","url(#fr-front-tide-border)","#DCF1F1","url(#fr-front-tide-line)","#8FC4D6","#EDF8F8","#B0D7E2","Five Realms Ember card front","fr-front-ember-border","#F5CDB5","#8C2E1C","fr-front-ember-line","#5C1712","url(#fr-front-ember-border)","#FBDFC7","url(#fr-front-ember-line)","#E4967D","#FDEEE2","#EEB59D","Five Realms Umbra card front","fr-front-umbra-border","#CBC1DA","#3A2947","fr-front-umbra-line","#1E1526","url(#fr-front-umbra-border)","#DCD4E8","url(#fr-front-umbra-line)","#9686AF","#EDE9F3","#B4A8C8","Five Realms Colourless card front","fr-front-colourless-border","#D4D4D4","#4A4A4A","fr-front-colourless-line","#2B2B2B","url(#fr-front-colourless-border)","#E6E6E6","url(#fr-front-colourless-line)","#9C9C9C","#F2F2F2","#BCBCBC","Five Realms Verdant basic land card front","fr-front-basicland-verdant-border","#C9DDB5","fr-front-basicland-verdant-line","url(#fr-front-basicland-verdant-border)","url(#fr-front-basicland-verdant-line)","#F4FAEA","#BBD59A","M38,401 C31,397 31,387 38,383 C45,387 45,397 38,401 Z","Five Realms Ember basic land card front","fr-front-basicland-ember-border","#F2C6A0","fr-front-basicland-ember-line","url(#fr-front-basicland-ember-border)","url(#fr-front-basicland-ember-line)","#FFF0E2","#E9AF8D","M38,382 C42,388 43,392 40,396 C39,393 37,393 36,396 C33,392 34,388 38,382 Z","Five Realms Umbra basic land card front","fr-front-basicland-umbra-border","#C9C2D9","fr-front-basicland-umbra-line","url(#fr-front-basicland-umbra-border)","url(#fr-front-basicland-umbra-line)","#EDE9F4","#B4A7C7","M41,384 A9,9 0 1 0 41,400 A6.5,6.5 0 1 1 41,384 Z","Five Realms numeral 0","fr-numeral-0-grad1","fr-numeral-0-grad2","fr-numeral-0-grad3","fr-numeral-0-grad4","fr-numeral-0-grad5","fr-numeral-0-grad6","fr-numeral-0-grad7","fr-numeral-0-grad8","fr-numeral-0-grad9","fr-numeral-0-grad10","fr-numeral-0-line","matrix(84.140625 0 0 136.34766 57.929688 29.960938)","fr-numeral-0-bg","url(#fr-numeral-0-bg)","url(#fr-numeral-0-grad1)","url(#fr-numeral-0-grad2)","url(#fr-numeral-0-grad3)","url(#fr-numeral-0-grad4)","url(#fr-numeral-0-grad5)","url(#fr-numeral-0-grad6)","url(#fr-numeral-0-grad7)","url(#fr-numeral-0-grad8)","url(#fr-numeral-0-grad9)","url(#fr-numeral-0-grad10)","url(#fr-numeral-0-line)","M 127.30468 85.390625 Q 131.75781 90.078125 133.89648 96.08399 Q 136.03516 102.08984 136.03516 108.53516 Q 136.03516 116.21094 133.36914 122.39258 Q 130.70313 128.57422 126.07421 132.85156 Q 121.210945 137.30469 114.76563 139.64844 Q 108.32032 141.99219 99.94141 141.99219 Q 91.09375 141.99219 84.32617 139.23828 Q 77.55859 136.48438 73.046875 131.97266 Q 68.59375 127.51953 66.2793 121.48437 Q 63.964848 115.44922 63.964848 108.53516 Q 63.964848 101.67969 66.16211 95.820305 Q 68.359375 89.96094 72.92969 85.21484 Q 77.38281 80.58594 84.23828 77.802734 Q 91.09375 75.01953 100 75.01953 Q 109.19922 75.01953 116.054695 77.890625 Q 122.91016 80.76172 127.30468 85.390625 Z M 110.78124 129.04297 Q 112.48047 125.11719 113.21289 120.28321 Q 113.94531 115.44922 113.94531 108.53516 Q 113.94531 102.32421 113.27148 97.34376 Q 112.59766 92.36328 111.015625 88.49609 Q 109.375 84.51172 106.67969 82.34375 Q 103.984375 80.17578 100.05859 80.17578 Q 96.07422 80.17578 93.37891 82.31445 Q 90.68359 84.453125 88.984375 88.378914 Q 87.46094 91.953125 86.75782 97.138664 Q 86.05469 102.32421 86.05469 108.53516 Q 86.05469 115.039055 86.66993 119.609375 Q 87.28516 124.179695 88.92578 128.39844 Q 90.39062 132.20703 93.14453 134.55078 Q 95.89844 136.89453 99.94141 136.89453 Q 103.69141 136.89453 106.44531 134.78516 Q 109.19922 132.67578 110.78124 129.04297 Z","Five Realms numeral 1","fr-numeral-1-grad1","fr-numeral-1-grad2","fr-numeral-1-grad3","fr-numeral-1-grad4","fr-numeral-1-grad5","fr-numeral-1-grad6","fr-numeral-1-grad7","fr-numeral-1-grad8","fr-numeral-1-grad9","fr-numeral-1-grad10","fr-numeral-1-line","matrix(58.76953 0 0 136.34766 70.615234 29.960938)","fr-numeral-1-bg","url(#fr-numeral-1-bg)","url(#fr-numeral-1-grad1)","url(#fr-numeral-1-grad2)","url(#fr-numeral-1-grad3)","url(#fr-numeral-1-grad4)","url(#fr-numeral-1-grad5)","url(#fr-numeral-1-grad6)","url(#fr-numeral-1-grad7)","url(#fr-numeral-1-grad8)","url(#fr-numeral-1-grad9)","url(#fr-numeral-1-grad10)","url(#fr-numeral-1-line)","M 126.044914 140 L 77.70508 140 L 77.70508 135.54688 Q 79.46289 135.42969 83.30078 134.96094 Q 87.13867 134.49219 88.54492 134.02344 Q 90.30273 133.4375 91.29883 132.03125 Q 92.29492 130.625 92.29492 128.16406 L 92.29492 91.015625 L 77.4707 91.015625 L 77.4707 85.44922 L 80.69336 85.44922 Q 85.791016 85.44922 89.51172 84.33594 Q 93.23242 83.22266 95.69337 81.640625 Q 98.2129 80 99.82422 78.24219 Q 101.43555 76.484375 102.37305 75.13672 L 112.68555 75.13672 Q 112.509766 78.94531 112.333984 84.04297 Q 112.15821 89.140625 112.15821 93.18359 L 112.15821 127.51953 Q 112.15821 129.6289 113.06641 131.18164 Q 113.97461 132.73438 115.67383 133.55469 Q 117.19726 134.25781 120.771484 134.84375 Q 124.3457 135.42969 126.044914 135.54688 L 126.044914 140 Z","Five Realms numeral 2","fr-numeral-2-grad1","fr-numeral-2-grad2","fr-numeral-2-grad3","fr-numeral-2-grad4","fr-numeral-2-grad5","fr-numeral-2-grad6","fr-numeral-2-grad7","fr-numeral-2-grad8","fr-numeral-2-grad9","fr-numeral-2-grad10","fr-numeral-2-line","matrix(75.17578 0 0 136.34766 62.41211 29.960938)","fr-numeral-2-bg","url(#fr-numeral-2-bg)","url(#fr-numeral-2-grad1)","url(#fr-numeral-2-grad2)","url(#fr-numeral-2-grad3)","url(#fr-numeral-2-grad4)","url(#fr-numeral-2-grad5)","url(#fr-numeral-2-grad6)","url(#fr-numeral-2-grad7)","url(#fr-numeral-2-grad8)","url(#fr-numeral-2-grad9)","url(#fr-numeral-2-grad10)","url(#fr-numeral-2-line)","M 132.37305 140 L 68.85742 140 L 68.85742 129.39453 Q 73.01758 125.17577 77.96875 121.68945 Q 82.91992 118.203125 88.017586 115.50781 Q 93.4668 112.63673 97.1582 110.38086 Q 100.84961 108.125 102.958984 105.66406 Q 105.06836 103.37891 105.97656 100.68359 Q 106.88476 97.98828 106.88476 94.64843 Q 106.88476 87.20703 103.36914 83.80859 Q 99.853516 80.41016 94.052734 80.41016 Q 92.23633 80.41016 90.625 80.67383 Q 89.013664 80.9375 87.25586 81.640625 Q 88.134766 84.27734 88.95508 87.08985 Q 89.77539 89.90234 89.77539 93.35937 Q 89.77539 97.51953 86.78711 99.98047 Q 83.79883 102.441414 79.16992 102.441414 Q 74.77539 102.441414 72.16797 99.57031 Q 69.56055 96.69922 69.56055 92.59766 Q 69.56055 85.44922 77.88086 80.234375 Q 86.20117 75.01953 98.154305 75.01953 Q 111.982414 75.01953 120.50781 79.765625 Q 129.0332 84.51172 129.0332 95.05859 Q 129.0332 100.50781 126.77734 103.84766 Q 124.521484 107.1875 120.12695 109.70703 Q 116.20117 111.99219 111.42578 113.45703 Q 106.65039 114.921875 101.20117 116.26952 Q 95.40038 117.73438 91.09375 119.375 Q 86.78711 121.015625 83.447266 123.30078 L 83.447266 123.945305 L 132.37305 123.945305 L 132.37305 140 Z","Five Realms numeral 3","fr-numeral-3-grad1","fr-numeral-3-grad2","fr-numeral-3-grad3","fr-numeral-3-grad4","fr-numeral-3-grad5","fr-numeral-3-grad6","fr-numeral-3-grad7","fr-numeral-3-grad8","fr-numeral-3-grad9","fr-numeral-3-grad10","fr-numeral-3-line","matrix(74.94141 0 0 136.34766 62.529297 29.960938)","fr-numeral-3-bg","url(#fr-numeral-3-bg)","url(#fr-numeral-3-grad1)","url(#fr-numeral-3-grad2)","url(#fr-numeral-3-grad3)","url(#fr-numeral-3-grad4)","url(#fr-numeral-3-grad5)","url(#fr-numeral-3-grad6)","url(#fr-numeral-3-grad7)","url(#fr-numeral-3-grad8)","url(#fr-numeral-3-grad9)","url(#fr-numeral-3-grad10)","url(#fr-numeral-3-line)","M 123.23242 120.31251 Q 126.74805 122.65624 129.0918 126.55273 Q 131.43555 130.44922 131.43555 136.13281 Q 131.43555 147.08984 120.94726 154.35547 Q 110.458984 161.6211 93.93555 161.6211 Q 82.09961 161.6211 73.83789 156.55273 Q 65.57617 151.48438 65.57617 144.10156 Q 65.57617 139.9414 68.24219 137.07031 Q 70.9082 134.19922 75.36133 134.19922 Q 79.990234 134.19922 82.94922 136.68945 Q 85.9082 139.17969 85.9082 143.33984 Q 85.9082 146.21094 84.88281 149.75586 Q 83.85742 153.30078 83.271484 155 Q 84.56055 155.58594 86.611336 155.9082 Q 88.66211 156.23047 91.416016 156.23047 Q 94.81445 156.23047 98.0664 155.11719 Q 101.31836 154.0039 103.7207 151.48438 Q 106.240234 148.84766 107.61719 145.30273 Q 108.99414 141.75781 108.99414 135.89844 Q 108.99414 132.5586 108.378914 129.57031 Q 107.76367 126.58202 106.12305 124.35547 Q 104.48243 122.12891 101.640625 120.86914 Q 98.79883 119.609375 94.404305 119.609375 L 86.96289 119.609375 L 86.96289 112.51952 L 92.23633 112.51952 Q 99.61914 112.51952 102.92969 108.1543 Q 106.240234 103.78906 106.240234 94.82423 Q 106.240234 87.61719 103.04687 84.01367 Q 99.853516 80.41016 93.81836 80.41016 Q 91.5332 80.41016 89.833984 80.67383 Q 88.134766 80.9375 86.37695 81.640625 Q 87.021484 83.63281 87.95899 87.20703 Q 88.896484 90.78124 88.896484 93.30077 Q 88.896484 97.46094 86.02539 99.92188 Q 83.1543 102.38282 78.52539 102.38282 Q 74.13086 102.38282 71.52344 99.51172 Q 68.916016 96.640625 68.916016 92.53906 Q 68.916016 85.27344 77.32422 80.146484 Q 85.73242 75.01953 98.447266 75.01953 Q 107.23633 75.01953 113.00781 77.07031 Q 118.7793 79.12109 122.11914 82.109375 Q 125.40039 85.03906 126.66016 88.40821 Q 127.91992 91.77734 127.91992 94.47266 Q 127.91992 97.05078 126.83594 100.302734 Q 125.75195 103.55468 123.642586 106.01562 Q 121.06446 109.00391 116.9043 111.17187 Q 112.74414 113.33984 107.17774 114.51172 L 107.17774 115.44922 Q 110.986336 115.68359 115.41016 116.85547 Q 119.83399 118.02734 123.23242 120.31251 Z","Five Realms numeral 4","fr-numeral-4-grad1","fr-numeral-4-grad2","fr-numeral-4-grad3","fr-numeral-4-grad4","fr-numeral-4-grad5","fr-numeral-4-grad6","fr-numeral-4-grad7","fr-numeral-4-grad8","fr-numeral-4-grad9","fr-numeral-4-grad10","fr-numeral-4-line","matrix(77.92969 0 0 136.34766 61.035156 29.960938)","fr-numeral-4-bg","url(#fr-numeral-4-bg)","url(#fr-numeral-4-grad1)","url(#fr-numeral-4-grad2)","url(#fr-numeral-4-grad3)","url(#fr-numeral-4-grad4)","url(#fr-numeral-4-grad5)","url(#fr-numeral-4-grad6)","url(#fr-numeral-4-grad7)","url(#fr-numeral-4-grad8)","url(#fr-numeral-4-grad9)","url(#fr-numeral-4-grad10)","url(#fr-numeral-4-line)","M 134.92188 139.41406 L 122.32421 139.41406 L 122.32421 161.6211 L 102.69531 161.6211 L 102.69531 139.41406 L 63.906246 139.41406 L 63.906246 128.63281 L 105.97656 75.37109 L 122.32421 75.37109 L 122.32421 127.05078 L 134.92188 127.05078 L 134.92188 139.41406 Z M 102.69531 127.05078 L 102.69531 89.375 L 72.87109 127.05078 L 102.69531 127.05078 Z","Five Realms numeral 5","fr-numeral-5-grad1","fr-numeral-5-grad2","fr-numeral-5-grad3","fr-numeral-5-grad4","fr-numeral-5-grad5","fr-numeral-5-grad6","fr-numeral-5-grad7","fr-numeral-5-grad8","fr-numeral-5-grad9","fr-numeral-5-grad10","fr-numeral-5-line","matrix(71.89453 0 0 136.34766 64.052734 29.960938)","fr-numeral-5-bg","url(#fr-numeral-5-bg)","url(#fr-numeral-5-grad1)","url(#fr-numeral-5-grad2)","url(#fr-numeral-5-grad3)","url(#fr-numeral-5-grad4)","url(#fr-numeral-5-grad5)","url(#fr-numeral-5-grad6)","url(#fr-numeral-5-grad7)","url(#fr-numeral-5-grad8)","url(#fr-numeral-5-grad9)","url(#fr-numeral-5-grad10)","url(#fr-numeral-5-line)","M 120.53711 112.22656 Q 124.93165 115.15626 127.91992 120.107414 Q 130.9082 125.05859 130.9082 132.38281 Q 130.9082 145.27344 120.91796 153.44727 Q 110.92774 161.6211 95.40038 161.6211 Q 83.38867 161.6211 75.36133 156.46484 Q 67.333984 151.3086 67.333984 144.27734 Q 67.333984 140.11719 70 137.2461 Q 72.666016 134.375 77.11914 134.375 Q 81.74805 134.375 84.70703 136.86523 Q 87.666016 139.35547 87.666016 143.51563 Q 87.666016 146.44531 86.66993 149.90234 Q 85.67383 153.35938 85.0293 155.17578 Q 86.43554 155.70313 88.31055 155.9668 Q 90.18555 156.23047 91.82618 156.23047 Q 95.166016 156.23047 98.38867 154.73633 Q 101.61133 153.24219 103.896484 150.3711 Q 106.5332 147.08984 107.88086 142.60742 Q 109.228516 138.125 109.228516 132.4414 Q 109.228516 124.179695 104.80469 118.876945 Q 100.38086 113.57422 93.34961 113.57422 Q 87.9004 113.57422 84.208984 115.771484 Q 80.51758 117.96875 77.58789 121.54298 L 73.01758 120.01953 L 78.70117 76.89453 L 128.21289 76.89453 L 128.21289 93.06641 L 82.91992 93.06641 L 80.51758 112.402336 Q 83.68164 110.41016 88.66211 108.59374 Q 93.64258 106.77734 100.38086 106.77734 Q 105.595695 106.77734 110.66406 107.91992 Q 115.73242 109.0625 120.53711 112.22656 Z","Five Realms numeral 6","fr-numeral-6-grad1","fr-numeral-6-grad2","fr-numeral-6-grad3","fr-numeral-6-grad4","fr-numeral-6-grad5","fr-numeral-6-grad6","fr-numeral-6-grad7","fr-numeral-6-grad8","fr-numeral-6-grad9","fr-numeral-6-grad10","fr-numeral-6-line","matrix(77.75391 0 0 136.34766 61.123047 29.960938)","fr-numeral-6-bg","url(#fr-numeral-6-bg)","url(#fr-numeral-6-grad1)","url(#fr-numeral-6-grad2)","url(#fr-numeral-6-grad3)","url(#fr-numeral-6-grad4)","url(#fr-numeral-6-grad5)","url(#fr-numeral-6-grad6)","url(#fr-numeral-6-grad7)","url(#fr-numeral-6-grad8)","url(#fr-numeral-6-grad9)","url(#fr-numeral-6-grad10)","url(#fr-numeral-6-line)","M 133.95508 112.87109 Q 133.95508 125.29296 124.609375 133.67188 Q 115.26367 142.05078 100.73243 142.05078 Q 85.55664 142.05078 76.35742 132.5293 Q 67.1582 123.00781 67.1582 106.953125 Q 67.1582 85.50781 81.63086 71.50391 Q 96.103516 57.5 120.94726 54.570313 L 122.294914 60.371094 L 116.08399 61.42578 Q 108.99414 63.359375 104.21875 66.728516 Q 99.44337 70.09766 96.33789 74.43359 Q 93.34961 78.59375 91.65038 83.83789 Q 89.95117 89.08203 89.07226 94.17969 Q 94.169914 89.60938 99.17969 88.02734 Q 104.18945 86.44531 109.93164 86.44531 Q 120.009766 86.44531 126.98242 93.79883 Q 133.95508 101.15235 133.95508 112.87109 Z M 112.2754 114.453125 Q 112.2754 105.19531 109.02344 99.746086 Q 105.77149 94.296875 100.322266 94.296875 Q 96.689445 94.296875 94.02344 95.52734 Q 91.35742 96.75781 88.66211 100.68359 Q 88.66211 100.976555 88.63281 101.708984 Q 88.603516 102.441414 88.54492 103.61327 Q 88.48633 104.90235 88.45703 106.01562 Q 88.427734 107.12891 88.427734 107.890625 Q 88.427734 121.953125 91.85548 129.42383 Q 95.2832 136.89453 100.673836 136.89453 Q 105.88868 136.89453 109.08203 131.03516 Q 112.2754 125.17577 112.2754 114.453125 Z","Five Realms numeral 7","fr-numeral-7-grad1","fr-numeral-7-grad2","fr-numeral-7-grad3","fr-numeral-7-grad4","fr-numeral-7-grad5","fr-numeral-7-grad6","fr-numeral-7-grad7","fr-numeral-7-grad8","fr-numeral-7-grad9","fr-numeral-7-grad10","fr-numeral-7-line","matrix(66.50391 0 0 136.34766 66.74805 29.960938)","fr-numeral-7-bg","url(#fr-numeral-7-bg)","url(#fr-numeral-7-grad1)","url(#fr-numeral-7-grad2)","url(#fr-numeral-7-grad3)","url(#fr-numeral-7-grad4)","url(#fr-numeral-7-grad5)","url(#fr-numeral-7-grad6)","url(#fr-numeral-7-grad7)","url(#fr-numeral-7-grad8)","url(#fr-numeral-7-grad9)","url(#fr-numeral-7-grad10)","url(#fr-numeral-7-line)","M 133.7793 83.86719 L 91.12305 161.6211 L 82.333984 161.6211 L 121.82617 92.65625 L 94.990234 92.65625 Q 89.89258 92.65625 87.021484 92.71484 Q 84.15039 92.77344 81.74805 93.88672 Q 79.81445 94.76563 78.4375 97.958984 Q 77.06055 101.15235 76.240234 105.78125 L 71.96289 105.78125 L 71.96289 76.89453 L 133.7793 76.89453 L 133.7793 83.86719 Z","Five Realms numeral 8","fr-numeral-8-grad1","fr-numeral-8-grad2","fr-numeral-8-grad3","fr-numeral-8-grad4","fr-numeral-8-grad5","fr-numeral-8-grad6","fr-numeral-8-grad7","fr-numeral-8-grad8","fr-numeral-8-grad9","fr-numeral-8-grad10","fr-numeral-8-line","matrix(81.15234 0 0 136.34766 59.423824 29.960938)","fr-numeral-8-bg","url(#fr-numeral-8-bg)","url(#fr-numeral-8-grad1)","url(#fr-numeral-8-grad2)","url(#fr-numeral-8-grad3)","url(#fr-numeral-8-grad4)","url(#fr-numeral-8-grad5)","url(#fr-numeral-8-grad6)","url(#fr-numeral-8-grad7)","url(#fr-numeral-8-grad8)","url(#fr-numeral-8-grad9)","url(#fr-numeral-8-grad10)","url(#fr-numeral-8-line)","M 134.48242 116.73828 Q 134.48242 127.51953 124.84374 134.84375 Q 115.20508 142.16797 98.62305 142.16797 Q 83.79883 142.16797 74.6582 135.89844 Q 65.51758 129.6289 65.51758 119.84375 Q 65.51758 112.28516 70.41016 107.39257 Q 75.302734 102.50001 85.84961 100.03906 Q 77.41211 96.23047 73.10547 90.42969 Q 68.79883 84.62891 68.79883 77.48047 Q 68.79883 67.69531 78.14453 61.07422 Q 87.490234 54.453125 101.259766 54.453125 Q 114.61913 54.453125 122.91016 60.3125 Q 131.20117 66.171875 131.20117 74.84375 Q 131.20117 81.52344 126.68945 86.06445 Q 122.17773 90.60547 113.21289 93.30077 Q 124.46289 97.34376 129.47266 103.23242 Q 134.48242 109.12109 134.48242 116.73828 Z M 111.63086 74.72656 Q 111.63086 67.92969 108.61328 63.74024 Q 105.595695 59.55078 100.20508 59.55078 Q 95.10742 59.55078 91.767586 63.125004 Q 88.427734 66.69922 88.427734 72.265625 Q 88.427734 76.13281 89.89258 78.740234 Q 91.35742 81.34766 94.052734 83.28125 Q 96.51367 85.09766 100.99609 87.265625 Q 105.478516 89.433586 108.99414 91.19141 Q 110.2832 88.26171 110.95704 84.01367 Q 111.63086 79.765625 111.63086 74.72656 Z M 114.79493 122.65624 Q 114.79493 118.55469 113.03711 115.859375 Q 111.2793 113.16406 107.99805 110.99609 Q 104.7168 108.88672 99.64844 106.66016 Q 94.58008 104.43359 90.009766 102.14844 Q 88.07617 104.43359 86.611336 109.00391 Q 85.146484 113.57422 85.146484 118.671875 Q 85.146484 127.28516 89.30665 132.14844 Q 93.4668 137.01172 100.26367 137.01172 Q 107.060555 137.01172 110.92774 133.02734 Q 114.79493 129.04297 114.79493 122.65624 Z","Five Realms numeral 9","fr-numeral-9-grad1","fr-numeral-9-grad2","fr-numeral-9-grad3","fr-numeral-9-grad4","fr-numeral-9-grad5","fr-numeral-9-grad6","fr-numeral-9-grad7","fr-numeral-9-grad8","fr-numeral-9-grad9","fr-numeral-9-grad10","fr-numeral-9-line","fr-numeral-9-bg","url(#fr-numeral-9-bg)","url(#fr-numeral-9-grad1)","url(#fr-numeral-9-grad2)","url(#fr-numeral-9-grad3)","url(#fr-numeral-9-grad4)","url(#fr-numeral-9-grad5)","url(#fr-numeral-9-grad6)","url(#fr-numeral-9-grad7)","url(#fr-numeral-9-grad8)","url(#fr-numeral-9-grad9)","url(#fr-numeral-9-grad10)","url(#fr-numeral-9-line)","M 132.8418 110.234375 Q 132.8418 131.5625 118.42773 145.12695 Q 104.01367 158.6914 79.052734 161.97266 L 77.70508 156.17188 L 83.916016 155.11719 Q 91.12305 153.0664 95.86914 149.84375 Q 100.61523 146.6211 103.66211 142.34375 Q 106.82617 137.94922 108.4668 133.02734 Q 110.10742 128.10547 110.92774 122.89063 Q 105.77149 127.40234 100.9375 128.83789 Q 96.103516 130.27344 90.06836 130.27344 Q 85.0293 130.27344 80.634766 128.28125 Q 76.240234 126.28906 73.01758 122.83204 Q 69.73633 119.31641 67.890625 114.365234 Q 66.04492 109.41406 66.04492 103.61327 Q 66.04492 91.25 75.53711 83.134766 Q 85.0293 75.01953 99.26757 75.01953 Q 114.67773 75.01953 123.75977 84.57031 Q 132.8418 94.12109 132.8418 110.234375 Z M 111.45508 113.45703 Q 111.45508 112.63673 111.51367 111.46484 Q 111.572266 110.29297 111.572266 109.17969 Q 111.572266 95.11719 108.20312 87.646484 Q 104.833984 80.17578 99.44337 80.17578 Q 94.22851 80.17578 90.97656 85.859375 Q 87.7246 91.54297 87.7246 102.26562 Q 87.7246 111.640625 91.03516 117.20703 Q 94.34571 122.773445 99.73633 122.773445 Q 103.13476 122.773445 106.00586 121.42577 Q 108.87695 120.07812 111.33789 116.38673 Q 111.33789 116.09375 111.396484 115.36133 Q 111.45508 114.62891 111.45508 113.45703 Z","Five Realms numeral X","fr-numeral-X-grad1","fr-numeral-X-grad2","fr-numeral-X-grad3","fr-numeral-X-grad4","fr-numeral-X-grad5","fr-numeral-X-grad6","fr-numeral-X-grad7","fr-numeral-X-grad8","fr-numeral-X-grad9","fr-numeral-X-grad10","fr-numeral-X-line","matrix(97.03125 0 0 136.34766 51.484375 29.960938)","fr-numeral-X-bg","url(#fr-numeral-X-bg)","url(#fr-numeral-X-grad1)","url(#fr-numeral-X-grad2)","url(#fr-numeral-X-grad3)","url(#fr-numeral-X-grad4)","url(#fr-numeral-X-grad5)","url(#fr-numeral-X-grad6)","url(#fr-numeral-X-grad7)","url(#fr-numeral-X-grad8)","url(#fr-numeral-X-grad9)","url(#fr-numeral-X-grad10)","url(#fr-numeral-X-line)","M 148.6914 140 L 98.007805 140 L 98.007805 135.42969 Q 105.27344 135.01953 107.38281 134.16992 Q 109.49218 133.32031 109.49218 131.91406 Q 109.49218 131.15234 108.73047 129.48242 Q 107.96875 127.81249 106.62109 125.64453 Q 104.57032 122.1875 101.14258 117.00195 Q 97.71484 111.81641 94.02344 106.3086 Q 81.71875 120.546875 78.4082 125.23437 Q 75.09766 129.92188 75.09766 131.44531 Q 75.09766 132.26563 75.36133 132.82227 Q 75.625 133.3789 76.73828 133.90625 Q 77.55859 134.375 79.55078 134.78516 Q 81.54297 135.19531 84.296875 135.42969 L 84.296875 140 L 52.01172 140 L 52.01172 135.42969 Q 54.53125 135.2539 56.02539 134.90234 Q 57.519527 134.55078 58.984375 133.90625 Q 62.382813 132.32422 65.01953 129.89258 Q 67.65625 127.46094 70.46875 124.23828 Q 74.57031 119.609375 79.72656 113.74999 Q 84.88281 107.890625 90.566414 101.26953 Q 85.17578 93.125 79.78516 85.44922 Q 74.39453 77.77344 70.64453 72.38281 Q 68.76953 69.6875 65.98633 66.99219 Q 63.203125 64.296875 60.156254 63.125004 Q 58.632813 62.480473 56.757813 62.041016 Q 54.882813 61.601563 52.246094 61.42578 L 52.246094 56.85547 L 103.04687 56.85547 L 103.04687 61.42578 Q 97.12891 61.660156 94.28712 62.480473 Q 91.44531 63.30078 91.44531 64.94141 Q 91.44531 65.76172 92.00195 67.021484 Q 92.55859 68.28125 94.19921 70.97656 Q 95.60548 73.32031 98.56445 77.83203 Q 101.52344 82.34375 105.27344 88.08594 Q 116.34766 74.90234 119.18945 70.88867 Q 122.03125 66.875 122.03125 65.41016 Q 122.03125 63.710934 120.390625 62.86133 Q 118.75 62.01172 112.71484 61.42578 L 112.71484 56.85547 L 145.11719 56.85547 L 145.11719 61.42578 Q 142.89063 61.484375 141.45508 61.83594 Q 140.01953 62.1875 138.14453 62.94922 Q 134.51172 64.58984 132.05078 66.99219 Q 129.58984 69.39453 126.66016 72.61719 Q 122.32421 77.421875 118.36913 81.96289 Q 114.41406 86.50391 108.671875 93.06641 Q 115.76172 103.73048 120.80078 110.9375 Q 125.83984 118.14453 130.35156 124.47266 Q 132.10938 127.16797 134.89258 129.89258 Q 137.67578 132.61719 140.66406 133.78906 Q 142.07031 134.3164 143.88672 134.78516 Q 145.70313 135.2539 148.6914 135.42969 L 148.6914 140 Z","#8B8D91","#414347","#B9C6D1","#4C5964","#E9CD82"],"assets":[{"i":"glyph-solara","n":"Solara glyph","t":0,"f":[],"k":{"realm":"solara"}},{"i":"glyph-verdant","n":"Verdant glyph","t":1,"f":[],"k":{"realm":"verdant"}},{"i":"glyph-tide","n":"Tide glyph","t":2,"f":[],"k":{"realm":"tide"}},{"i":"glyph-ember","n":"Ember glyph","t":3,"f":[],"k":{"realm":"ember"}},{"i":"glyph-umbra","n":"Umbra glyph","t":4,"f":[],"k":{"realm":"umbra"}},{"i":"front-solara","n":"Solara card front","t":5,"f":[0,1,2,3,4,3,5,6,7,8,9,8,10,8,3,11,8,9,8,10,8,10,8,8,3],"k":{"realm":"solara","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#F6E5BB","borderDark":"#B8860B","lineLight":"#B8860B","lineDark":"#7A5C0E","cardFace":"#FBEFD1","bar":"#E8C877","artWindow":"#F0D99E","rulesPanel":"#FDF7E7","titleText":"#7A5C0E","bodyText":"#7A5C0E"}}},{"i":"front-verdant","n":"Verdant card front","t":5,"f":[12,13,14,15,16,15,17,18,19,20,21,20,22,20,15,23,20,21,20,22,20,22,20,20,15],"k":{"realm":"verdant","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#D5E6C1","borderDark":"#3B6B35","lineLight":"#3B6B35","lineDark":"#254A22","cardFace":"#E3F0D3","bar":"#A9C98A","artWindow":"#C2DAA9","rulesPanel":"#F0F7E8","titleText":"#254A22","bodyText":"#254A22"}}},{"i":"front-tide","n":"Tide card front","t":5,"f":[24,25,26,27,28,27,29,30,31,32,33,32,34,32,27,35,32,33,32,34,32,34,32,32,27],"k":{"realm":"tide","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#C9E6EA","borderDark":"#1B5A78","lineLight":"#1B5A78","lineDark":"#12374A","cardFace":"#DCF1F1","bar":"#8FC4D6","artWindow":"#B0D7E2","rulesPanel":"#EDF8F8","titleText":"#12374A","bodyText":"#12374A"}}},{"i":"front-ember","n":"Ember card front","t":5,"f":[36,37,38,39,40,39,41,42,43,44,45,44,46,44,39,47,44,45,44,46,44,46,44,44,39],"k":{"realm":"ember","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#F5CDB5","borderDark":"#8C2E1C","lineLight":"#8C2E1C","lineDark":"#5C1712","cardFace":"#FBDFC7","bar":"#E4967D","artWindow":"#EEB59D","rulesPanel":"#FDEEE2","titleText":"#FDF1E7","bodyText":"#5C1712"}}},{"i":"front-umbra","n":"Umbra card front","t":5,"f":[48,49,50,51,52,51,53,54,55,56,57,56,58,56,51,59,56,57,56,58,56,58,56,56,51],"k":{"realm":"umbra","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#CBC1DA","borderDark":"#3A2947","lineLight":"#3A2947","lineDark":"#1E1526","cardFace":"#DCD4E8","bar":"#9686AF","artWindow":"#B4A8C8","rulesPanel":"#EDE9F3","titleText":"#F0EDF5","bodyText":"#1E1526"}}},{"i":"front-colourless","n":"Colourless card front","t":5,"f":[60,61,62,63,64,63,65,66,67,68,69,68,70,68,63,71,68,69,68,70,68,70,68,68,63],"k":{"realm":"colourless","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]},"palette":{"borderLight":"#D4D4D4","borderDark":"#4A4A4A","lineLight":"#4A4A4A","lineDark":"#2B2B2B","cardFace":"#E6E6E6","bar":"#9C9C9C","artWindow":"#BCBCBC","rulesPanel":"#F2F2F2","titleText":"#F4F4F4","bodyText":"#2B2B2B"}}},{"i":"front-land","n":"Land card front","t":6,"f":[],"k":{"type":"land","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98],"resourcePip":[22,376,32,32]}}},{"i":"front-gold","n":"Gold card front","t":7,"f":[],"k":{"type":"gold","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]}}},{"i":"front-artifact","n":"Artifact card front","t":8,"f":[],"k":{"type":"artifact","safe_areas":{"name":[32,20,226,28],"costArea":[253,17,34,34],"art":[20,54,260,150],"typeLine":[32,210,248,24],"rulesText":[20,240,260,130],"ptBox":[254,376,32,32]}}},{"i":"front-basicland-solara","n":"Solara basic land card front","t":9,"f":[],"k":{"realm":"solara","cardClass":"basicland","rarity":"Field","safe_areas":{"name":[32,20,226,28],"costArea":[256,20,28,28],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98]}}},{"i":"front-basicland-verdant","n":"Verdant basic land card front","t":10,"f":[72,73,74,15,75,15,17,76,19,77,21,77,78,77,79,77,21,77,78,77,78,77,80,15,77,15],"k":{"realm":"verdant","cardClass":"basicland","rarity":"Field","safe_areas":{"name":[32,20,226,28],"costArea":[256,20,28,28],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98]}}},{"i":"front-basicland-tide","n":"Tide basic land card front","t":11,"f":[],"k":{"realm":"tide","cardClass":"basicland","rarity":"Field","safe_areas":{"name":[32,20,226,28],"costArea":[256,20,28,28],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98]}}},{"i":"front-basicland-ember","n":"Ember basic land card front","t":10,"f":[81,82,83,39,84,39,41,85,43,86,45,86,87,86,88,86,45,86,87,86,87,86,89,39,86,39],"k":{"realm":"ember","cardClass":"basicland","rarity":"Field","safe_areas":{"name":[32,20,226,28],"costArea":[256,20,28,28],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98]}}},{"i":"front-basicland-umbra","n":"Umbra basic land card front","t":10,"f":[90,91,92,51,93,51,53,94,55,95,57,95,96,95,97,95,57,95,96,95,96,95,98,51,95,51],"k":{"realm":"umbra","cardClass":"basicland","rarity":"Field","safe_areas":{"name":[32,20,226,28],"costArea":[256,20,28,28],"art":[20,54,260,182],"typeLine":[32,242,248,24],"rulesText":[20,272,260,98]}}},{"i":"back","n":"Five Realms card back","t":12,"f":[],"k":{}},{"i":"symbol-solara","n":"Solara mana symbol","t":13,"f":[],"k":{"realm":"solara","code":"W"}},{"i":"symbol-verdant","n":"Verdant mana symbol","t":14,"f":[],"k":{"realm":"verdant","code":"G"}},{"i":"symbol-tide","n":"Tide mana symbol","t":15,"f":[],"k":{"realm":"tide","code":"U"}},{"i":"symbol-ember","n":"Ember mana symbol","t":16,"f":[],"k":{"realm":"ember","code":"R"}},{"i":"symbol-umbra","n":"Umbra mana symbol","t":17,"f":[],"k":{"realm":"umbra","code":"B"}},{"i":"symbol-colourless","n":"Colourless mana symbol","t":18,"f":[],"k":{"realm":"colourless","code":"C"}},{"i":"numeral-0","n":"Numeral 0","t":19,"f":[99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125],"k":{}},{"i":"numeral-1","n":"Numeral 1","t":19,"f":[126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152],"k":{}},{"i":"numeral-2","n":"Numeral 2","t":19,"f":[153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179],"k":{}},{"i":"numeral-3","n":"Numeral 3","t":19,"f":[180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200,201,202,203,204,205,206],"k":{}},{"i":"numeral-4","n":"Numeral 4","t":19,"f":[207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233],"k":{}},{"i":"numeral-5","n":"Numeral 5","t":19,"f":[234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,256,257,258,259,260],"k":{}},{"i":"numeral-6","n":"Numeral 6","t":19,"f":[261,262,263,264,265,266,267,268,269,270,271,272,273,274,275,276,277,278,279,280,281,282,283,284,285,286,287],"k":{}},{"i":"numeral-7","n":"Numeral 7","t":19,"f":[288,289,290,291,292,293,294,295,296,297,298,299,300,301,302,303,304,305,306,307,308,309,310,311,312,313,314],"k":{}},{"i":"numeral-8","n":"Numeral 8","t":19,"f":[315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341],"k":{}},{"i":"numeral-9","n":"Numeral 9","t":19,"f":[342,343,344,345,346,347,348,349,350,351,352,353,273,354,355,356,357,358,359,360,361,362,363,364,365,366,367],"k":{}},{"i":"numeral-X","n":"Numeral X","t":19,"f":[368,369,370,371,372,373,374,375,376,377,378,379,380,381,382,383,384,385,386,387,388,389,390,391,392,393,394],"k":{}},{"i":"symbol-tap","n":"Tap symbol","t":20,"f":[],"k":{}},{"i":"phase-untap","n":"Untap phase icon","t":21,"f":[],"k":{"phase":"untap"}},{"i":"phase-draw","n":"Draw phase icon","t":22,"f":[],"k":{"phase":"draw"}},{"i":"phase-main","n":"Main phase icon","t":23,"f":[],"k":{"phase":"main"}},{"i":"phase-combat","n":"Combat phase icon","t":24,"f":[],"k":{"phase":"combat"}},{"i":"phase-end","n":"End phase icon","t":25,"f":[],"k":{"phase":"end"}},{"i":"life-gem","n":"Life total gem","t":26,"f":[],"k":{"safe_areas":{"value":[29,52,42,26]}}},{"i":"gem-marked","n":"Marked rarity gem","t":27,"f":[],"k":{"tier":"Marked","size":"full"}},{"i":"gem-marked-small","n":"Marked rarity gem (small)","t":28,"f":[395,396],"k":{"tier":"Marked","size":"small"}},{"i":"gem-vaulted","n":"Vaulted rarity gem","t":29,"f":[],"k":{"tier":"Vaulted","size":"full"}},{"i":"gem-vaulted-small","n":"Vaulted rarity gem (small)","t":28,"f":[397,398],"k":{"tier":"Vaulted","size":"small"}},{"i":"gem-sovereign","n":"Sovereign rarity gem","t":30,"f":[],"k":{"tier":"Sovereign","size":"full"}},{"i":"gem-sovereign-small","n":"Sovereign rarity gem (small)","t":28,"f":[399,5],"k":{"tier":"Sovereign","size":"small"}},{"i":"gem-ascendant","n":"Ascendant rarity gem","t":31,"f":[],"k":{"tier":"Ascendant","size":"full"}},{"i":"gem-ascendant-small","n":"Ascendant rarity gem (small)","t":32,"f":[],"k":{"tier":"Ascendant","size":"small"}}]};
+// Rebuilds one asset's SVG text from the template + string-pool payload. Identical logic
+// to cardDeckBuild (card-deck-plugin/lists.txt:52-58); mirrors game-assets'
+// tools/verify_payload.py reconstruct() exactly.
+
+frAssetBuild(asset) =>
+  let chunks = window.FIVE_REALMS_PAYLOAD.templates[asset.t];
+  let out = chunks[0];
+  for(let i = 0; i < asset.f.length; i++) {
+    out += window.FIVE_REALMS_PAYLOAD.strings[asset.f[i]] + chunks[i + 1];
+  }
+  return out;
+
+frAssetGet(id) =>
+  if(!window.FIVE_REALMS_PAYLOAD) frInitPayload();
+  for(let a of window.FIVE_REALMS_PAYLOAD.assets) {
+    if(a.i === id) return a;
+  }
+  return null;
+
+frAssetList() =>
+  if(!window.FIVE_REALMS_PAYLOAD) frInitPayload();
+  return window.FIVE_REALMS_PAYLOAD.assets.map(a => a.i);
+
+
+// =====================================================================
+// RENDERER
+// =====================================================================
+//
+// A rendered card is bare SVG plus a rects/text data envelope, NOT a composed HTML
+// fragment -- see NOTES.md, "Renderer output shape", for the reasoning. frRenderCard
+// resolves a card id (or an already-fetched card record) to: its front SVG (realm, card
+// class, or basic-land front -- see frFrontAssetId just below); its realm glyph SVG (null
+// for a colourless card, or for any glyph the payload does not carry -- no synthesised
+// substitute, see NOTES.md); its rarity gem SVG, full-size and type-line-sized (null for
+// `Field` or any unrecognised rarity -- see frGemForCard); the safe-area rects a consumer
+// positions text over, in the front's 300x420 view box, straight from the payload's own
+// asset.k.safe_areas (three different shapes exist across the fronts -- read, never
+// assumed, see the ART PAYLOAD banner comment above); the front's asset.k.palette, so any
+// HTML the consumer composes can match ink to the pre-coloured front rather than guessing
+// at colours (undefined for the four fronts that publish no palette -- again, see above);
+// and the card's mana cost broken into an ordered, per-symbol asset array (see
+// frCostSymbols) for a consumer to lay across the title bar, since the front's single
+// costArea circle cannot hold more than one symbol -- see NOTES.md, "Multi-symbol mana
+// cost is still a layout gap, not solved here". `rarity` and `frame` are passed through
+// on the returned `card` for the consumer to read.
+
+// frFrontAssetId resolves which of the 14 front assets a card renders on. This is a
+// judgement call, not something the card-model spec fixes (it only fixes `glyph`,
+// `types`, `colors`/`colorIdentity`, and rarity) -- see NOTES.md, "Front selection
+// precedence", for the full reasoning. Precedence, highest first:
+//   1. Basic land -- `card.cardClass === "basicland"` (an explicit tag a future basic-land
+//      card record may carry, matching the asset payload's own `k.cardClass` spelling) OR
+//      `card.rarity === "Field"` (the card-model spec's own class marker, section 2: Field
+//      IS the basic-land card class). Picks `front-basicland-<realm>` when `card.glyph` is
+//      one of the five realms; there is no basicland-colourless asset, so a colourless or
+//      unrecognised glyph falls through to `front-land` instead of throwing.
+//   2. Any other `Land` type -> `front-land`.
+//   3. Multicolour (`colors`, or `colorIdentity` if `colors` is absent, has 2+ entries) ->
+//      `front-gold`. This un-defers the card-model spec's section 3 note that "multicolour
+//      glyph rendering... is explicitly deferred" -- see NOTES.md for why this bucket
+//      treats that deferral as closed rather than still-open.
+//   4. A colourless `Artifact` (no realm colours at all) -> `front-artifact`.
+//   5. Otherwise, the existing per-realm/colourless front -> `front-<glyph>`.
+frFrontAssetId(card) =>
+  let isBasicLand = card.cardClass === "basicland" || card.rarity === "Field";
+  if(isBasicLand) {
+    let realm = card.glyph;
+    if(realm && frRealmList().indexOf(realm) !== -1) {
+      return "front-basicland-" + realm;
+    }
+    return "front-land";
+  }
+  let types = Array.isArray(card.types) ? card.types : [];
+  if(types.indexOf("Land") !== -1) {
+    return "front-land";
+  }
+  let colors = Array.isArray(card.colors)
+    ? card.colors
+    : (Array.isArray(card.colorIdentity) ? card.colorIdentity : []);
+  if(colors.length >= 2) {
+    return "front-gold";
+  }
+  if(types.indexOf("Artifact") !== -1 && colors.length === 0) {
+    return "front-artifact";
+  }
+  return "front-" + card.glyph;
+
+// frGemAssetIdForRarity/frGemForCard resolve a rarity tier to its gem asset id, per the
+// card-model spec section 2's tier table. `Field` (basic lands) and any rarity string this
+// plugin doesn't recognise both resolve to null -- a valid, non-throwing answer, not a
+// missing-asset bug. This plugin's five tier names (Field, Marked, Vaulted, Sovereign,
+// Ascendant) are the only rarity vocabulary this file's own authored text ever emits --
+// see NOTES.md for the locked decision behind that and a documented, unavoidable exception
+// inside the copied-verbatim art payload itself.
+frGemAssetIdForRarity(rarity) =>
+  let map = {
+    Marked: "gem-marked",
+    Vaulted: "gem-vaulted",
+    Sovereign: "gem-sovereign",
+    Ascendant: "gem-ascendant"
+  };
+  return map[rarity] || null;
+
+frGemForCard(cardOrId) =>
+  let card = (typeof cardOrId === "string") ? frCardGet(cardOrId) : cardOrId;
+  if(!card || typeof card !== "object" || typeof card.rarity !== "string") {
+    return null;
+  }
+  return frGemAssetIdForRarity(card.rarity);
+
+// frManaColorAssetMap: the one color-letter -> cost-symbol-asset lookup shared by
+// frCostSymbols and $output("gem"/"cost", ...). Kept as its own function (rather than a
+// bare object literal duplicated at each call site) so there is exactly one place that
+// encodes "W -> solara" etc.
+frManaColorAssetMap() =>
+  return { W: "symbol-solara", U: "symbol-tide", B: "symbol-umbra", R: "symbol-ember", G: "symbol-verdant", C: "symbol-colourless" };
+
+// frCostSymbols parses a manaCost string (via the existing frManaParseCost -- the grammar
+// is not re-derived here) into an ORDERED array of { symbol, assetId, svg } entries, left
+// to right, one per brace-delimited symbol in the original cost string. This is the point
+// of the B11 asset grant: the front has exactly one 34x34 costArea circle, which cannot
+// hold a multi-symbol cost like "{1}{R}{R}" (three symbols) -- returning an ordered array
+// lets a consumer lay them out itself. NOT solved here -- see NOTES.md, "Multi-symbol mana
+// cost is still a layout gap, not solved here".
+//
+// Mapping: generic {N} for 0<=N<=9 -> numeral-N; a multi-digit generic (no single asset
+// covers e.g. "12") -> assetId null with a `parts` array of each digit's numeral asset,
+// same non-fabrication rule as hybrids, below. {X} -> numeral-X. {C} and a coloured {W/
+// U/B/R/G} -> the matching symbol-<realm> asset via frManaColorAssetMap. A hybrid symbol
+// (colored/colored or generic/colored) has NO single asset in the payload -- per this
+// bucket's instructions, this returns assetId: null and a `parts` array of the component
+// asset ids, rather than fabricating a hybrid asset that doesn't exist.
+//
+// Never throws: frManaParseCost throws on `{T}` or any malformed cost string (by design,
+// see the MANA section above); frCostSymbols catches that and returns [] rather than
+// propagating, matching every other op's "readable placeholder, not an exception" contract.
+frCostSymbols(costStr) =>
+  let colorAsset = frManaColorAssetMap();
+  let parsed;
+  try {
+    parsed = frManaParseCost(costStr);
+  } catch(e) {
+    return [];
+  }
+  let out = [];
+  for(let i = 0; i < parsed.symbols.length; i++) {
+    let sym = parsed.symbols[i];
+    let entry = { symbol: null, assetId: null, svg: null };
+    if(sym.kind === "generic") {
+      entry.symbol = "{" + sym.n + "}";
+      if(sym.n >= 0 && sym.n <= 9) {
+        entry.assetId = "numeral-" + sym.n;
+      } else {
+        entry.parts = String(sym.n).split("").map((d) => "numeral-" + d);
+      }
+    } else if(sym.kind === "variable") {
+      entry.symbol = "{X}";
+      entry.assetId = "numeral-X";
+    } else if(sym.kind === "colorless") {
+      entry.symbol = "{C}";
+      entry.assetId = colorAsset.C;
+    } else if(sym.kind === "colored") {
+      entry.symbol = "{" + sym.color + "}";
+      entry.assetId = colorAsset[sym.color] || null;
+    } else if(sym.kind === "hybridColored") {
+      entry.symbol = "{" + sym.options.join("/") + "}";
+      entry.parts = sym.options.map((c) => colorAsset[c] || null);
+    } else if(sym.kind === "hybridGeneric") {
+      entry.symbol = "{" + sym.n + "/" + sym.color + "}";
+      entry.parts = [
+        (sym.n >= 0 && sym.n <= 9) ? ("numeral-" + sym.n) : null,
+        colorAsset[sym.color] || null
+      ];
+    } else {
+      entry.symbol = "{?}";
+    }
+    if(entry.assetId) {
+      let asset = frAssetGet(entry.assetId);
+      entry.svg = asset ? frAssetBuild(asset) : null;
+    }
+    out.push(entry);
+  }
+  return out;
+
+frRenderCard(cardOrId) =>
+  let card = (typeof cardOrId === "string") ? frCardGet(cardOrId) : cardOrId;
+  if(!card || typeof card !== "object" || !card.glyph) {
+    return "(unknown card id: " + String(cardOrId) + ")";
+  }
+  let realm = card.glyph;
+  let frontId = frFrontAssetId(card);
+  let frontAsset = frAssetGet(frontId);
+  if(!frontAsset) {
+    return "(unknown realm: " + String(realm) + ")";
+  }
+  let frontSvg = frAssetBuild(frontAsset);
+  let glyphSvg = null;
+  if(realm !== "colourless") {
+    let glyphAsset = frAssetGet("glyph-" + realm);
+    if(glyphAsset) glyphSvg = frAssetBuild(glyphAsset);
+  }
+  let gemId = frGemForCard(card);
+  let gemSvg = null;
+  let gemSmallSvg = null;
+  if(gemId) {
+    let gemAsset = frAssetGet(gemId);
+    if(gemAsset) gemSvg = frAssetBuild(gemAsset);
+    let gemSmallAsset = frAssetGet(gemId + "-small");
+    if(gemSmallAsset) gemSmallSvg = frAssetBuild(gemSmallAsset);
+  }
+  let costSymbols = card.manaCost ? frCostSymbols(card.manaCost) : [];
+  return {
+    card: card,
+    typeLine: frCardTypeLine(card),
+    frontSvg: frontSvg,
+    glyphSvg: glyphSvg,
+    gemSvg: gemSvg,
+    gemSmallSvg: gemSmallSvg,
+    rects: frontAsset.k.safe_areas,
+    palette: frontAsset.k.palette,
+    costSymbols: costSymbols
+  };
+
+
+// =====================================================================
+// PLUGIN ENTRY POINT
+// =====================================================================
+//
+// Column-0 function-form $output, op-dispatch on the first argument -- the same idiom
+// card-deck-plugin/lists.txt:99 uses for its id-dispatch. Multi-parameter $output is
+// source-verified against the 82 official plugins (not merely corpus-attested the way
+// card-deck-plugin/NOTES.md left it): e.g.
+// plugins/plugins/fullscreen-button-plugin/main.pjs:1 `$output(text, exitText, style) =>`
+// and plugins/plugins/markdown-plugin/main.pjs:1 `$output(text, options, callback) =>`,
+// both re-verified this session -- see NOTES.md.
+//
+// Ops (all lazily init the art payload on first call; NEVER throw -- unknown or hostile
+// input returns a readable placeholder string, an empty array, or a defensively cloned
+// value, per op, documented here):
+//
+//   $output("render", cardIdOrCardRecord)
+//     -> { card, typeLine, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects, palette,
+//        costSymbols } for a resolvable card, else "(unknown card id: ...)" /
+//        "(unknown realm: ...)". glyphSvg is null for a colourless card (or any realm
+//        whose glyph asset does not exist). gemSvg/gemSmallSvg are null for a `Field`
+//        (basic land) card or any unrecognised rarity. palette is undefined for a front
+//        that publishes no k.palette (front-land/gold/artifact/basicland-*). costSymbols
+//        is [] for a card with no manaCost (a Land).
+//   $output("card", cardId)        -> the card record, or "(unknown card id: ...)"
+//   $output("cards")               -> array of all 12 card records
+//   $output("realms")              -> ["solara","verdant","tide","ember","umbra"]
+//   $output("rarities")            -> the five tier names, Field..Ascendant, in order.
+//                                     Field is the basic-land card class, not a rarity step,
+//                                     and is the one tier with no gem asset.
+//   $output("newGame", config)     -> frGameNew(config), or a placeholder string
+//   $output("act", state, action)  -> frApplyAction(state, action), or a placeholder
+//                                     string if state/action is too malformed for even
+//                                     frApplyAction's own guard clauses to absorb (e.g.
+//                                     state is not an object at all -- frApplyAction
+//                                     already guards a malformed ACTION, not a malformed
+//                                     STATE; this op closes that gap, see NOTES.md)
+//   $output("state", state)        -> a defensively cloned, JSON-safe copy of state, or
+//                                     "(invalid state)" if it cannot be round-tripped
+//   $output("legalActions", state) -> frLegalActions(state) -- see its own comment; []
+//                                     on a malformed/missing state
+//   $output("asset", id)           -> that asset's rebuilt SVG string, or
+//                                     "(unknown asset id: ...)"
+//   $output("assets")              -> array of all 52 asset ids
+//   $output("gem", cardIdOrRarity) -> the gem SVG for that card's (or that literal
+//                                     rarity's) tier, or "(unknown card id or rarity:
+//                                     ...)" / "(no gem for rarity: Field)" -- added B11
+//   $output("cost", manaCost)      -> frCostSymbols(manaCost) -- an ordered array of
+//                                     { symbol, assetId, svg[, parts] }; [] for an
+//                                     unparseable cost string -- added B11
+//
+// Any other op -- including null, undefined, {}, 42, "", [], or a deeply nested object --
+// returns "(unknown op: ...)" rather than throwing. Matched against card-deck-plugin's own
+// 11-hostile-input contract; see tools/five-realms-plugin.test.mjs.
+
+$output(op, a, b, c, d, e) =>
+  if(!window.FIVE_REALMS_PAYLOAD) frInitPayload();
+
+  if(op === "render") return frRenderCard(a);
+
+  if(op === "card") {
+    let card = frCardGet(a);
+    if(!card) return "(unknown card id: " + String(a) + ")";
+    return card;
+  }
+
+  if(op === "cards") return Object.values(frCardDb());
+
+  if(op === "realms") return frRealmList();
+
+  if(op === "rarities") return frRarityList();
+
+  if(op === "newGame") {
+    try { return frGameNew(a); }
+    catch(e) { return "(could not start a new game: " + String(e && e.message) + ")"; }
+  }
+
+  if(op === "act") {
+    try { return frApplyAction(a, b); }
+    catch(e) { return "(could not apply action: " + String(e && e.message) + ")"; }
+  }
+
+  if(op === "state") {
+    try { return frCloneState(a); }
+    catch(e) { return "(invalid state)"; }
+  }
+
+  if(op === "legalActions") return frLegalActions(a);
+
+  if(op === "asset") {
+    let asset = frAssetGet(a);
+    if(!asset) return "(unknown asset id: " + String(a) + ")";
+    return frAssetBuild(asset);
+  }
+
+  if(op === "assets") return frAssetList();
+
+  if(op === "gem") {
+    let rarityNames = frRarityList();
+    let rarity = null;
+    if(typeof a === "string" && rarityNames.indexOf(a) !== -1) {
+      rarity = a;
+    } else {
+      let card = (typeof a === "string") ? frCardGet(a) : a;
+      if(card && typeof card === "object" && typeof card.rarity === "string") {
+        rarity = card.rarity;
+      }
+    }
+    if(!rarity) return "(unknown card id or rarity: " + String(a) + ")";
+    let gemId = frGemAssetIdForRarity(rarity);
+    if(!gemId) return "(no gem for rarity: " + rarity + ")";
+    let asset = frAssetGet(gemId);
+    if(!asset) return "(unknown asset id: " + gemId + ")";
+    return frAssetBuild(asset);
+  }
+
+  if(op === "cost") return frCostSymbols(a);
+
+  return "(unknown op: " + String(op) + ")";

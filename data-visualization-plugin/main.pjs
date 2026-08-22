@@ -1,0 +1,1679 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// data-visualization-plugin  ·  v1.1.0
+// Clean, dependency-free SVG charts for Perchance: bar, line, pie, donut and
+// histogram, driven by plain arrays, label/value objects, Perchance lists or
+// distribution objects. Every chart returns a responsive SVG string.
+//
+//   charts = <import data-visualization-plugin>   (curly-brace import syntax)
+//
+//   [charts.bar([3, 7, 2])]
+//   [charts.line([{label:"Mon", Views:5, Saves:3}, {label:"Tue", Views:8, Saves:6}])]
+//   [charts.pie([{label:"A", value:1}, {label:"B", value:2}])]
+//   [charts.donut([{label:"A", value:1}], {centerText: "42"})]
+//   [charts.histogram({outcomes:[{v:3,p:0.1},{v:4,p:0.3}], expr:"1d6", mean:3.5, std:1.2})]
+//   [charts.infer(data)]                    // smart default: infers the best chart type
+//   [charts.timeSeries([{t: Date.now(), v: 5}])]  // irregular {t, v} time data
+//   [charts.timeSeries([{name, data: [{t,v}]}], {mode: "combo", bin: "daily"})]
+//   [charts.line(timestampLabels)]  // auto-detects numeric-ms / ISO date labels
+//
+// All chart types accept an optional second options argument:
+//   {height, title, labels, ticks, gridlines, legend, tooltips, min, max,
+//    decimals, horizontal, fill, theme, gap, colors, keys, centerText}
+// timeSeries adds: {mode, bin, log, smooth, dots, stacked, percent, trend,
+//   target, maxPoints} — mode: "line" | "bars" | "combo" | "norm".
+// Full reference + live demos: perchance.org/data-visualization-plugin
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = Data Visualization Plugin
+  description = Dependency-free SVG charts for Perchance — bar, line, pie, donut and histogram from arrays, lists or distribution objects. Import it, point it at your data, drop the SVG into any element.
+  tags = charts, data, visualization, svg, graphs, plugin
+  header
+    mode = minimal
+
+
+makeChartsApi() =>
+  if (window.__chartsApi) return window.__chartsApi;
+
+  const VERSION = "1.1.0";
+  const DEF_COLORS = ["#7c6cff", "#22d3ee", "#34d399", "#f472b6", "#fbbf24", "#f87171", "#a78bfa", "#38bdf8"];
+  const VB_W = 520;
+  const NODE_SKIP = ["evaluateItem", "selectAll", "selectOne", "selectMany", "selectMultiple", "selectMultipleUnique", "selectUnique", "getLength", "parent", "getParent", "name", "keys", "isItem", "isList", "listKey"];
+
+  function resolve(v) {
+    if (v == null) return v;
+    try { if (v.evaluateItem !== undefined) return v.evaluateItem; } catch (e) {}
+    return v;
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function fmt(v, dec) {
+    if (typeof v !== "number" || !isFinite(v)) return v == null ? "" : String(v);
+    if (dec == null) dec = Math.round(v) === v ? 0 : 2;
+    let neg = v < 0;
+    v = Math.abs(v);
+    let s = v.toFixed(dec);
+    if (dec === 0) s = String(Math.round(v));
+    return (neg ? "-" : "") + s;
+  }
+
+  function fmtP(prob, dec) {
+    return fmt(prob * 100, dec) + "%";
+  }
+
+  function num(v) {
+    v = resolve(v);
+    let n = typeof v === "number" ? v : Number(v);
+    return isFinite(n) ? n : NaN;
+  }
+
+  function themeColors(theme) {
+    if (theme === "light") return { text: "#1e293b", muted: "#64748b", grid: "rgba(15,23,42,0.10)", axis: "rgba(15,23,42,0.28)", bar: "#7c6cff", barPeak: "#0891b2" };
+    if (theme === "dark") return { text: "#e2e8f0", muted: "#94a3b8", grid: "rgba(148,163,184,0.13)", axis: "rgba(148,163,184,0.32)", bar: "#8b7cff", barPeak: "#22d3ee" };
+    return { text: "var(--text, #e2e8f0)", muted: "var(--muted, #94a3b8)", grid: "var(--border, rgba(148,163,184,0.13))", axis: "var(--border, rgba(148,163,184,0.32))", bar: "var(--accent, #7c6cff)", barPeak: "var(--accent2, #22d3ee)" };
+  }
+
+  function defaultOpts() {
+    return {
+      height: 300, title: null, labels: true, ticks: 4, gridlines: true,
+      legend: null, tooltips: true, min: null, max: null, decimals: null,
+      horizontal: false, fill: true, theme: null, centerTotal: true,
+      centerText: null, gap: 0.25, colors: DEF_COLORS.slice(), keys: null,
+      mode: "line", bin: "auto", log: "auto", smooth: false, dots: true,
+      stacked: true, percent: false, trend: false, target: null, maxPoints: 400
+    };
+  }
+
+  function mergeOpts(o, opts) {
+    if (opts == null || typeof opts !== "object") return o;
+    for (let k in opts) {
+      if (k === "colors" && Array.isArray(opts[k])) { o.colors = opts[k].slice(); continue; }
+      if (k === "keys" && opts[k] != null) {
+        o.keys = Array.isArray(opts[k]) ? opts[k].map(function(x) { return resolve(x); }) : [resolve(opts[k])];
+        continue;
+      }
+      o[k] = resolve(opts[k]);
+    }
+    return o;
+  }
+
+  function niceNum(range, round) {
+    let exp = Math.floor(Math.log(range) / Math.LN10);
+    let f = range / Math.pow(10, exp);
+    let nf;
+    if (round) { if (f < 1.5) nf = 1; else if (f < 3) nf = 2; else if (f < 7) nf = 5; else nf = 10; }
+    else { if (f <= 1) nf = 1; else if (f <= 2) nf = 2; else if (f <= 5) nf = 5; else nf = 10; }
+    return nf * Math.pow(10, exp);
+  }
+
+  function niceTicks(min, max, count) {
+    if (!isFinite(min) || !isFinite(max) || !(min < max)) { min = 0; max = max === min ? max + 1 : (min || 1); }
+    let range = niceNum(max - min, false);
+    let step = niceNum(range / Math.max(1, count - 1), true);
+    if (step <= 0) step = 1;
+    let lo = Math.floor(min / step) * step;
+    let hi = Math.ceil(max / step) * step;
+    let out = [];
+    for (let v = lo; v <= hi + step * 0.001; v += step) out.push(v);
+    return out;
+  }
+
+  function minMax(vals) {
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < vals.length; i++) {
+      let v = vals[i];
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    if (!isFinite(mn)) { mn = 0; mx = 1; }
+    return { mn: mn, mx: mx };
+  }
+
+  function valueRange(series, o) {
+    let vals = [];
+    for (let s = 0; s < series.length; s++) {
+      let vs = series[s].values;
+      for (let i = 0; i < vs.length; i++) vals.push(vs[i]);
+    }
+    let r = minMax(vals);
+    let mn = r.mn, mx = r.mx;
+    if (o.min != null) mn = +o.min;
+    if (o.max != null) mx = +o.max;
+    if (o.min == null && mn >= 0) mn = 0;
+    if (!(mn < mx)) { if (mx === mn) mx = mn + 1; else { let t = mn; mn = mx; mx = t; } }
+    return { mn: mn, mx: mx };
+  }
+
+  function layout(o, titleH, legendH, xLabelsH) {
+    let H = Math.max(160, Math.floor(+o.height || 300));
+    let T = titleH + 8;
+    let B = xLabelsH + legendH + 6;
+    let L = 58, R = 14;
+    return { H: H, L: L, R: R, x0: L, x1: VB_W - R, y0: T, y1: H - B, T: T, B: B };
+  }
+
+  function svgHead(H) {
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + VB_W + " " + H + '" role="img" style="width:100%;height:auto;display:block;overflow:visible;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">';
+  }
+
+  function drawTitle(o, tc) {
+    if (!o.title) return "";
+    return '<text x="' + (VB_W / 2) + '" y="18" style="font-size:15px;font-weight:700;fill:' + tc.text + ';text-anchor:middle;">' + esc(o.title) + '</text>';
+  }
+
+  function drawGrid(o, tc, ly, x0, x1, y0, y1, ticks, lo, hi) {
+    let out = "";
+    if (o.gridlines) {
+      for (let i = 0; i < ticks.length; i++) {
+        let y = ly(ticks[i]);
+        out += '<line x1="' + x0 + '" y1="' + y + '" x2="' + x1 + '" y2="' + y + '" style="stroke:' + tc.grid + ';stroke-width:1;"/>';
+      }
+    }
+    let base = Math.max(lo, Math.min(hi, 0));
+    let by = Math.max(y0, Math.min(y1, ly(base)));
+    out += '<line x1="' + x0 + '" y1="' + by + '" x2="' + x1 + '" y2="' + by + '" style="stroke:' + tc.axis + ';stroke-width:1.3;"/>';
+    return out;
+  }
+
+  function drawTicksY(o, tc, ly, ticks, x0, dec) {
+    let out = "";
+    for (let i = 0; i < ticks.length; i++) {
+      let y = ly(ticks[i]);
+      out += '<text x="' + (x0 - 7) + '" y="' + (y + 4) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:end;">' + fmt(ticks[i], dec) + '</text>';
+    }
+    return out;
+  }
+
+  function drawLegend(o, tc, y, names, colors) {
+    if (!names.length) return "";
+    let avail = VB_W - 16;
+    let fixed = 24;
+    let maxChars = Math.max(1, Math.floor((avail - fixed * names.length) / (6.4 * names.length)));
+    let shown = [];
+    for (let i = 0; i < names.length; i++) {
+      let nm = String(names[i] == null ? "" : names[i]);
+      if (nm.length > maxChars) nm = nm.slice(0, Math.max(1, maxChars - 1)) + "…";
+      shown.push(nm);
+    }
+    let widths = [];
+    let totalW = 0;
+    for (let i = 0; i < shown.length; i++) {
+      let w = Math.min(160, shown[i].length * 6.4) + fixed;
+      widths.push(w);
+      totalW += w;
+    }
+    let x = Math.max(8, (VB_W - totalW) / 2);
+    let out = "";
+    for (let i = 0; i < shown.length; i++) {
+      let c = colors[i % colors.length];
+      out += '<rect x="' + x + '" y="' + (y - 5) + '" width="11" height="11" rx="3" fill="' + c + '" opacity="0.92"/>';
+      out += '<text x="' + (x + 16) + '" y="' + (y + 4) + '" style="font-size:12px;fill:' + tc.muted + ';">' + esc(shown[i]) + '</text>';
+      x += widths[i];
+    }
+    return out;
+  }
+
+  function yScale(lo, hi, y0, y1) {
+    return function(v) { return y1 - (v - lo) / (hi - lo) * (y1 - y0); };
+  }
+
+  function xScale(lo, hi, x0, x1) {
+    return function(v) { return x0 + (v - lo) / (hi - lo) * (x1 - x0); };
+  }
+
+  function polar(cx, cy, r, a) {
+    let rad = a * Math.PI / 180;
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+  }
+
+  // ---------- data normalization ----------
+
+  function toObj(e) {
+    if (e == null || typeof e !== "object") return null;
+    let o = {};
+    let any = false;
+    let keys = Object.keys(e);
+    for (let i = 0; i < keys.length; i++) {
+      let k = keys[i];
+      if (NODE_SKIP.indexOf(k) >= 0 || k.charAt(0) === "$") continue;
+      let v = e[k];
+      if (v == null || typeof v === "function") continue;
+      o[k] = resolve(v);
+      any = true;
+    }
+    return any ? o : null;
+  }
+
+  function classifyObjects(objs, opts) {
+    if (!objs.length) return { ok: false, error: "empty data" };
+    let first = objs[0];
+    let keys = Object.keys(first);
+    let hasV = keys.indexOf("v") >= 0 && keys.indexOf("p") >= 0;
+    if (hasV) {
+      let values = [], probs = [];
+      for (let i = 0; i < objs.length; i++) {
+        values.push(num(objs[i].v));
+        probs.push(num(objs[i].p));
+      }
+      let labels = [];
+      for (let i = 0; i < values.length; i++) labels.push(fmt(values[i], 0));
+      return { ok: true, series: [{ name: "value", values: values }], labels: labels, dist: { values: values, probs: probs }, error: null };
+    }
+    let numericKeys = keys.filter(function(k) {
+      return k !== "label" && k !== "name" && k !== "value" && typeof num(first[k]) === "number";
+    });
+    let hasValue = keys.indexOf("value") >= 0 || first.value !== undefined;
+    if (hasValue && !numericKeys.length) {
+      let labels = [], values = [];
+      for (let i = 0; i < objs.length; i++) {
+        labels.push(String(objs[i].label !== undefined ? resolve(objs[i].label) : (objs[i].name !== undefined ? resolve(objs[i].name) : i)));
+        values.push(num(objs[i].value));
+      }
+      return { ok: true, series: [{ name: "value", values: values }], labels: labels, dist: null, error: null };
+    }
+    if (numericKeys.length) {
+      let useKeys = opts && opts.keys && opts.keys.length ? opts.keys : numericKeys;
+      let labels = [], series = [];
+      for (let s = 0; s < useKeys.length; s++) series.push({ name: String(useKeys[s]), values: [] });
+      for (let i = 0; i < objs.length; i++) {
+        labels.push(String(objs[i].label !== undefined ? resolve(objs[i].label) : (objs[i].name !== undefined ? resolve(objs[i].name) : i)));
+        for (let s = 0; s < useKeys.length; s++) {
+          let val = objs[i][useKeys[s]];
+          series[s].values.push(val !== undefined ? num(val) : NaN);
+        }
+      }
+      return { ok: true, series: series, labels: labels, dist: null, error: null };
+    }
+    return { ok: false, error: "objects need a `label` + `value`, or `label` + numeric keys" };
+  }
+
+  function classify(d, opts) {
+    if (Array.isArray(d)) {
+      let elems = d.map(function(x) { return resolve(x); });
+      let objects = [];
+      let allScalar = true;
+      for (let i = 0; i < elems.length; i++) {
+        let e = elems[i];
+        let o = toObj(e);
+        if (o) { objects.push(o); allScalar = false; }
+        else if (typeof e === "number" || typeof e === "string") { objects.push({ label: String(i), value: num(e) }); }
+        else { objects.push({ label: String(i), value: num(e) }); }
+      }
+      if (!allScalar) return classifyObjects(objects, opts);
+      let values = [];
+      let labels = [];
+      for (let i = 0; i < elems.length; i++) {
+        values.push(num(elems[i]));
+        labels.push(String(i));
+      }
+      return { ok: true, series: [{ name: "value", values: values }], labels: labels, dist: null, error: null };
+    }
+    if (d != null && typeof d === "object") {
+      if (Array.isArray(d.outcomes) && d.outcomes.length && typeof d.outcomes[0] === "object") {
+        let values = [], probs = [];
+        for (let i = 0; i < d.outcomes.length; i++) {
+          values.push(num(d.outcomes[i].v));
+          probs.push(num(d.outcomes[i].p));
+        }
+        let labels = [];
+        for (let i = 0; i < values.length; i++) labels.push(fmt(values[i], 0));
+        return { ok: true, series: [{ name: "probability", values: probs }], labels: labels, dist: { values: values, probs: probs, expr: resolve(d.expr), mean: num(d.mean), std: num(d.std) }, error: null };
+      }
+      if (Array.isArray(d.dist) && d.dist.length && typeof d.dist[0] === "object") {
+        let values = [], probs = [];
+        for (let i = 0; i < d.dist.length; i++) {
+          values.push(num(d.dist[i].v));
+          probs.push(num(d.dist[i].p));
+        }
+        let labels = [];
+        for (let i = 0; i < values.length; i++) labels.push(fmt(values[i], 0));
+        return { ok: true, series: [{ name: "probability", values: probs }], labels: labels, dist: { values: values, probs: probs, expr: resolve(d.expr), mean: num(d.mean), std: num(d.std) }, error: null };
+      }
+      if (Array.isArray(d.series)) {
+        let labels = (d.labels || []).map(function(x) { return String(resolve(x)); });
+        let series = [];
+        for (let i = 0; i < d.series.length; i++) {
+          let s = d.series[i];
+          let nm = resolve(s.name != null ? s.name : "Series " + (i + 1));
+          let data = (s.data || s.values || []).map(function(v) { return num(v); });
+          series.push({ name: String(nm), values: data });
+        }
+        if (!labels.length && series.length) {
+          for (let i = 0; i < series[0].values.length; i++) labels.push(String(i));
+        }
+        return { ok: true, series: series, labels: labels, dist: null, error: null };
+      }
+      let ks = Object.keys(d);
+      let arrKeys = [];
+      for (let i = 0; i < ks.length; i++) if (Array.isArray(d[ks[i]])) arrKeys.push(ks[i]);
+      if (arrKeys.length === ks.length && arrKeys.length) {
+        let series = [];
+        for (let i = 0; i < ks.length; i++) {
+          series.push({ name: String(ks[i]), values: d[ks[i]].map(function(v) { return num(v); }) });
+        }
+        let labels = [];
+        if (series.length) for (let i = 0; i < series[0].values.length; i++) labels.push(String(i));
+        return { ok: true, series: series, labels: labels, dist: null, error: null };
+      }
+      if (d.v !== undefined && d.p !== undefined) {
+        return { ok: true, series: [{ name: "probability", values: [num(d.p)] }], labels: [fmt(num(d.v), 0)], dist: { values: [num(d.v)], probs: [num(d.p)], expr: null, mean: NaN, std: NaN }, error: null };
+      }
+      if (d.label !== undefined || d.value !== undefined) {
+        let objs = [];
+        let o2 = toObj(d);
+        if (o2) objs.push(o2);
+        if (objs.length) return classifyObjects(objs, opts);
+      }
+      return { ok: false, error: "unrecognized data shape" };
+    }
+    return { ok: false, error: "expected an array, list, or distribution object" };
+  }
+
+  function normData(input, opts) {
+    if (input == null) return { ok: false, error: "expected data (array, {label,value} items, or a series object)" };
+    let d = input;
+    if (d != null && typeof d === "object" && typeof d.selectAll === "function") {
+      let items = [];
+      try {
+        let all = d.selectAll;
+        for (let i = 0; i < all.length; i++) items.push(all[i]);
+      } catch (e) {
+        return { ok: false, error: "could not read list data" };
+      }
+      let arr = [];
+      for (let i = 0; i < items.length; i++) {
+        let it = items[i];
+        let o = it != null && typeof it === "object" ? toObj(it) : null;
+        if (o) arr.push(o);
+        else arr.push(resolve(it));
+      }
+      return classify(arr, opts);
+    }
+    return classify(resolve(d), opts);
+  }
+
+  // ---------- renderers ----------
+
+  function renderBars(n, o) {
+    let tc = themeColors(o.theme);
+    let legend = o.legend == null ? n.series.length > 1 : !!o.legend;
+    let legendH = legend ? 22 : 0;
+    let xLabelsH = o.labels ? 24 : 6;
+    let titleH = o.title ? 26 : 0;
+    let lay = layout(o, titleH, legendH, xLabelsH);
+    let H = lay.H, x0 = lay.x0, x1 = lay.x1, y0 = lay.y0, y1 = lay.y1;
+    let vals = [];
+    for (let s = 0; s < n.series.length; s++) {
+      let vs = n.series[s].values;
+      for (let i = 0; i < vs.length; i++) vals.push(vs[i]);
+    }
+    let y = yScaleInfo(vals, o, y0, y1);
+    let lo = y.lo, hi = y.hi, ticks = y.ticks;
+    let ly = y.ly, by = y.by, log = y.log;
+    let colors = o.colors && o.colors.length ? o.colors : DEF_COLORS;
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    out += drawGrid(o, tc, ly, x0, x1, y0, y1, ticks, lo, hi);
+    out += drawTicksY(o, tc, ly, ticks, x0, o.decimals);
+    let nS = n.series.length;
+    let nG = n.labels.length;
+    let gap = o.gap == null ? 0.25 : +o.gap;
+    let groupW = (x1 - x0) / Math.max(1, nG);
+    let bandW = groupW * (1 - gap);
+    let barW = bandW / nS;
+    let baseY = y.baseY;
+    for (let i = 0; i < nG; i++) {
+      let cx = x0 + i * groupW;
+      for (let s = 0; s < nS; s++) {
+        let v = n.series[s].values[i];
+        if (v == null || isNaN(v)) continue;
+        if (log && !(v > 0)) continue;
+        let bx = cx + groupW * gap / 2 + s * barW;
+        let topY = Math.max(y0, Math.min(y1, by(v)));
+        let y = Math.min(baseY, topY);
+        let h = Math.max(0.5, Math.abs(baseY - topY));
+        let c = colors[s % colors.length];
+        out += '<rect x="' + bx + '" y="' + y + '" width="' + Math.max(1, barW - 1) + '" height="' + h + '" rx="2.5" fill="' + c + '" opacity="0.9"';
+        if (o.tooltips !== false) out += '><title>' + esc(n.labels[i] + ": " + fmt(v, o.decimals)) + '</title></rect>';
+        else out += '/>';
+      }
+      if (o.labels) {
+        let step = Math.ceil(nG / 12);
+        let slotW = step * groupW;
+        let maxChars = Math.max(4, Math.floor(slotW / 6.4) - 1);
+        if (i % step === 0) {
+          let lbl = String(resolve(n.labels[i]));
+          if (lbl.length > maxChars) lbl = lbl.slice(0, Math.max(1, maxChars - 1)) + "…";
+          let w = lbl.length * 6.4 + 4;
+          let x = Math.min(cx + groupW / 2, VB_W - 4 - w / 2);
+          out += '<text x="' + fmt(x, 1) + '" y="' + (H - legendH - 6) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:middle;">' + esc(lbl) + '</text>';
+        }
+      }
+    }
+    if (legend) {
+      let names = [];
+      for (let s = 0; s < n.series.length; s++) names.push(n.series[s].name);
+      out += drawLegend(o, tc, H - legendH / 2 + 2, names, colors);
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function wrapLabel(s, maxChars) {
+    s = String(s == null ? "" : s);
+    if (!s.length) return [""];
+    let words = s.split(/\s+/);
+    let out = [];
+    let cur = "";
+    for (let i = 0; i < words.length; i++) {
+      let w = words[i];
+      if (!w.length) continue;
+      if (cur.length && cur.length + 1 + w.length <= maxChars) { cur += " " + w; continue; }
+      if (cur.length) out.push(cur);
+      cur = w;
+      while (cur.length > maxChars) {
+        out.push(cur.slice(0, maxChars));
+        cur = cur.slice(maxChars);
+      }
+    }
+    if (cur.length) out.push(cur);
+    return out.length ? out : [""];
+  }
+
+  function textOverflows(svg) {
+    let bad = [];
+    let h = 300;
+    let hm = svg.match(/viewBox="0 0 \d+ (\d+)"/);
+    if (hm) h = +hm[1];
+    let re = /<text\b([^>]*)>([\s\S]*?)<\/text>/g;
+    let m;
+    while ((m = re.exec(svg))) {
+      let attrs = m[1];
+      let inner = m[2];
+      let xm = attrs.match(/\bx="([-\d.]+)"/);
+      let ym = attrs.match(/\by="([-\d.]+)"/);
+      if (!xm || !ym) continue;
+      let x = +xm[1];
+      let y = +ym[1];
+      let am = attrs.match(/text-anchor:([a-z]+)/);
+      let anchor = am ? am[1] : "start";
+      let segs = [];
+      let first = inner.replace(/<tspan\b[\s\S]*/, "").trim();
+      if (first) segs.push({ x: x, y: y, text: first });
+      let ycur = y;
+      let re2 = /<tspan\b([^>]*)>([\s\S]*?)(?=<tspan\b|$)/g;
+      let m2;
+      while ((m2 = re2.exec(inner))) {
+        let ax = m2[1].match(/\bx="([-\d.]+)"/);
+        let sx = ax ? +ax[1] : x;
+        let dy = m2[1].match(/\bdy="([-\d.]+)"/);
+        ycur += dy ? +dy[1] : 0;
+        let text = m2[2].replace(/<[^>]*>/g, "").trim();
+        segs.push({ x: sx, y: ycur, text: text });
+      }
+      for (let k = 0; k < segs.length; k++) {
+        let seg = segs[k];
+        let w = seg.text.length * 6.4;
+        let left = anchor === "end" ? seg.x - w : (anchor === "middle" ? seg.x - w / 2 : seg.x);
+        let right = anchor === "end" ? seg.x : (anchor === "middle" ? seg.x + w / 2 : seg.x + w);
+        if (left < -0.5 || right > VB_W + 0.5 || seg.y < -8 || seg.y > h + 0.5) {
+          bad.push({ x: seg.x, y: seg.y, content: seg.text.slice(0, 24), left: left, right: right, h: h });
+        }
+      }
+    }
+    return bad;
+  }
+
+  function renderBarsH(n, o) {
+    let tc = themeColors(o.theme);
+    let legend = o.legend == null ? n.series.length > 1 : !!o.legend;
+    let legendH = legend ? 22 : 0;
+    let titleH = o.title ? 26 : 0;
+    let H = Math.max(160, Math.floor(+o.height || 300));
+    let T = titleH + 8;
+    let xL = 86, xR = 44;
+    let B = legendH + 6;
+    let x0 = xL, x1 = VB_W - xR, y0 = T, y1 = H - B - 24;
+    let range = valueRange(n.series, o);
+    let lo = range.mn, hi = range.mx;
+    let ticks = niceTicks(lo, hi, Math.max(2, Math.floor(+o.ticks) || 4));
+    lo = ticks[0]; hi = ticks[ticks.length - 1];
+    let xs = xScale(lo, hi, x0, x1);
+    let sc = Math.max(hi, range.mx * 1.07);
+    let bxs = sc === hi ? xs : xScale(lo, sc, x0, x1);
+    let colors = o.colors && o.colors.length ? o.colors : DEF_COLORS;
+    let nS = n.series.length;
+    let nG = n.labels.length;
+    let gap = o.gap == null ? 0.25 : +o.gap;
+    let maxChars = Math.max(4, Math.floor((x0 - 8) / 6.4));
+    let labelLines = [];
+    let totalLines = 0;
+    for (let i = 0; i < nG; i++) {
+      let lines = wrapLabel(resolve(n.labels[i]), maxChars);
+      if (lines.length > 3) {
+        lines = lines.slice(0, 3);
+        lines[2] = lines[2].slice(0, Math.max(1, maxChars - 1)) + "…";
+      }
+      labelLines.push(lines);
+      totalLines += lines.length;
+    }
+    let lineH = (y1 - y0) / Math.max(1, totalLines);
+    let lsp = Math.min(13, lineH);
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    if (o.gridlines) {
+      for (let i = 0; i < ticks.length; i++) {
+        let x = xs(ticks[i]);
+        out += '<line x1="' + x + '" y1="' + y0 + '" x2="' + x + '" y2="' + y1 + '" style="stroke:' + tc.grid + ';stroke-width:1;"/>';
+      }
+    }
+    out += '<line x1="' + xs(0) + '" y1="' + y0 + '" x2="' + xs(0) + '" y2="' + y1 + '" style="stroke:' + tc.axis + ';stroke-width:1.3;"/>';
+    for (let i = 0; i < ticks.length; i++) {
+      let lbl = fmt(ticks[i], o.decimals);
+      let w = lbl.length * 6 + 4;
+      let x = Math.min(xs(ticks[i]), VB_W - 4 - w / 2);
+      out += '<text x="' + fmt(x, 1) + '" y="' + (H - B + 2) + '" style="font-size:11px;fill:' + tc.muted + ';text-anchor:middle;">' + lbl + '</text>';
+    }
+    let cy = y0;
+    for (let i = 0; i < nG; i++) {
+      let lines = labelLines[i];
+      let rowH = lines.length * lineH;
+      let bandH = rowH * (1 - gap);
+      let barH = bandH / nS;
+      let firstY = cy + rowH / 2 - (lines.length - 1) * lsp / 2 + 4;
+      out += '<text x="' + (x0 - 8) + '" y="' + fmt(firstY, 1) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:end;">';
+      for (let j = 0; j < lines.length; j++) {
+        if (j === 0) out += esc(lines[j]);
+        else out += '<tspan x="' + (x0 - 8) + '" dy="' + fmt(lsp, 1) + '">' + esc(lines[j]) + '</tspan>';
+      }
+      out += '</text>';
+      for (let s = 0; s < nS; s++) {
+        let v = n.series[s].values[i];
+        if (v == null || isNaN(v)) continue;
+        let by = cy + gap * rowH / 2 + s * barH;
+        let topX = Math.max(x0, Math.min(x1, bxs(v)));
+        let baseX = Math.max(x0, Math.min(x1, bxs(Math.max(lo, Math.min(sc, 0)))));
+        let x = Math.min(baseX, topX);
+        let w = Math.max(0.5, Math.abs(topX - baseX));
+        let c = colors[s % colors.length];
+        out += '<rect x="' + x + '" y="' + by + '" width="' + w + '" height="' + Math.max(1, barH - 1) + '" rx="2.5" fill="' + c + '" opacity="0.9"';
+        if (o.tooltips !== false) out += '><title>' + esc(n.labels[i] + ": " + fmt(v, o.decimals)) + '</title></rect>';
+        else out += '/>';
+        if (s === nS - 1 && o.labels) {
+          let vx = bxs(v);
+          let txt = fmt(v, o.decimals);
+          let tw = txt.length * 6 + 8;
+          let anchor, tx;
+          if (vx + 6 + tw <= VB_W - 4) { anchor = "start"; tx = vx + 6; }
+          else if (vx - tw - 4 >= x + 2) { anchor = "start"; tx = vx - tw - 4; }
+          else { anchor = "end"; tx = VB_W - 4; }
+          out += '<text x="' + tx + '" y="' + (by + barH / 2 + 4) + '" style="font-size:11px;font-weight:700;fill:' + tc.text + ';text-anchor:' + anchor + ';">' + txt + '</text>';
+        }
+      }
+      cy += rowH;
+    }
+    if (legend) {
+      let names = [];
+      for (let s = 0; s < n.series.length; s++) names.push(n.series[s].name);
+      out += drawLegend(o, tc, H - legendH / 2 + 2, names, colors);
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function renderLine(n, o) {
+    let tc = themeColors(o.theme);
+    let legend = o.legend == null ? n.series.length > 1 : !!o.legend;
+    let legendH = legend ? 22 : 0;
+    let xLabelsH = o.labels ? 24 : 6;
+    let titleH = o.title ? 26 : 0;
+    let lay = layout(o, titleH, legendH, xLabelsH);
+    let H = lay.H, x0 = lay.x0, x1 = lay.x1, y0 = lay.y0, y1 = lay.y1;
+    let vals = [];
+    for (let s = 0; s < n.series.length; s++) {
+      let vs = n.series[s].values;
+      for (let i = 0; i < vs.length; i++) vals.push(vs[i]);
+    }
+    let y = yScaleInfo(vals, o, y0, y1);
+    let lo = y.lo, hi = y.hi, ticks = y.ticks;
+    let ly = y.ly, by = y.by, log = y.log;
+    let nG = n.labels.length;
+    let xFor = nG <= 1 ? function() { return (x0 + x1) / 2; } : function(i) { return x0 + (x1 - x0) * i / (nG - 1); };
+    let baseY = y.baseY;
+    let colors = o.colors && o.colors.length ? o.colors : DEF_COLORS;
+    let smooth = o.smooth === true || o.smooth === "true";
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    out += drawGrid(o, tc, ly, x0, x1, y0, y1, ticks, lo, hi);
+    out += drawTicksY(o, tc, ly, ticks, x0, o.decimals);
+    for (let s = 0; s < n.series.length; s++) {
+      let c = colors[s % colors.length];
+      let vals = n.series[s].values;
+      let spts = [];
+      for (let i = 0; i < nG; i++) {
+        let v = vals[i];
+        if (log && !(v > 0)) continue;
+        spts.push({ x: xFor(i), y: isFinite(v) ? by(v) : baseY, i: i });
+      }
+      if (o.fill !== false && spts.length >= 2) {
+        let poly = spts.map(function(p) { return fmt(p.x, 1) + "," + fmt(p.y, 1); }).join(" ") + " " + fmt(spts[spts.length - 1].x, 1) + "," + fmt(baseY, 1) + " " + fmt(spts[0].x, 1) + "," + fmt(baseY, 1);
+        out += '<polygon points="' + poly + '" fill="' + c + '" opacity="0.13"/>';
+      }
+      if (smooth && spts.length >= 2) {
+        out += '<path d="' + smoothPath(spts) + '" fill="none" stroke="' + c + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+      } else {
+        out += '<polyline points="' + spts.map(function(p) { return fmt(p.x, 1) + "," + fmt(p.y, 1); }).join(" ") + '" fill="none" stroke="' + c + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+      }
+      for (let i = 0; i < spts.length; i++) {
+        let p = spts[i];
+        out += '<circle cx="' + fmt(p.x, 1) + '" cy="' + fmt(p.y, 1) + '" r="3.2" fill="' + c + '"';
+        if (o.tooltips !== false) out += '><title>' + esc(n.labels[p.i] + ": " + fmt(vals[p.i], o.decimals)) + '</title></circle>';
+        else out += '/>';
+      }
+    }
+    if (o.labels) {
+      let step = Math.ceil(nG / 12);
+      let slotW = step * (x1 - x0) / Math.max(1, nG - 1);
+      let maxChars = Math.max(4, Math.floor(slotW / 6.4) - 1);
+      for (let i = 0; i < nG; i++) {
+        if (i % step === 0) {
+          let lbl = String(resolve(n.labels[i]));
+          if (lbl.length > maxChars) lbl = lbl.slice(0, Math.max(1, maxChars - 1)) + "…";
+          let w = lbl.length * 6.4 + 4;
+          let x = Math.max(x0 + w / 2, Math.min(xFor(i), VB_W - 4 - w / 2));
+          out += '<text x="' + fmt(x, 1) + '" y="' + (H - legendH - 6) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:middle;">' + esc(lbl) + '</text>';
+        }
+      }
+    }
+    if (legend) {
+      let names = [];
+      for (let s = 0; s < n.series.length; s++) names.push(n.series[s].name);
+      out += drawLegend(o, tc, H - legendH / 2 + 2, names, colors);
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function renderPie(n, o, isDonut) {
+    let tc = themeColors(o.theme);
+    let vals = n.series[0].values;
+    let labels = n.labels;
+    let total = 0;
+    for (let i = 0; i < vals.length; i++) if (isFinite(vals[i])) total += Math.abs(vals[i]);
+    if (total <= 0) return "(charts." + (isDonut ? "donut" : "pie") + ": values must sum to more than 0)";
+    let titleH = o.title ? 26 : 0;
+    let showN = Math.min(vals.length, 10);
+    let hasMore = vals.length > showN;
+    let legendH = showN * 20 + 14 + (hasMore ? 24 : 0);
+    let pieH = Math.max(160, Math.floor(+o.height || 300) - titleH - legendH - 16);
+    let H = titleH + pieH + legendH + 8;
+    let cx = VB_W / 2;
+    let cy = titleH + 10 + pieH / 2;
+    let r = Math.min(pieH / 2 - 10, VB_W / 2 - 76);
+    let ri = isDonut ? r * 0.62 : 0;
+    let colors = o.colors && o.colors.length ? o.colors : DEF_COLORS;
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    let start = -90;
+    for (let i = 0; i < vals.length; i++) {
+      let v = Math.abs(isFinite(vals[i]) ? vals[i] : 0);
+      if (v <= 0) continue;
+      let ang = v / total * 360;
+      let c = colors[i % colors.length];
+      let tip = "";
+      if (o.tooltips !== false) {
+        tip = '><title>' + esc(labels[i] + ": " + fmt(v, o.decimals) + " (" + fmt(v / total * 100, 1) + "%)") + '</title></path>';
+      } else {
+        tip = "/>";
+      }
+      if (ang >= 359.9) {
+        out += '<path d="M ' + cx + " " + (cy - r) + " a " + r + " " + r + " 0 1 1 0.01 0 Z\" fill=\"" + c + '" opacity="0.92"' + tip;
+        break;
+      }
+      let p1 = polar(cx, cy, r, start);
+      let p2 = polar(cx, cy, r, start + ang);
+      let large = ang > 180 ? 1 : 0;
+      let d;
+      if (!isDonut) {
+        d = "M " + cx + " " + cy + " L " + fmt(p1.x, 2) + " " + fmt(p1.y, 2) + " A " + r + " " + r + " 0 " + large + " 1 " + fmt(p2.x, 2) + " " + fmt(p2.y, 2) + " Z";
+      } else {
+        let q1 = polar(cx, cy, ri, start);
+        let q2 = polar(cx, cy, ri, start + ang);
+        d = "M " + fmt(p1.x, 2) + " " + fmt(p1.y, 2) + " A " + r + " " + r + " 0 " + large + " 1 " + fmt(p2.x, 2) + " " + fmt(p2.y, 2) + " L " + fmt(q2.x, 2) + " " + fmt(q2.y, 2) + " A " + ri + " " + ri + " 0 " + large + " 0 " + fmt(q1.x, 2) + " " + fmt(q1.y, 2) + " Z";
+      }
+      out += '<path d="' + d + '" fill="' + c + '" opacity="0.92"' + tip;
+      if (ang >= 15) {
+        let mid = start + ang / 2;
+        let pr = isDonut ? (r + ri) / 2 : r * 0.62;
+        let lp = polar(cx, cy, pr, mid);
+        out += '<text x="' + fmt(lp.x, 1) + '" y="' + fmt(lp.y, 1) + '" style="font-size:11px;font-weight:700;fill:' + (isDonut ? tc.text : "#fff") + ';text-anchor:middle;dominant-baseline:central;">' + fmt(v / total * 100, 1) + "%</text>";
+      }
+      start += ang;
+    }
+    if (isDonut) {
+      let ctv = o.centerText != null ? String(o.centerText) : fmt(total, o.decimals);
+      out += '<text x="' + cx + '" y="' + (cy - 4) + '" style="font-size:22px;font-weight:800;fill:' + tc.text + ';text-anchor:middle;">' + esc(ctv) + '</text>';
+      out += '<text x="' + cx + '" y="' + (cy + 15) + '" style="font-size:11px;fill:' + tc.muted + ';text-anchor:middle;">total</text>';
+    }
+    let colX = (VB_W - 330) / 2;
+    for (let i = 0; i < showN; i++) {
+      let yy = titleH + pieH + 22 + i * 20;
+      let v = Math.abs(isFinite(vals[i]) ? vals[i] : 0);
+      out += '<rect x="' + colX + '" y="' + (yy - 6) + '" width="11" height="11" rx="3" fill="' + colors[i % colors.length] + '" opacity="0.92"/>';
+      out += '<text x="' + (colX + 17) + '" y="' + (yy + 3) + '" style="font-size:12px;fill:' + tc.muted + ';">' + esc(labels[i]) + '</text>';
+      out += '<text x="' + (colX + 330) + '" y="' + (yy + 3) + '" style="font-size:12px;font-weight:700;fill:' + tc.text + ';text-anchor:end;">' + fmt(v, o.decimals) + " · " + fmt(v / total * 100, 1) + "%</text>";
+    }
+    if (vals.length > showN) {
+      out += '<text x="' + (VB_W / 2) + '" y="' + (titleH + pieH + 22 + showN * 20 + 12) + '" style="font-size:11px;fill:' + tc.muted + ';text-anchor:middle;">… and ' + (vals.length - showN) + " more</text>";
+    }
+    out += "</svg>";
+    return out;
+  }
+
+  function renderHisto(n, o) {
+    let dist = n.dist;
+    if (!dist || !dist.values || !dist.values.length) return renderBars(n, o);
+    let tc = themeColors(o.theme);
+    let V = dist.values.slice();
+    let P = dist.probs.slice();
+    let mean = dist.mean, std = dist.std;
+    let dataLo = V[0], dataHi = V[V.length - 1];
+    for (let i = 0; i < V.length; i++) {
+      if (V[i] < dataLo) dataLo = V[i];
+      if (V[i] > dataHi) dataHi = V[i];
+    }
+    let labels = [];
+    let binned = false;
+    let MAXB = 42;
+    let count = V.length;
+    if (count > MAXB) {
+      let span = dataHi - dataLo;
+      if (span <= 0) span = 1;
+      let step = span / MAXB;
+      let bv = [], bp = [], bl = [];
+      for (let b = 0; b < MAXB; b++) {
+        let a = dataLo + b * step;
+        let c2 = dataLo + (b + 1) * step;
+        let sum = 0;
+        for (let i = 0; i < V.length; i++) if (V[i] >= a && V[i] < c2) sum += P[i];
+        bv.push((a + c2) / 2);
+        bp.push(sum);
+        bl.push(fmt(a, 2) + "–" + fmt(c2, 2));
+      }
+      V = bv; P = bp; labels = bl; binned = true;
+    } else {
+      for (let i = 0; i < V.length; i++) labels.push(fmt(V[i], o.decimals == null ? 0 : o.decimals));
+    }
+    let maxP = 0;
+    for (let i = 0; i < P.length; i++) if (P[i] > maxP) maxP = P[i];
+    if (maxP <= 0) maxP = 1;
+    let title = o.title != null ? String(resolve(o.title)) : (dist.expr ? "Distribution of " + String(dist.expr) : "Histogram");
+    let o2 = mergeOpts(defaultOpts(), o);
+    o2.title = title;
+    let titleH = 26;
+    let xLabelsH = o.labels ? 24 : 6;
+    let lay = layout(o2, titleH, 0, xLabelsH);
+    let H = lay.H, x0 = lay.x0, x1 = lay.x1, y0 = lay.y0, y1 = lay.y1;
+    let ticks = niceTicks(0, maxP, Math.max(2, Math.floor(+o.ticks) || 4));
+    let hi = ticks[ticks.length - 1];
+    let ly = yScale(0, hi, y0, y1);
+    let sc = Math.max(hi, maxP * 1.07);
+    let by = sc === hi ? ly : yScale(0, sc, y0, y1);
+    let decP = o.decimals != null ? +o.decimals : (maxP * 100 < 3 ? 2 : 1);
+    let out = svgHead(H);
+    out += drawTitle(o2, tc);
+    out += drawGrid(o2, tc, ly, x0, x1, y0, y1, ticks, 0, hi);
+    for (let i = 0; i < ticks.length; i++) {
+      let y = ly(ticks[i]);
+      out += '<text x="' + (x0 - 7) + '" y="' + (y + 4) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:end;">' + fmtP(ticks[i], decP) + '</text>';
+    }
+    let nB = P.length;
+    let stepW = (x1 - x0) / Math.max(1, nB);
+    let barW = stepW * 0.72;
+    let xStep = Math.max(1, Math.ceil(nB / 10));
+    for (let i = 0; i < nB; i++) {
+      let p = P[i];
+      let h = Math.max(1, p / sc * (y1 - y0));
+      let y = y1 - h;
+      let peak = p >= maxP - 1e-12;
+      let c = peak ? tc.barPeak : tc.bar;
+      let bx = x0 + i * stepW + (stepW - barW) / 2;
+      out += '<rect x="' + bx + '" y="' + y + '" width="' + barW + '" height="' + h + '" rx="2" fill="' + c + '" opacity="0.88"';
+      if (o.tooltips !== false) out += '><title>' + esc(labels[i] + ": " + fmtP(p, decP)) + '</title></rect>';
+      else out += '/>';
+      if (i % xStep === 0) {
+        out += '<text x="' + (bx + barW / 2) + '" y="' + (H - 6) + '" style="font-size:11px;fill:' + tc.muted + ';text-anchor:middle;">' + esc(labels[i]) + '</text>';
+      }
+    }
+    out += '<text x="' + (x1 - 2) + '" y="' + (y0 + 11) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:end;">' + count + " outcomes · μ " + (isFinite(mean) ? fmt(mean, 2) : "—") + " · σ " + (isFinite(std) ? fmt(std, 2) : "—") + "</text>";
+    if (isFinite(mean) && mean >= dataLo && mean <= dataHi && dataHi > dataLo) {
+      let mx = x0 + (mean - dataLo) / (dataHi - dataLo) * (x1 - x0);
+      out += '<line x1="' + mx + '" y1="' + y0 + '" x2="' + mx + '" y2="' + y1 + '" style="stroke:' + tc.axis + ';stroke-width:1.2;stroke-dasharray:4 3;"/>';
+      let anchor = mx > x1 - 72 ? "end" : "start";
+      let tx = anchor === "end" ? mx - 5 : mx + 5;
+      out += '<text x="' + tx + '" y="' + (y0 + 25) + '" style="font-size:11.5px;font-weight:700;fill:' + tc.text + ';text-anchor:' + anchor + ';">μ ' + fmt(mean, 2) + "</text>";
+    }
+    out += "</svg>";
+    return out;
+  }
+
+
+  // ---------- time-series ----------
+
+  function tf(v) {
+    return v === true || v === "true";
+  }
+
+  function parseT(v) {
+    v = resolve(v);
+    if (typeof v === "number") return v;
+    let n = num(v);
+    if (isFinite(n)) return n;
+    if (typeof v === "string" && v.length) {
+      let t = Date.parse(v);
+      if (isFinite(t)) return t;
+    }
+    return NaN;
+  }
+
+  function tsOf(e) {
+    if (e == null) return null;
+    if (Array.isArray(e)) {
+      let t = num(e[0]), v = num(e[1]);
+      return isFinite(t) ? { t: t, v: isFinite(v) ? v : NaN } : null;
+    }
+    let o = toObj(e);
+    if (!o) return null;
+    let t = o.t !== undefined ? parseT(o.t) : (o.time !== undefined ? parseT(o.time) : NaN);
+    let v = o.v !== undefined ? num(o.v) : (o.value !== undefined ? num(o.value) : NaN);
+    return isFinite(t) ? { t: t, v: v } : null;
+  }
+
+  function serPointsOf(raw) {
+    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) return null;
+    let rdata = raw.data != null ? raw.data : raw.values;
+    if (rdata == null) return null;
+    let its = [];
+    if (Array.isArray(rdata)) {
+      its = rdata;
+    } else if (typeof rdata === "object" && typeof rdata.selectAll === "function") {
+      try {
+        let all = rdata.selectAll;
+        for (let j = 0; j < all.length; j++) its.push(all[j]);
+      } catch (e) {
+        return null;
+      }
+    } else {
+      return null;
+    }
+    let pts = [];
+    for (let j = 0; j < its.length; j++) { let p = tsOf(its[j]); if (p) pts.push(p); }
+    return pts;
+  }
+
+  function normTime(input, opts) {
+    if (input == null) return { ok: false, error: "expected an array of {t, v} points, or a series object" };
+    let d = input;
+    if (d != null && typeof d === "object" && typeof d.selectAll === "function") {
+      let items = [];
+      try {
+        let all = d.selectAll;
+        for (let i = 0; i < all.length; i++) items.push(all[i]);
+      } catch (e) {
+        return { ok: false, error: "could not read list data" };
+      }
+      if (items.length && items[0] != null && typeof items[0] === "object" && !Array.isArray(items[0]) &&
+        (items[0].data !== undefined || items[0].values !== undefined) &&
+        items[0].t === undefined && items[0].v === undefined) {
+        let series = [];
+        for (let i = 0; i < items.length; i++) {
+          let raw = items[i];
+          let nm = raw.name != null ? String(resolve(raw.name)) : "Series " + (i + 1);
+          let pts = serPointsOf(raw);
+          if (pts && pts.length) series.push({ name: nm, ts: pts.map(function(p) { return p.t; }), vals: pts.map(function(p) { return p.v; }) });
+        }
+        if (!series.length) return { ok: false, error: "no {t, v} points found in series data" };
+        return { ok: true, series: series, error: null };
+      }
+      let arr = [];
+      for (let i = 0; i < items.length; i++) {
+        let it = items[i];
+        let o = it != null && typeof it === "object" ? toObj(it) : null;
+        if (o) arr.push(o); else arr.push(resolve(it));
+      }
+      d = arr;
+    } else {
+      d = resolve(d);
+    }
+    if (Array.isArray(d)) {
+      let fRaw = d.length ? d[0] : null;
+      let isSeries = fRaw != null && typeof fRaw === "object" && !Array.isArray(fRaw) &&
+        (fRaw.data !== undefined || fRaw.values !== undefined) &&
+        fRaw.t === undefined && fRaw.v === undefined;
+      if (isSeries) {
+        let series = [];
+        for (let i = 0; i < d.length; i++) {
+          let raw = d[i];
+          if (raw == null || typeof raw !== "object" || Array.isArray(raw)) continue;
+          let nm = raw.name != null ? String(resolve(raw.name)) : "Series " + (i + 1);
+          let pts = serPointsOf(raw);
+          if (pts && pts.length) series.push({ name: nm, ts: pts.map(function(p) { return p.t; }), vals: pts.map(function(p) { return p.v; }) });
+        }
+        if (!series.length) return { ok: false, error: "no {t, v} points found in series data" };
+        return { ok: true, series: series, error: null };
+      }
+      let pts = [];
+      for (let i = 0; i < d.length; i++) {
+        let p = tsOf(d[i]);
+        if (p) pts.push(p);
+      }
+      if (pts.length) {
+        return { ok: true, series: [{ name: "value", ts: pts.map(function(p) { return p.t; }), vals: pts.map(function(p) { return p.v; }) }], error: null };
+      }
+    }
+    let n = normData(d, opts);
+    if (!n.ok) return n;
+    let series = [];
+    for (let s = 0; s < n.series.length; s++) {
+      let ts = [], vals = [];
+      for (let i = 0; i < n.series[s].values.length; i++) {
+        let t = n.labels[i] != null ? parseT(n.labels[i]) : i;
+        if (!isFinite(t)) t = i;
+        ts.push(t);
+        vals.push(num(n.series[s].values[i]));
+      }
+      series.push({ name: n.series[s].name, ts: ts, vals: vals });
+    }
+    return { ok: true, series: series, error: null };
+  }
+
+  function looksLikeTime(labels) {
+    if (!labels || !labels.length) return false;
+    let n = 0;
+    for (let i = 0; i < labels.length; i++) {
+      let l = resolve(labels[i]);
+      if (l == null) return false;
+      if (typeof l === "number") {
+        if (!(l >= 1e9)) return false;
+        n++;
+      } else if (typeof l === "string") {
+        let s = l.trim();
+        if (/^\d+$/.test(s)) {
+          if (!(Number(s) >= 1e9)) return false;
+          n++;
+        } else {
+          if (!isFinite(Date.parse(s))) return false;
+          n++;
+        }
+      } else {
+        return false;
+      }
+    }
+    return n > 0;
+  }
+
+  function niceTimeStep(range) {
+    let steps = [
+      60e3, 5 * 60e3, 10 * 60e3, 15 * 60e3, 30 * 60e3,
+      3600e3, 2 * 3600e3, 4 * 3600e3, 6 * 3600e3, 12 * 3600e3,
+      24 * 3600e3, 2 * 24 * 3600e3, 3 * 24 * 3600e3, 7 * 24 * 3600e3,
+      14 * 24 * 3600e3, 30 * 24 * 3600e3, 90 * 24 * 3600e3,
+      180 * 24 * 3600e3, 365 * 24 * 3600e3
+    ];
+    let target = range / 5.5;
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i] >= target) return steps[i];
+    }
+    return steps[steps.length - 1];
+  }
+
+  function binStart(t, hourly) {
+    let d = new Date(t);
+    if (hourly) d.setMinutes(0, 0, 0);
+    else d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+
+  function nextBinStart(t, hourly) {
+    let d = new Date(binStart(t, hourly));
+    if (hourly) d.setHours(d.getHours() + 1);
+    else d.setDate(d.getDate() + 1);
+    return d.getTime();
+  }
+
+  function timeTicks(t0, t1, step) {
+    let hourly = step < 24 * 3600e3;
+    let e0 = binStart(0, hourly);
+    let s = e0 + Math.ceil((t0 - e0) / step) * step;
+    let out = [];
+    for (let t = s; t <= t1 + 0.5; t += step) out.push(t);
+    return out;
+  }
+
+  function fmtTimeTick(t, step, spanDays) {
+    let d = new Date(t);
+    if (step < 24 * 3600e3) {
+      let h = d.getHours();
+      let ap = h >= 12 ? "PM" : "AM";
+      h = h % 12; if (h === 0) h = 12;
+      return h + " " + ap;
+    }
+    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+    let s = mon + " " + d.getDate();
+    if (spanDays > 130) s += " " + d.getFullYear();
+    return s;
+  }
+
+  function strideDecimate(pts, n) {
+    if (!n || pts.length <= n) return pts;
+    let step = (pts.length - 1) / Math.max(1, n - 1);
+    let out = [];
+    for (let i = 0; i < n - 1; i++) out.push(pts[Math.floor(i * step)]);
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+
+  function linSlope(pts) {
+    if (pts.length < 2) return null;
+    let n = pts.length;
+    let sx = 0, sy = 0, sxx = 0, sxy = 0;
+    let t0 = pts[0].t;
+    for (let i = 0; i < n; i++) {
+      let x = pts[i].t - t0;
+      let y = pts[i].v;
+      sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    let den = n * sxx - sx * sx;
+    if (den === 0) return null;
+    let slope = (n * sxy - sx * sy) / den;
+    return { slope: slope, slopeDay: slope * 86400e3, intercept: (sy - slope * sx) / n, t0: t0 };
+  }
+
+  function smoothPath(pts) {
+    let d = "M " + fmt(pts[0].x, 1) + " " + fmt(pts[0].y, 1);
+    for (let i = 0; i < pts.length - 1; i++) {
+      let mx = (pts[i].x + pts[i + 1].x) / 2;
+      let my = (pts[i].y + pts[i + 1].y) / 2;
+      d += " Q " + fmt(pts[i].x, 1) + " " + fmt(pts[i].y, 1) + " " + fmt(mx, 1) + " " + fmt(my, 1);
+    }
+    let lp = pts[pts.length - 1];
+    d += " L " + fmt(lp.x, 1) + " " + fmt(lp.y, 1);
+    return d;
+  }
+
+  function drawTag(tc, x, y, text, color, icon, anchor) {
+    let iconW = icon ? 15 : 0;
+    let w = Math.max(30, text.length * 6.2 + iconW + 20);
+    let h = 21;
+    let px = anchor === "end" ? x - w : (anchor === "start" ? x : x - w / 2);
+    px = Math.max(1, Math.min(VB_W - w - 1, px));
+    let out = "";
+    out += "<g>";
+    out += '<rect x="' + px + '" y="' + (y - h / 2) + '" width="' + w + '" height="' + h + '" rx="10.5" fill="' + (color || tc.text) + '" opacity="0.13" stroke="' + (color || tc.text) + '" stroke-width="1" stroke-dasharray="3 2"/>';
+    if (icon) out += '<text x="' + (px + 9) + '" y="' + (y + 5) + '" style="font-size:11px;text-anchor:middle;">' + icon + '</text>';
+    out += '<text x="' + (px + (icon ? 21 : 11)) + '" y="' + (y + 4) + '" style="font-size:11px;font-weight:700;fill:' + tc.text + ';">' + esc(text) + '</text>';
+    out += "</g>";
+    return out;
+  }
+
+  function logTicks(llo, lhi) {
+    let out = [];
+    let e0 = Math.floor(llo), e1 = Math.ceil(lhi);
+    for (let e = e0; e <= e1; e++) {
+      let base = Math.pow(10, e);
+      let cands = [1, 2, 5];
+      for (let j = 0; j < cands.length; j++) {
+        let c = cands[j] * base;
+        let lc = Math.log10(c);
+        if (lc >= llo - 1e-9 && lc <= lhi + 1e-9) out.push(c);
+      }
+    }
+    let uniq = [];
+    for (let i = 0; i < out.length; i++) if (!uniq.length || uniq[uniq.length - 1] !== out[i]) uniq.push(out[i]);
+    return uniq;
+  }
+
+  function yScaleInfo(vals, o, y0, y1) {
+    let mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < vals.length; i++) {
+      let v = vals[i];
+      if (!isFinite(v)) continue;
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+    }
+    if (!isFinite(mn)) { mn = 0; mx = 1; }
+    if (o.min != null) mn = +o.min;
+    if (o.max != null) mx = +o.max;
+    if (!(mn < mx)) { if (mx === mn) mx = mn + 1; else { let t = mn; mn = mx; mx = t; } }
+    let wantLog = o.log === true || o.log === "true";
+    if (o.log === "auto") wantLog = mn > 0 && mx / mn > 100;
+    if (wantLog && mn > 0) {
+      let ticks = logTicks(Math.log10(mn), Math.log10(mx));
+      if (!ticks.length) ticks = [mn, mx];
+      let tlo = Math.log10(ticks[0]), thi = Math.log10(ticks[ticks.length - 1]);
+      let ly = function(v) { return y1 - (Math.log10(v) - tlo) / (thi - tlo) * (y1 - y0); };
+      let sc = Math.max(mx, mx * 1.07);
+      let by = sc === mx ? ly : function(v) { return y1 - (Math.log10(v) - tlo) / (Math.log10(sc) - tlo) * (y1 - y0); };
+      return { lo: ticks[0], hi: ticks[ticks.length - 1], ticks: ticks, ly: ly, by: by, log: true, sc: sc, baseY: y1 };
+    }
+    if (o.min == null && mn >= 0) mn = 0;
+    let ticks = niceTicks(mn, mx, Math.max(2, Math.floor(+o.ticks) || 4));
+    let tlo = ticks[0], thi = ticks[ticks.length - 1];
+    let ly = yScale(tlo, thi, y0, y1);
+    let sc = Math.max(thi, mx * 1.07);
+    let by = sc === thi ? ly : yScale(tlo, sc, y0, y1);
+    let baseY = Math.max(y0, Math.min(y1, by(Math.max(tlo, Math.min(sc, 0)))));
+    return { lo: tlo, hi: thi, ticks: ticks, ly: ly, by: by, log: false, sc: sc, baseY: baseY };
+  }
+
+  function binGains(serPts, hourly) {
+    let out = [];
+    for (let s = 0; s < serPts.length; s++) {
+      let g = {};
+      let pts = serPts[s];
+      for (let i = 0; i < pts.length - 1; i++) {
+        let t1 = pts[i].t, t2 = pts[i + 1].t;
+        let v1 = pts[i].v, v2 = pts[i + 1].v;
+        if (t2 <= t1) continue;
+        let gain = v2 - v1;
+        let dt = t2 - t1;
+        let cur = t1;
+        while (cur < t2) {
+          let nb = nextBinStart(cur, hourly);
+          let end = Math.min(nb, t2);
+          let key = binStart(cur, hourly);
+          g[key] = (g[key] || 0) + gain * (end - cur) / dt;
+          cur = end;
+        }
+      }
+      out.push(g);
+    }
+    return out;
+  }
+
+  function tsEmpty(H, o, tc) {
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    out += '<text x="' + (VB_W / 2) + '" y="' + (H / 2) + '" style="font-size:13px;fill:' + tc.muted + ';text-anchor:middle;">No data in range.</text>';
+    out += "</svg>";
+    return out;
+  }
+
+  function renderTimeSeries(series, o) {
+    let tc = themeColors(o.theme);
+    let titleH = o.title ? 26 : 0;
+    let xLabelsH = o.labels ? 24 : 6;
+    let H = Math.max(160, Math.floor(+o.height || 300));
+    let T = titleH + 8;
+    let B = xLabelsH + 6;
+    let x0 = 58, R = 88, x1 = VB_W - R, y0 = T, y1 = H - B;
+    let colors = o.colors && o.colors.length ? o.colors : DEF_COLORS;
+    let mode = (o.mode === "bars" || o.mode === "combo" || o.mode === "norm") ? o.mode : "line";
+    let maxPoints = Math.max(2, Math.floor(+o.maxPoints || 400));
+    let smooth = tf(o.smooth);
+    let log = o.log === true || o.log === "true";
+
+    let names = [];
+    let serPts = [];
+    let allPts = [];
+    for (let s = 0; s < series.length; s++) {
+      let pts = [];
+      let tsArr = series[s].ts, vs = series[s].vals;
+      for (let i = 0; i < tsArr.length; i++) {
+        if (isFinite(tsArr[i]) && isFinite(vs[i])) pts.push({ t: tsArr[i], v: vs[i] });
+      }
+      names.push(series[s].name != null ? String(series[s].name) : "Series " + (s + 1));
+      serPts.push(pts);
+      for (let i = 0; i < pts.length; i++) allPts.push(pts[i]);
+    }
+
+    if (mode === "norm") {
+      let keepIdx = [];
+      for (let s = 0; s < serPts.length; s++) {
+        let anchor = serPts[s].length ? serPts[s][0].v : NaN;
+        if (isFinite(anchor) && anchor !== 0 && serPts[s].length) {
+          for (let i = 0; i < serPts[s].length; i++) serPts[s][i].v = serPts[s][i].v / anchor * 100;
+          keepIdx.push(s);
+        }
+      }
+      let p2 = [], n2 = [];
+      for (let i = 0; i < keepIdx.length; i++) { p2.push(serPts[keepIdx[i]]); n2.push(names[keepIdx[i]]); }
+      serPts = p2; names = n2;
+      allPts = [];
+      for (let s = 0; s < serPts.length; s++) for (let i = 0; i < serPts[s].length; i++) allPts.push(serPts[s][i]);
+    }
+
+    if (!allPts.length) return tsEmpty(H, o, tc);
+
+    let tLo = allPts[0].t, tHi = allPts[0].t;
+    for (let i = 1; i < allPts.length; i++) {
+      if (allPts[i].t < tLo) tLo = allPts[i].t;
+      if (allPts[i].t > tHi) tHi = allPts[i].t;
+    }
+    if (!(tLo < tHi)) tHi = tLo + 1;
+    let xs = xScale(tLo, tHi, x0, x1);
+    let spanDays = (tHi - tLo) / 86400e3;
+    let timeAxis = tLo >= 1e9;
+    let step = niceTimeStep(tHi - tLo);
+    let xticks = timeTicks(tLo, tHi, step);
+    if (xticks.length < 2) xticks = [tLo, tHi];
+
+    let hourly = tHi - tLo <= 48 * 3600e3;
+    if (o.bin === "hourly") hourly = true;
+    else if (o.bin === "daily") hourly = false;
+
+    // bars / combo prep
+    let barInfo = null;
+    if (mode === "bars" || mode === "combo") {
+      let keySet = {};
+      let gains = binGains(serPts, hourly);
+      for (let s = 0; s < gains.length; s++) for (let k in gains[s]) keySet[k] = true;
+      let binKeys = Object.keys(keySet).map(Number).sort(function(a, b) { return a - b; });
+      if (binKeys.length > 120) {
+        let stride = Math.ceil(binKeys.length / 120);
+        let reduced = [];
+        for (let i = 0; i < binKeys.length; i += stride) reduced.push(binKeys[i]);
+        binKeys = reduced;
+      }
+      if (binKeys.length) {
+        let barData = [];
+        for (let b = 0; b < binKeys.length; b++) {
+          let arr = [];
+          for (let s = 0; s < serPts.length; s++) arr.push(gains[s][binKeys[b]] || 0);
+          barData.push(arr);
+        }
+        let pct = tf(o.percent);
+        if (pct) {
+          for (let b = 0; b < barData.length; b++) {
+            let sum = 0;
+            for (let s = 0; s < barData[b].length; s++) sum += Math.abs(barData[b][s]);
+            if (sum > 0) for (let s = 0; s < barData[b].length; s++) barData[b][s] = barData[b][s] / sum * 100;
+          }
+        }
+        let stacked = !(o.stacked === false || o.stacked === "false");
+        let ext = [0];
+        let segments = [];
+        for (let b = 0; b < barData.length; b++) {
+          let seg = [];
+          let run = 0;
+          for (let s = 0; s < barData[b].length; s++) {
+            let g = barData[b][s];
+            let low = stacked ? run : 0;
+            let high = low + g;
+            if (stacked) run = high;
+            seg.push({ s: s, low: low, high: high });
+            ext.push(low); ext.push(high);
+          }
+          segments.push(seg);
+        }
+        barInfo = { binKeys: binKeys, segments: segments, ext: ext };
+      }
+    }
+    if ((mode === "bars" || mode === "combo") && !barInfo) mode = "line";
+
+    // y range
+    let y;
+    if (mode === "bars" && barInfo) {
+      y = yScaleInfo(barInfo.ext, o, y0, y1);
+    } else {
+      let vals = [];
+      for (let i = 0; i < allPts.length; i++) vals.push(allPts[i].v);
+      y = yScaleInfo(vals, o, y0, y1);
+    }
+    if (y.log) log = true;
+    let ly = y.ly, by = y.by;
+
+    let out = svgHead(H);
+    out += drawTitle(o, tc);
+    if (o.gridlines) {
+      for (let i = 0; i < y.ticks.length; i++) {
+        let yy = ly(y.ticks[i]);
+        out += '<line x1="' + x0 + '" y1="' + fmt(yy, 1) + '" x2="' + x1 + '" y2="' + fmt(yy, 1) + '" style="stroke:' + tc.grid + ';stroke-width:1;"/>';
+      }
+    }
+    out += '<line x1="' + x0 + '" y1="' + fmt(y.baseY, 1) + '" x2="' + x1 + '" y2="' + fmt(y.baseY, 1) + '" style="stroke:' + tc.axis + ';stroke-width:1.3;"/>';
+    let pctLabel = mode === "norm" || (mode === "bars" && tf(o.percent));
+    for (let i = 0; i < y.ticks.length; i++) {
+      let yy = ly(y.ticks[i]);
+      out += '<text x="' + (x0 - 7) + '" y="' + (yy + 4) + '" style="font-size:11.5px;fill:' + tc.muted + ';text-anchor:end;">' + fmt(y.ticks[i], o.decimals) + (pctLabel ? "%" : "") + '</text>';
+    }
+
+    // bars (mode bars / combo)
+    if (barInfo) {
+      let bandY0 = y0, bandY1 = y1;
+      if (mode === "combo") bandY0 = y0 + (y1 - y0) * 0.68;
+      let ext = barInfo.ext;
+      let barLo = Math.min.apply(null, ext), barHi = Math.max.apply(null, ext);
+      if (barHi === barLo) barHi = barLo + 1;
+      let byB = yScale(barLo, barHi, bandY0, bandY1);
+      let bw = (x1 - x0) / Math.max(1, barInfo.binKeys.length) * 0.7;
+      for (let b = 0; b < barInfo.segments.length; b++) {
+        let k = barInfo.binKeys[b];
+        let bx = xs(k) - bw / 2;
+        for (let j = 0; j < barInfo.segments[b].length; j++) {
+          let seg = barInfo.segments[b][j];
+          let c = colors[seg.s % colors.length];
+          let yT = Math.max(bandY0, Math.min(bandY1, byB(seg.high)));
+          let yB = Math.max(bandY0, Math.min(bandY1, byB(seg.low)));
+          let yy = Math.min(yT, yB);
+          let h = Math.max(0.5, Math.abs(yT - yB));
+          out += '<rect x="' + fmt(bx, 1) + '" y="' + fmt(yy, 1) + '" width="' + fmt(bw, 1) + '" height="' + fmt(h, 1) + '" rx="2" fill="' + c + '" opacity="' + (mode === "combo" ? "0.45" : "0.9") + '"';
+          if (o.tooltips !== false) out += '><title>' + esc(names[seg.s] + ": " + fmt(seg.high - seg.low, o.decimals)) + '</title></rect>';
+          else out += '/>';
+        }
+      }
+      if (mode === "combo") {
+        out += '<line x1="' + x0 + '" y1="' + fmt(bandY0, 1) + '" x2="' + x1 + '" y2="' + fmt(bandY0, 1) + '" style="stroke:' + tc.axis + ';stroke-width:1;stroke-dasharray:4 3;"/>';
+        out += '<text x="' + (x0 + 4) + '" y="' + (bandY0 - 5) + '" style="font-size:10.5px;fill:' + tc.muted + ';">' + (hourly ? "hourly gain" : "daily gain") + '</text>';
+      }
+    }
+
+    // lines
+    if (mode === "line" || mode === "combo" || mode === "norm") {
+      for (let s = 0; s < serPts.length; s++) {
+        let pts = strideDecimate(serPts[s], maxPoints);
+        if (!pts.length) continue;
+        let c = colors[s % colors.length];
+        let xy = [];
+        for (let i = 0; i < pts.length; i++) {
+          let v = pts[i].v;
+          if (log && !(v > 0)) continue;
+          xy.push({ x: xs(pts[i].t), y: by(v), t: pts[i].t, v: v });
+        }
+        if (!xy.length) continue;
+        if (o.fill !== false && xy.length >= 2) {
+          let gid = "tsf" + s + "x" + Math.round(tLo);
+          out += '<linearGradient id="' + gid + '" x1="0" y1="0" x2="0" y2="1">';
+          out += '<stop offset="0" stop-color="' + c + '" stop-opacity="0.28"/>';
+          out += '<stop offset="1" stop-color="' + c + '" stop-opacity="0.02"/>';
+          out += '</linearGradient>';
+          let poly = xy.map(function(p) { return fmt(p.x, 1) + "," + fmt(p.y, 1); }).join(" ");
+          out += '<polygon points="' + poly + " " + fmt(xy[xy.length - 1].x, 1) + "," + fmt(y1, 1) + " " + fmt(xy[0].x, 1) + "," + fmt(y1, 1) + '" fill="url(#' + gid + ')"/>';
+        }
+        if (smooth && xy.length >= 2) {
+          out += '<path d="' + smoothPath(xy) + '" fill="none" stroke="' + c + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+        } else {
+          out += '<polyline points="' + xy.map(function(p) { return fmt(p.x, 1) + "," + fmt(p.y, 1); }).join(" ") + '" fill="none" stroke="' + c + '" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>';
+        }
+        if (o.dots !== false && o.dots !== "false") {
+          for (let i = 0; i < xy.length; i++) {
+            out += '<circle cx="' + fmt(xy[i].x, 1) + '" cy="' + fmt(xy[i].y, 1) + '" r="3.2" fill="' + c + '"';
+            if (o.tooltips !== false) out += '><title>' + esc((timeAxis ? fmtTimeTick(xy[i].t, step, spanDays) : fmt(xy[i].t, 0)) + ": " + fmt(xy[i].v, o.decimals)) + '</title></circle>';
+            else out += '/>';
+          }
+        }
+      }
+    }
+
+    // target
+    if (o.target != null) {
+      let tv = +o.target;
+      if (isFinite(tv) && (log ? tv > 0 : true)) {
+        let yT = Math.max(y0, Math.min(y1, by(tv)));
+        let c = colors[0 % colors.length];
+        out += '<line x1="' + x0 + '" y1="' + fmt(yT, 1) + '" x2="' + x1 + '" y2="' + fmt(yT, 1) + '" stroke="' + c + '" stroke-width="1.4" stroke-dasharray="6 4" opacity="0.8"/>';
+        out += drawTag(tc, x0 + 4, yT - 14, "goal " + fmt(tv, o.decimals), c, "🎯", "start");
+      }
+    }
+
+    // end chips (slots computed first so other labels can dodge them)
+    let chipSlots = [];
+    let chips = [];
+    if (serPts.length) {
+      for (let s = 0; s < serPts.length; s++) {
+        let pts = serPts[s];
+        if (!pts.length) continue;
+        let last = pts[pts.length - 1];
+        let v = last.v;
+        if (log && !(v > 0)) continue;
+        chips.push({ v: v, x: xs(last.t), y: Math.max(y0, Math.min(y1, by(v))), color: colors[s % colors.length] });
+      }
+      chips.sort(function(a, b) { return b.v - a.v; });
+      if (chips.length > 12) chips = chips.slice(0, 12);
+      let cTop = y0 + 10, cBot = y1 - 8;
+      for (let i = 0; i < chips.length; i++) {
+        chipSlots.push(cTop + (cBot - cTop) * (chips.length === 1 ? 0.5 : i / (chips.length - 1)));
+      }
+    }
+
+    function freeY(yy, pad, occupied) {
+      yy = Math.max(y0 + 12, Math.min(y1 - 12, yy));
+      let clash = function(v) {
+        for (let i = 0; i < occupied.length; i++) if (Math.abs(v - occupied[i]) < pad) return true;
+        return false;
+      };
+      let found = yy;
+      if (clash(yy)) {
+        let best = null;
+        for (let off = pad; off <= (y1 - y0) / 2 && best == null; off += pad) {
+          if (yy + off <= y1 - 12 && !clash(yy + off)) best = yy + off;
+          else if (yy - off >= y0 + 12 && !clash(yy - off)) best = yy - off;
+        }
+        if (best == null) best = yy;
+        found = best;
+      }
+      occupied.push(found);
+      return found;
+    }
+
+    // trend
+    if (tf(o.trend)) {
+      let occupied = chipSlots.slice();
+      for (let s = 0; s < serPts.length; s++) {
+        let pts = strideDecimate(serPts[s], maxPoints);
+        if (pts.length < 2) continue;
+        let ls = linSlope(pts);
+        if (!ls) continue;
+        let last = pts[pts.length - 1];
+        let vEnd = last.v + ls.slope * (tHi - last.t);
+        if (log && !(vEnd > 0)) continue;
+        let yEnd = Math.max(y0, Math.min(y1, by(vEnd)));
+        let c = colors[s % colors.length];
+        out += '<line x1="' + fmt(xs(last.t), 1) + '" y1="' + fmt(Math.max(y0, Math.min(y1, by(last.v))), 1) + '" x2="' + fmt(x1, 1) + '" y2="' + fmt(yEnd, 1) + '" stroke="' + c + '" stroke-width="1.6" stroke-dasharray="5 4" opacity="0.85"/>';
+        out += '<path d="M ' + fmt(x1, 1) + " " + (yEnd - 5) + " L " + (x1 + 5) + " " + yEnd + " L " + x1 + " " + (yEnd + 5) + " L " + (x1 - 5) + " " + yEnd + " Z" + '" fill="' + c + '"/>';
+        let tagY = freeY(yEnd - 14, 16, occupied);
+        out += drawTag(tc, x1 - 8, tagY, "proj " + fmt(vEnd, o.decimals), c, "📈", "end");
+      }
+    }
+
+    // x tick labels
+    if (o.labels) {
+      let lastRight = -Infinity;
+      for (let i = 0; i < xticks.length; i++) {
+        let raw = xs(xticks[i]);
+        if (raw < x0 - 1 || raw > x1 + 1) continue;
+        let label = timeAxis ? fmtTimeTick(xticks[i], step, spanDays) : fmt(xticks[i], 0);
+        let w = label.length * 6.4 + 4;
+        let x = Math.min(raw, VB_W - 4 - w / 2);
+        if (x - w / 2 < lastRight) continue;
+        out += '<text x="' + fmt(x, 1) + '" y="' + (H - 6) + '" style="font-size:11px;fill:' + tc.muted + ';text-anchor:middle;">' + esc(label) + '</text>';
+        lastRight = x + w / 2 + 6;
+      }
+    }
+
+    // end chips
+    for (let i = 0; i < chips.length; i++) {
+      let ch = chips[i];
+      let sy = chipSlots[i];
+      let cx2 = VB_W - 8;
+      out += '<line x1="' + fmt(ch.x, 1) + '" y1="' + fmt(ch.y, 1) + '" x2="' + fmt(cx2 - 40, 1) + '" y2="' + fmt(sy, 1) + '" stroke="' + ch.color + '" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>';
+      let txt = fmt(ch.v, o.decimals);
+      let w = Math.max(28, txt.length * 6 + 22);
+      let rx = cx2 - w;
+      out += '<rect x="' + fmt(rx, 1) + '" y="' + (sy - 11) + '" width="' + fmt(w, 1) + '" height="22" rx="11" fill="' + ch.color + '" opacity="0.14" stroke="' + ch.color + '" stroke-width="1"/>';
+      out += '<circle cx="' + (rx + 10) + '" cy="' + sy + '" r="3.5" fill="' + ch.color + '"/>';
+      out += '<text x="' + (rx + 18) + '" y="' + (sy + 4) + '" style="font-size:11px;font-weight:700;fill:' + tc.text + ';">' + esc(txt) + '</text>';
+    }
+
+    out += "</svg>";
+    return out;
+  }
+
+  // ---------- public api ----------
+
+  function ph(name, msg) {
+    return "(charts." + name + ": " + msg + ")";
+  }
+
+  function safe(name, fn) {
+    try {
+      let r = fn();
+      if (r == null) return "(charts." + name + ": produced no output)";
+      return r;
+    } catch (e) {
+      return "(charts." + name + ": " + ((e && e.message) || e) + ")";
+    }
+  }
+
+  const api = {
+    version: VERSION,
+    bar: function(data, opts) {
+      return safe("bar", function() {
+        let n = normData(data, opts);
+        if (!n.ok) return ph("bar", n.error);
+        if (n.dist) return renderHisto(n, opts);
+        let o = mergeOpts(defaultOpts(), opts);
+        return o.horizontal ? renderBarsH(n, o) : renderBars(n, o);
+      });
+    },
+    line: function(data, opts) {
+      return safe("line", function() {
+        let n = normData(data, opts);
+        if (!n.ok) return ph("line", n.error);
+        let o = mergeOpts(defaultOpts(), opts);
+        if (looksLikeTime(n.labels)) {
+          let series = [];
+          for (let s = 0; s < n.series.length; s++) {
+            let ts = [];
+            for (let i = 0; i < n.labels.length; i++) {
+              let t = parseT(n.labels[i]);
+              ts.push(isFinite(t) ? t : i);
+            }
+            series.push({ name: n.series[s].name, ts: ts, vals: n.series[s].values });
+          }
+          return renderTimeSeries(series, o);
+        }
+        return renderLine(n, o);
+      });
+    },
+    pie: function(data, opts) {
+      return safe("pie", function() {
+        let n = normData(data, opts);
+        if (!n.ok) return ph("pie", n.error);
+        let o = mergeOpts(defaultOpts(), opts);
+        return renderPie(n, o, false);
+      });
+    },
+    donut: function(data, opts) {
+      return safe("donut", function() {
+        let n = normData(data, opts);
+        if (!n.ok) return ph("donut", n.error);
+        let o = mergeOpts(defaultOpts(), opts);
+        return renderPie(n, o, true);
+      });
+    },
+    histogram: function(data, opts) {
+      return safe("histogram", function() {
+        let n = normData(data, opts);
+        if (!n.ok) return ph("histogram", n.error);
+        if (!n.dist) {
+          let tv = [], tp = [];
+          for (let i = 0; i < n.labels.length; i++) {
+            tv.push(num(n.labels[i]));
+            tp.push(n.series[0].values[i] || 0);
+          }
+          n.dist = { values: tv, probs: tp, expr: null, mean: NaN, std: NaN };
+        }
+        let o = mergeOpts(defaultOpts(), opts);
+        return renderHisto(n, o);
+      });
+    },
+    timeSeries: function(data, opts) {
+      return safe("timeSeries", function() {
+        let n = normTime(data, opts);
+        if (!n.ok) return ph("timeSeries", n.error);
+        let o = mergeOpts(defaultOpts(), opts);
+        return renderTimeSeries(n.series, o);
+      });
+    },
+    infer: function(data, opts) {
+      let t = null;
+      try { t = opts != null && opts.type !== undefined ? resolve(opts.type) : null; } catch (e) {}
+      if (t === "bar" || t === "line" || t === "pie" || t === "donut" || t === "histogram") return api[t](data, opts);
+      if (t === "timeSeries" || t === "ts") return api.timeSeries(data, opts);
+      return api.bar(data, opts);
+    },
+    selfCheck: function() {
+      let results = [];
+      let pass = true;
+      function check(name, cond) {
+        results.push({ name: name, pass: !!cond });
+        if (!cond) pass = false;
+      }
+      try {
+        check("bar svg", api.bar([3, 7, 2]).indexOf("<svg") >= 0);
+        check("bar horizontal", api.bar([3, 7, 2], { horizontal: true }).indexOf("<svg") >= 0);
+        check("line multi-series", api.line([{ label: "A", Views: 5, Saves: 3 }, { label: "B", Views: 8, Saves: 6 }]).indexOf("<svg") >= 0);
+        check("pie svg", api.pie([{ label: "A", value: 1 }, { label: "B", value: 2 }]).indexOf("<svg") >= 0);
+        check("donut svg", api.donut([{ label: "A", value: 1 }]).indexOf("<svg") >= 0);
+        let bad = api.bar(null);
+        check("null → placeholder", typeof bad === "string" && bad.charAt(0) === "(");
+        check("garbage → placeholder", typeof api.line("nonsense") === "string");
+        let d = { outcomes: [{ v: 3, p: 0.1 }, { v: 4, p: 0.3 }, { v: 5, p: 0.6 }], expr: "1d4", mean: 4.5, std: 0.5 };
+        check("histogram from distribution", api.histogram(d).indexOf("<svg") >= 0);
+        check("histogram object form", api.histogram({ v: 3, p: 0.1 }).indexOf("<svg") >= 0);
+        check("object-of-arrays", api.line({ Views: [1, 2, 3], Saves: [4, 5, 6] }).indexOf("<svg") >= 0);
+        check("explicit series form", api.bar({ labels: ["A", "B"], series: [{ name: "x", data: [1, 2] }] }).indexOf("<svg") >= 0);
+        let tsl = [];
+        let tsNow = Date.now();
+        for (let i = 0; i < 30; i++) tsl.push({ t: tsNow - (29 - i) * 3600e3, v: 10 + i * 3 });
+        check("timeSeries line svg", api.timeSeries(tsl).indexOf("<svg") >= 0);
+        check("timeSeries multi-series", api.timeSeries([{ name: "A", data: tsl }, { name: "B", data: tsl }]).indexOf("<svg") >= 0);
+        check("timeSeries bars rect", api.timeSeries(tsl, { mode: "bars" }).indexOf("<rect") >= 0);
+        check("timeSeries log", api.timeSeries(tsl, { log: true }).indexOf("<svg") >= 0);
+        check("timeSeries target", api.timeSeries(tsl, { target: 200 }).indexOf("goal") >= 0);
+        check("timeSeries null → placeholder", typeof api.timeSeries(null) === "string" && api.timeSeries(null).charAt(0) === "(");
+        let longLbl = [{ label: "A very long generator title that wraps around", value: 1 }, { label: "Second quite long title here as well", value: 2 }, { label: "Third longish label", value: 3 }, { label: "Short", value: 4 }];
+        check("long barH labels contained", textOverflows(api.bar(longLbl, { horizontal: true })).length === 0);
+        check("long bar labels contained", textOverflows(api.bar(longLbl)).length === 0);
+        check("long line labels contained", textOverflows(api.line(longLbl)).length === 0);
+        check("long pie labels contained", textOverflows(api.pie(longLbl)).length === 0);
+        check("long donut labels contained", textOverflows(api.donut(longLbl)).length === 0);
+        check("long timeSeries labels contained", textOverflows(api.timeSeries(tsl, { title: "A very long title that must stay inside the chart area" })).length === 0);
+        check("pie more-line contained", textOverflows(api.pie([{ label: "A", value: 1 }, { label: "B", value: 2 }, { label: "C", value: 3 }, { label: "D", value: 4 }, { label: "E", value: 5 }, { label: "F", value: 6 }, { label: "G", value: 7 }, { label: "H", value: 8 }, { label: "I", value: 9 }, { label: "J", value: 10 }, { label: "K", value: 11 }, { label: "L", value: 12 }])).length === 0);
+      } catch (e) {
+        pass = false;
+        results.push({ name: "no exceptions thrown", pass: false });
+      }
+      return { pass: pass, results: results };
+    }
+  };
+
+  const chartsApi = {
+    infer: function(data, opts) { return api.infer(data, opts); },
+    bar: api.bar,
+    line: api.line,
+    pie: api.pie,
+    donut: api.donut,
+    histogram: api.histogram,
+    timeSeries: api.timeSeries,
+    selfCheck: api.selfCheck,
+    version: api.version
+  };
+  window.__chartsApi = chartsApi;
+  return chartsApi;
+
+// The plugin's public face: a plain OBJECT API — bar/line/pie/donut/histogram/
+// timeSeries/selfCheck, plus infer(data, opts) for the "smart default". It is
+// deliberately NOT a callable function: the perchance import machinery strips
+// properties off function-valued imports (root.charts([3,7,2]) works, but a
+// callable loses its .bar/.line/... methods), so an object is the only way
+// [charts.bar(...)] and friends actually survive `charts = {import:...}`.
+// (Named dvCharts, not charts, because "charts" collides with this generator's
+// own historical import of itself — an engine-side name conflict.)
+dvCharts = [makeChartsApi()]
+$output = [dvCharts]
+

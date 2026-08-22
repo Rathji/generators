@@ -1,0 +1,892 @@
+// ════════════════════════════════════════════════════════════════════════
+//  A BARD'S TALE
+//  A perchance.org recreation of the classic 1980s first-person, party-based
+//  dungeon crawler — character creation, a 3D maze view, spells, turn-based
+//  combat, a hub town with shops, and dungeons to explore.
+//
+//  ROADMAP:
+//  ------------------------------------------------------------------------
+//  ## Phase 1: Core Engine & Grid State
+//  Establish the fundamental game loop and spatial coordinate system.
+//  1. [x] **Game State Object**: Define a global state object containing party data, current map, and player coordinates; verify by logging state to console.
+//  2. [x] **Grid Movement Logic**: Implement a function to handle movement (forward, back, left, right) that updates X/Y coordinates and orientation; verify by printing coordinates to screen.
+//  3. [x] **Map Generator (Basic)**: Create a system to generate a 2D array of integers (0=floor, 1=wall) with a guaranteed path from start to end; verify by rendering the array as a text grid.
+//  4. [x] **Canvas Setup**: Initialize a full-screen canvas and a basic render loop; verify by drawing a static colored square.
+//  5. [x] **Pseudo-3D Projection**: Implement a simple ray-casting or projection function to render the current grid cell's walls on the canvas; verify by moving through the grid and seeing walls shift.
+//  6. [x] **Collision System**: Prevent the player from moving into cells marked as walls; verify by attempting to walk through a wall and remaining stationary.
+//  
+//  ## Phase 2: Party Architecture
+//  Build the character system and statistical foundation.
+//  7. [x] **Race/Class Definitions**: Create data objects for original races and classes with base stat modifiers; verify by printing a list of available options.
+//  8. [x] **Character Generator**: Implement a "roll" system for the six core stats (STR, INT, DEX, CON, CHA, LUK); verify by creating a character and displaying their rolls.
+//  9. [x] **Derived Stats Logic**: Calculate HP, Armor Class, and Mana based on stats and class; verify by ensuring a Warrior has more HP than a Magician.
+//  10. [x] **Party Management**: Implement a party array (up to 4 members) with a "current party" state; verify by adding multiple characters to the party list.
+//  11. [x] **Character Sheet UI**: Build an HTML overlay showing the party's stats and current HP/MP; verify by checking if values update during state changes.
+//  
+//  ## Phase 3: Exploration Mechanics
+//  Add sensory and navigation depth to the dungeon.
+//  12. [x] **Light Radius System**: Implement a "light level" variable that clips the canvas rendering based on distance from the player; verify by seeing walls fade to black in the distance.
+//  13. [x] **Auto-Map UI**: Create a top-down 2D map that fills in as the player visits tiles; verify by moving to a new tile and seeing a dot appear on the map.
+//  14. [x] **Interactive Objects**: Add "triggers" to the grid for doors, chests, and traps; verify by triggering a console message when stepping on a specific tile.
+//  15. [x] **Door Logic**: Implement locked/unlocked states for doors requiring a key or a specific check; verify by blocking movement until a "key" flag is true.
+//  
+//  ## Phase 4: Combat Foundation
+//  Implement the turn-based encounter system.
+//  16. [x] **Encounter Trigger**: Create a random chance to trigger a combat state upon moving into a new cell; verify by entering combat randomly during movement.
+//  17. [x] **Combat State Transition**: Create a UI switch that hides the 3D view and shows the Combat Panel (monster list vs party list); verify by entering and exiting combat.
+//  18. [x] **Monster Database**: Define an original bestiary with scaling HP, Attack, and XP values; verify by spawning different monsters based on dungeon depth.
+//  19. [x] **Turn Order Queue**: Implement a round-based system where each party member and monster acts in sequence; verify by logging the sequence of attacks.
+//  20. [x] **Basic Attack Logic**: Implement a "hit/miss" calculation based on DEX and Monster AC; verify by seeing "Hit" or "Miss" messages in the combat log.
+//  
+//  ## Phase 5: Magic & Ability System
+//  Develop the spellcasting mechanics.
+//  21. [x] **Spell Database**: Create original spells categorized by class/tier with MP costs and effects; verify by listing spells available to a Conjurer.
+//  22. [x] **Spell Casting UI**: Implement a menu-driven selection process for spells during combat; verify by selecting a spell and deducting MP.
+//  23. [x] **Spell Effects**: Implement logic for damage, healing, and buffs; verify by seeing monster HP drop or party HP rise after a spell.
+//  24. [x] **Mana Regeneration**: Create a system for recovering MP through resting or items; verify by checking MP increase after a "rest" action.
+//  
+//  ## Phase 6: The Hub Town
+//  Build the non-combat social and economic layer.
+//  25. [x] **Town Layout & Navigation**: Build the town map and a menu to choose its locations; verify by moving between town locations and back to the dungeon.
+//  
+//  ## Phase 7: Town Services & Economy
+//  Implement the commercial and support systems of the hub town.
+//  26. [x] **Currency System**: Implement a global party gold variable and a function to add/subtract gold; verify by checking gold balance in the UI.
+//  27. [x] **Armory Shop**: Create a menu to buy/sell original weapons and armor with gold costs; verify by purchasing an item and seeing gold decrease.
+//  28. [x] **Temple Services**: Implement a "Heal" and "Resurrect" service with a gold cost; verify by restoring party HP to max.
+//  29. [x] **The Inn**: Create a resting mechanic that restores HP/MP and allows party reorganization; verify by triggering a "rest" state that refills bars.
+//  30. [x] **Adventurer's Guild**: Implement a quest-board system that tracks completed objectives; verify by marking a "dungeon cleared" flag as true.
+//  
+//  ## Phase 8: Inventory & Equipment
+//  Manage the physical assets and stat modifiers of the party.
+//  31. [x] **Item Database**: Define a list of original consumables (potions, scrolls) and equipment (swords, shields) with stat modifiers; verify by listing item properties.
+//  32. [x] **Inventory Grid**: Build a UI list showing all items currently held by the party; verify by adding an item to the list via the shop.
+//  33. [x] **Equipment Slots**: Implement "Equip/Unequip" logic for Head, Body, and Weapon slots per character; verify by seeing a character's AC or Attack value increase.
+//  34. [x] **Consumable Logic**: Create a function to use items from the inventory during exploration or combat; verify by using a potion to regain HP.
+//  
+//  ## Phase 9: Advanced Dungeon Design
+//  Create complex environmental hazards and structural challenges.
+//  35. [x] **Dungeon Tiering**: Create three distinct map sets (Low, Mid, Deep) with increasing monster difficulty; verify by transitioning to a "Deep" map.
+//  36. [x] **Dark Rooms**: Implement "Pitch Black" tiles where the render distance is reduced to zero unless a torch is equipped; verify by walking into a black tile.
+//  37. [x] **Trap Mechanics**: Implement floor-based traps (spikes, pits) that trigger damage or displacement; verify by taking damage upon entering a trap tile.
+//  38. [x] **One-Way Doors**: Create "Valve" doors that allow entry from one side but not the other; verify by being unable to return to a previous tile.
+//  39. [x] **Riddle Gates**: Implement text-based input prompts that require a keyword to unlock a door; verify by typing the correct answer to open a gate.
+//  
+//  ## Phase 10: Persistence & Audio
+//  Integrate saving and sensory feedback.
+//  40. [x] **Save/Load Integration**: Use the kv-plugin to serialize the game state object to local storage; verify by refreshing the page and retaining party stats.
+//  41. [x] **Audio Manager**: Create a system to trigger sounds from the upload service for combat, movement, and town themes; verify by hearing a sound on a button click.
+//  42. [x] **Dynamic BGM**: Implement a logic switch that changes background music based on location (Town vs. Dungeon); verify by hearing the track change on map transition.
+//  
+//  ## Phase 11: Visual Polish & UI
+//  Transform the prototype into a finished product.
+//  43. [x] **Enhanced 3D Visuals**: Add textures (via canvas patterns) or gradient shading to the walls and floors; verify by seeing non-solid colors in the 3D view.
+//  44. [x] **Combat Animations**: Implement "shake" or "flash" effects on the canvas when damage is dealt; verify by seeing the screen shake during an attack.
+//  45. [x] **UI Skinning**: Apply a consistent 80s-style CSS theme (black backgrounds, neon or gold borders, pixel fonts); verify by inspecting the visual style of the menus.
+//  
+//  ## Phase 12: Endgame & Balance
+//  Finalize the victory condition and playability.
+//  46. [x] **Final Boss Encounter**: Create a unique boss entity with a multi-stage attack pattern and high HP; verify by triggering the boss fight at the deepest tile.
+//  47. [x] **Win Condition**: Implement a "Victory" screen and credits sequence upon defeating the boss; verify by reaching the end-game state.
+//  48. [x] **Balance Pass**: Adjust XP curves and gold costs to ensure a 2-4 hour completion time; verify by playtesting a "speedrun" through the tiers.
+//  
+//  ## Sequence
+//  1. **Core Engine & Grid** (Phases 1-3) -> **Combat & Magic** (Phases 4-5) ->
+//     **Town & Economy** (Phases 6-8) -> **Deep Dungeons** (Phase 9) ->
+//     **Persistence & Audio** (Phase 10) -> **Polish** (Phase 11) -> **Endgame & Balance** (Phase 12).
+//  Gates: freeze movement/collision + stat rules before combat; freeze the bestiary and
+//  spell list before dungeon design; freeze dungeon tier maps before the balance pass.
+//  ════════════════════════════════════════════════════════════════════════
+
+title
+  A Bard's Tale
+
+$meta
+  title = A Bard's Tale
+  description = A first-person, party-based dungeon crawler on Perchance: create a party of adventurers, explore a wireframe 3D maze city of dungeons, learn spells, fight monsters, and conquer the catacombs below. A fan-made homage to the classic Bard's Tale.
+  image = https://user.uploads.dev/file/cce8d9467fc796c6427a2a0230ba30e3.png
+  tags = rpg, dungeon, crawler, fantasy, game, retro
+  header
+    mode = minimal
+
+kv = {import:kv-plugin}
+
+// ────────────────────────────────────────────────────────────────────────
+//  GAME DATA — races, classes, stats. Tweak freely; the engine reads these
+//  from the lists below at runtime. Everything here is original content.
+// ────────────────────────────────────────────────────────────────────────
+
+statNames
+  STR
+  INT
+  DEX
+  CON
+  CHA
+  LUK
+
+race
+  human
+    id = human
+    raceName = Human
+    desc = Versatile wanderers, gifted with neither great strength nor great weakness.
+    STR = 0
+    INT = 0
+    DEX = 0
+    CON = 0
+    CHA = 0
+    LUK = 0
+    allowedClasses
+      warrior
+      rogue
+      bard
+      conjurer
+      magician
+      monk
+      paladin
+  elf
+    id = elf
+    raceName = Elf
+    desc = Graceful and quick-witted, but fragile of body.
+    STR = -1
+    INT = 1
+    DEX = 1
+    CON = -1
+    CHA = 0
+    LUK = 0
+    allowedClasses
+      warrior
+      rogue
+      bard
+      magician
+      conjurer
+      monk
+  dwarf
+    id = dwarf
+    raceName = Dwarf
+    desc = Stout and stubborn; strong of lung and strong of arm.
+    STR = 1
+    INT = 0
+    DEX = 0
+    CON = 2
+    CHA = -1
+    LUK = 0
+    allowedClasses
+      warrior
+      rogue
+      bard
+      paladin
+  halfling
+    id = halfling
+    raceName = Halfling
+    desc = Small, lucky, and light of foot.
+    STR = -1
+    INT = 0
+    DEX = 2
+    CON = 0
+    CHA = 1
+    LUK = 1
+    allowedClasses
+      warrior
+      rogue
+      bard
+      monk
+  gnome
+    id = gnome
+    raceName = Gnome
+    desc = Canny and clever, with a knack for the arcane.
+    STR = -1
+    INT = 2
+    DEX = 0
+    CON = 0
+    CHA = 0
+    LUK = 1
+    allowedClasses
+      conjurer
+      magician
+      rogue
+      bard
+      monk
+
+characterClass
+  warrior
+    id = warrior
+    className = Warrior
+    desc = A master of arms, tough as nails.
+    hpBase = 20
+    acBonus = 2
+    manaBase = 0
+    STR = 2
+    INT = -1
+    DEX = 0
+    CON = 2
+    CHA = 0
+    LUK = 0
+  rogue
+    id = rogue
+    className = Rogue
+    desc = Quick hands, quick feet, quick exit.
+    hpBase = 14
+    acBonus = 2
+    manaBase = 0
+    STR = 0
+    INT = 0
+    DEX = 2
+    CON = 0
+    CHA = 0
+    LUK = 1
+  bard
+    id = bard
+    className = Bard
+    desc = Sings, stabs, and knows a little magic.
+    hpBase = 14
+    acBonus = 1
+    manaBase = 5
+    STR = 0
+    INT = 0
+    DEX = 1
+    CON = -1
+    CHA = 2
+    LUK = 0
+  conjurer
+    id = conjurer
+    className = Conjurer
+    desc = Calls creatures and forces from beyond the veil.
+    hpBase = 10
+    acBonus = 0
+    manaBase = 10
+    STR = -1
+    INT = 2
+    DEX = 0
+    CON = -1
+    CHA = 0
+    LUK = 1
+  magician
+    id = magician
+    className = Magician
+    desc = Blasts the dark with raw arcane power.
+    hpBase = 8
+    acBonus = 0
+    manaBase = 10
+    STR = 0
+    INT = 2
+    DEX = 0
+    CON = -2
+    CHA = 0
+    LUK = 0
+  monk
+    id = monk
+    className = Monk
+    desc = Discipline over steel; bare hands are enough.
+    hpBase = 14
+    acBonus = 2
+    manaBase = 0
+    STR = 1
+    INT = 0
+    DEX = 1
+    CON = 1
+    CHA = -1
+    LUK = 0
+  paladin
+    id = paladin
+    className = Paladin
+    desc = A holy warrior with a shield of faith.
+    hpBase = 20
+    acBonus = 1
+    manaBase = 0
+    STR = 1
+    INT = 0
+    DEX = 0
+    CON = 1
+    CHA = 1
+    LUK = 0
+
+gameConfig
+  encounterChance = 0.14
+  lightRadius = 9
+  maxPartySize = 4
+
+monster
+  giantRat
+    id = giantRat
+    monsterName = Giant Rat
+    tier = 1
+    hp = 8
+    ac = 10
+    attack = 4
+    damage = 1d4
+    xp = 5
+  kobold
+    id = kobold
+    monsterName = Kobold
+    tier = 1
+    hp = 10
+    ac = 12
+    attack = 4
+    damage = 1d6
+    xp = 7
+  goblin
+    id = goblin
+    monsterName = Goblin
+    tier = 1
+    hp = 12
+    ac = 11
+    attack = 5
+    damage = 1d6
+    xp = 8
+  caveSpider
+    id = caveSpider
+    monsterName = Cave Spider
+    tier = 1
+    hp = 11
+    ac = 12
+    attack = 5
+    damage = 1d6
+    xp = 10
+  skeleton
+    id = skeleton
+    monsterName = Skeleton
+    tier = 1
+    hp = 14
+    ac = 13
+    attack = 6
+    damage = 1d6
+    xp = 12
+  zombie
+    id = zombie
+    monsterName = Zombie
+    tier = 2
+    hp = 20
+    ac = 10
+    attack = 7
+    damage = 1d8
+    xp = 18
+  orc
+    id = orc
+    monsterName = Orc
+    tier = 2
+    hp = 18
+    ac = 12
+    attack = 8
+    damage = 1d8
+    xp = 20
+  ghoul
+    id = ghoul
+    monsterName = Ghoul
+    tier = 2
+    hp = 16
+    ac = 13
+    attack = 7
+    damage = 1d8
+    xp = 22
+  wight
+    id = wight
+    monsterName = Wight
+    tier = 2
+    hp = 24
+    ac = 14
+    attack = 9
+    damage = 2d4
+    xp = 28
+  ogre
+    id = ogre
+    monsterName = Ogre
+    tier = 3
+    hp = 30
+    ac = 11
+    attack = 10
+    damage = 2d6
+    xp = 40
+  minotaur
+    id = minotaur
+    monsterName = Minotaur
+    tier = 3
+    hp = 34
+    ac = 14
+    attack = 11
+    damage = 2d6
+    xp = 45
+  wraith
+    id = wraith
+    monsterName = Wraith
+    tier = 3
+    hp = 28
+    ac = 16
+    attack = 10
+    damage = 2d4
+    xp = 42
+  golem
+    id = golem
+    monsterName = Golem
+    tier = 3
+    hp = 40
+    ac = 16
+    attack = 12
+    damage = 2d8
+    xp = 60
+  theNamelessDirge
+    id = theNamelessDirge
+    monsterName = The Nameless Dirge
+    tier = 3
+    hp = 240
+    ac = 15
+    attack = 13
+    damage = 2d8
+    xp = 300
+    boss = true
+
+// ────────────────────────────────────────────────────────────────────────
+//  MAGIC — the spell database. Casters: bard (songs), conjurer (veil-work),
+//  magician (raw arcana). Tier 1 spells are known at level 1; tiers 2 and 3
+//  unlock at levels 2 and 3. `school`: attack | heal | buff | control.
+//  `plus` names the stat whose modifier feeds damage/heal.
+// ────────────────────────────────────────────────────────────────────────
+
+spell
+  sparkLance
+    id = sparkLance
+    spellName = Spark Lance
+    caster = magician
+    tier = 1
+    mp = 3
+    school = attack
+    target = enemy
+    damage = 1d6
+    plus = int
+    desc = A lance of crackling sparks, dealing 1d6 + INT modifier damage to one foe.
+  burningHaze
+    id = burningHaze
+    spellName = Burning Haze
+    caster = magician
+    tier = 1
+    mp = 5
+    school = attack
+    target = all
+    damage = 1d4
+    plus = int
+    desc = A clinging haze of embers, dealing 1d4 + INT modifier damage to every foe.
+  chainBolt
+    id = chainBolt
+    spellName = Chain Bolt
+    caster = magician
+    tier = 2
+    mp = 7
+    school = attack
+    target = enemy
+    damage = 2d6
+    plus = int
+    desc = A snapping bolt of force, dealing 2d6 + INT modifier damage to one foe.
+  thunderCrack
+    id = thunderCrack
+    spellName = Thunder Crack
+    caster = magician
+    tier = 2
+    mp = 9
+    school = attack
+    target = all
+    damage = 2d4
+    plus = int
+    desc = A deafening crack, dealing 2d4 + INT modifier damage to every foe.
+  voidHowl
+    id = voidHowl
+    spellName = Void Howl
+    caster = magician
+    tier = 3
+    mp = 12
+    school = attack
+    target = enemy
+    damage = 4d6
+    plus = int
+    desc = A scream from beyond the stars, dealing 4d6 + INT modifier damage to one foe.
+  stormcall
+    id = stormcall
+    spellName = Stormcall
+    caster = magician
+    tier = 3
+    mp = 16
+    school = attack
+    target = all
+    damage = 3d6
+    plus = int
+    desc = You call a storm into the chamber, dealing 3d6 + INT modifier damage to every foe.
+  forceDart
+    id = forceDart
+    spellName = Force Dart
+    caster = conjurer
+    tier = 1
+    mp = 3
+    school = attack
+    target = enemy
+    damage = 1d6
+    plus = int
+    desc = A dart of invisible force, dealing 1d6 + INT modifier damage to one foe.
+  phantomWard
+    id = phantomWard
+    spellName = Phantom Ward
+    caster = conjurer
+    tier = 1
+    mp = 4
+    school = buff
+    target = ally
+    rounds = 4
+    acBonus = 2
+    desc = A shimmering ward that grants an ally +2 AC for 4 rounds.
+  bindFlesh
+    id = bindFlesh
+    spellName = Bind Flesh
+    caster = conjurer
+    tier = 2
+    mp = 5
+    school = control
+    target = enemy
+    desc = Tightening bands of force make a foe lose its next turn.
+  balmVeil
+    id = balmVeil
+    spellName = Balm of the Veil
+    caster = conjurer
+    tier = 2
+    mp = 6
+    school = heal
+    target = ally
+    heal = 2d4
+    plus = int
+    desc = Mends wounds with borrowed light, healing 2d4 + INT modifier HP.
+  spectralMaw
+    id = spectralMaw
+    spellName = Spectral Maw
+    caster = conjurer
+    tier = 3
+    mp = 12
+    school = attack
+    target = enemy
+    damage = 3d8
+    plus = int
+    desc = A ghostly mouth closes on one foe, dealing 3d8 + INT modifier damage.
+  banish
+    id = banish
+    spellName = Banish
+    caster = conjurer
+    tier = 3
+    mp = 14
+    school = control
+    target = enemy
+    killHalf = true
+    desc = Rip a weakened foe back to whatever bore it. A foe at or below half HP is destroyed outright.
+  rousingVerse
+    id = rousingVerse
+    spellName = Rousing Verse
+    caster = bard
+    tier = 1
+    mp = 3
+    school = heal
+    target = all
+    heal = 1d4
+    healPlus = 1
+    desc = A verse that lifts spirit and flesh, healing all allies for 1d4 + 1 HP.
+  discord
+    id = discord
+    spellName = Discord
+    caster = bard
+    tier = 1
+    mp = 3
+    school = attack
+    target = enemy
+    damage = 1d4
+    plus = cha
+    desc = A jarring note, dealing 1d4 + CHA modifier damage to one foe.
+  warChant
+    id = warChant
+    spellName = War Chant
+    caster = bard
+    tier = 2
+    mp = 5
+    school = buff
+    target = all
+    rounds = 4
+    attackBonus = 2
+    desc = A blood-quickening chant giving the whole party +2 attack for 4 rounds.
+  lullaby
+    id = lullaby
+    spellName = Lullaby
+    caster = bard
+    tier = 2
+    mp = 6
+    school = control
+    target = enemy
+    desc = A soft melody that makes one foe doze and lose its next turn.
+  balladBlade
+    id = balladBlade
+    spellName = Ballad of the Blade
+    caster = bard
+    tier = 3
+    mp = 10
+    school = attack
+    target = enemy
+    damage = 3d6
+    plus = cha
+    desc = A fierce ballad of ancient duels, dealing 3d6 + CHA modifier damage to one foe.
+  anthemValor
+    id = anthemValor
+    spellName = Anthem of Valor
+    caster = bard
+    tier = 3
+    mp = 12
+    school = heal
+    target = all
+    heal = 2d6
+    healPlus = 2
+    desc = An anthem that banishes pain, healing all allies for 2d6 + 2 HP.
+
+// ────────────────────────────────────────────────────────────────────────
+//  GOODS — the armory's stock. `attackBonus` / `acBonus` / `heal` feed the
+//  equipment & consumable logic (Phase 8 wires equipping them).
+// ────────────────────────────────────────────────────────────────────────
+
+item
+  rustyShortSword
+    id = rustyShortSword
+    itemName = Rusty Short Sword
+    type = weapon
+    cost = 25
+    attackBonus = 1
+    desc = A pitted but serviceable blade.
+  longSword
+    id = longSword
+    itemName = Long Sword
+    type = weapon
+    cost = 70
+    attackBonus = 2
+    desc = A well-balanced blade for a professional.
+  warHammer
+    id = warHammer
+    itemName = War Hammer
+    type = weapon
+    cost = 95
+    attackBonus = 3
+    desc = Heavy, honest, and ruinous.
+  studdedLeather
+    id = studdedLeather
+    itemName = Studded Leather
+    type = armor
+    cost = 45
+    acBonus = 1
+    desc = Leather reinforced with studs and hope.
+  chainMail
+    id = chainMail
+    itemName = Chain Mail
+    type = armor
+    cost = 85
+    acBonus = 2
+    desc = Interlocked rings that stop most blades.
+  woodenBuckler
+    id = woodenBuckler
+    itemName = Wooden Buckler
+    type = shield
+    cost = 20
+    acBonus = 1
+    desc = Light, cheap, and better than nothing.
+  ironShield
+    id = ironShield
+    itemName = Iron Shield
+    type = shield
+    cost = 50
+    acBonus = 1
+    desc = A plain shield of riveted iron.
+  healingDraught
+    id = healingDraught
+    itemName = Healing Draught
+    type = potion
+    cost = 15
+    heal = 8
+    desc = A bitter red tonic that closes wounds.
+  manaDraught
+    id = manaDraught
+    itemName = Mana Draught
+    type = potion
+    cost = 20
+    mana = 8
+    desc = A cool blue cordial that steadies the mind.
+  elixir
+    id = elixir
+    itemName = Elixir of Vigor
+    type = potion
+    cost = 45
+    heal = 15
+    desc = A strong tonic that knits even deep wounds.
+  dagger
+    id = dagger
+    itemName = Worn Dagger
+    type = weapon
+    cost = 12
+    attackBonus = 1
+    desc = Small, cheap, and sharp enough.
+  battleAxe
+    id = battleAxe
+    itemName = Battle Axe
+    type = weapon
+    cost = 120
+    attackBonus = 3
+    desc = A heavy head on a stouter shaft.
+  woodenStaff
+    id = woodenStaff
+    itemName = Willow Staff
+    type = weapon
+    cost = 30
+    attackBonus = 1
+    desc = A caster's crutch — and a fine cudgel.
+  paddedArmor
+    id = paddedArmor
+    itemName = Padded Armor
+    type = armor
+    cost = 20
+    acBonus = 1
+    desc = Quilted cloth that blunts the blow.
+  plateMail
+    id = plateMail
+    itemName = Plate Mail
+    type = armor
+    cost = 140
+    acBonus = 3
+    desc = The finest steel, fitted and heavy.
+  helm
+    id = helm
+    itemName = Iron Helm
+    type = head
+    cost = 35
+    acBonus = 1
+    desc = Guards the most important part.
+  greatHelm
+    id = greatHelm
+    itemName = Great Helm
+    type = head
+    cost = 80
+    acBonus = 2
+    desc = A full casque with a slit of a view.
+  torch
+    id = torch
+    itemName = Torch
+    type = light
+    cost = 8
+    desc = Binds the dark rooms back to the edge of sight.
+  lantern
+    id = lantern
+    itemName = Storm Lantern
+    type = light
+    cost = 35
+    desc = A shuttered lantern that laughs at darkness.
+  scrollOfSpark
+    id = scrollOfSpark
+    itemName = Scroll of Spark Lance
+    type = scroll
+    cost = 25
+    spell = sparkLance
+    desc = One spell of crackling sparks, ready to read aloud.
+  scrollOfHaze
+    id = scrollOfHaze
+    itemName = Scroll of Burning Haze
+    type = scroll
+    cost = 45
+    spell = burningHaze
+    desc = A scroll that unleashes a clinging ember-haze on all foes.
+  scrollOfBalm
+    id = scrollOfBalm
+    itemName = Scroll of Balm of the Veil
+    type = scroll
+    cost = 60
+    spell = balmVeil
+    desc = A scroll that mends wounds with borrowed light.
+  scrollOfDiscord
+    id = scrollOfDiscord
+    itemName = Scroll of Discord
+    type = scroll
+    cost = 30
+    spell = discord
+    desc = A scroll of one jarring, wounding note.
+
+// ────────────────────────────────────────────────────────────────────────
+//  GUILD QUESTS — each tracks one statistic from state.stats and pays a
+//  gold reward when claimed at the Adventurers' Guild.
+// ────────────────────────────────────────────────────────────────────────
+
+quest
+  firstBlood
+    id = firstBlood
+    questName = First Blood
+    desc = Slay 5 monsters in the dark.
+    metric = kills
+    goal = 5
+    reward = 20
+  buriedTreasure
+    id = buriedTreasure
+    questName = Buried Treasure
+    desc = Crack open 3 chests.
+    metric = chestsOpened
+    goal = 3
+    reward = 15
+  keyKeeper
+    id = keyKeeper
+    questName = Keykeeper
+    desc = Find 3 iron keys.
+    metric = keysFound
+    goal = 3
+    reward = 25
+  dungeonDelver
+    id = dungeonDelver
+    questName = Dungeon Delver
+    desc = Descend from the first floor of the catacombs.
+    metric = floorsCleared
+    goal = 1
+    reward = 40
+  goldRush
+    id = goldRush
+    questName = Gold Rush
+    desc = Amass 100 gold from chests and coin.
+    metric = goldEarned
+    goal = 100
+    reward = 30
+  lastChord
+    id = lastChord
+    questName = The Last Chord
+    desc = Silence the Nameless Dirge beneath the city.
+    metric = bossDefeated
+    goal = 1
+    reward = 250
+
+// ────────────────────────────────────────────────────────────────────────
+//  RIDDLE GATES — carved on ancient stone gates. Answer in the prompt to
+//  open the way; the wrong word leaves the gate shut (and it mocks you).
+// ────────────────────────────────────────────────────────────────────────
+
+riddle
+  riddleBook
+    id = riddleBook
+    riddle = I have no voice, yet I speak to those who listen. I hold every story ever told, and never say a word. What am I?
+    answer = book
+  riddleTomorrow
+    id = riddleTomorrow
+    riddle = What is always coming, but never arrives?
+    answer = tomorrow
+  riddleFootsteps
+    id = riddleFootsteps
+    riddle = The more you take, the more you leave behind. What am I?
+    answer = footsteps
+  riddleFire
+    id = riddleFire
+    riddle = I am not alive, but I grow. I do not have lungs, but I need air. What am I?
+    answer = fire
+  riddleEcho
+    id = riddleEcho
+    riddle = I speak without a mouth and hear without ears. I have no body, but I come alive with wind. What am I?
+    answer = echo
+  riddleKeys
+    id = riddleKeys
+    riddle = I have keys, but open no locks. I have space, but no room. You can enter, but not go inside. What am I?
+    answer = keyboard
+  riddleNight
+    id = riddleNight
+    riddle = What has a head and a tail, but no body?
+    answer = coin
+  riddleShadows
+    id = riddleShadows
+    riddle = I hide when the sun is high and stretch when it is low. Who am I?
+    answer = shadow
+

@@ -1,0 +1,359 @@
+<!-- PAC-MAN '80 — Perchance Edition
+     Phase 1 game shell: HUD + canvas stage + overlay state screens + roadmap modal.
+     Engine in src/engine.js + src/main.js; roadmap data lives in main.pjs. -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --black: #0a0a0a;
+    --panel: #121212;
+    --yellow: #ffe000;
+    --ghost-red: #ff2020;
+    --ghost-pink: #ffb8ff;
+    --ghost-cyan: #00ffff;
+    --ghost-orange: #ffb852;
+    --wall-blue: #4b4bff;
+    --text: #e8e8e8;
+    --muted: #9a9a9a;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1000px 460px at 50% -120px, rgba(255, 224, 0, .07), transparent 60%),
+      var(--black);
+    color: var(--text);
+    text-align: left;
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    -webkit-font-smoothing: antialiased;
+  }
+  .scanlines {
+    pointer-events: none; position: fixed; inset: 0; z-index: 60;
+    background:
+      radial-gradient(120% 90% at 50% 50%, transparent 55%, rgba(0, 0, 0, .45) 100%),
+      repeating-linear-gradient(0deg, rgba(0, 0, 0, .22) 0 1px, transparent 1px 3px);
+  }
+  .scanlines::after {
+    content: ""; position: absolute; inset: 0;
+    background: repeating-linear-gradient(90deg, rgba(255, 255, 255, .02) 0 1px, transparent 1px 3px);
+  }
+  .app { max-width: 620px; margin: 0 auto; padding: 22px 16px 36px; display: flex; flex-direction: column; align-items: center; }
+
+  /* ── HUD ── */
+  .hud { width: 100%; max-width: 520px; display: flex; align-items: stretch; gap: 8px; margin-bottom: 10px; }
+  .hud-cell { flex: 1; min-width: 0; background: var(--panel); border: 1px solid #242424; border-radius: 10px; padding: 8px 12px; }
+  .hud-label { display: block; font-family: "Press Start 2P", monospace; font-size: 8px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; margin-bottom: 5px; }
+  .hud-val { font-family: "Press Start 2P", monospace; font-size: 13px; color: var(--yellow); white-space: nowrap; }
+  .lives-cell { flex: 0 0 auto; display: flex; flex-direction: column; justify-content: center; }
+  .lives-cell .hud-label { margin-bottom: 6px; }
+  #livesEl { display: flex; gap: 5px; }
+  .life { width: 13px; height: 13px; border-radius: 50% 50% 45% 45% / 62% 62% 38% 38%; background: var(--yellow); }
+  .hud-actions { display: flex; flex-direction: column; justify-content: center; gap: 6px; flex: none; }
+  .btn-mini {
+    font-family: "Press Start 2P", monospace; font-size: 8px; letter-spacing: 1px;
+    background: var(--panel); color: var(--ghost-cyan); border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 7px 10px; cursor: pointer; white-space: nowrap;
+  }
+  .btn-mini:hover { color: var(--yellow); border-color: var(--yellow); }
+  #levelIntroFruitsEl { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .level-fruit { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .level-fruit canvas { image-rendering: pixelated; }
+  .level-fruit span { font-family: "Press Start 2P", monospace; font-size: 13px; color: var(--yellow); }
+  .chip {
+    font-family: "Press Start 2P", monospace; font-size: 8px; letter-spacing: 1px;
+    color: var(--ghost-pink); background: var(--panel); border: 1px dashed #444; border-radius: 8px;
+    padding: 7px 10px; text-align: center; white-space: nowrap;
+  }
+
+  /* ── stage ── */
+  .stage {
+    position: relative; width: 100%; max-width: 520px;
+    aspect-ratio: 448 / 496;
+    border-radius: 12px; overflow: hidden;
+    border: 1px solid #262626;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, .6);
+    touch-action: manipulation;
+    user-select: none;
+  }
+  #gameCanvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  .overlay {
+    position: absolute; inset: 0; z-index: 5;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; text-align: center; padding: 24px;
+    background: rgba(6, 6, 10, .9);
+  }
+  .overlay .logo { width: 84px; height: 84px; border-radius: 14px; box-shadow: 0 0 0 1px rgba(255, 224, 0, .4), 0 12px 32px rgba(0, 0, 0, .65); animation: logo-pulse 2.6s ease-in-out infinite; }
+  @keyframes logo-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+  .overlay h1 { margin: 0; font-family: "Press Start 2P", monospace; font-size: 24px; color: var(--yellow); letter-spacing: 2px; text-shadow: 3px 3px 0 rgba(255, 224, 0, .22); animation: title-glow 2.6s ease-in-out infinite; }
+  @keyframes title-glow { 0%, 100% { text-shadow: 3px 3px 0 rgba(255, 224, 0, .18); } 50% { text-shadow: 3px 3px 0 rgba(255, 224, 0, .4), 0 0 22px rgba(255, 224, 0, .25); } }
+  .overlay .sub { font-family: "Press Start 2P", monospace; font-size: 10px; color: var(--ghost-pink); letter-spacing: 3px; }
+  .press-enter { font-family: "Press Start 2P", monospace; font-size: 12px; color: var(--text); animation: blink 1.15s steps(1) infinite; }
+  .chase { position: relative; width: 168px; height: 20px; overflow: hidden; }
+  .chase-row { position: absolute; top: 0; left: 0; display: flex; align-items: center; gap: 9px; animation: chase-move 5.5s linear infinite; }
+  @keyframes chase-move { 0% { transform: translateX(168px); } 100% { transform: translateX(-190px); } }
+  .ch-pac { width: 15px; height: 15px; flex: none; border-radius: 50%; background: linear-gradient(42deg, transparent 44%, var(--yellow) 45%), linear-gradient(-42deg, transparent 44%, var(--yellow) 45%); }
+  .ch-g { width: 13px; height: 13px; flex: none; border-radius: 50% 50% 45% 45% / 62% 62% 38% 38%; background: var(--c); }
+  .hs-line { font-family: "Press Start 2P", monospace; font-size: 11px; color: var(--ghost-cyan); }
+  .go-title { font-family: "Press Start 2P", monospace; font-size: 26px; color: var(--ghost-red); letter-spacing: 3px; text-shadow: 3px 3px 0 rgba(255, 32, 32, .3); }
+  .ready-line { font-family: "Press Start 2P", monospace; font-size: 26px; color: var(--yellow); letter-spacing: 5px; text-shadow: 2px 2px 0 rgba(255, 224, 0, .25); }
+  .pause-line { font-family: "Press Start 2P", monospace; font-size: 22px; color: var(--ghost-cyan); letter-spacing: 4px; }
+  .note-line { color: var(--muted); font-size: 11px; line-height: 1.8; max-width: 330px; }
+  .controls-line { font-family: "Press Start 2P", monospace; font-size: 8px; color: #666; letter-spacing: 1px; line-height: 1.9; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── footer ── */
+  .foot { margin-top: 14px; color: var(--muted); font-size: 11px; line-height: 1.7; text-align: center; }
+  .foot a { color: var(--ghost-cyan); }
+  .foot code { background: #161616; border: 1px solid #2a2a2a; border-radius: 5px; padding: 1px 5px; color: var(--ghost-cyan); }
+
+  /* ── touch d-pad ── */
+  .dpad { display: none; grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(2, 52px); gap: 6px; margin-top: 16px; justify-content: center; }
+  .dpad-btn {
+    background: var(--panel); border: 1px solid #2a2a2a; color: var(--yellow);
+    font-size: 18px; border-radius: 12px; touch-action: none; user-select: none;
+    -webkit-user-select: none; cursor: pointer;
+  }
+  .dpad-btn:active { background: #262628; border-color: var(--yellow); }
+  .dpad-btn:nth-child(1) { grid-column: 2; grid-row: 1; }
+  .dpad-btn:nth-child(2) { grid-column: 1; grid-row: 2; }
+  .dpad-btn:nth-child(3) { grid-column: 2; grid-row: 2; }
+  .dpad-btn:nth-child(4) { grid-column: 3; grid-row: 2; }
+  @media (pointer: coarse) { .dpad { display: grid; } }
+
+  /* ── roadmap modal ── */
+  .modal { position: fixed; inset: 0; z-index: 70; background: rgba(4, 4, 8, .88); display: flex; align-items: flex-start; justify-content: center; padding: 30px 14px; overflow: auto; }
+  .modal-box { width: 100%; max-width: 640px; background: var(--black); border: 1px solid #2a2a2a; border-radius: 14px; padding: 16px 18px 22px; }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .modal-title { font-family: "Press Start 2P", monospace; font-size: 11px; color: var(--yellow); letter-spacing: 1px; }
+  .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .ptext { color: var(--muted); font-size: 12px; }
+  .ptext b { color: var(--yellow); }
+  .progressbar { height: 8px; border-radius: 999px; background: #1c1c1c; border: 1px solid #262626; overflow: hidden; }
+  .progressbar > div { height: 100%; background: var(--yellow); width: 0%; transition: width .3s ease; }
+  .phase { margin-top: 24px; }
+  .phase h2 { font-family: "Press Start 2P", monospace; font-size: 10px; color: var(--wall-blue); margin: 0 0 10px; letter-spacing: 1px; }
+  .phase h2 .pnum { color: var(--yellow); }
+  .task {
+    display: flex; gap: 12px; align-items: flex-start; cursor: pointer;
+    padding: 10px 12px; border-radius: 10px; background: var(--panel);
+    border: 1px solid #202020; margin-bottom: 8px;
+    transition: border-color .15s, background .15s;
+  }
+  .task:hover { border-color: rgba(255, 224, 0, .45); }
+  .task:focus-visible { outline: 2px solid var(--yellow); outline-offset: 1px; }
+  .task.done { opacity: .55; }
+  .task.done .title { text-decoration: line-through; }
+  .cb {
+    flex: none; width: 18px; height: 18px; margin-top: 1px;
+    border: 2px solid #555; border-radius: 5px; background: #1b1b1b;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; line-height: 1; color: #0a0a0a;
+  }
+  .task.done .cb { background: var(--yellow); border-color: var(--yellow); }
+  .task .tbody { min-width: 0; }
+  .task .title { font-weight: 700; color: #eee; }
+  .task .num { color: var(--yellow); font-weight: 700; }
+  .task .desc { color: var(--muted); font-size: 12.5px; line-height: 1.55; margin-top: 3px; }
+  .task code { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 5px; padding: 1px 5px; color: var(--ghost-cyan); font-size: 12px; }
+  .modal-note { margin: 14px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+  .modal-note code { background: #161616; border: 1px solid #2a2a2a; border-radius: 5px; padding: 1px 5px; color: var(--ghost-cyan); }
+
+  @media (max-width: 520px) {
+    .overlay h1 { font-size: 19px; }
+    .overlay .logo { width: 68px; height: 68px; }
+    .go-title { font-size: 21px; }
+    .hud-val { font-size: 11px; }
+  }
+</style>
+
+<div class="scanlines" id="crtOverlay" hidden></div>
+
+<div class="app">
+  <div class="hud">
+    <div class="hud-cell"><span class="hud-label">Score</span><span class="hud-val" id="scoreEl">000000</span></div>
+    <div class="hud-cell"><span class="hud-label">High</span><span class="hud-val" id="highScoreEl">000000</span></div>
+    <div class="hud-cell lives-cell"><span class="hud-label">Lives</span><span id="livesEl"></span></div>
+    <div class="hud-actions">
+      <button class="btn-mini" id="soundBtn" type="button">SOUND ON</button>
+      <button class="btn-mini" id="crtBtn" type="button">CRT: OFF</button>
+      <button class="btn-mini" id="fullscreenBtn" type="button">FULLSCREEN</button>
+      <button class="btn-mini" id="roadmapBtn" type="button">ROADMAP</button>
+    </div>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="gameCanvas" width="448" height="496"></canvas>
+
+    <div class="overlay" id="titleOverlay">
+      <img class="logo" src="https://user.uploads.dev/file/dd4fe4418a95630e9ed1e4adb39fe375.png" alt="PAC-MAN '80 logo">
+      <h1>PAC-MAN '80</h1>
+      <div class="sub">PERCHANCE EDITION</div>
+      <div class="hs-line" id="highScoreTitleEl">HIGH SCORE 000000</div>
+      <div class="press-enter">INSERT COIN — PRESS ENTER</div>
+      <div class="controls-line">ARROWS / WASD / D-PAD / SWIPE — MOVE<br>P / ESC — PAUSE&nbsp;&nbsp;M — SOUND&nbsp;&nbsp;C — CRT&nbsp;&nbsp;F — FULLSCREEN</div>
+      <div class="chase" aria-hidden="true">
+        <div class="chase-row">
+          <span class="ch-pac"></span>
+          <span class="ch-g" style="--c:#ff2020"></span>
+          <span class="ch-g" style="--c:#ffb8ff"></span>
+          <span class="ch-g" style="--c:#00ffff"></span>
+          <span class="ch-g" style="--c:#ffb852"></span>
+        </div>
+      </div>
+      <div class="note-line">Chomp dots, grab the fruit, and dodge the ghosts. On touch screens a D-PAD appears below the maze.<br><span style="opacity:.65">© 1980 NAMCO / MIDWAY — FAN-MADE RECREATION</span></div>
+    </div>
+
+    <div class="overlay" id="readyOverlay"><div class="ready-line">READY!</div></div>
+
+    <div class="overlay" id="pauseOverlay"><div class="pause-line">PAUSED</div><div class="controls-line">P / ESC — RESUME</div></div>
+
+    <div class="overlay" id="levelIntroOverlay">
+      <div class="ready-line" id="levelIntroTitleEl">LEVEL 2</div>
+      <div id="levelIntroFruitsEl"></div>
+      <div class="controls-line">FRUIT BONUS</div>
+    </div>
+
+    <div class="overlay" id="gameoverOverlay">
+      <div class="go-title">GAME OVER</div>
+      <div class="hs-line" id="goScoreEl">000000</div>
+      <div class="hs-line" id="newHighEl" style="color:#ffe000" hidden>NEW HIGH SCORE!</div>
+      <div class="press-enter">PRESS ENTER TO PLAY AGAIN</div>
+    </div>
+  </div>
+
+  <div class="dpad" id="dpad">
+    <button class="dpad-btn" data-dir="up" type="button" aria-label="Up">▲</button>
+    <button class="dpad-btn" data-dir="left" type="button" aria-label="Left">◀</button>
+    <button class="dpad-btn" data-dir="down" type="button" aria-label="Down">▼</button>
+    <button class="dpad-btn" data-dir="right" type="button" aria-label="Right">▶</button>
+  </div>
+
+  <footer class="foot">
+    PAC-MAN '80 — Perchance Edition · COMPLETE. All 7 phases shipped. Full checklist via the <b>ROADMAP</b> button, or in <code>main.pjs</code>.
+  </footer>
+</div>
+
+<div class="modal" id="roadmapModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="modal-title">ROADMAP — PAC-MAN '80</span>
+      <button class="btn-mini" id="closeRoadmapBtn" type="button">✕</button>
+    </div>
+    <div class="meta-row">
+      <div class="ptext"><b id="doneCount">0</b> / <span id="totalCount">0</span> tasks complete</div>
+      <button class="btn-mini" id="resetBtn" type="button">reset</button>
+    </div>
+    <div class="progressbar" aria-hidden="true"><div id="bar"></div></div>
+    <main id="roadmapCtn"></main>
+    <p class="modal-note">Backlog generated with the <a href="https://perchance.org/atomic-roadmap" target="_blank" rel="noopener">atomic-roadmap</a> methodology; the checklist lives in <code>main.pjs</code> under the <code>roadmap</code> list. Click a task to track progress locally.</p>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>
+<script>
+  (function () {
+    const ctn = document.getElementById("roadmapCtn");
+    const STORE_KEY = "pm80RoadmapDone";
+
+    function load() { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { return {}; } }
+    function inlineCode(s) {
+      return s
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/`([^`]+)`/g, (m, c) => "<code>" + c + "</code>");
+    }
+    function stripStars(s) { return s.replace(/^\*{1,2}\s*|\s*\*{1,2}$/g, "").trim(); }
+
+    const phases = [];
+    const pjsDone = {};
+    let cur = null;
+    (root.roadmap.selectAll || []).forEach(item => {
+      const line = item.evaluateItem.trim();
+      if (!line) return;
+      const pm = line.match(/^#{2,}\s*(.+)$/);
+      if (pm) { cur = { name: pm[1], tasks: [] }; phases.push(cur); return; }
+      if (!cur) return;
+      const tm = line.match(/^(\d+)\.\s*\[([ xX])\]\s*:?\s*(.*)$/);
+      if (!tm) return;
+      const num = Number(tm[1]);
+      if (tm[2].toLowerCase() === "x") pjsDone[num] = true;
+      const rest = stripStars(tm[3]);
+      const ci = rest.search(/:\*{0,2}\s/);
+      const title = (ci >= 0 ? rest.slice(0, ci) : rest).replace(/:$/, "").trim();
+      const desc = ci >= 0 ? stripStars(rest.slice(ci + 1)) : "";
+      cur.tasks.push({ num: num, title: title, desc: desc });
+    });
+
+    const total = phases.reduce((n, p) => n + p.tasks.length, 0);
+
+    function save(done) { try { localStorage.setItem(STORE_KEY, JSON.stringify(done)); } catch (e) {} }
+
+    function render() {
+      const done = Object.assign({}, pjsDone, load());
+      ctn.innerHTML = "";
+      phases.forEach((ph, i) => {
+        const sec = document.createElement("section");
+        sec.className = "phase";
+        const h = document.createElement("h2");
+        const label = ph.name.replace(/^PHASE\s*\d*\s*[—-]?\s*/i, "");
+        h.innerHTML = "<span class=\"pnum\">PHASE " + (i + 1) + "</span> — " + inlineCode(label);
+        sec.appendChild(h);
+
+        ph.tasks.forEach(t => {
+          const row = document.createElement("div");
+          row.className = "task" + (done[t.num] ? " done" : "");
+          row.tabIndex = 0;
+          row.setAttribute("role", "checkbox");
+          row.setAttribute("aria-checked", done[t.num] ? "true" : "false");
+
+          const cb = document.createElement("span");
+          cb.className = "cb";
+          cb.textContent = done[t.num] ? "✓" : "";
+
+          const body = document.createElement("div");
+          body.className = "tbody";
+          const titleEl = document.createElement("div");
+          titleEl.className = "title";
+          titleEl.innerHTML = "<span class=\"num\">" + t.num + ".</span> " + inlineCode(t.title);
+          body.appendChild(titleEl);
+          if (t.desc) {
+            const d = document.createElement("div");
+            d.className = "desc";
+            d.innerHTML = inlineCode(t.desc);
+            body.appendChild(d);
+          }
+
+          const toggle = () => {
+            const cur = load();
+            if (done[t.num]) delete cur[t.num]; else cur[t.num] = true;
+            save(cur);
+            render();
+          };
+          row.addEventListener("click", toggle);
+          row.addEventListener("keydown", e => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+          });
+
+          row.appendChild(cb);
+          row.appendChild(body);
+          sec.appendChild(row);
+        });
+        ctn.appendChild(sec);
+      });
+
+      const d = Object.keys(done).filter(k => done[k]).length;
+      document.getElementById("doneCount").textContent = d;
+      document.getElementById("totalCount").textContent = total;
+      document.getElementById("bar").style.width = (total ? Math.round((d / total) * 100) : 0) + "%";
+    }
+
+    document.getElementById("resetBtn").addEventListener("click", () => {
+      try { localStorage.removeItem(STORE_KEY); } catch (e) {}
+      render();
+    });
+    render();
+  })();
+</script>

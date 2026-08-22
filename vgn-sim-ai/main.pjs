@@ -1,0 +1,379 @@
+$meta
+  title = SimAI — Cozy AI Startup Simulator
+  description = Build a scrappy AI lab from a single garage workstation: rack GPUs, harvest web data, train models from perceptrons to frontier giants, hire talent, ship products, and ride the leaderboard through every age of AI.
+  tags = ai, simulation, cozy, idle, startup
+  header
+    mode = minimal
+
+kv = {import:kv-plugin}
+generateText = {import:ai-text-plugin}
+
+// ============================================================================
+//  SimAI — Cozy AI Startup Simulator
+//  IMPLEMENTATION PLAN (v0 — phases & architecture)
+//  ============================================================================
+//  Every line here is a plan comment. It is intentionally not runnable pjs.
+//  Actual implementation lives in:  index.html, src/defs.js, src/game.js,
+//  src/ui.js, src/main.js  (see Phase 0).
+//
+//  One-paragraph pitch:
+//  Build a scrappy AI lab from a single garage workstation — no code, no
+//  deployment, pure resource & growth simulation. Rack GPUs, harvest and
+//  clean web data, train models from perceptrons to frontier giants, hire
+//  talent, ship products down the API gateway, and ride the leaderboard
+//  through every age of AI. Cozy text/emoji UI, no map, one tick = one day.
+
+//  --------------------------------------------------------------------------
+//  PHASE OVERVIEW (high level)
+//  --------------------------------------------------------------------------
+//  Phase 0 — Foundation & scaffolding
+//  Phase 1 — Core loop, resources & economy heartbeat
+//  Phase 2 — Data pipeline (crawl -> clean tokens)
+//  Phase 3 — Research tree & model training (the tech ladder)
+//  Phase 4 — Products, contracts & revenue
+//  Phase 5 — Talent, perks & office buildings
+//  Phase 6 — Community, leaderboard & rivals
+//  Phase 7 — Random events, incidents & funding winters
+//  Phase 8 — Venture capital, IPO & end conditions
+//  Phase 9 — Cozy polish: flavor, help, balance pass
+//
+//  Each phase below = goal, files touched, core decisions, numbers, and a
+//  "done when" checklist so progress is verifiable.
+
+//  ==========================================================================
+//  PHASE 0 — FOUNDATION & SCAFFOLDING
+//  ==========================================================================
+//  Goal:  Get a runnable tabbed shell with a game loop and autosave.
+//  Files: main.pjs, index.html, src/main.js, src/game.js (stub),
+//         src/ui.js (stub), src/defs.js (already drafted — reuse).
+//  Note:  src/defs.js already contains drafted constant tables + pure state
+//         derivations (EPOCHS, RESEARCH, ARCHES, PRODUCTS, HARDWARE,
+//         BUILDINGS, STAFF, DATA_UPGRADES, DATAPACKS, ROUNDS, RIVALS,
+//         EVENTS, computeCap/dailyRevenue/dataQuality/valuation/labScore...).
+//         Phase 0 continues from that: build the state + engine + shell
+//         around it, and sanity-check every def against the numbers below.
+//
+//  main.pjs (only real pjs content the game needs):
+//    $meta -> title/description/tags, header mode = minimal
+//    kv = {import:kv-plugin}            // autosave via root.kv
+//    generateText = {import:ai-text-plugin} // "press release" flavor button
+//
+//  index.html shell:
+//    <style> cozy dark-warm palette: bg #1f1b16, panels #2a241d, border
+//            #3a3228, text #e8dcc3, accent amber #e0a458, green/red status.
+//    <header> topbar chips: epoch, day/year, cash, GPU-h/d, energy,
+//            tokens, staff, leaderboard rank + speed controls (pause/1x/3x/
+//            10x/30x).
+//    <nav>  9 tabs: HQ, Research, Models, Data, Infra, Team, Products,
+//            Community, Money.
+//    <main id="view"> rendered by ui.js per active tab.
+//    <footer id="log"> last ~8 log lines.
+//    <div id="modalRoot"> event/win/game-over modal.
+//    <script type="module" src="src/main.js">
+//  All game JS lives in src/*.js modules — index.html stays parser-safe
+//  (no square-bracket template text in static HTML).
+//
+//  Game engine skeleton (src/game.js):
+//    class Game { state, newGame(), tick(), action(name,args), save/load }
+//    state shape (plain JSON-able data only, for IndexedDB):
+//      day, year, epoch, speed, cash($K), equity(0-1), rep(0+),
+//      researchDone{}, activeResearch, researchProgress,
+//      data{raw,clean,pref,quality,crawlerOn}, dataup{},
+//      hardware{}, buildings{}, cloud{on}, staff{}, perks{}, models[],
+//      jobs[], products[], contracts[], contractOffer, roundsTaken,
+//      morale, pendingEvent, flags{...}, stats{}, log[], rivals[],
+//      gameOver/finalNote
+//  Game loop: requestAnimationFrame with a day-accumulator (speed = days/sec).
+//  Autosave: kv (root.kv.simaiSave.set/get) every 30 game-days + manual
+//            Save/Load/New buttons in Money tab; "Continue?" prompt on load.
+//  ui.js: full re-render of active tab each frame via innerHTML, event
+//         delegation on data-act attributes; no inline handlers needed.
+//
+//  Done when: page loads error-free, tabs switch, ticks advance day, save/
+//  load round-trips, console & perchanceErrors clean.
+
+//  ==========================================================================
+//  PHASE 1 — CORE LOOP, RESOURCES & ECONOMY HEARTBEAT
+//  ==========================================================================
+//  Goal:  The daily tick that makes every resource move.
+//
+//  Units (single source of truth, display helpers fmt them):
+//    Cash     $K (thousands). Start: $250K. Display: $1.2M/$350K/$1.5K.
+//    Compute  GPU-hours/day produced by hardware. Start: 24 (garage).
+//    Tokens   G = billions of tokens. Start: 0.05G raw, 0.01G clean.
+//    Energy   MW supply vs demand. Grid at $1.5K/MW-day.
+//    Rep      mindshare 0-1000+. Quality 0-99. Leaderboard score 0-100+.
+//
+//  Daily tick order:
+//    1. day++, update year/epoch from deepest research done.
+//    2. Compute: cap = sum(hardware+buildings gpuH) * (1+0.1*hotaisle) *
+//       productivity(morale) [+cloud burst 1000]. Outage => 0.
+//       Allocation: inference use -> crawler use -> training jobs (first
+//       come, first served; each job gets up to its rate).
+//    3. Money out: salaries (per staff role), hardware+building maintenance,
+//       grid energy bill, perk costs. Money in: product revenue (Phase 4),
+//       contracts, agent sales, investor cut = 0.35*equity*gross.
+//    4. Data: raw += rawPerDay(crawler); clean += min(raw, processCapacity);
+//       quality = dataQuality(s) (see defs.js).
+//    5. Research progress += (1/days) * (1+0.25*researchers).
+//    6. Training jobs accumulate hours; on completion consume tokens and
+//       spawn a model checkpoint (Phase 3).
+//    7. Events roll (Phase 7), rivals advance (Phase 6), contract offers.
+//    8. Quit chance per staff: 0.004*(1 - morale/110) per day.
+//    9. Flags (winter/shortage/outage/halt) age out by day comparison.
+//
+//  Core getters (already in defs.js — verify they match this spec):
+//    productivity(s): clamp(0.75+0.004*morale, 0.75, 1.15)
+//    computeCap, energyUse/Own/Grid, uptime, freeCompute,
+//    dailyRevenue, dataQuality, processCapacity, rawPerDay,
+//    valuation(s) = max(2, revK/day*80 + rep*0.5 + bestQ*0.3) $M
+//
+//  Soft failure: cash < -$60K triggers emergency rescue round (+$150K,
+//  equity +0.20). If equity already >= 0.65 -> "bust" game over (Phase 8).
+//
+//  Done when: numbers tick sensibly at 30x speed, no NaN/infinity, cash can
+//  go negative only as specified, morale/productivity curve verified.
+
+//  ==========================================================================
+//  PHASE 2 — DATA PIPELINE (crawl -> clean tokens)
+//  ==========================================================================
+//  Goal:  A satisfying "harvest and clean" loop that gates the research tree.
+//
+//  Raw sources (Data tab):
+//    Web crawler toggle (on by default): +0.5G raw/day, uses 10 GPU-h/d.
+//    Dist. Crawler Fleet (+2.5G/d, $50K) and Web-Scale Partnership (+15G/d,
+//    $300K, req gpt research) as upgrades in DATA_UPGRADES.
+//    Buy data packs (DATAPACKS): Common Crawl scrap 5G raw $10K; Wikipedia
+//    1G clean $20K; News corpus 2G clean $60K (quality 0.9); Human pref
+//    pairs 0.2G $100K (the ONLY source of pref data, required by RLHF).
+//
+//  Processing (always-on, converts raw->clean passively):
+//    processCapacity = 0.2 + 0.6 per {quality,dedup,tokenizer} upgrade,
+//    doubled by MLOps building. clean += min(raw, capacity) daily.
+//    Upgrades (DATA_UPGRADES): Quality Filters $15K (+0.10 quality),
+//    Dedup $40K (+0.12), BPE Tokenizer $60K req bpe (+0.12, +0.6 cap),
+//    PII Scrubbing $80K (safety: prevents leak lawsuits), Content
+//    Moderation $150K (safety: prevents rogue-model PR disasters),
+//    Data Flywheel $250K req gpt (+0.01G clean/day per product),
+//    Synthetic Distillation $500K req rlhf (+0.05G/day, +0.03 quality).
+//
+//  dataQuality(s) = 0.3 + upgrade bonuses + min(0.2, 0.002*annotators)
+//                   + distill/flywheel bonuses, capped 1.2.
+//  Quality feeds Phase 3's trainQuality() — bad data = bad models.
+//
+//  Done when: raw/clean/quality evolve plausibly; buying a pack shows
+//  immediately in the pipeline; RLHF pref data is only obtainable via the
+//  pref pack or flywheel trickle.
+
+//  ==========================================================================
+//  PHASE 3 — RESEARCH TREE & MODEL TRAINING (the tech ladder)
+//  ==========================================================================
+//  Goal:  The heart of the game — a 24-item research tree and trainable
+//  model architectures from perceptron to frontier.
+//
+//  Research (RESEARCH in defs.js, cost $K / days / prereqs):
+//    One active research at a time. days = base/(1+0.25*researchers).
+//    Expedite button: pay 1.5x*(remaining fraction)*cost to finish now.
+//    Year/epoch = deepest research done (1997 -> 2012 -> 2017 -> 2024+).
+//    Key chain: perceptron->neural-net->{rnn,cnn}; rnn->transformer->
+//    {gpt->{bpe,diffusion,code,lora->rlhf->cot->tools->swarm},embeddings->
+//    rag}; lora chain unlocks chat; tools+swarm+vlm -> frontier.
+//
+//  Architectures (ARCHES): rule-chat, spam, decision-tree (free tier-0,
+//  no GPU), perceptron, MLP, CNN, LSTM (tier 1-2), transformer, gpt,
+//  embeddings (tier 3), diffusion, code, tts, vlm, chat, reasoning, agent
+//  (tier 4-5), frontier (tier 6). Each: gpu-h total, tokens G, base
+//  quality, capability flags {text,image,voice,code,retrieval,chat,
+//  reason,agent} that products key off.
+//
+//  Training:
+//    Pick architecture + size (Tiny/Standard/Massive = token & compute
+//    multipliers, slight quality modifier). Job accumulates GPU-h up to its
+//    rate; tokens consumed AT completion. Engineer headcount cuts required
+//    hours (-2% each, max 20%). Standup/CI buildings cut real days.
+//    Quality at completion:
+//      q = arch.quality * dataFactor(0.6+dataQuality) * sizeFactor
+//          * talentFactor(engineers/researchers/finetuners)
+//          * buildFactor(git 3%, dojo 5%) * productivity,
+//      capped at arch.quality*1.45.
+//    Evals computed at train time: MMLU=q*0.85, MATH=max(0,q-25)*0.8,
+//    HumanEval (code models)=max(0,q-18)*0.85. Leaderboard uses MMLU.
+//
+//  Finetuning (modifies a checkpoint, keeps history in roster):
+//    LoRA (req lora): small job (+~6 quality).
+//    RLHF (req rlhf + 0.1G pref + 2G clean): +~10 quality, sets chat cap.
+//    Distill/archive: "Retire" button removes model gracefully (rep +2).
+//
+//  Done when: full chain trainable in reasonable real time; the frontier
+//  model is a genuine endgame grind (~4M GPU-h, 1500G); evals/quality bars
+//  display per model.
+
+//  ==========================================================================
+//  PHASE 4 — PRODUCTS, CONTRACTS & REVENUE
+//  ==========================================================================
+//  Goal:  Turn compute + data + models into money.
+//
+//  Products (PRODUCTS): deploy a capable model to a product line. A model
+//  can power several products. Each product uses inference GPU-h/day
+//  (quantization halves it). Lines:
+//    token-api (any text), chat-api (chat, req rlhf), image-api (image),
+//    voice-api (voice, req tts), code-api (code, req code), embeddings-api
+//    (retrieval, req embeddings), rag-api (retrieval, req rag),
+//    agent-api (agent, req tools), swarm-api (agent, req swarm),
+//    consumer-app (any model).
+//  Income per product/day =
+//    quality^1.6 * mult * 0.015 * repFactor(1+rep/600)
+//    * designMult(designers 8% / prompters 6% / devpod 5%)
+//    * (openSource? 0.85:1), halved during funding winter.
+//    (Target curve: rule-chat ~$0.3K/d -> transformer ~$10K/d ->
+//     frontier ~$50-90K/d at high rep.)
+//
+//  Contracts (Enterprise tab / offers): templates in CONTRACT_TEMPLATES,
+//  total scaled by (1+rep/200)*(1+0.15*sales). Offer chance per day =
+//  0.035*(1+0.1*sales)*(1+0.2*boardroom), 0 during winter. Accepted
+//  contracts pay total/days per day; one at a time.
+//
+//  Agents (auto-sellers, hired in Team tab):
+//    Shipping agent: sells 0.5G clean tokens/day at $1.5K/G + spare idle
+//    compute at $0.001/GPU-h.
+//    Evaluator agent: +0.8 rep/day (scores & publishes evals).
+//    Finetuner agent: auto-LoRAs your best model when affordable.
+//    Open-Sourcer agent: auto-publishes + open-sources weakest unpublished
+//    checkpoint every ~5 days (needs rep > 40).
+//
+//  Done when: deploying/retiring products works, income tracks the target
+//  curve, contracts appear/complete, and agents visibly automate money.
+
+//  ==========================================================================
+//  PHASE 5 — TALENT, PERKS & OFFICE BUILDINGS
+//  ==========================================================================
+//  Goal:  A cozy people layer that multiplies everything.
+//
+//  Staff (STAFF; salary/day $K, hire/fire one at a time):
+//    Annotator 0.08 (+data quality), ML Engineer 0.45 (-train compute,
+//    +quality), Researcher 0.55 (research speed, +quality), Prompt
+//    Whisperer 0.30 (+product income 6%), Security 0.40 (-incident chance
+//    30% each), Designer 0.35 (+income 8%), Sales 0.30 (+contract chance).
+//    Agents (lower salary, req research): Evaluator, Shipping, Finetuner,
+//    Open-Sourcer. Agents are hires too — they show in roster.
+//  Perks (toggles, Money/Team tab): Snack budget +6 morale @0.5K/d,
+//    Health +8 @1K/d, Stock options +5 (no dilution, it's cozy).
+//  Morale: 62 base + perks + snack/nap/standup buildings - events -
+//    poaching/burnout. Drives productivity (Phase 1) and quit chance.
+//
+//  Buildings (BUILDINGS, one-time purchases): Snack Pantry 3 (+3 morale),
+//    Standup Board 2 (+5% train speed), Nap Room 8 (+4 morale), Dev Pod 10
+//    (+5% income), Git Repo 5 (+3% quality), CI Runners 15 (+10% train
+//    speed), Hot-Aisle 20 (+10% compute cap), MLOps 80 (2x data capacity),
+//    RLHF Dojo 120 (+5% quality), Boardroom 50 (+20% deal chance),
+//    Data Center Rack 120 (+500 GPU-h/d, +0.8MW, uses a DC slot — max
+//    slots = 1 + cooling towers), Cooling Tower 60 (+1 slot, +0.5MW),
+//    Backup Generator 150 (+20MW, prevents outage events), Hydro Tie-In
+//    1200 (+50MW), Nuclear Reactor 8000 (+1000MW, req frontier).
+//
+//  Done when: hiring/firing affects numbers visibly, morale curve smooths
+//  out with perks, DC rack/cooling slot constraint enforced.
+
+//  ==========================================================================
+//  PHASE 6 — COMMUNITY, LEADERBOARD & RIVALS
+//  ==========================================================================
+//  Goal:  Make the leaderboard the scoreboard and rivals the clock.
+//
+//  Lab score = best MMLU across models + 1.5*published + 2*openSourced.
+//  Rivals (RIVALS): Deepmindia 8, OpenBrains 12, Cerebrum Inc 18,
+//  VastMind 25; scores creep by `growth`/day with random +8-23 "shipped"
+//  jumps (logged as industry news). Rank shown in header chip and
+//  Community tab table (You vs 4 rivals, #1-5).
+//
+//  Publishing a model: rep += 10 + 0.15*quality; one-time; counts to score.
+//  Open-sourcing (requires published): rep += 8 + 0.1*quality; that model's
+//  product income x0.85 but unlocks star events and community multipliers.
+//  Retiring a model: rep +2, clean log entry ("retirement party").
+//
+//  Done when: rivals visibly chase you, publishing feels like progress,
+//  and the header rank updates correctly.
+
+//  ==========================================================================
+//  PHASE 7 — RANDOM EVENTS, INCIDENTS & FUNDING WINTERS
+//  ==========================================================================
+//  Goal:  Texture, risk, and the occasional rogue-model drama.
+//
+//  Daily roll chance base 9%, reduced by security/guardrails/moderation/
+//  PII (incidentChance(s) in defs.js). Events open a PAUSED modal with
+//  1-2 choices. Full roster is in EVENTS (defs.js):
+//    Rogue Model Incident, Funding Winter (60d, income/2, no deals),
+//    GPU Shortage (45d, hardware 2x), Power Outage (4d compute=0; blocked
+//    by generators), Poaching Attempt (counter-offer vs lose a hire),
+//    AI Hype Wave, Data Leak Lawsuit (blocked by PII), Open-Source Star,
+//    Burnout Wave, Crypto Miners, Research Breakthrough,
+//    Acquisition Offer (exit win, Phase 8).
+//  Rogue-model events also halt product income 5 days (flags.haltUntil)
+//  and track lastRogueDay for a cooldown.
+//  Non-modal flavor: FLAVOR_NEWS lines occasionally appended to the log,
+//  plus industry news whenever a rival ships.
+//
+//  Done when: events fire at sane frequency, mitigations actually reduce
+//  frequency/severity, and the game pauses while a choice is pending.
+
+//  ==========================================================================
+//  PHASE 8 — VENTURE CAPITAL, IPO & END CONDITIONS
+//  ==========================================================================
+//  Goal:  Money decisions with teeth, and satisfying endings.
+//
+//  Valuation $M = max(2, revK/day*80 + rep*0.5 + bestQ*0.3).
+//  Rounds (ROUNDS, sequential, take when valuation >= val):
+//    Seed 3M @10%, A 15M @8%, B 60M @6%, C 250M @5%, D 800M @4%.
+//    Cash = val*share ($K). Equity accumulates; investor cut of gross
+//    income = 0.35*equity.
+//  IPO: rounds >= 5 (all taken), valuation >= $1500M, equity < 35%.
+//    -> WIN modal (cozy: confetti + stats), option to keep playing.
+//  Acquisition Offer event (Phase 7): exit win, payout = valuation*(1-equity).
+//  Bust: emergency rescue at equity >= 65% when cash < -$60K -> game over
+//    with "try again" and stats.
+//
+//  Done when: dilution math is transparent in the Money tab, IPO is a
+//  believable late-game goal, both exits feel earned.
+
+//  ==========================================================================
+//  PHASE 9 — COZY POLISH, HELP & BALANCE
+//  ==========================================================================
+//  Goal:  Make it feel alive and fair.
+//
+//  HQ tab: epoch banner, key stats grid, dynamic "next steps" objectives
+//  (first research / hire annotator / clean data / train first model /
+//  deploy / publish), latest log lines, and a "Write press release" AI
+//  button (generateText, -$5K, +8 rep, streams the copy into the log).
+//  How-to-play modal on first run (when no save exists).
+//  Number formatting everywhere (moneyK, g-tokens, num) — never raw floats.
+//  Balance pass: playtest script in browser_eval simulating ~1500 days at
+//  30x; assert cash/reputation/leaderboard stay sane, no dead-ends, and a
+//  reasonable playthrough reaches the transformer era in ~20 min.
+//  Performance: full re-render is cheap for text UI; keep DOM small.
+//  $meta.image for the listing page (generate_image asset).
+//
+//  ==========================================================================
+//  BUILD ORDER & VERIFICATION GATES
+//  ==========================================================================
+//  1.  Phase 0 shell + loop + save/load        -> browser_refresh clean
+//  2.  Phase 1 tick economy                    -> eval sim 500 days, check
+//      cash/resources bounds
+//  3.  Phase 2 data                           -> eval buy upgrades, check
+//      pipeline math
+//  4.  Phase 3 research + training            -> eval train transformer,
+//      verify hours/tokens/quality
+//  5.  Phase 4 products + contracts           -> eval income curve
+//  6.  Phase 5 team + buildings               -> eval hire/quit/morale
+//  7.  Phase 6 community + rivals             -> eval rank transitions
+//  8.  Phase 7 events                         -> eval 2000-day run, count
+//      incident frequency with/without mitigations
+//  9.  Phase 8 venture + endings              -> eval IPO path
+//  10. Phase 9 polish                         -> vision check of rendered
+//      page (cozy vibes), one full playtest
+//
+//  Files-to-own per phase (target sizes):
+//    src/defs.js    ~600 lines (constants + pure derivations) [drafted]
+//    src/game.js    ~450 lines (state + tick + actions + save/load)
+//    src/ui.js      ~800 lines (renderers + wiring + modal/toast)
+//    src/main.js     ~60 lines (boot: wire ui to game, load save prompt)
+//    index.html     ~150 lines (CSS + shell, no game logic)
+//    main.pjs       ~30 lines ($meta + kv + generateText imports)

@@ -1,0 +1,201 @@
+// ============================================================================
+// IMPLEMENTATION PLAN (task tracker) — see completion checkboxes below.
+// The single source of truth for what's built and what's next.
+// ============================================================================
+// ── BGN integration: Five Realms is a full part of the Boardgame Network.
+//    The app's structure (BGN nav/hero/lobby, rooms & room codes, turn order,
+//    presence, rematch, table chat, leaderboard, audio system, fullscreen
+//    board, share/export) is adopted from the BGN blank template. Build INTO
+//    that shell: the game UI (Phase 12) drops into #stageEl, the Phase 11 bot
+//    is AI_DO_TURN(), online turns use the `move` rpc, and task 68's save
+//    extends the template's local table save. Do not re-derive the table.
+// You are building **Five Realms** — a complete, playable recreation of the classic Alpha-era trading card game (1993), reskinned as five realms, as a perchance.org app. You must follow the Atomic Roadmap workflow below exactly. Focus entirely on delivering robust, modular, and testable features based on the functional requirements provided.
+// 
+// ### Global Constraints (apply to every task)
+// - **NO card artwork — ever:** Never generate, fetch, download, hotlink, or embed any AI-generated or external artwork, photos, or images for card faces. Card faces are rendered typographically only: color-coded frames, mana/color symbols, name, type line, rules text, and P/T — no images, no generated art, no sprites. (The `$meta.image` banner and the loading screen are not cards and are unaffected.)
+// - **Architecture may be re-decided at the checkpoint:** The game mechanics/engine (and possibly the card data) may be packaged as an importable perchance plugin instead of living directly inside this generator. Do not assume a fixed file layout for the engine until the user resolves this at the task 2 checkpoint.
+// - **RESOLVED (2026-08):** The engine now lives in the `five-realms-plugin` generator (live at perchance.org/five-realms-plugin) — imported here as `fr` (Phase 1: state, zones, turns, priority, mana, seeded RNG, action reducer; 13-op `$output` API; its own 12 fixture cards + 52-asset SVG renderer). Later phases build the game ON TOP of `root.fr(...)` (newGame/act/state/legalActions/render/...). The Alpha 295-card DB in src/cards stays as the full-card-data foundation for the real set.
+// 
+// ### Workflow & Execution Rules
+// 1. This file (`src/roadmap.pjs`) is the task tracker. Initialize its TODO checklist (it already exists — keep it updated).
+// 2. **STRICT HOLD — DO NOT START IMPLEMENTATION:** Do NOT write any implementation code, create source files, or execute any task yet. Wait until the user explicitly instructs that the backlog is complete.
+// 3. **CHECKPOINT — HARD STOP after task 2:** Implement ONLY tasks 1 and 2 (branding/loading experience, then app shell & configuration). After task 2 is verified complete, STOP completely — do NOT start task 3 or anything later — and wait for the user to confirm how the remaining work should be structured (including whether the card mechanics go into a perchance plugin). Resume only on explicit instruction.
+// 4. Once given the signal to proceed, pick ONLY the first uncompleted task from this file.
+// 5. Implement that single task, write corresponding validation tests, verify it works in the live preview, update `.pjs` to mark it complete (`[x]`), and stop to await review before proceeding to the next task.
+// 6. If a task grows beyond a single session, split its subtasks into new numbered items in the relevant phase and leave them uncompleted.
+// 7. When asked for "add N more phases", continue the sequential task numbering from the previous total and output only the new Phase blocks in this exact format.
+// 
+// ### Core Framework Tasks for `.pjs`
+// 
+// #### Phase 1: Foundation & Branding
+// 1. **[x] Branding & loading experience:** Define the app name "Alpha: The Gathering", tagline, and theme (classic MTG dark-black background, gold/parchment accents, five color accents for White/Blue/Black/Red/Green). Provide a full-screen animated loading page (name, tagline, animated five-color spinner) that is shown on app start and dismisses itself once the game's initialization completes. Provide `$meta` title, description, tags, and a generated `$meta.image`. Validate by loading the page and confirming the loading screen renders, animates, and disappears after init.
+// 2. **[x] App shell & configuration:** Build the base `index.html` layout containing every top-level game UI container needed by later phases (phase/turn bar, battlefield, player hand, action panel, game log, HUD containers) hidden behind the loading screen until init finishes. Add a `main.pjs` configuration object holding gameplay rule toggles (e.g. enable/disable mana burn, mulligan allowance, autopass speed) with sensible defaults for a classic Alpha ruleset. Validate that the shell renders with no console errors and each container has a unique id.
+// 
+// >>> HARD STOP: After task 2 is verified complete, STOP and await the user's direction on structuring the rest of the work (the card mechanics may be packaged as a perchance plugin). Do not start task 3 until explicitly told to.
+// 3. **[x] Test harness & logging:** Provide a small reusable test runner and logging utility (console + on-screen log panel) usable by every later phase to assert game state, run scenario tests, and print human-readable action history. Include a simple assertion helper that fails loudly with a descriptive message. Validate with a handful of trivial passing/failing assertions run from the browser console.
+// 
+// #### Phase 2: Card Database
+// 4. **[x] Card data schema & validation:** Define and document the structured data schema every Alpha card record must satisfy: name, mana cost (including X), color identity, card type (artifact/creature/enchantment/instant/land/sorcery), subtypes, rules text, power/toughness (creatures), rarity, and collector number. Provide a validator that checks a card record against the schema and reports every violation (missing/wrong-typed fields, malformed cost, invalid color/type tokens). Validate that a set of known-good and deliberately-broken records produces the correct pass/fail results.
+// 5. **[x] Alpha card database authoring:** Author all 295 Alpha set cards as structured data records (source of truth lives in a dedicated data directory — exact location/format pending the task 2 checkpoint, since the data may ship inside a plugin). Every card's rules text must be represented faithfully in the data model so a later phase's effects engine can interpret it. Validate that all 295 records exist, parse, and pass the schema validator from task 4 with zero violations.
+// 6. **[ ] Database integrity checks:** Verify the card database against the real Alpha set: exactly 295 unique cards, names are unique and non-empty, correct per-color card counts, all five basic lands present with correct color identity, all 10 dual lands, Strip Mine, and correct rarity distribution. Print a human-readable summary report (counts by color/type/rarity) usable as a QA checklist. Validate by comparing the summary against the known Alpha distribution.
+// 
+// #### Phase 2.5: Card-Data Reconcile (plugin model)
+// 6.5. **[x] Alpha → plugin projection:** `src/cards/plugin.js` projects all 295 Alpha records into the five-realms-plugin card shape (slug ids, capitalized types, rarity → Field/Marked/Vaulted/Sovereign tiers, lands omit manaCost, cmc/colors/colorIdentity/`producesMana`/`glyph` derived, basic-printings suffix collector numbers). Validated by `src/cards/plugin.test.js`. Paste-ready frCardDb() body for perchance.org/five-realms-plugin: `JSON.stringify(Object.fromEntries(ALPHA_TO_PLUGIN.map(c=>[c.id,c])),null,2)`.
+// 
+// #### Phase 3: Game State Core
+// 7. **[x] Player model:** Define a player object holding life total, mana pool, library/hand/graveyard/exile/battlefield references, an identifier, and a name/type (human or AI). Provide methods to query and mutate life and mana pool with change-history logging. Validate by simulating life/mana changes and confirming the recorded history matches expectations. — `src/game/engine.js` (setLife/addMana/spendMana/player/manaPool + history log), tested in `src/game/engine.test.js`.
+// 8. **[x] Zones & move operations:** Model the six zones (library, hand, battlefield, graveyard, exile, stack) with ordering semantics (library: ordered; hand: ordered; battlefield: unordered; graveyard: append-only ordered; stack: LIFO). Provide a single `moveCard(card, from, to, position)` operation that performs legal zone transfers, maintains ordering, fires per-zone-change hooks for later effect engines, and records a log entry. Validate that representative move sequences produce correct zone contents and order. — `src/game/engine.js` (moveCard/zoneIds, mirroring the plugin's zone semantics), tested in `src/game/engine.test.js`.
+// 9. **[x] Card instance model:** Define a card instance (a card in a specific game) tracking: its database record, current controller, zone, tapped state, damage marked, counters, attached cards (enchanted/equipped), turn-played timestamp, and any per-instance effect state. Instances must be cloneable from the database record and never mutate the shared database record. Validate by creating instances, mutating them independently, and confirming the database record and other instances are unaffected. — the plugin's `frObjectNew` instances + `cardInstance()` resolution in `src/game/engine.js`, tested in `src/game/engine.test.js`.
+// 10. **[x] Game engine object & snapshot:** Define the top-level game object owning both players, turn/phase state, priority holder, the stack, the trigger queue, and active continuous effects. Provide a `snapshot()` method producing a plain serializable object capturing all game state (for save/load and multiplayer sync), and a `restore(snapshot)` that rebuilds a working game. Validate round-trip: play several turns, snapshot, restore into a fresh engine, and confirm state equality. — the plugin's game state + `snapshot()`/`restore()` in `src/game/engine.js` (round-trip proven in `src/game/engine.test.js`).
+// 
+// #### Phase 4: Turn & Phases
+// 11. **[ ] Turn structure & phase events:** Implement the full turn lifecycle in Alpha order — untap step, upkeep, draw, main phase 1, begin combat, declare attackers, declare blockers, combat damage, end combat, main phase 2, end step, cleanup — with an emitted event and on-screen indicator for each phase/step entry. Validate that a full turn visits every step exactly once in the correct order.
+// 12. **[ ] Priority system:** Implement priority passing between the active player and opponents at every step, with the rule that the stack must fully resolve (or be declined) before the turn can advance. Provide an "autopass" mode that declines priority whenever the current player has no legal actions available, plus a "hold priority/full control" mode. Validate with a scripted scenario confirming the stack resolves before the phase advances.
+// 13. **[ ] Untap step & summoning sickness:** During the untap step, untap all tapped permanents the active player controls; players receive priority after untapping. Track "entered the battlefield under this control this turn" so creatures can't attack or activate `{T}` abilities while sick. Validate both behaviors with a creature that has a tap ability.
+// 14. **[ ] Draw step & deck-out:** At the start of the active player's draw step, they draw one card from the top of their library. If a player must draw from an empty library, that player loses the game immediately. Validate both the normal draw and the deck-out loss with automated tests.
+// 15. **[ ] Core state-based actions:** Apply, continuously and before any player receives priority, the two foundational state-based actions: a player at 0 or less life loses the game, and a player who attempted to draw from an empty library loses. Later phases add more SBA categories; structure the SBA check as a single repeatable pass so it's easy to extend. Validate each SBA triggers the correct loss.
+// 
+// #### Phase 5: Mana & Casting
+// 16. **[ ] Mana pool & types:** Model a player's mana pool supporting White, Blue, Black, Red, Green and colorless mana, with add/remove operations that fail loudly on insufficient/absent mana. Track mana produced and mana spent per turn, and support the optional "mana burn" rule (unspent mana causes that much damage to its owner at the end of the cleanup step, dealt from that player's pool). Validate pool math including the burn damage calculation.
+// 17. **[ ] Mana abilities:** Implement mana-producing activated abilities (e.g. basic lands tapping for one mana, dual lands for either of two colors) that do not use the stack and can be activated any time priority could be gained. Validate that tapping a land adds the correct mana to the pool and the land becomes tapped.
+// 18. **[ ] Cost payment engine:** Given a card's mana cost (including X costs), compute the total payment: auto-tap mana sources (lands/artifacts with mana abilities) to cover the cost when the pool alone is insufficient, allow mixed pool+cards payment, and resolve X to a chosen integer (free X spells must be handled: X=0 is a legal payment). Validate costs like `1`, `1R`, `2WW`, `X`, `XX`, and `XG` with multiple payment strategies.
+// 19. **[ ] Casting spells:** Implement casting as the complete pipeline: check timing legality (sorcery only in a main phase with an empty stack while its controller has priority; instant any time with priority), announce the spell, choose mode/X/targets, put the spell on the stack, and pay the cost. Spells that can't legally be cast (wrong timing, unpayable cost) must be rejected with a clear reason. Validate legal/illegal cast scenarios for both sorcery- and instant-speed casts.
+// 
+// #### Phase 6: Stack & Targeting
+// 20. **[ ] Stack & resolution:** Implement the stack as LIFO with spells and abilities added on top; whenever all players pass priority with the stack non-empty, resolve the topmost object and trigger any resulting abilities. When both the stack is empty and all players pass, the phase/step advances. Validate a multi-object stack resolves in reverse order with triggers firing correctly between resolutions.
+// 21. **[ ] Target selection:** Give every spell and ability that targets a declared set of target requirements (type, count, distinctness, legality); provide a targeting query that returns all legal targets and rejects illegal ones (e.g. a spell that must target a creature can't target an enchantment, a wall, or a hexproof/protected card). Validate a representative set of targeting requirements from real Alpha cards.
+// 22. **[ ] Spell resolution & fizzle:** On resolution, apply the spell/ability's effect to its chosen targets; if all its targets are illegal at resolution, the object "fizzles" (no effect, still goes to graveyard). Partially-legal targets resolve with only the legal subset affected. Validate fizzle-on-counterspell and partial-legality scenarios.
+// 
+// #### Phase 7: Abilities Framework
+// 23. **[ ] Triggered abilities:** Implement a trigger system: conditions (e.g. "whenever X attacks", "when X enters the battlefield", "at the beginning of your upkeep") that fire on game events and queue abilities onto the stack in timestamp order, with a configurable rule toggle for whether triggers use the stack or apply immediately (classic Alpha often resolves immediately — default to immediate resolution with a toggle). Validate a representative set: card draw on upkeep, damage on entering the battlefield, and death triggers.
+// 24. **[ ] Continuous effects & static abilities:** Implement static/continuous effects that modify characteristics of cards or game rules while the source is on the battlefield (e.g. global +1/+1 to a creature type, "creatures you control gain flying", "lands you control produce two mana"). Effects must re-evaluate whenever relevant objects change (entered/left battlefield, gained/lost type, controller change). Validate Crusade-style global pumps, type-based pumps, and one Lord-style card.
+// 25. **[ ] Activated abilities framework:** Implement generic activated abilities of the form "cost: effect" including `{T}` (tap permanent), mana costs, and life costs, with all relevant timings/legality rules (sick creatures can't activate `{T}` abilities, instant-speed unless the permanent says otherwise). Validate a tap-to-damage ability, a regeneration ability, and a mana-cost activated ability.
+// 26. **[ ] Damage prevention & regeneration effects:** Implement damage-prevention shields ("prevent all damage that would be dealt to/by X this turn/next time") and the regeneration process (next time the creature would die, instead remove it from combat, tap it, and remove all damage from it — and mark it "regenerated" once). Multiple overlapping prevention effects must apply one shield at a time. Validate a Circle-of-Protection-style effect and a Regeneration-style effect.
+// 
+// #### Phase 8: Combat
+// 27. **[ ] Attack declaration:** At the declare-attackers step, the active player announces a legal set of attackers: creatures they control, not sick, and not Walls, paid any "attacks" costs; tapped creatures can't attack. Unblocked attacking creatures and their damage-relevant properties (power, evasion keywords) must be tracked. Validate attack legality including summoning sickness, Walls, and tap-state restrictions.
+// 28. **[ ] Block declaration:** The defending player declares a legal set of blockers: untapped creatures they control that can block each attacker (respecting flying — a creature without flying/ability to block flying can't block a flier — and any "can't be blocked except by" rules); a single creature can block only one attacker. Attackers must be assigned the order their blockers will take damage. Validate flying/ground blocking legality and multi-blocker assignment order.
+// 29. **[ ] Combat damage & first strike:** Deal combat damage in the classic model: first-strikers deal damage first; if any creature with first strike was in combat, the survivors deal regular combat damage; each blocker deals damage to its attacker equal to its power (assigned in the declared order up to lethal for trample) and the attacker deals damage split among its blockers by its declared order. Damage is dealt simultaneously within each damage step. Validate double-blocked attacker damage division, trample remainder, and first-strike interactions.
+// 30. **[ ] Post-combat cleanup:** At end of combat, remove all attackers/blockers from combat, clear "attacked/blocked/dealt damage this turn" markers, and drop temporary combat-state references (e.g. "tapped unless dealt damage" effects resolve). Validate a full combat round leaves the board state consistent and markers cleared.
+// 
+// #### Phase 9: Life, Damage & Win/Loss
+// 31. **[ ] Damage & healing framework:** Implement dealing damage to creatures and players (including X damage, unpreventable damage, and damage from multiple sources in one event), marking damage on creatures, and healing/prevention interaction. Damage to a player reduces that player's life by the amount. Validate a Fireball-style multi-target damage event and a heal spell.
+// 32. **[ ] Life total engine:** Centralize all life changes (gain, lose, set) so every change goes through one path with history logging, prevention hooks, and a "0 or less → game loss" check. Validate that all life sources (combat damage, burn, drain spells, gain life, mana burn) update life and the log correctly.
+// 33. **[ ] State-based actions (full set):** Complete the SBA pass: creatures with toughness 0 or less are put into their owner's graveyard, creatures with lethal damage (>= toughness) are destroyed, a player at 0 or less life loses, an attempted draw from an empty library loses, and attachments whose target has left play/type are put into their owner's graveyard. Repeat until no more apply; check before each priority grant and after each resolution. Validate each SBA with a focused scenario.
+// 34. **[ ] Counters & tokens:** Implement counters (any kind, most commonly +1/+1) on permanents, adjusting power/toughness dynamically, and the creation of token permanents (name, type, P/T, abilities, color, controller) distinct from real cards. Validate +1/+1 counter math and a token-creating card (e.g. The Hive).
+// 35. **[ ] Attached permanents (Auras):** Implement cards that attach to a permanent or player (enchant creature/enchant land/artifact etc.): attaching, the "enchant" target legality at the time of casting, auto-detaching when the host becomes an illegal target (SBA), and the +1/+1 or granted-ability effects auras typically provide. Validate an enchant-creature granting an ability and its removal-from-play detachment.
+// 
+// #### Phase 10: Alpha Set Implementation
+// 36. **[ ] Card scripting DSL & per-card harness:** Define a declarative, data-driven way to express each card's abilities/effects using the frameworks from Phases 5–9 (costs, keywords, triggered/activated/continuous abilities, effect templates like "deal N damage to target creature", "draw N cards", "gain N life", "destroy target ...", "target creature gets +N/+N until end of turn"). Provide a per-card automated test harness so any card can be exercised in an isolated scenario (play card, resolve, assert outcome). Validate the DSL with several prototype cards of different types.
+// 37. **[ ] Lands:** Implement all 26 Alpha lands: the 15 basic lands (all five basics) and the 10 dual lands + Strip Mine, each as a playable card with correct mana abilities. Validate each produces the correct mana (or Strip Mine's destruction ability works).
+// 38. **[ ] Vanilla creatures:** Implement every Alpha creature with no abilities (plain power/toughness bodies) across all colors with correct mana costs, colors, and P/T. Validate that each can be cast and attacks/blocks with correct stats.
+// 39. **[ ] Creatures with static keyword abilities:** Implement every Alpha creature whose rules text is a static keyword: flying, trample, first strike, landwalk variants (islandwalk/swampwalk/etc.), protection from a color, rampage, banding, and vigilance-free vanilla-plus cases. Each keyword must behave per Alpha-era rules. Validate one card per keyword.
+// 40. **[ ] Creatures with activated abilities:** Implement every Alpha creature with an activated ability (e.g. regeneration, tap-to-deal-damage, pump abilities) using the activated-ability framework, correctly including costs and summoning sickness. Validate two representative creatures end to end.
+// 41. **[ ] Walls:** Implement all Alpha Wall creatures (defender, can't attack, often with activated abilities like "deals damage to attacking creature"). Validate that a Wall can block, never attacks, and its defensive ability functions.
+// 42. **[ ] Artifacts & artifact creatures:** Implement all Alpha artifacts and artifact creatures (e.g. Basalt Monolith, Icy Manipulator, The Hive, Jade Statue, Ornithopter, Clockwork Beast) covering mana abilities, tap abilities, continuous effects, and token creation. Validate three of different mechanics.
+// 43. **[ ] White noncreature spells:** Implement every remaining Alpha white non-creature spell (instants, sorceries, enchantments incl. auras and global effects) faithfully — e.g. Healing Salve, Holy Strength, Crusade, Wrath of God, Circle of Protection: Black, Disenchant, Karma. Validate a damage-prevention, a global-pump, and a mass-destruction card.
+// 44. **[ ] Blue noncreature spells:** Implement every remaining Alpha blue non-creature spell — e.g. Counterspell, Control Magic, Blue Elemental Blast, Unsummon, Power Sink, Steal Artifact, Copy Artifact, Magical Hack. Validate a counterspell, a control-steal, and a copy effect.
+// 45. **[ ] Black noncreature spells:** Implement every remaining Alpha black non-creature spell — e.g. Dark Ritual, Terror, Animate Dead, Mind Twist, Drain Life, Demonic Tutor, Zombify, Paralyze. Validate a ritual, a tutor, a discard effect, and an X-drain.
+// 46. **[ ] Red noncreature spells:** Implement every remaining Alpha red non-creature spell — e.g. Lightning Bolt, Fireball, Wheel of Fortune, Shatter, Stone Rain, Blood Lust, Mana Flare. Validate a direct-damage instant, a mass-draw, and a land-destruction spell.
+// 47. **[ ] Green noncreature spells:** Implement every remaining Alpha green non-creature spell — e.g. Giant Growth, Llanowar's Elves is a creature (skip), Regrowth, Naturalize-variant (Crumble), Berserk, Fog, Stream of Life, Ley Druid. Validate a pump, a fog/prevent-all-combat-damage, and a regrowth/recursion spell.
+// 48. **[ ] X-cost & variable spells:** Implement every Alpha spell with an X in its mana cost (e.g. Fireball, Drain Life, Stream of Life, Disintegrate, Power Sink, Mind Twist, X-spiral etc.) so the X engine, multi-target choices, and division of effects work end to end. Validate Fireball-style damage division across arbitrary target counts and an X-draw/X-mill case.
+// 49. **[ ] Set completeness & regression validation:** Run the automated validation sweep: all 295 cards load with zero schema violations; every card has at least one passing isolated scenario test; no card has unimplemented placeholder behavior; and a full automated "smoke match" (AI vs AI playing the complete game) completes without illegal moves, crashes, or console errors. Produce a coverage report showing 295/295 cards implemented. Fix every gap found by the sweep.
+// 
+// #### Phase 11: AI Opponent
+// 50. **[ ] AI decision framework:** Implement an AI decision layer that, given the full game state, enumerates all legal actions (play land, cast spells, activate abilities, attack/block declarations, pass priority) using the same legality functions as the human player, and selects among them via scored heuristics. Validate that every AI-chosen action passes the engine's own legality checks over many simulated turns.
+// 51. **[ ] AI land-play & casting:** Implement AI play decisions: playing a land each turn (choosing which land), casting spells from hand when it can pay and the timing is legal, preferring to keep answers (removal/counters) for player threats, and spending mana efficiently (including X spells). Validate a scripted board where the AI correctly holds removal and plays creatures on curve.
+// 52. **[ ] AI combat:** Implement AI attack and block decisions: attack to force favorable trades or lethal race, block to preserve life/board, use evasion (flying/trample) effectively, and avoid suicidal blocks except when strategically justified. Validate scenarios where blocking or not blocking is clearly better and the AI picks the better line.
+// 53. **[ ] AI stack interaction & targeting:** Implement AI responses on the stack (counter dangerous spells, kill threatening permanents, pump blockers at the right time) and sensible target selection (damage to face vs. creature, removal priorities by threat). Validate that the AI responds to an opponent's game-ending spell and correctly chooses targets.
+// 54. **[ ] AI difficulty levels & full-game integrity:** Implement at least Easy/Normal/Hard modes via strategy weights and lookahead depth, and verify a complete AI-vs-AI game finishes with a winner, all moves legal, no engine errors, and a stable frame rate. Provide a game-log export for debugging.
+// 
+// #### Phase 12: UI & Game Flow
+// 55. **[ ] Hand & battlefield rendering:** Render each player's hand (as a fan of card frames showing cost, type, rules text, P/T) and the battlefield (grouped by controller, cards shown with tap state via 90° rotation, counters and damage badges). Card faces are typographic/symbolic only — NO art images, per the Global Constraints. Cards must be clickable for selection. Validate visually and via DOM assertions that zones show correct contents after scripted game actions.
+// 56. **[ ] Card zoom & tooltips:** Hovering a card shows a large zoomed preview; clicking opens a full card viewer modal (with the original rules text and any Alpha-era reminder text). Validate zoom and viewer on a card in hand and one in play.
+// 57. **[ ] Phase & turn indicator:** Show whose turn it is, the turn number, and the current phase/step with an Alpha-themed indicator, plus clickable controls to skip passed steps and (where legal) auto-advance. Validate that the indicator updates in sync with the engine across a full turn.
+// 58. **[ ] Action panel & targeting UI:** Provide a contextual action area that always offers the legal actions for the current player/state (Pass, Done, Attack, Block, castable spells, activatable abilities), plus a targeting mode overlay that lets the player click valid targets (highlighting legal targets, dimming illegal ones) and cancels cleanly. Validate a full cast+target+resolve round using the panel.
+// 59. **[ ] HUD: life, mana & zone viewers:** Show life totals and the mana pool for both players, and provide clickable viewers for graveyard, library, and exile that list cards in order with counts. Validate that HUD numbers track engine state after damage, burns, and draws.
+// 60. **[ ] Game log:** Maintain a readable, scrollable history of every game action ("You cast Lightning Bolt targeting Goblin King", "Opponent draws a card") with color coding by player, and a clear button. Validate that a scripted game sequence produces the expected log lines in order.
+// 61. **[ ] Mulligan & opening hand:** Implement the pre-game flow: shuffle the 40-card minimum library (default 60), draw an opening hand of 7, and offer a keep/re-draw choice (optionally restricted per the Alpha-era "no mulligan" toggle; when allowed, the whole hand is returned and re-drawn). Validate keep and redraw paths.
+// 62. **[ ] Win/lose screen & restart:** Detect game end (player at 0 life, deck-out, conceded) and show an Alpha-styled victory/defeat screen with a replay/rematch button that restarts cleanly with fresh shuffled libraries. Validate both win and lose paths and the restart.
+// 63. **[ ] Responsive layout, animations & polish:** Ensure the whole UI adapts to mobile portrait and desktop, add tasteful animations (card plays, taps, damage flashes, life changes) and optional sound effects, and keep interactions snappy. Validate at desktop and mobile viewport widths with no overflow or console errors.
+// 
+// #### Phase 13: Multiplayer
+// 64. **[ ] Multiplayer architecture & lobby:** Add an online mode using the perchance server-plugin: create/join games by a 5-character room code, a lobby showing players and "N online" presence, and turn-based connection handling. Validate two browser tabs can create and join a room.
+// 65. **[ ] Networked game flow & state sync:** Sync the turn-based game between the two connected players so each player sees their own hand and the shared board, with moves relayed over the socket, priority passed correctly, and no desync after 10 scripted turns (validate by comparing snapshots). Keep server load light (client-authoritative with validation hooks).
+// 66. **[ ] Disconnect/reconnect & stability:** Handle a player disconnecting mid-game (auto-win or suspend with a reconnect grace period per a user-visible policy), reconnecting restores the game state, and abandoned games expire from the lobby. Validate a forced disconnect/reconnect cycle.
+// 67. **[ ] In-game chat & presence:** Provide a lightweight chat/emote bar during multiplayer games and an online counter on the menu, using the server-plugin's pub/sub. Validate message delivery between two connected clients.
+// 
+// #### Phase 14: Persistence & Polish
+// 68. **[ ] Save/load games:** Persist single-player game state via the kv-plugin (full snapshot from task 10) so a player can save mid-game and resume later, with a save slot list and a "load" flow. Validate save→reload→restore equality in the live app.
+// 69. **[ ] Settings & preferences:** Implement a settings menu covering the rule toggles from Phase 1 (mana burn, mulligans, autopass behavior, AI difficulty) plus sound/animations, persisted via the kv-plugin and applied immediately. Validate that each setting round-trips through a reload.
+// 70. **[ ] Rules reference:** Provide an in-app Alpha-era rules glossary explaining the vintage rules the recreation honors (damage prevention step, mana burn, banding, no mulligan option, 1st-edition timing) with short examples, accessible from the menu. Validate every glossary entry renders.
+// 71. **[ ] Final QA sweep & performance:** Run the complete end-to-end validation: full human-vs-AI and AI-vs-AI games, all 295 cards exercised, multiplayer session smoke test, save/load cycle, zero console errors or `perchanceErrors`, and smooth performance (60fps interactions, fast rendering of large boards). Produce a final sign-off report covering every phase's checklist.
+// 
+$meta
+  title = Five Realms
+  description = A complete recreation of the classic 1993 Alpha-edition trading card game — all 295 original cards, faithful vintage rules, reskinned across five realms. Playable vs AI or a friend. Built from scratch on Perchance.
+  image = https://user.uploads.dev/file/418fbb1aeab2216b90393a9b1516ca48.png
+  tags = five realms, card game, tcg, strategy, fantasy, 1993
+  header
+    mode = minimal
+
+// ─────────────────────────────────────────────────────────────
+// Boardgame Network (BGN) — Five Realms is a full part of the
+// Boardgame Network. These values drive the shared BGN chrome in
+// index.html (nav, hero, lobby, footer). The multiplayer table —
+// rooms, 5-letter codes, turn order, presence, rematch, chat,
+// leaderboard — is the BGN blank template's scaffold, adopted
+// wholesale; it is already wired up in index.html.
+// ─────────────────────────────────────────────────────────────
+hubUrl = https://perchance.org/bgn-boardgame-network     // the BGN hub — browse the shelf of network games
+projectsUrl = https://perchance.org/rathjis-generators   // "Rathji's Projects" badge (network credit)
+authorInitial = R                                        // initial shown on that badge
+gameTitle = Five Realms
+gameTagline = A complete recreation of the classic 1993 Alpha-edition trading card game — all 295 original cards, faithful vintage rules, reskinned across five realms. Duel the machine, a friend on one screen, or across the network.
+gameKicker = Duel · Conjure · Command
+gameGenre = Card game
+gamePlayers = 1–2 players
+accentColor = #D9A441
+heroImage = https://user.uploads.dev/file/7a9b9d0b346210572370175be4c89a49.png
+
+// Game configuration — user-tweakable defaults for the classic Alpha-era ruleset.
+gameConfig
+  minDeckSize = 40
+  defaultDeckSize = 60
+  openingHandSize = 7
+  maxHandSize = 7
+  maxPlayers = 2
+  startingLife = 20
+  // Rule toggles (each adjustable later from the in-app Settings menu):
+  rules
+    manaBurn = true            // unspent mana damages its owner at end of turn (classic Alpha rule)
+    allowMulligan = false      // Alpha had no mulligan; re-draws stay off unless the player enables them
+    triggerStack = false       // classic Alpha resolved many triggers immediately; modern-style stack optional
+    firstStrikeOrder = true    // Alpha first-strike damage step applies
+
+// Built-in theme accents, exposed for the UI. Realm ids are the canonical names;
+// see src/realms.js for the full realm table (domains, MTG color mapping, emblems).
+theme
+  colors
+    solara = #F8F6F0     // Order / Light    (classic white)
+    tide = #2A6CB8       // Water / Mystery  (classic blue)
+    umbra = #19161B      // Shadow / Death   (classic black)
+    ember = #C4372E      // Fire / War       (classic red)
+    verdant = #3E8E45    // Nature / Life    (classic green)
+    generic = #9B937F    // colourless
+    gold = #D9A441
+    parchment = #EDE3C9
+
+// Card-back artwork (uploaded asset — used for face-down cards / library in later phases).
+cardBackImage = https://user.uploads.dev/file/d887be97e7f7b2c004636edf81cdcde5.png
+
+// Boardgame Network multiplayer — powers the online table (rooms, turn order,
+// presence, chat, leaderboard) that index.html's BGN scaffold uses.
+createServerSocket = {import:server-plugin}
+
+// The Five Realms rules engine — Phase 1 of an MTG-compatible engine (state,
+// zones, turns, priority, mana, seeded RNG, action reducer), imported as `fr`.
+// Consume via root.fr(op, ...): "newGame" / "act" / "state" / "legalActions" /
+// "cards" / "card" / "render" / "asset" / "assets" / "gem" / "cost" / "realms" /
+// "rarities". Docs + full API table live on the plugin's own page.
+fr = {import:five-realms-plugin}

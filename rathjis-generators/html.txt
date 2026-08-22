@@ -2,6 +2,33 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
+<script type="text/x-server-plugin">
+// connection counter + heartbeat tick counter
+self.onopen = ({conn}) => {
+  conn.subscribe("conncount");
+  conn.subscribe("tickcount");
+  const dv = new DataView(state.buffer);
+  dv.setUint32(0, (dv.getUint32(0, true) || 0) + 1, true);
+  pubsub.publish("conncount", "c:" + dv.getUint32(0, true));
+};
+self.onmessage = ({conn, data}) => {
+  if (data === "tick") {
+    const dv = new DataView(state.buffer);
+    dv.setUint32(4, (dv.getUint32(4, true) || 0) + 1, true);
+    pubsub.publish("tickcount", "t:" + dv.getUint32(4, true));
+  }
+};
+self.rpc = {
+  count(data) {
+    return String(new DataView(state.buffer).getUint32(0, true) || 0);
+  },
+  ticks(data) {
+    return String(new DataView(state.buffer).getUint32(4, true) || 0);
+  }
+};
+</script>
+
+
 <style>
   :root {
     --bg: #0a0c11;
@@ -531,6 +558,7 @@
       { icon: "🔮", title: "Fnarkwarist Chronjob Console", desc: "A play-manager for a Level 17 Deep Gnome Artillerist/Chronurgy Wizard — HP, spell slots, resources, conditions, and rolls.", url: "https://perchance.org/fnarkwarist-chronjob", tags: ["dnd", "character sheet", "spelljammer"] },
       { icon: "🔍", title: "Perchance Archive Search", desc: "Full-text search across 110k+ Perchance generators — names, titles, tags, and descriptions — with one-click source-code inspection.", url: "https://perchance.org/query-archive", tags: ["search", "directory", "discover"] },
       { icon: "🧭", title: "Atomic Roadmap", desc: "Turn a high-level project concept into a granular, atomic task backlog formatted for AI coding agents — Claude Code, Cursor, Copilot — behind a strict planning-first gate.", url: "https://perchance.org/atomic-roadmap", tags: ["ai", "planning", "backlog"] },
+      { icon: "💻", title: "VS Code Web", desc: "A VS Code-style editor that runs entirely in your browser — virtual file tree, syntax highlighting, a terminal, command palette, search, and a live JavaScript runner.", url: "https://perchance.org/vs-code-web", tags: ["code editor", "vscode", "terminal"] },
       { icon: "🐉", title: "MUD / MUSH Reference Index", desc: "A searchable, filterable index of 1990s MUDs and MUSHes — ranked by how well each matches the memory of a text-only dial-up game with a dragon in a mountain.", url: "https://perchance.org/mud-mush-reference", tags: ["mud", "mush", "reference", "90s"] },
     ],
     templates: [
@@ -723,6 +751,32 @@
   tryStartMusic();
   addEventListener("pointerdown", tryStartMusic, { passive: true });
   addEventListener("keydown", tryStartMusic, { passive: true });
+
+  // server-plugin counters: connections + heartbeat ticks (tick driven by this client's 60s timer)
+  const connSocket = root.createServerSocket();
+  const connWrap = document.createElement("div");
+  connWrap.innerHTML = '<b id="connStat">–</b><span>connections</span>';
+  document.getElementById("heroStats").appendChild(connWrap);
+  const tickWrap = document.createElement("div");
+  tickWrap.innerHTML = '<b id="tickStat">–</b><span>ticks</span>';
+  document.getElementById("heroStats").appendChild(tickWrap);
+  const connStatEl = connWrap.querySelector("b");
+  const tickStatEl = tickWrap.querySelector("b");
+  function decodeMsg(data) {
+    return typeof data === "string" ? data : new TextDecoder().decode(data);
+  }
+  connSocket.addEventListener("message", e => {
+    const s = decodeMsg(e.data);
+    if (s.startsWith("c:")) connStatEl.textContent = s.slice(2);
+    else if (s.startsWith("t:")) tickStatEl.textContent = s.slice(2);
+  });
+  connSocket.opened.then(() => {
+    connSocket.rpc.count("").then(n => { connStatEl.textContent = n; });
+    connSocket.rpc.ticks("").then(n => { tickStatEl.textContent = n; });
+  }).catch(() => {});
+  setInterval(() => {
+    if (connSocket.readyState === 1) connSocket.send("tick");
+  }, 60000);
 
   // reveal on scroll
   const io = new IntersectionObserver(entries => {

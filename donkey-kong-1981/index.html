@@ -1,0 +1,159 @@
+<!-- DONKEY KONG (1981) — Full Arcade Recreation
+     Loading screen + Phase 1 framework: canvas bootstrap, input manager,
+     visual test harness, and a hidden roadmap checklist debug UI. -->
+
+<style>
+  html { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; text-align: center;
+    background: radial-gradient(1200px 620px at 50% -10%, #16224a 0%, #070b1c 55%, #04060f 100%);
+    color: #e8ecf8;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  h1 {
+    margin: 0; letter-spacing: .34em; text-transform: uppercase;
+    font-size: clamp(14px, 2.2vw, 22px); font-weight: 900; padding-top: 16px;
+    background: linear-gradient(180deg, #fff 0%, #ffd23b 42%, #e43b3b 62%, #7a1f12 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .tagline { color: #9fb0d8; font-size: 12px; margin: 7px 0 0; letter-spacing: .04em; }
+
+  #gameCtn {
+    height: calc(100vh - 128px); min-height: 320px;
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px 14px 4px;
+    position: relative;
+  }
+  #gameCanvas {
+    background: #060b22;
+    border: 2px solid #2b3a66; border-radius: 8px;
+    box-shadow: 0 0 0 1px #0a1122, 0 24px 60px rgba(0,0,0,.6);
+    image-rendering: pixelated;
+    max-width: 100%; max-height: 100%;
+  }
+  .scanlines::after {
+    content: ""; position: absolute; inset: 2px; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, transparent 1px 3px);
+    border-radius: 8px;
+  }
+
+  /* ── Roadmap debug UI ── */
+  .rm-btn {
+    position: fixed; bottom: 14px; right: 14px; z-index: 50;
+    background: #141d33; color: #cfe0ff; border: 1px solid #2b3a66; border-radius: 999px;
+    padding: 8px 14px; font-size: 12px; font-weight: 700; cursor: pointer;
+    font-family: inherit; letter-spacing: .05em;
+  }
+  .rm-btn:hover { border-color: #7c9bff; }
+  #roadmapPanel {
+    position: fixed; inset: 0; z-index: 60;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(3,6,14,.72); backdrop-filter: blur(3px);
+  }
+  #roadmapPanel[hidden] { display: none; }
+  .rm-box {
+    width: min(720px, 92vw); max-height: 82vh; overflow: auto;
+    background: #0c1226; border: 1px solid #2b3a66; border-radius: 14px;
+    padding: 18px 20px 16px; text-align: left;
+  }
+  .rm-box h2 { margin: 0 0 2px; font-size: 16px; letter-spacing: .12em; text-transform: uppercase; }
+  .rm-count { font-size: 11px; color: #7f8db3; margin: 0 0 8px; }
+  .rm-progress { height: 8px; background: #1a2340; border-radius: 999px; margin: 8px 0 4px; overflow: hidden; }
+  .rm-progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, #31c7ef, #7c9bff); transition: width .2s; }
+  .rm-phase {
+    margin: 12px 0 3px; font-size: 11.5px; font-weight: 800; color: #9fe0ff;
+    text-transform: uppercase; letter-spacing: .08em;
+  }
+  .rm-task { display: flex; gap: 9px; align-items: flex-start; padding: 4px 6px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; }
+  .rm-task:hover { background: #111a33; }
+  .rm-task input { margin-top: 3px; accent-color: #31c7ef; cursor: pointer; flex: none; }
+  .rm-task .rm-n { color: #5b6b96; font-weight: 700; min-width: 26px; }
+  .rm-task .rm-d { color: #aab7d8; }
+  .rm-task.done .rm-d { color: #7f8db3; text-decoration: line-through; }
+  .rm-close {
+    float: right; background: none; border: 1px solid #2b3a66; color: #cfe0ff;
+    border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; font-family: inherit;
+  }
+  .rm-reset { background: none; border: none; color: #ff8f7a; font-size: 11px; cursor: pointer; font-family: inherit; margin-top: 8px; text-decoration: underline; }
+</style>
+
+<h1>[title]</h1>
+<p class="tagline">[tagline]</p>
+
+<div id="gameCtn" class="scanlines"></div>
+
+<button id="rmBtn" class="rm-btn">☰ Roadmap</button>
+<div id="roadmapPanel" hidden>
+  <div class="rm-box">
+    <button id="rmClose" class="rm-close">✕</button>
+    <h2>Roadmap — Donkey Kong (1981)</h2>
+    <p class="rm-count" id="rmCount"></p>
+    <div class="rm-progress"><div id="rmBar"></div></div>
+    <div id="rmList"></div>
+    <button id="rmReset" class="rm-reset">Reset local progress</button>
+  </div>
+</div>
+
+<script src="src/roadmap.js"></script>
+<script src="src/game.js"></script>
+<script>
+  // ── Roadmap debug UI: render tasks from src/roadmap.js, persist to localStorage ──
+  (function () {
+    const KEY = "dkRoadmapProgress";
+    let prog = {};
+    try { prog = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) {}
+
+    // Seed completion from the roadmap data (mirrors [x] in main.pjs) on first run.
+    if (!localStorage.getItem(KEY)) {
+      for (const p of window.ROADMAP.phases) {
+        for (const t of p.tasks) if (t.done) prog[t.num] = true;
+      }
+    }
+
+    const panel = document.getElementById("roadmapPanel");
+    const listEl = document.getElementById("rmList");
+    const barEl = document.getElementById("rmBar");
+    const countEl = document.getElementById("rmCount");
+
+    function render() {
+      listEl.textContent = "";
+      let done = 0, total = 0;
+      for (const p of window.ROADMAP.phases) {
+        const ph = document.createElement("div");
+        ph.className = "rm-phase";
+        ph.textContent = "Phase " + p.number + " — " + p.name;
+        listEl.appendChild(ph);
+        for (const t of p.tasks) {
+          total++;
+          const checked = !!prog[t.num];
+          if (checked) done++;
+          const row = document.createElement("label");
+          row.className = "rm-task" + (checked ? " done" : "");
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = checked;
+          cb.addEventListener("change", function () {
+            if (cb.checked) prog[t.num] = true; else delete prog[t.num];
+            localStorage.setItem(KEY, JSON.stringify(prog));
+            render();
+          });
+          const n = document.createElement("span"); n.className = "rm-n"; n.textContent = t.num + ".";
+          const d = document.createElement("span"); d.className = "rm-d"; d.textContent = t.title + " — " + t.desc;
+          row.appendChild(cb); row.appendChild(n); row.appendChild(d);
+          listEl.appendChild(row);
+        }
+      }
+      barEl.style.width = (total ? Math.round(done / total * 100) : 0) + "%";
+      countEl.textContent = done + " / " + total + " tasks complete";
+    }
+
+    document.getElementById("rmBtn").addEventListener("click", function () { panel.hidden = false; render(); });
+    document.getElementById("rmClose").addEventListener("click", function () { panel.hidden = true; });
+    document.getElementById("rmReset").addEventListener("click", function () {
+      prog = {}; localStorage.removeItem(KEY); render();
+    });
+    panel.addEventListener("click", function (e) { if (e.target === panel) panel.hidden = true; });
+
+    render();
+  })();
+</script>

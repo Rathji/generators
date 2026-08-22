@@ -1,0 +1,82 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// Perchance Generator Analytics Dashboard
+//
+// Scans every generator listed on https://perchance.org/generators (via the
+// same /api/getGeneratorList endpoint that page uses), classifies each one
+// into a category, persists the results (kv-plugin), and renders an analytics
+// dashboard using the data-visualization-plugin's `charts` API.
+//
+// INCREMENTAL UPDATES: on every refresh, each generator is compared against
+// the stored snapshot. New generators are classified; generators whose
+// lastEditTime changed are re-classified and re-stored; generators that only
+// changed views get just their view count/views-gained updated; everything
+// else is left untouched. Only changed views/attributes are written back.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── FEATURE ROADMAP (todo list — tick a box when the feature ships) ──────────
+featureTodo
+  ✅ 1. Snapshot history / time-series — keep the last N snapshots (not just one) so views, gains and category counts trend over days/weeks; add "Trends" charts
+  ✅ 2. Watchlist + change alerts — pin any generators; toast/badge when a watched gen is edited or jumps in views; "movers" row highlight
+  ✅ 3. Rankings with deltas — rank positions (and per-category) with ↑/↓ vs last scan; biggest risers/fallers
+  ✅ 4. Shareable filtered links — URL query params (cat, q, adult, sort) that open a pre-filtered view; wire into dynamic metadata for proper share titles and descriptions
+  ✅ 5. Generator comparison — select 2-5 generators, compare stats side-by-side + overlaid trend chart
+  ✅ 6. Thumbnail lightbox + gallery mode — click any thumbnail for full-size preview; grid/browse view toggle alongside the table
+  ⬜ 7. CSV/JSON export of the table — export current filtered/sorted view (not just markdown); optional auto-refresh on load with "data fresh as of…" note
+  ⬜ 8. Interactive charts ↔ table linkage — hover tooltips with exact values; click a bar/slice to filter the table to that category
+  ⬜ 9. AI insights digest — "Today in generators" summary via generateText (top gainers, notable new gens, category shifts); AI-assisted category suggestions
+  ⬜ 10. Keep departed generators in history — flag removed gens (darklingslop, ChatNEX vanished silently) as "removed" instead of dropping them, so rankings/history stay consistent
+
+kv = {import:kv-plugin}
+rathji = {import:rathji-template}
+
+$meta
+  title = Perchance Generator Analytics Dashboard
+  description = Automatically scans every generator on the Perchance generators page, classifies them into categories, and visualizes the results — category shares, top generators, activity over time, tag frequency, view counts and more. Refreshing only re-processes generators that actually changed.
+  tags = dashboard, analytics, charts, statistics, categories, generators, data-visualization, perchance
+
+  // Shareable filtered links: ?cat=&q=&adult=&sort= open a pre-filtered view
+  // (the dashboard reads them on load). This dynamic metadata gives shared
+  // links proper titles/descriptions in embeds and the listing page. Self-
+  // contained by design — the sandbox has none of the generator's scope.
+  async dynamic(inputs) =>
+    const p = inputs.urlParams || {};
+    const q = typeof p.q === "string" ? p.q.trim().slice(0, 100) : "";
+    const cat = typeof p.cat === "string" ? p.cat.trim().slice(0, 40) : "";
+    const adult = typeof p.adult === "string" ? p.adult.trim().slice(0, 12) : "";
+    const sort = typeof p.sort === "string" ? p.sort.trim().slice(0, 24) : "";
+    if (!q && !cat && !adult) return {};
+    const catNames = { games: "Games & RPGs", ai: "AI & Chat", art: "Art & Images", writing: "Writing & Stories", names: "Names & Words", music: "Music & Audio", people: "People & Roleplay", world: "Worldbuilding", tools: "Utilities & Tools", web: "Web & Templates", fun: "Quizzes & Fun", nature: "Nature & Animals", data: "Data & Math", food: "Food & Drink", other: "Everything Else" };
+    const bits = [];
+    if (cat === "__adult_explicit") bits.push("explicit content");
+    else if (cat === "__adult_mature") bits.push("mature content");
+    else if (cat === "__watched") bits.push("watched generators");
+    else if (cat === "__movers") bits.push("rank movers");
+    else if (catNames[cat]) bits.push(catNames[cat]);
+    else if (cat) bits.push("a custom category");
+    if (adult === "explicit") bits.push("explicit content");
+    else if (adult === "mature") bits.push("mature content");
+    if (q) bits.push("matching \"" + q + "\"");
+    let label = bits.join(", ") || "a filtered view";
+    let title = "Perchance Analytics — " + label;
+    if (title.length > 80) title = title.slice(0, 77) + "…";
+    let description = "Generator analytics filtered to " + label + (sort ? " · sorted by " + sort : "") + ": category shares, top generators, rank movers, activity and trends across every generator on Perchance.";
+    if (description.length > 300) description = description.slice(0, 297) + "…";
+    return { title: title, description: description };
+  header
+    mode = minimal
+
+// ─────────────────────────────────────────────────────────────────────────────
+// data-visualization-plugin — imported as `charts` (published plugin).
+// API: charts.bar(data, opts) · charts.line · charts.pie · charts.donut ·
+// charts.histogram · charts.timeSeries — every function returns inline <svg>.
+// Data shapes: numbers, [{label, value}], [{label, key1, key2}],
+// {labels:[...], series:[...]}, or distribution objects.
+// NOTE: the plugin's $output is a callable FUNCTION, and Perchance's function
+// wrapping strips its .bar/.line/... properties — so this `charts` binding is
+// only the plugin's import hook (it loads the plugin). The dashboard reads the
+// full API object from the plugin's `window.__chartsApi` global, which the
+// plugin sets when it loads. Chart labels wrap/truncate inside the viewBox
+// since data-visualization-plugin v1.1.0's label-wrapping update.
+// ─────────────────────────────────────────────────────────────────────────────
+
+charts = {import:data-visualization-plugin}

@@ -1,0 +1,99 @@
+# ─────────────────────────────────────────────────────────────
+#  OUTBREAK PROTOCOL — task backlog
+#  Generated with the atomic-roadmap methodology: a strict
+#  planning-first backlog for building a complete recreation of
+#  Pandemic (co-op, 2–4 players) as a Perchance generator.
+#
+#  Each task is atomic: a single capability with explicit inputs,
+#  outputs and thresholds. Implement ONLY the first `[ ]` task,
+#  validate it, tick it `[x]`, then stop for review.
+#
+#  Rules cross-checked against the official Z-Man rulebook
+#  (Pandemic 2024 reprint): 48 city cards, 24 cubes/color,
+#  6 research stations, 7 role cards, 5 event cards, difficulty =
+#  4 (Introductory) / 5 (Standard) / 6 (Heroic) epidemic cards.
+# ─────────────────────────────────────────────────────────────
+
+#### Phase 1: [Core Foundation Domain]
+1. **[x] Model the city network:** Define static data for all 48 Pandemic cities, each with {name, color (blue|yellow|black|red), mapX, mapY, links[]}, exposed as root.world; provide byName(name) lookup and validation that exactly 48 cities exist, every link resolves to an existing city, and all links are bidirectional.
+2. **[x] Model disease state:** Four disease objects keyed by color, each tracking cubeSupply (start 24), cured (false), eradicated (false); provide addCube(color) which decrements supply without going below 0 and flags the exact moment supply reaches 0.
+3. **[x] Model player state:** Each player as {name, role, color, location, hand[], actions (start 4), isBot, isTurn}; provide startTurn(player) that resets actions to 4 and applies the Medic's cured-disease auto-clear when that role is active.
+4. **[x] Model board features:** Cities hold per-color cube stacks (0–3) and an optional research-station flag; global outbreakCounter (start 0, max 8) and infectionRate (start 2, max 4); provide per-disease total board-cube counts and station lookup.
+
+#### Phase 2: [Card & Deck Systems]
+5. **[x] Implement a deck primitive:** A Stack class over arrays with draw(n), drawBottom(n), push, pop, shuffle(seed), top(), bottom(), size(), shared by player and infection decks; wrap Math.random with a seedable PRNG (mulberry32) so a given seed reproduces identical shuffle and draw order.
+6. **[x] Build the player deck:** 48 city cards (one per city, colored by city: 13 blue / 12 yellow / 11 black / 12 red) plus 5 event cards, shuffled once, then divided into as many face-down piles as the chosen epidemic count (4/5/6), each pile as equal in size as possible; shuffle 1 epidemic card into each pile and stack the piles with smaller ones on the bottom, so one epidemic lands in each deck segment.
+7. **[x] Build the infection deck:** 48 infection cards (one per city, colored by city: 13 blue / 12 yellow / 11 black / 12 red) seeded-shuffled; provide infect(card, n) that places n cubes on the card's city (consuming supply, respecting the 3-cube cap and eradicated-disease immunity), delegating outbreak chaining and loss checks to the Phase 4 engine hooks.
+8. **[x] Implement infection-draw semantics:** drawInfection(rate) takes `rate` cards from the top of the infection deck, infects each exactly once, then appends them to the infection discard pile; an emptied deck mid-draw resolves remaining cards without error.
+9. **[x] Implement full game setup:** setupGame({numPlayers, humanCount, seed, difficulty}) composes the city network, deals roles without duplicates from the 7 role cards, deals starting hands (4/3/2 city cards for 2/3/4 players), places the first research station in Atlanta, positions pawns, builds both decks per tasks 6–7, and runs the standard initial infection (3 cards × 3 cubes, then 3 × 2, then 3 × 1 = 18 cubes on 9 cities); identical seeds always produce identical starting states.
+
+#### Phase 3: [Turn & Action System]
+10. **[x] Build the action framework:** Register each action as {id, legal(ctx)→null|reason, apply(ctx)}; the turn controller validates, applies, decrements player.actions, and appends a log entry for every applied action; a turn ends when actions hit 0 or the player passes.
+11. **[x] Implement Drive/Ferry:** Move the acting pawn to any city linked to the current one; costs 1 action; illegal when the destination is not in the current city's links.
+12. **[x] Implement Direct Flight:** Discard the destination city's card from hand to move the pawn there; costs 1 action; illegal when that card is absent from hand.
+13. **[x] Implement Charter Flight:** Discard the current city's card from hand to move the pawn to any city; costs 1 action; illegal when the current city's card is absent from hand.
+14. **[x] Implement Shuttle Flight:** Move the pawn between any two cities that both have research stations; costs 1 action; illegal when either endpoint lacks a station.
+15. **[x] Implement Treat Disease:** Remove 1 cube of a chosen color from the current city; costs 1 action; legal only when that color has at least 1 cube there; if that color has been cured, remove ALL cubes of that color in one action; removing the last cube of a cured disease eradicates it (per task 25).
+16. **[x] Implement Build Research Station:** Discard the current city's card and place a station in the current city; costs 1 action; illegal when a station already exists there; if all 6 stations are already on the board, an existing station is moved instead.
+17. **[x] Implement Share Knowledge:** Give or take the city card matching the current city between the acting pawn and another pawn in the same city; costs 1 action; legal only when the donor holds that exact card, both pawns co-locate, and both players agree.
+18. **[x] Implement Discover Cure:** At a city with a research station, discard 5 city cards of one color to mark that disease cured; costs 1 action; illegal when fewer than 5 matching cards are held or the disease is already cured.
+19. **[x] Implement the draw phase:** After actions, draw 2 player cards; if fewer than 2 cards remain at draw time the game is lost; a hand of more than 7 player cards (city AND event cards both count) at any point requires discarding cards or playing events down to 7.
+20. **[x] Implement full turn sequencing:** A complete turn runs actions → draw phase (epidemics resolved as interrupts) → infection phase at the current infection rate (skipped while One Quiet Night is active), then advances to the next player; the sequence passes an integration test over seeded multi-turn games.
+
+#### Phase 4: [Outbreaks, Eradication & Loss Conditions]
+21. **[x] Implement single-city infection:** Infecting a city with 0–2 cubes adds 1 cube; infecting a city with 3 cubes triggers the outbreak path instead and leaves the city at 3 cubes; eradicated diseases place no cubes at all.
+22. **[x] Implement chain outbreaks:** An outbreak adds 1 cube to every linked city; any city reaching 4 cubes during the event also outbreaks, but each city may outbreak at most once per event (visited set); every outbreak increments the global outbreak counter and resolution is depth-first so all branches complete before the infection draw continues.
+23. **[x] Implement the cube-supply loss:** Whenever a cube must be placed but that disease's supply is 0, the game is lost immediately, even mid-chain.
+24. **[x] Implement the 8-outbreak loss:** The moment the outbreak counter reaches 8, the game ends in defeat regardless of remaining actions.
+25. **[x] Implement eradication:** A cured disease with zero cubes on the board becomes eradicated (cure marker flipped); eradicated diseases never add cubes during infection draws or epidemics and are exempt from re-infection for the rest of the game.
+
+#### Phase 5: [Roles & Powers]
+26. **[x] Implement the Medic:** The Treat action removes ALL cubes of one color from the Medic's city (even when not cured); if a disease has been cured, he automatically removes all cubes of that color from a city simply by entering it or being there (free, any turn), and prevents cubes of cured diseases from being placed in his location.
+27. **[x] Implement the Scientist:** Discover Cure requires discarding only 4 same-color city cards instead of 5; all other cure rules (station required, 1 action) are unchanged.
+28. **[x] Implement the Researcher:** When Sharing Knowledge, the Researcher may give ANY city card from hand (not only the card matching the current city), on either player's turn; a player Sharing Knowledge with her may also take any 1 of her cards; the receiving pawn must still be in the same city.
+29. **[x] Implement the Operations Expert:** Build Research Station costs no city-card discard; once per turn, discard any city card to move from any research-station city to any city (each use still costs 1 action).
+30. **[x] Implement the Dispatcher:** May spend actions to move ANY pawn as if it were his own (Drive, Direct, Charter, Shuttle and station-move costs unchanged, discarding from his own hand); once per turn, as an action, may move any pawn to a city containing another pawn; may not use the Operations Expert's special move for a moved pawn.
+31. **[x] Implement the Quarantine Specialist:** Prevents both disease-cube placements and outbreaks in the city she occupies and all cities connected to it (does not affect setup-time infection or the Medic's prevent rule stacking).
+32. **[x] Implement the Contingency Planner:** As an action, take any event card from the Player Discard Pile and store it on the role card (max 1 stored at a time, not part of the hand); when the stored event is played, remove it from the game instead of discarding it.
+
+#### Phase 6: [Event Cards & Turn Log]
+33. **[x] Implement Airlift:** Playable once per turn; move any pawn to any city immediately with no action cost and no card discard (get permission before moving another player's pawn).
+34. **[x] Implement Government Grant:** Playable once per turn; place a research station in any city with no card discard.
+35. **[x] Implement One Quiet Night:** Playable once per turn; sets a flag that skips the next infection phase entirely (including the infection phase of the turn on which it is played).
+36. **[x] Implement Resilient Population:** Playable once per turn (including between the Infect and Intensify steps of an epidemic); choose any card in the infection discard pile and remove it from the game permanently.
+37. **[x] Implement Forecast:** Playable once per turn; draw the top 6 infection cards, reveal them to the team, and replace them on top of the deck in any chosen order.
+38. **[x] Implement event-card lifecycle:** Event cards live in hands alongside city cards, are playable at any time except between drawing and resolving a card, are discarded to the Player Discard Pile after use (or removed from game when played via the Contingency Planner), count toward the 7-card hand limit, and do not draw replacements.
+39. **[x] Implement the turn log:** Every applied action, draw, infection, outbreak, epidemic, event, and game-state change appends a timestamped entry tagged with role/player color; the log renders oldest→newest and is capped at the last 200 entries.
+
+#### Phase 7: [Bots & Setup Modes]
+40. **[x] Build the bot action engine:** A bot controller enumerates all legal actions for a state, scores them with heuristics (treat highest-cube cities first, then move toward hotspots, build stations in high-value cure cities, share/take cards that complete cures), and executes up to 4 actions per turn.
+41. **[x] Implement bot difficulty presets:** Easy picks mostly random legal actions; Normal applies the greedy heuristic in order; Hard re-orders heuristics to prioritize completing a cure before epidemic pressure builds and to pre-position for known epidemic timing.
+42. **[x] Build the setup/lobby UI:** A pre-game screen to choose player count (2–4), which seats are human vs bot, bot difficulty, event-card inclusion, difficulty (4/5/6 epidemics), and an optional seed; starting a game calls setupGame with those choices.
+43. **[x] Implement seeded reproducible setups:** The seed is echoed in the URL (?seed=...) so a shared link reproduces the identical shuffle order, roles, and initial infection for the same player count.
+
+#### Phase 8: [End-Game Resolution]
+44. **[x] Implement victory resolution:** When the 4th disease is cured, the game transitions to a victory state with a summary of turns taken, outbreaks suffered, cures found, and eradicated diseases.
+45. **[x] Implement defeat resolution:** Any of the three loss conditions (8 outbreaks, unable to place cubes actually needed, fewer than 2 cards at draw time) transitions to a defeat state naming the exact cause.
+46. **[x] Build the debrief screen:** A post-game overlay showing the cause, final board snapshot (outbreaks, infection rate, cube counts, cured/eradicated diseases) and New Game / Replay (same seed) / Lobby buttons.
+
+#### Phase 9: [UI / UX]
+47. **[x] Render the world board:** An SVG/canvas map drawing all 48 cities at their coordinates with adjacency routes, per-city cube stacks (max 3), research stations, pawns, and clickable city targeting.
+48. **[x] Build the player HUD:** A panel showing the active player's role, 4 action pips (depleted as actions are spent), current city, and hand rendered as clickable card tiles.
+49. **[x] Build the global trackers:** A visible strip with the infection rate (2→4), outbreak counter (0→8 with danger styling past 5), and the four disease cure/eradicated markers.
+50. **[x] Build the action UI:** Buttons for each legal action type, enabled only when currently legal (disabled state shows the reason on hover/tooltip), plus Pass/End Turn; chosen cards are highlighted before confirm.
+51. **[x] Build event-card play UI:** Event cards present a "Play" affordance usable outside the player's turn; played events resolve immediately and the card leaves the game.
+52. **[x] Build turn & phase indicators:** A banner showing whose turn, the active phase (Actions / Draw / Infection), bot turns auto-playing with a readable delay, and a log entry per phase change.
+53. **[x] Build end screens:** Victory/defeat overlays with the Phase 8 summaries, animated reveal, and replay/lobby actions.
+54. **[x] Make the layout responsive:** The board scales to fit the viewport with a collapsible side panel under 900px, legible text sizes, and tap-target-sized buttons for touch.
+
+#### Phase 10: [Multiplayer & Persistence]
+55. **[x] Implement online co-op rooms:** server-plugin rooms (create/join by code) where one connection acts as the authoritative game host: the acting player submits the full serialized game snapshot via the move RPC and the host echoes it to all members after validation.
+56. **[x] Implement presence & reconnect:** Room members see who is connected/disconnected, rejoining players receive the current snapshot on (re)connect, and a lone host can claim the table when teammates leave.
+57. **[x] Implement save/load with kv:** The full game state serializes to JSON; auto-save after every action and infection event into a per-user kv folder; a Continue button restores and resumes the saved game.
+58. **[x] Implement share links:** A Copy-Link button produces a URL carrying the seed and player count that starts the identical setup for a group.
+
+#### Phase 11: [Polish]
+59. **[x] Add audio:** WebAudio-synthesized SFX for cube placement, outbreak rumble, cure chime, epidemic sting, and win/lose themes, with a mute toggle (default on) and volume control.
+60. **[x] Add animations:** Pawn movement tweens, cube-pop on infection, outbreak pulse rings, card deal/draw animations, and infection-rate increments, all respecting prefers-reduced-motion.
+61. **[x] Add onboarding & rules:** A first-time tutorial overlay (goal, the 4 action categories, the infection/outbreak loop, win/loss) plus a persistent Rules modal covering all 7 roles, 5 events, and edge-case rulings.
+62. **[x] Add official difficulty presets:** Introductory (4 epidemic cards), Standard (5 epidemic cards), Heroic (6 epidemic cards), selectable in the lobby and fed to setupGame as the epidemic count.

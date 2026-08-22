@@ -1,0 +1,857 @@
+<!-- Interactive voice assistant demo for the voice-tools-plugin.
+     Vendor copy of the plugin lives in src/voice-tools-plugin.js and
+     exposes window.__voiceToolsPluginApi; if main.pjs ever restores the
+     real plugin, getApi() below picks it up first and this copy is a no-op. -->
+
+<script src="src/voice-tools-plugin.js"></script>
+
+<style>
+  :root {
+    --bg: #f4f5fa; --panel: #ffffff; --ink: #1b1e2b; --muted: #6b7280;
+    --accent: #5b5bd6; --accent-ink: #fff; --user-bubble: #dcdcff;
+    --asst-bubble: #eceef3; --line: #e2e4ec; --red: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12141c; --panel: #1a1d29; --ink: #e7e9f2; --muted: #9aa1b2;
+      --user-bubble: #34366e; --asst-bubble: #232735; --line: #2b3040;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { text-align: left; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .app { max-width: 1100px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; padding: 14px 16px 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 2px 10px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 16px; margin: 0; }
+  .tagline { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .statusbar { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  #speakingEl { color: var(--accent); }
+  main { flex: 1; display: flex; gap: 14px; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .panel-chat { flex: 3; }
+  .panel-todo { flex: 2; }
+  .chat-scroll { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 85%; padding: 9px 13px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .bubble.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
+  .bubble.assistant { align-self: flex-start; background: var(--asst-bubble); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bubble.live::after { content: "▋"; color: var(--muted); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  #textInput { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); font-size: 14px; min-width: 0; }
+  #textInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  button { font: inherit; cursor: pointer; }
+  .mic-btn { border: none; border-radius: 10px; background: var(--accent); color: var(--accent-ink); padding: 10px 14px; font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .mic-btn.listening { background: var(--red); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .72; } }
+  #sendBtn { border: none; border-radius: 10px; background: var(--ink); color: var(--bg); padding: 10px 16px; font-weight: 600; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 12px 10px; }
+  .chip { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 6px 12px; font-size: 12.5px; }
+  .chip:hover { color: var(--accent); border-color: var(--accent); }
+  .todo-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .count { color: var(--muted); font-size: 13px; flex: 1; }
+  .ghost { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+  .ghost:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+  .ghost:disabled { opacity: .45; cursor: default; }
+  .todo-list { list-style: none; margin: 0; padding: 8px 10px; overflow-y: auto; flex: 1; }
+  .todo-row { display: flex; align-items: center; gap: 10px; padding: 8px 8px; border-radius: 9px; }
+  .todo-row:hover { background: var(--bg); }
+  .todo-num { color: var(--muted); font-size: 13px; min-width: 22px; text-align: right; }
+  .todo-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
+  .todo-text { flex: 1; font-size: 14px; word-break: break-word; }
+  .todo-row.done .todo-text { text-decoration: line-through; color: var(--muted); }
+  .todo-x { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; }
+  .todo-x:hover { color: var(--red); background: var(--bg); }
+  .todo-edit-btn { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; }
+  .todo-edit-btn:hover { color: var(--accent); background: var(--bg); }
+  .todo-edit { flex: 1; padding: 5px 8px; border: 1px solid var(--accent); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 14px; min-width: 0; }
+  .todo-edit:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  .empty-note { color: var(--muted); font-size: 13.5px; text-align: center; padding: 24px 12px; }
+  .notice { color: var(--muted); font-size: 12.5px; padding: 2px 12px 10px; }
+  @media (max-width: 880px) {
+    .app { height: auto; min-height: 100vh; }
+    main { flex-direction: column; }
+    .panel-chat { min-height: 60vh; }
+    .panel-todo { min-height: 40vh; }
+  }
+</style>
+
+<div class="app">
+  <header>
+    <div>
+      <h1>AI Voice Assistant</h1>
+      <div class="tagline">a TODO list you manage by voice — demo of the voice-tools-plugin</div>
+    </div>
+    <div class="statusbar">
+      <span id="speakingEl" hidden>🔊 Speaking…</span>
+      <span id="statusEl">type below, or tap 🎤 to talk</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel panel-chat">
+      <div class="chat-scroll" id="chatScrollEl"></div>
+      <div class="input-row">
+        <button id="micBtn" class="mic-btn">🎤 Talk</button>
+        <input id="textInput" type="text" placeholder="Type a command… e.g. “add buy milk and eggs”" autocomplete="off">
+        <button id="sendBtn">Send</button>
+      </div>
+      <div class="chips" id="chipsCtn"></div>
+      <div class="notice" id="voiceNoticeEl" hidden></div>
+    </section>
+
+    <section class="panel panel-todo">
+      <div class="todo-head">
+        <h2>My To-dos</h2>
+        <span class="count" id="countEl"></span>
+        <button id="clearAllBtn" class="ghost">Clear all</button>
+      </div>
+      <ul class="todo-list" id="todoListEl"></ul>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+
+  // ============ plugin access (runs after main.pjs is evaluated) ============
+  function getApi() {
+    if (window.__voiceToolsPluginApi) return window.__voiceToolsPluginApi;
+    try { if (typeof root !== "undefined" && root && root.$output) { root.$output; } } catch (e) {}
+    return window.__voiceToolsPluginApi || null;
+  }
+  const tts = getApi();
+
+  const VOICE_NAME = "British Lady";
+  const VOICE_RATE = 1.05;
+  const STORAGE_KEY = "vtAssistant_todos";
+
+  // ============ DOM ============
+  const chatScrollEl = document.getElementById("chatScrollEl");
+  const micBtn = document.getElementById("micBtn");
+  const textInput = document.getElementById("textInput");
+  const sendBtn = document.getElementById("sendBtn");
+  const chipsCtn = document.getElementById("chipsCtn");
+  const todoListEl = document.getElementById("todoListEl");
+  const countEl = document.getElementById("countEl");
+  const clearAllBtn = document.getElementById("clearAllBtn");
+  const speakingEl = document.getElementById("speakingEl");
+  const statusEl = document.getElementById("statusEl");
+  const voiceNoticeEl = document.getElementById("voiceNoticeEl");
+
+  // ============ state ============
+  let todos = [];
+  let busy = false;
+  let pending = [];
+  let micMode = false;
+  let recognition = null;
+  let restartTimer = null;
+  let liveEl = null;
+  let nativeVoiceFallback = null;
+  let pendingEdit = null;
+
+  function loadTodos() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) todos = arr.filter(t => t && typeof t.text === "string");
+      }
+    } catch (e) {}
+  }
+
+  function saveTodos() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(todos.map(t => ({ text: t.text, done: !!t.done, created: t.created || Date.now() }))));
+    } catch (e) {}
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  function addBubble(role, text) {
+    const div = document.createElement("div");
+    div.className = "bubble " + role;
+    div.innerHTML = escapeHtml(text);
+    chatScrollEl.appendChild(div);
+    chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+    return div;
+  }
+
+  function renderInterim(text) {
+    if (!liveEl || !liveEl.isConnected) {
+      liveEl = addBubble("user");
+      liveEl.classList.add("live");
+    }
+    liveEl.textContent = text;
+    chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+  }
+
+  function commitVoiceBubble(finalText) {
+    if (liveEl && liveEl.isConnected) {
+      liveEl.textContent = finalText;
+      liveEl.classList.remove("live");
+    } else {
+      addBubble("user", finalText);
+    }
+    liveEl = null;
+  }
+
+  function renderTodos() {
+    const open = todos.filter(t => !t.done).length;
+    countEl.textContent = open + " open · " + todos.length + " total";
+    todoListEl.innerHTML = "";
+    if (!todos.length) {
+      const li = document.createElement("li");
+      li.className = "empty-note";
+      li.textContent = "Nothing here yet. Say or type “add buy milk” to get started.";
+      todoListEl.appendChild(li);
+    }
+    todos.forEach((t, i) => {
+      const li = document.createElement("li");
+      li.className = "todo-row" + (t.done ? " done" : "");
+      const num = document.createElement("span");
+      num.className = "todo-num";
+      num.textContent = (i + 1) + ".";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!t.done;
+      cb.title = "Mark done";
+      cb.addEventListener("change", () => { t.done = cb.checked; saveTodos(); renderTodos(); });
+      const label = document.createElement("span");
+      label.className = "todo-text";
+      label.textContent = t.text;
+      label.title = "Double-click to edit";
+      label.addEventListener("dblclick", () => startInlineEdit(li, t, label, i));
+      const ed = document.createElement("button");
+      ed.className = "todo-edit-btn";
+      ed.textContent = "✎";
+      ed.title = "Edit";
+      ed.addEventListener("click", () => startInlineEdit(li, t, label, i));
+      const del = document.createElement("button");
+      del.className = "todo-x";
+      del.textContent = "✕";
+      del.title = "Delete";
+      del.addEventListener("click", () => { todos.splice(i, 1); saveTodos(); renderTodos(); });
+      li.append(num, cb, label, ed, del);
+      todoListEl.appendChild(li);
+    });
+    clearAllBtn.disabled = !todos.length;
+  }
+
+  function startInlineEdit(li, t, label, i) {
+    if (li.querySelector(".todo-edit")) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "todo-edit";
+    input.value = t.text;
+    input.title = "Enter to save, Esc to cancel";
+    li.replaceChild(input, label);
+    input.focus();
+    input.select();
+    let finished = false;
+    const finish = (save) => {
+      if (finished) return;
+      finished = true;
+      const v = input.value.trim();
+      if (save && v && v !== t.text) { t.text = v; saveTodos(); }
+      renderTodos();
+    };
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") finish(true);
+      else if (e.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+
+  // ============ TTS helpers ============
+  async function pickNativeVoice() {
+    if (nativeVoiceFallback) return nativeVoiceFallback;
+    try {
+      const voices = await tts.voices;
+      const en = voices.filter(v => v.source === "native" && (v.lang || "").toLowerCase().startsWith("en"));
+      nativeVoiceFallback = en[0] || null;
+    } catch (e) {}
+    return nativeVoiceFallback;
+  }
+
+  async function speakReply(text) {
+    if (!tts || !tts.supported || !text || !text.trim()) return;
+    speakingEl.hidden = false;
+    try {
+      await tts(text, { voice: VOICE_NAME, rate: VOICE_RATE });
+    } catch (e) {
+      try {
+        const fallback = await pickNativeVoice();
+        if (fallback) await tts(text, { voice: fallback, rate: VOICE_RATE });
+      } catch (e2) {}
+    }
+    speakingEl.hidden = true;
+  }
+
+  // ============ intent parser (voice + typed share this) ============
+  const normalize = s => String(s || "").toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
+
+  const ORDINALS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10 };
+
+  function lcs(a, b) {
+    const m = a.length, n = b.length;
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    let best = 0;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        if (a[i - 1] === b[j - 1]) {
+          dp[i][j] = dp[i - 1][j - 1] + 1;
+          if (dp[i][j] > best) best = dp[i][j];
+        }
+      }
+    }
+    return best;
+  }
+
+  function findBestTask(phrase) {
+    const p = phrase.toLowerCase().replace(/[^a-z0-9 ]+/g, "").trim();
+    if (!p) return null;
+    let best = null;
+    for (let i = 0; i < todos.length; i++) {
+      const title = todos[i].text.toLowerCase().replace(/[^a-z0-9 ]+/g, "");
+      let score = 0;
+      if (title.includes(p)) score = 20 + p.length;
+      else if (p.includes(title) && title.length >= 2) score = 10 + title.length;
+      else {
+        const common = lcs(title, p);
+        if (common >= 3 && common >= Math.min(title.length, p.length) * 0.5) score = 10 + common;
+      }
+      if (score > (best ? best.score : 0)) best = { index: i, score };
+    }
+    if (!best || best.score < 12) return null;
+    return best;
+  }
+
+  function splitAdd(s) {
+    return s
+      .split(/\s*,\s*|\s+and\s+|\s*;\s*|\n/)
+      .map(x => x.replace(/^[^a-z0-9]+|[^a-z0-9!?.]+$/gi, "").trim())
+      .filter(x => x.length > 0);
+  }
+
+  function buildEdit(targetText, newText) {
+    const clean = newText == null ? null : newText.replace(/[.!?]+$/, "").trim();
+    const target = targetText.trim();
+    return { intent: "edit", target: parseDeleteTarget(target) || { kind: "fuzzy", text: target }, newText: clean || null };
+  }
+
+  const EDIT_SEPS = [" to read ", " to say ", " to ", " into ", " as ", " with "];
+
+  function targetBonus(s) {
+    const t = parseDeleteTarget(s);
+    if (!t) return 0;
+    if (t.kind === "index" || t.kind === "ordinal") return 100;
+    if (t.kind === "last") return 80;
+    return 0;
+  }
+
+  function splitEditPhrase(phrase) {
+    let best = null;
+    for (const sep of EDIT_SEPS) {
+      let idx = phrase.indexOf(sep);
+      while (idx !== -1) {
+        const left = phrase.slice(0, idx).trim();
+        const right = phrase.slice(idx + sep.length).trim();
+        if (left && right) {
+          const m = findBestTask(left);
+          const score = targetBonus(left) + (m ? m.score : 0);
+          if (!best || score > best.score) best = { left, right, score };
+        }
+        idx = phrase.indexOf(sep, idx + 1);
+      }
+    }
+    return best;
+  }
+
+  function parseDeleteTarget(s) {
+    s = s.trim();
+    if (!s) return null;
+    if (/^(?:that|it|this|undo)$/.test(s) || /^the (?:last|latest) (?:one|task|item)$/.test(s))
+      return { kind: "last" };
+    let m = s.match(/^(?:the )?(?:task|item|todo|number|num|#)?\s*(\d+)(?:st|nd|rd|th)?(?: (?:task|item|todo))?$/);
+    if (m) return { kind: "index", index: +m[1] };
+    m = s.match(/^(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?: one| task| item)?$/);
+    if (m) return { kind: "ordinal", ordinal: m[1] };
+    let text = s.replace(/^the\s+/, "").replace(/^one (?:about|for)\s+/, "").replace(/\s+(?:task|item|todo|chore)s?$/, "").replace(/\s+one$/, "");
+    if (text.length >= 2) return { kind: "fuzzy", text };
+    return null;
+  }
+
+  function parseIntent(raw) {
+    const u = normalize(raw);
+    if (!u) return { intent: "unknown" };
+
+    // polite prefixes / greeting-prefixed commands → strip and re-parse
+    if (/^please[\s,]+/.test(u)) return parseIntent(u.replace(/^please[\s,]+/, "").trim());
+    const gp = u.match(/^(?:hello|hi|hey|yo|howdy|good (?:morning|afternoon|evening))[\s,]+/);
+    if (gp) {
+      const rest = u.slice(gp[0].length).trim();
+      if (rest) return parseIntent(rest);
+    }
+
+    // "help me <command>" → re-parse the command
+    if (/^help (?:me |me to |me with )?/.test(u)) {
+      const rest = u.replace(/^help (?:me |me to |me with )?/, "").trim();
+      if (rest && rest !== "help") {
+        const sub = parseIntent(rest);
+        if (sub.intent !== "help") return sub;
+      }
+    }
+
+    // 1. greeting (whole utterance)
+    if (/^(?:hello|hi|hey|yo|howdy|good (?:morning|afternoon|evening|day))[!.?,]*$/.test(u))
+      return { intent: "greet" };
+
+    // 2. help
+    if (/^(?:help|commands|what can you do|what can i (?:say|do)|show commands|help me)[!.?,]*$/.test(u))
+      return { intent: "help" };
+
+    // 3. stop / cancel
+    if (/^(?:stop|cancel|shut up|be quiet|quiet|never mind|stop talking|stop speaking|stop listening|cancel that|cancel it|turn off|turn it off|go away|silence)[!.?,]*$/.test(u))
+      return { intent: "stop" };
+
+    // 4. thanks
+    if (/^(?:thanks|thank you|thx|ty|cheers|appreciated|thank you very much|thanks a lot)[!.?,]*$/.test(u))
+      return { intent: "thanks" };
+
+    // 5. count
+    if (/(?:how many (?:tasks|todos|todo|items|chores|things)|count (?:my )?(?:tasks|todos|items|list)|task count|tasks do i have)/.test(u))
+      return { intent: "count" };
+
+    // 6. list
+    if (/^(?:list|my list|the list|tasks|todos|todo list|to do list|to-do list|task list|show list|read list)[!.?,]*$/.test(u)
+        || /(?:read|show|recite|say|tell) (?:me )?(?:my |the )?(?:todo|task|to do|to-do)? ?list/.test(u)
+        || /(?:whats|what is|what's) on (?:my |the )?(?:list|tasks|todo|todos)/.test(u)
+        || /(?:what do i have|what do i need to do|show (?:me )?my (?:tasks|todos|list|items))/.test(u))
+      return { intent: "list" };
+
+    // 7. clear
+    if (/^(?:clear|empty|wipe|reset)[!.?,]*$/.test(u)
+        || /(?:clear|empty|wipe|reset|remove|delete) (?:everything|all(?: (?:the )?(?:tasks|items|todos|list|things))?|the (?:whole )?(?:list|tasks|todos|todo list|to do list)|my (?:list|tasks|todos|items))/.test(u)
+        || /get rid of (?:everything|all)/.test(u))
+      return { intent: "clear" };
+
+    // 8. delete / remove / erase / get rid of / forget / undo
+    const delM = u.match(/^(?:delete|remove|erase|get rid of|forget|undo)\b\s*(.*)$/);
+    if (delM) {
+      const targetText = delM[1].trim();
+      if (!targetText) return { intent: "delete", target: { kind: u === "undo" ? "last" : "none" } };
+      const tgt = parseDeleteTarget(targetText);
+      return { intent: "delete", target: tgt || { kind: "none" } };
+    }
+
+    // 9. edit / rename / change / update
+    let em;
+    if ((em = u.match(/^(?:edit|change|rename|modify|reword|rephrase|update|rewrite|revise|replace)\s+(.+)$/))) {
+      let phrase = em[1].trim().replace(/^(?:the\s+)?text\s+of\s+/, "");
+      const split = splitEditPhrase(phrase);
+      if (split) return buildEdit(split.left, split.right);
+      return buildEdit(phrase, null);
+    }
+
+    // 10. mark done
+    if (/^(?:mark|check off|cross off|complete|finish)\s+(?:all(?: the (?:tasks|items|todos|things))?|everything)(?:\s+done)?$/.test(u))
+      return { intent: "done", target: { kind: "all" } };
+
+    let m;
+    if ((m = u.match(/^(?:mark|check off|cross off|complete|finish)\s+(?:the )?(?:task|item|todo|number|#)?\s*(\d+)(?:st|nd|rd|th)?(?:\s+done)?$/))
+        || (m = u.match(/^(?:task|item|todo)\s*(\d+)(?:st|nd|rd|th)?\s+done$/))
+        || (m = u.match(/^(\d+)(?:st|nd|rd|th)?\s+done$/)))
+      return { intent: "done", target: { kind: "index", index: +m[1] } };
+
+    if ((m = u.match(/^(?:mark|check off|cross off|complete|finish)\s+(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?:\s+one)?(?:\s+done)?$/))
+        || (m = u.match(/^(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?:\s+one)?\s+done$/)))
+      return { intent: "done", target: { kind: "ordinal", ordinal: m[1] } };
+
+    if (/^(?:mark|check off|cross off|complete|finish)\s+(?:it|that)\s+done$/.test(u))
+      return { intent: "done", target: { kind: "bare" } };
+
+    if ((m = u.match(/^(?:mark|check off|cross off|complete|finish)\s+(.+?)\s+done$/)))
+      return { intent: "done", target: { kind: "fuzzy", text: m[1].replace(/^the\s+/, "").trim() } };
+
+    if (/^done[!.?,]*$/.test(u) || /^mark (?:it|that)? ?done[!.?,]*$/.test(u))
+      return { intent: "done", target: { kind: "bare" } };
+
+    // bare "complete/finish <text>" → mark it if it matches a task, else add
+    if ((m = u.match(/^(?:mark|check off|cross off|complete|finish)\s+(.+)$/))) {
+      const text = m[1].replace(/^the\s+/, "").trim();
+      if (findBestTask(text)) return { intent: "done", target: { kind: "fuzzy", text } };
+      return { intent: "add", tasks: splitAdd(u) };
+    }
+
+    // 10. add
+    if (/^put (?:out|away|back|up|down|off|aside|in|on)\b/.test(u)) return { intent: "add", tasks: [u] };
+    if (/^get (?:out of|up|down|over|through)\b/.test(u)) return { intent: "add", tasks: [u] };
+    m = u.match(/^(?:add|create|note|write down|put|jot down|jot|remember|remind me to|i need to|i need|do not forget|don't forget|dont forget|buy|get|pick up|grab|call|email)\b\s*(.*)$/);
+    if (m) {
+      let rest = m[1]
+        .replace(/^(?:a task|a todo|an item|a chore|some tasks|a couple of tasks|a few tasks|this|that|it down)\b/, "")
+        .trim()
+        .replace(/^(?:to (?:my|the) (?:list|todo list|to do list|task list)|on (?:my|the) (?:list|todo list|to do list|task list))\b/, "")
+        .replace(/^to\s+/, "")
+        .replace(/\s*(?:to|on) (?:my|the) (?:list|todo list|to do list|task list)\s*$/, "")
+        .trim();
+      const tasks = splitAdd(rest);
+      return { intent: "add", tasks };
+    }
+
+    // 11. fallback: bare phrase (not a question) → add as a task
+    if (u.length >= 2 && !/[?]$/.test(u)) return { intent: "add", tasks: [u] };
+    return { intent: "unknown", question: true };
+  }
+
+  // ============ reply builders ============
+  function resolveTarget(t) {
+    if (!t) return "none";
+    if (t.kind === "last") return todos.length - 1;
+    if (t.kind === "index") return t.index - 1;
+    if (t.kind === "ordinal") {
+      if (t.ordinal === "last") return todos.length - 1;
+      return ORDINALS[t.ordinal] != null ? ORDINALS[t.ordinal] - 1 : null;
+    }
+    if (t.kind === "fuzzy") {
+      const best = findBestTask(t.text);
+      return best ? best.index : null;
+    }
+    return "none";
+  }
+
+  function greetReply() {
+    return {
+      bubbles: ["Hi! I'm your voice assistant. Tap the mic and talk, or type below. Try “add buy milk”, “mark 2 done” or “read my list”."],
+      speak: "Hi! I'm your voice assistant. Add tasks, mark them done, or read your list."
+    };
+  }
+
+  function helpReply() {
+    return {
+      bubbles: ["Here's what I can do:\n• “add buy milk and eggs” — add tasks\n• “mark 2 done” / “mark all done” — check off\n• “change task 2 to buy oat milk” / “rename buy milk to 1% milk” — edit a task\n• “read my list” / “how many tasks” — review\n• “delete task 2” / “delete buy milk” — remove\n• “clear all” — wipe the list\n• “thanks”, “help”, “stop”"],
+      speak: "You can say add, mark done, edit, read my list, how many tasks, delete, clear all, or help."
+    };
+  }
+
+  function countReply() {
+    const open = todos.filter(t => !t.done).length;
+    const total = todos.length;
+    if (!total) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
+    const msg = "You have " + open + " open and " + (total - open) + " done — " + total + " total.";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function listReply() {
+    if (!todos.length) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
+    const lines = todos.map((t, i) => (i + 1) + ". " + t.text + (t.done ? " — done" : ""));
+    const speak = "Here's your list. " + todos.map((t, i) => (i + 1) + ": " + t.text + (t.done ? " — done" : "")).join(". ") + ".";
+    return { bubbles: ["Here's your list:\n" + lines.join("\n")], speak: speak };
+  }
+
+  function clearReply() {
+    if (!todos.length) return { bubbles: ["Your list is already empty."], speak: "Your list is already empty." };
+    const n = todos.length;
+    todos = [];
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Cleared " + n + " task" + (n === 1 ? "" : "s") + " from your list."], speak: "Cleared your list." };
+  }
+
+  function deleteReply(target) {
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to delete."], speak: "Your list is empty." };
+    const idx = resolveTarget(target);
+    if (idx === "none") return { bubbles: ["I didn't catch which task to delete. Say a number, like “delete 2”, or repeat the task name."], speak: "Which task should I delete?" };
+    if (target && target.kind === "fuzzy" && (idx === null || idx < 0 || idx >= todos.length))
+      return { bubbles: ["I couldn't find a task matching “" + target.text + "”."], speak: "I couldn't find that task." };
+    if (idx === null || idx < 0 || idx >= todos.length)
+      return { bubbles: ["I couldn't find that task. You have " + todos.length + " task" + (todos.length === 1 ? "" : "s") + " on your list."], speak: "I couldn't find that task." };
+    const removed = todos.splice(idx, 1)[0];
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Removed “" + removed.text + "”."], speak: "Removed " + removed.text + "." };
+  }
+
+  function doneReply(target) {
+    if (target.kind === "all") {
+      const open = todos.filter(t => !t.done);
+      if (!open.length) return { bubbles: ["All tasks are already done."], speak: "All tasks are already done." };
+      open.forEach(t => { t.done = true; });
+      saveTodos();
+      renderTodos();
+      return { bubbles: ["Marked all " + open.length + " task" + (open.length === 1 ? "" : "s") + " done."], speak: "Marked " + open.length + " tasks done." };
+    }
+    if (target.kind === "bare") {
+      const open = todos.filter(t => !t.done);
+      if (!open.length) return { bubbles: ["Everything is already done."], speak: "Everything is already done." };
+      if (open.length === 1) {
+        open[0].done = true;
+        saveTodos();
+        renderTodos();
+        return { bubbles: ["Marked “" + open[0].text + "” done."], speak: "Marked " + open[0].text + " done." };
+      }
+      return { bubbles: ["Which one? You have " + open.length + " open tasks — say a number, like “mark 2 done”."], speak: "Which task? You have " + open.length + " open tasks." };
+    }
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to mark done."], speak: "Your list is empty." };
+    const idx = resolveTarget(target);
+    if (idx === "none") return { bubbles: ["I didn't catch which task to mark done."], speak: "Which task should I mark done?" };
+    if (target && target.kind === "fuzzy" && (idx === null || idx < 0 || idx >= todos.length))
+      return { bubbles: ["I couldn't find a task matching “" + target.text + "”."], speak: "I couldn't find that task." };
+    if (idx === null || idx < 0 || idx >= todos.length)
+      return { bubbles: ["I couldn't find that task. You have " + todos.length + " task" + (todos.length === 1 ? "" : "s") + "."], speak: "I couldn't find that task." };
+    const t = todos[idx];
+    if (t.done) return { bubbles: ["“" + t.text + "” was already done."], speak: t.text + " was already done." };
+    t.done = true;
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Marked “" + t.text + "” done."], speak: "Marked " + t.text + " done." };
+  }
+
+  function editReply(target, newText) {
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to edit."], speak: "Your list is empty." };
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length) {
+      if (target && target.kind === "fuzzy")
+        return { bubbles: ["I couldn't find a task matching “" + target.text + "”. Use a number, like “edit task 2”, or say “add …” to create a new one."], speak: "I couldn't find that task." };
+      return { bubbles: ["I didn't catch which task to edit. Say a number, like “edit task 2 to buy milk”."], speak: "Which task should I edit?" };
+    }
+    const t = todos[idx];
+    if (!newText) {
+      pendingEdit = { index: idx, oldText: t.text };
+      statusEl.textContent = "say or type the new text…";
+      return { bubbles: ["What should I change “" + t.text + "” to?"], speak: "What should I change " + t.text + " to?" };
+    }
+    const old = t.text;
+    t.text = newText;
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Changed “" + old + "” to “" + newText + "”."], speak: "Changed " + old + " to " + newText + "." };
+  }
+
+  function addReply(tasks) {
+    if (!tasks || !tasks.length) return { bubbles: ["What would you like to add? Try “add buy milk”."], speak: "What would you like to add?" };
+    for (const t of tasks) todos.push({ text: t, done: false, created: Date.now() });
+    saveTodos();
+    renderTodos();
+    if (tasks.length === 1) return { bubbles: ["Added “" + tasks[0] + "”."], speak: "Added " + tasks[0] + "." };
+    const speak = "Added " + tasks.join(" and ") + ".";
+    return { bubbles: ["Added " + tasks.length + " tasks: " + tasks.map(t => "“" + t + "”").join(", ") + "."], speak: speak };
+  }
+
+  function unknownReply(question) {
+    if (question)
+      return { bubbles: ["I didn't quite catch that. Try “add buy milk”, “mark 2 done” or “read my list”."], speak: "Sorry, I didn't catch that." };
+    return { bubbles: ["I didn't quite catch that. Try “add buy milk”, “mark 2 done”, “read my list”, or “clear all”."], speak: "I didn't quite catch that." };
+  }
+
+  function applyIntent(it) {
+    switch (it.intent) {
+      case "greet": return greetReply();
+      case "help": return helpReply();
+      case "thanks": return { bubbles: ["You're welcome!"], speak: "You're welcome!" };
+      case "count": return countReply();
+      case "list": return listReply();
+      case "clear": return clearReply();
+      case "delete": return deleteReply(it.target);
+      case "done": return doneReply(it.target);
+      case "edit": return editReply(it.target, it.newText);
+      case "add": return addReply(it.tasks);
+      default: return unknownReply(it.question);
+    }
+  }
+
+  // ============ orchestration ============
+  async function runUtterance(text) {
+    const u = normalize(text);
+    if (!u) return;
+    if (pendingEdit) {
+      const PURE_CANCEL = /^(?:cancel|never mind|nevermind|forget it|forget that|quit|exit|back|wait|no|nope|nah|actually no|scratch that)[!.?,]*$/;
+      const CANCEL_ALL = /^(?:stop|help|undo|clear all|clear everything|empty the list|empty|delete everything|delete all|delete the list)[!.?,]*$/;
+      if (PURE_CANCEL.test(u) || CANCEL_ALL.test(u)) {
+        const pe = pendingEdit;
+        pendingEdit = null;
+        statusEl.textContent = "type below, or tap 🎤 to talk";
+        addBubble("assistant", "Cancelled editing “" + pe.oldText + "”.");
+        if (PURE_CANCEL.test(u)) return;
+      } else {
+        const pe = pendingEdit;
+        pendingEdit = null;
+        statusEl.textContent = "type below, or tap 🎤 to talk";
+        const res = editReply({ kind: "index", index: pe.index + 1 }, u);
+        for (const b of res.bubbles) addBubble("assistant", b);
+        if (res.speak) await speakReply(res.speak);
+        return;
+      }
+    }
+    const intent = parseIntent(u);
+    if (intent.intent === "stop") {
+      stopEverything();
+      addBubble("assistant", "Stopped — I'll be quiet now.");
+      return;
+    }
+    const res = applyIntent(intent);
+    for (const b of res.bubbles) addBubble("assistant", b);
+    if (res.speak) await speakReply(res.speak);
+  }
+
+  async function execute(text) {
+    busy = true;
+    try {
+      await runUtterance(text);
+    } catch (e) {
+      console.warn("utterance error", e);
+    } finally {
+      busy = false;
+      if (pending.length) {
+        const nxt = pending.shift();
+        execute(nxt);
+      } else if (micMode) {
+        scheduleRestart(300);
+      }
+    }
+  }
+
+  function submitUtterance(text) {
+    if (busy) pending.push(text);
+    else execute(text);
+  }
+
+  function commitVoice(finalText) {
+    busy = true; // stop onEnd from restarting while we process this
+    stopRecognition();
+    commitVoiceBubble(finalText);
+    execute(finalText);
+  }
+
+  function stopRecognition() {
+    if (recognition) {
+      try { recognition.stop(); } catch (e) {}
+      recognition = null;
+    }
+  }
+
+  function scheduleRestart(delay) {
+    if (!micMode) return;
+    if (restartTimer) clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      if (micMode && !recognition && !busy) startListening();
+    }, delay);
+  }
+
+  function stopConversation() {
+    micMode = false;
+    if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+    stopRecognition();
+    micBtn.textContent = "🎤 Talk";
+    micBtn.classList.remove("listening");
+    statusEl.textContent = "type below, or tap 🎤 to talk";
+  }
+
+  function stopEverything() {
+    stopConversation();
+    if (tts) { try { tts.stop(); } catch (e) {} }
+    speakingEl.hidden = true;
+  }
+
+  function micOffWithNotice(msg) {
+    stopConversation();
+    if (msg) addBubble("assistant", msg);
+  }
+
+  async function startListening() {
+    if (!tts) return;
+    if (micMode && !recognition && !busy) {
+      try {
+        const hearing = tts.listen({
+          lang: "en-US",
+          continuous: true,
+          interim: true,
+          onStart: () => {},
+          onInterim: ({ text }) => { if (text) renderInterim(text); },
+          onFinal: ({ text }) => {
+            if (text && text.trim()) commitVoice(text.trim());
+          },
+          onEnd: () => {
+            recognition = null;
+            if (micMode && !busy) scheduleRestart(400);
+          },
+          onError: (err) => {
+            recognition = null;
+            micOffWithNotice("Voice recognition stopped: " + ((err && err.message) ? err.message : "unknown error") + ". Type below instead.");
+          }
+        });
+        recognition = hearing;
+        try { await hearing; } catch (e) {}
+        recognition = null;
+        if (micMode && !busy) scheduleRestart(400);
+      } catch (e) {
+        recognition = null;
+        micOffWithNotice(e && e.message ? e.message : "Couldn't start the microphone. Type below instead.");
+      }
+    }
+  }
+
+  // ============ UI wiring ============
+  micBtn.addEventListener("click", () => {
+    if (!tts || !tts.sttSupported) {
+      addBubble("assistant", "Voice input needs Chrome, Edge or Safari (this demo is in a browser without speech recognition). Type below instead — everything works by typing, and I'll still talk back.");
+      return;
+    }
+    if (micMode) {
+      stopConversation();
+      return;
+    }
+    micMode = true;
+    micBtn.textContent = "🎤 Listening…";
+    micBtn.classList.add("listening");
+    statusEl.textContent = "mic on — talk now";
+    startListening();
+  });
+
+  function submitTyped() {
+    const v = textInput.value.trim();
+    if (!v) return;
+    textInput.value = "";
+    addBubble("user", v);
+    submitUtterance(v);
+  }
+  sendBtn.addEventListener("click", submitTyped);
+  textInput.addEventListener("keydown", e => { if (e.key === "Enter") submitTyped(); });
+
+  clearAllBtn.addEventListener("click", () => {
+    if (!todos.length) return;
+    todos = [];
+    saveTodos();
+    renderTodos();
+    addBubble("assistant", "Cleared your list.");
+  });
+
+  const DEMO_CHIPS = ["Add buy milk and eggs", "Mark 2 done", "Change task 2 to buy oat milk", "Read my list", "Clear all"];
+  DEMO_CHIPS.forEach(c => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.textContent = c;
+    b.addEventListener("click", () => {
+      textInput.value = c;
+      submitTyped();
+    });
+    chipsCtn.appendChild(b);
+  });
+
+  // expose parser internals for automated testing (harmless in production)
+  window.__vt = { parseIntent, normalize, splitAdd, findBestTask, parseDeleteTarget };
+
+  // ============ init ============
+  loadTodos();
+  renderTodos();
+  addBubble("assistant", "Welcome! I'm your voice assistant, powered by the voice-tools-plugin. Tap 🎤 Talk to speak commands, or type below — try a demo chip.");
+  if (tts) {
+    tts.setVoice(VOICE_NAME);
+    if (tts.sttSupported) statusEl.textContent = "tap 🎤 to talk, or type below";
+  }
+})();
+</script>

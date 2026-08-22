@@ -1,0 +1,332 @@
+<script type="text/x-server-plugin">
+var VERSION = 1;
+var MAGIC = 0x54;
+var MAX_ENTRIES = 20;
+var ENTRY_BYTES = 37;
+var HEADER = 2;
+var TOPIC = "tt:board";
+var dv = null;
+var lastSubmit = new Map();
+
+function initState() {
+  var need = HEADER + MAX_ENTRIES * ENTRY_BYTES;
+  if (state.length < need) return false;
+  dv = new DataView(state.buffer, state.byteOffset, state.length);
+  if (dv.getUint8(0) !== MAGIC || dv.getUint8(1) !== VERSION) {
+    dv.setUint8(0, MAGIC);
+    dv.setUint8(1, VERSION);
+    for (var i = 0; i < MAX_ENTRIES * ENTRY_BYTES; i++) dv.setUint8(HEADER + i, 0);
+  }
+  return true;
+}
+
+function readName(i) {
+  var o = HEADER + i * ENTRY_BYTES;
+  var len = dv.getUint8(o);
+  if (len < 1 || len > 20) return "";
+  var name = "";
+  for (var k = 0; k < len; k++) name += String.fromCharCode(dv.getUint8(o + 1 + k));
+  return name;
+}
+
+function writeEntry(i, name, floors, coins) {
+  var o = HEADER + i * ENTRY_BYTES;
+  dv.setUint8(o, name.length);
+  for (var k = 0; k < name.length; k++) dv.setUint8(o + 1 + k, name.charCodeAt(k) & 255);
+  dv.setUint32(o + 21, floors, false);
+  dv.setUint32(o + 25, coins, false);
+  dv.setFloat64(o + 29, Date.now() / 1000, false);
+}
+
+function entryInfo(i) {
+  var o = HEADER + i * ENTRY_BYTES;
+  var name = readName(i);
+  if (!name) return null;
+  return {
+    n: name,
+    f: dv.getUint32(o + 21, false),
+    c: dv.getUint32(o + 25, false),
+    t: dv.getFloat64(o + 29, false),
+  };
+}
+
+function boardToJson() {
+  var arr = [];
+  for (var i = 0; i < MAX_ENTRIES; i++) {
+    var e = entryInfo(i);
+    if (e) arr.push(e);
+  }
+  arr.sort(function (a, b) {
+    if (b.f !== a.f) return b.f - a.f;
+    if (b.c !== a.c) return b.c - a.c;
+    return a.n < b.n ? -1 : a.n > b.n ? 1 : 0;
+  });
+  var out = "";
+  for (var i = 0; i < arr.length; i++) {
+    if (i > 0) out += ",";
+    out += '{"n":' + JSON.stringify(arr[i].n) + ',"f":' + arr[i].f + ',"c":' + arr[i].c + "}";
+  }
+  return '{"v":' + VERSION + ',"entries":[' + out + "]}";
+}
+
+function mergeEntry(name, floors, coins) {
+  for (var i = 0; i < MAX_ENTRIES; i++) {
+    var e = entryInfo(i);
+    if (e && e.n === name) {
+      if (floors > e.f) writeEntry(i, name, floors, coins);
+      return boardToJson();
+    }
+  }
+  for (var i = 0; i < MAX_ENTRIES; i++) {
+    if (!entryInfo(i)) {
+      writeEntry(i, name, floors, coins);
+      return boardToJson();
+    }
+  }
+  var worst = 0;
+  var w = entryInfo(worst);
+  for (var i = 1; i < MAX_ENTRIES; i++) {
+    var e = entryInfo(i);
+    if (e.f < w.f || (e.f === w.f && e.t < w.t)) {
+      worst = i;
+      w = e;
+    }
+  }
+  if (floors >= w.f) writeEntry(worst, name, floors, coins);
+  return boardToJson();
+}
+
+function validName(name) {
+  if (typeof name !== "string" || name.length < 1 || name.length > 20) return false;
+  var ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-";
+  for (var i = 0; i < name.length; i++) if (ok.indexOf(name.charAt(i)) === -1) return false;
+  return true;
+}
+
+self.onopen = function (args) {
+  var conn = args.conn;
+  if (!initState()) {
+    conn.close(1011, "bad state");
+    return;
+  }
+  conn.subscribe(TOPIC);
+  pubsub.publish(TOPIC, '{"type":"online","online":' + pubsub.numSubscribers(TOPIC) + "}");
+};
+
+self.onclose = function (args) {
+  var conn = args.conn;
+  if (lastSubmit.has(conn.id)) lastSubmit.delete(conn.id);
+  pubsub.publish(TOPIC, '{"type":"online","online":' + pubsub.numSubscribers(TOPIC) + "}");
+};
+
+self.rpc = {
+  getBoard: function (context, data) {
+    if (!initState()) return '{"error":"init"}';
+    return boardToJson();
+  },
+  getOnline: function (context, data) {
+    if (!initState()) return "0";
+    return String(pubsub.numSubscribers(TOPIC));
+  },
+  submit: function (context, data) {
+    var conn = context.conn;
+    if (!initState()) return '{"error":"init"}';
+    if (typeof data !== "string") return '{"error":"bad"}';
+    var o = null;
+    try {
+      o = JSON.parse(data);
+    } catch (err) {
+      return '{"error":"bad"}';
+    }
+    if (!o || !validName(o.name)) return '{"error":"name"}';
+    if (typeof o.floors !== "number" || o.floors < 1 || o.floors > 10000) return '{"error":"floors"}';
+    if (typeof o.coins !== "number" || o.coins < 0 || o.coins > 1000000000) return '{"error":"coins"}';
+    var now = Date.now();
+    var since = lastSubmit.get(conn.id) || 0;
+    if (now - since < 5000) return boardToJson();
+    lastSubmit.set(conn.id, now);
+    var floors = Math.floor(o.floors);
+    var coins = Math.floor(o.coins);
+    var board = mergeEntry(o.name, floors, coins);
+    pubsub.publish(TOPIC, '{"type":"board","board":' + board + "}");
+    return board;
+  },
+};
+</script>
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; text-align: left;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: #0f1622; color: #e8eef5;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+  #hud {
+    flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 8px 14px; background: #18222f; border-bottom: 1px solid #0b1017;
+  }
+  .hud-left { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .brand { font-weight: 800; font-size: 16px; letter-spacing: 0.3px; color: #ffd94d; }
+  .hud-stat { font-size: 14px; font-weight: 600; background: #0f1622; padding: 4px 10px; border-radius: 20px; }
+  .hud-right { display: flex; align-items: center; gap: 10px; }
+  #onlineEl { font-size: 12px; color: #8fe388; }
+  .btn {
+    background: #2a3a52; color: #e8eef5; border: 1px solid #40536f; border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  .btn:hover { background: #33476a; }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+  .btn.small { font-size: 12px; padding: 4px 10px; }
+  .btn.tiny { font-size: 11px; padding: 2px 7px; border-radius: 6px; }
+  .btn.danger { color: #ff9c9c; border-color: #7a4a4a; }
+  .btn.ghost { background: transparent; }
+  #gameCtn { flex: 1 1 auto; position: relative; min-height: 240px; }
+  #game {
+    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+    touch-action: manipulation;
+  }
+  #elevCtrls {
+    position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px; user-select: none;
+  }
+  .elev-btn {
+    width: 44px; height: 44px; font-size: 18px; border-radius: 50%;
+    background: #2a3a52; color: #fff; border: 2px solid #40536f; cursor: pointer;
+  }
+  .elev-btn:active { background: #40536f; }
+  #elevInfo {
+    background: #0f1622cc; padding: 4px 10px; border-radius: 14px; font-size: 12px;
+    color: #cfe9ff; text-align: center; min-width: 84px;
+  }
+  #panel {
+    flex: 0 0 auto; height: 178px; background: #18222f; border-top: 1px solid #0b1017;
+    overflow-y: auto; padding: 10px 14px;
+  }
+  .pv-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .pv-title { font-size: 13px; font-weight: 700; color: #ffd94d; letter-spacing: 0.4px; text-transform: uppercase; }
+  .pv-meta { font-size: 12px; color: #93a4b8; display: flex; align-items: center; gap: 8px; }
+  #buildTiles { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .tile {
+    flex: 0 0 auto; width: 104px; background: #0f1622; border: 2px solid var(--tile, #444);
+    border-radius: 10px; color: #e8eef5; cursor: pointer; padding: 8px 6px;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+  }
+  .tile:hover { transform: translateY(-2px); }
+  .tile:disabled { opacity: 0.45; cursor: default; transform: none; }
+  .tile-icon { font-size: 22px; }
+  .tile-label { font-size: 11px; font-weight: 600; }
+  .tile-cost { font-size: 10px; color: #93a4b8; }
+  .hint { font-size: 11.5px; color: #93a4b8; margin-top: 8px; }
+  #floorView { display: flex; flex-direction: column; gap: 8px; }
+  #floorCtn { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
+  .f-head { display: flex; align-items: center; gap: 10px; }
+  .f-emoji { font-size: 26px; }
+  .f-name { font-size: 15px; font-weight: 700; }
+  .f-sub { font-size: 12px; color: #93a4b8; }
+  .f-block-title { font-size: 11px; font-weight: 700; color: #ffd94d; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }
+  .f-empty { font-size: 12px; color: #93a4b8; }
+  .f-bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #93a4b8; }
+  .f-bar { flex: 1; height: 10px; max-width: 220px; background: #0f1622; border-radius: 6px; overflow: hidden; }
+  .f-bar-fill { height: 100%; background: linear-gradient(90deg, #41b883, #ffd94d); border-radius: 6px; }
+  .f-actions { display: flex; gap: 8px; }
+  .res-row { display: flex; align-items: center; gap: 8px; background: #0f1622; border-radius: 8px; padding: 5px 8px; }
+  .res-avatar { width: 22px; height: 22px; border-radius: 50%; flex: 0 0 auto; border: 2px solid #ffffff33; }
+  .res-info { flex: 1; font-size: 12.5px; }
+  .res-tags { font-size: 11px; color: #93a4b8; }
+  .badge { display: inline-block; font-size: 10px; background: #2a3a52; padding: 1px 6px; border-radius: 10px; margin-left: 4px; color: #cfe9ff; }
+  .badge.gold { background: #6b5a1a; color: #ffd94d; }
+  .happy { font-size: 11px; color: #8fe388; }
+  #toastCtn {
+    position: fixed; top: 52px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    z-index: 50; pointer-events: none;
+  }
+  .toast {
+    background: #223046f0; color: #fff; border: 1px solid #40536f; border-radius: 10px;
+    padding: 7px 14px; font-size: 13px; box-shadow: 0 4px 14px #00000055;
+    animation: tin 0.25s ease;
+  }
+  .toast.out { opacity: 0; transition: opacity 0.4s; }
+  @keyframes tin { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+  #boardOverlay { position: fixed; inset: 0; background: #00000088; display: flex; align-items: center; justify-content: center; z-index: 60; }
+  #boardOverlay[hidden] { display: none; }
+  .modal {
+    background: #18222f; border: 1px solid #40536f; border-radius: 14px;
+    width: min(440px, 92vw); max-height: 80vh; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .m-title { display: flex; align-items: center; justify-content: space-between; font-weight: 800; font-size: 16px; }
+  .m-name { display: flex; gap: 8px; }
+  .m-name input {
+    flex: 1; background: #0f1622; border: 1px solid #40536f; color: #fff;
+    border-radius: 8px; padding: 6px 10px; font-size: 13px;
+  }
+  .lb-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 13px; }
+  .lb-row:nth-child(odd) { background: #0f1622; }
+  .lb-rank { width: 28px; text-align: center; font-weight: 700; }
+  .lb-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lb-floors { color: #ffd94d; font-weight: 700; }
+  .lb-coins { color: #93a4b8; }
+  .m-note { font-size: 11px; color: #93a4b8; }
+</style>
+
+<div id="app">
+  <div id="hud">
+    <div class="hud-left">
+      <span class="brand">🏢 Tiny Towers</span>
+      <span class="hud-stat" id="coinsEl">🪙 0</span>
+      <span class="hud-stat" id="buxEl">💎 0</span>
+      <span class="hud-stat" id="floorsEl">🏗 0</span>
+    </div>
+    <div class="hud-right">
+      <span id="onlineEl"></span>
+      <button class="btn" id="boardBtn">🏆 Board</button>
+    </div>
+  </div>
+
+  <div id="gameCtn">
+    <canvas id="game"></canvas>
+    <div id="elevCtrls">
+      <button class="elev-btn" id="upBtn">▲</button>
+      <div id="elevInfo">Idle</div>
+      <button class="elev-btn" id="downBtn">▼</button>
+    </div>
+  </div>
+
+  <div id="panel">
+    <div id="defaultView">
+      <div class="pv-head">
+        <div class="pv-title">Build a floor</div>
+        <div class="pv-meta">
+          <span id="waitingEl">🚶 0 waiting</span>
+          <span id="arrivalEl"></span>
+          <button class="btn small" id="summonBtn">✨ Summon 💎2</button>
+        </div>
+      </div>
+      <div id="buildTiles"></div>
+      <div class="hint">👆 Click a bitizen bubble at the lobby to board the elevator, then drive to their floor. Click any shop or home to manage it. Stock sells itself — hit Restock to keep it flowing.</div>
+    </div>
+    <div id="floorView" hidden>
+      <button class="btn small" id="floorBackBtn">← Back</button>
+      <div id="floorCtn"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toastCtn"></div>
+
+<div id="boardOverlay" hidden>
+  <div class="modal">
+    <div class="m-title">🏆 Tower Leaderboard <button class="btn tiny" id="boardCloseBtn">✕</button></div>
+    <div class="m-name">
+      <input id="nameInput" maxlength="20" placeholder="Your name">
+      <button class="btn small" id="nameSaveBtn">Save</button>
+    </div>
+    <div id="boardList" class="m-list"></div>
+    <div class="m-note">Your tower height and coins are shared automatically.</div>
+  </div>
+</div>
+
+<script type="module" src="src/main.js"></script>

@@ -1,0 +1,954 @@
+<!-- Heroes of Might and Magic: A Strategic Quest — full build through Phase 5:
+     branding (1), map (2), movement (3), fog (4), resources (5), encounters (6),
+     army/recruit/capacity/casualties (7-10), combat (11-15), hero attributes/leveling/
+     abilities (16-18), global state manager (19), HUD (20), save/load (21). -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4 8 14v18c0 16 12 26 24 28 12-2 24-12 24-28V14z' fill='%230a1410' stroke='%23d4af37' stroke-width='4'/%3E%3Cpath d='M32 16l4 9h8l-6 6 3 9-9-5-9 5 3-9-6-6h8z' fill='%23d4af37'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700;900&family=Cormorant+Garamond:ital,wght@0,500;1,500&display=swap" rel="stylesheet">
+
+<style>
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(ellipse at 50% -10%, #24452f 0%, #101d15 48%, #060b08 100%);
+    color: #e8e0c8;
+    text-align: center;
+    font-family: "Cormorant Garamond", Georgia, serif;
+    display: flex; flex-direction: column; align-items: center;
+  }
+
+  /* ── Title screen ─────────────────────────────────── */
+  .title-screen {
+    display: flex; flex-direction: column; align-items: center;
+    padding: clamp(28px, 7vh, 72px) 20px 30px;
+    max-width: 860px; width: 100%;
+  }
+  .banner {
+    width: min(600px, 92vw);
+    border-radius: 14px;
+    border: 2px solid rgba(212, 175, 55, .55);
+    box-shadow: 0 0 70px rgba(212, 175, 55, .22), 0 18px 50px rgba(0, 0, 0, .65);
+  }
+  h1 {
+    margin: 30px 0 6px;
+    font-family: "Cinzel Decorative", Georgia, serif;
+    font-weight: 900;
+    font-size: clamp(2.2rem, 6.5vw, 3.6rem);
+    line-height: 1.12;
+    letter-spacing: .04em;
+    color: #f0d98c;
+    text-shadow: 0 0 24px rgba(212, 175, 55, .45), 0 3px 0 #5c4310, 0 6px 14px rgba(0, 0, 0, .8);
+  }
+  .subtitle {
+    margin: 0 0 6px;
+    font-family: "Cinzel Decorative", Georgia, serif;
+    font-weight: 700;
+    font-size: clamp(1rem, 2.6vw, 1.35rem);
+    letter-spacing: .42em;
+    text-transform: uppercase;
+    color: #bfa76a;
+  }
+  .divider { width: 260px; height: 2px; margin: 22px auto; background: linear-gradient(90deg, transparent, #d4af37, transparent); }
+  .tagline { max-width: 620px; margin: 0; font-size: clamp(1.05rem, 2.4vw, 1.3rem); font-style: italic; color: #cdc0a0; }
+  .play-btn {
+    margin-top: 34px;
+    font-family: "Cinzel Decorative", Georgia, serif;
+    font-weight: 700;
+    font-size: 1.15rem;
+    letter-spacing: .18em;
+    color: #fff8e0;
+    background: linear-gradient(180deg, #a3781f, #6d4c10);
+    border: 2px solid #d4af37;
+    border-radius: 10px;
+    padding: 14px 46px;
+    cursor: pointer;
+    box-shadow: 0 0 22px rgba(212, 175, 55, .35), inset 0 1px 0 rgba(255, 255, 255, .35);
+    transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+  }
+  .play-btn:hover { transform: translateY(-2px); filter: brightness(1.12); box-shadow: 0 0 34px rgba(212, 175, 55, .5), inset 0 1px 0 rgba(255, 255, 255, .35); }
+
+  /* ── Game view ────────────────────────────────────── */
+  .game-view { display: none; flex-direction: column; align-items: center; padding: 20px 16px 30px; width: 100%; max-width: 1200px; }
+  .game-view.visible { display: flex; }
+
+  .hud {
+    width: 100%;
+    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    padding: 10px 14px; margin-bottom: 14px;
+    background: rgba(10, 20, 14, .72);
+    border: 1px solid rgba(212, 175, 55, .35);
+    border-radius: 12px;
+    backdrop-filter: blur(4px);
+  }
+  .hud-brand { font-family: "Cinzel Decorative", Georgia, serif; font-weight: 700; font-size: .95rem; color: #f0d98c; letter-spacing: .05em; }
+  .hud-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: .95rem; color: #cdc0a0; }
+  .hud-stats b { color: #f0d98c; }
+  .hud-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  .hud-btn {
+    font-family: "Cinzel Decorative", Georgia, serif; font-weight: 700;
+    font-size: .8rem; letter-spacing: .12em;
+    color: #fff8e0; border-radius: 8px; padding: 8px 18px; cursor: pointer;
+    transition: filter .15s ease, transform .15s ease;
+  }
+  .hud-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .recruit-btn { background: linear-gradient(180deg, #2a4a6d, #1a3048); border: 1px solid #5a8bb8; }
+  .new-world-btn { background: linear-gradient(180deg, #3a5a3f, #24452f); border: 1px solid #7f9c6b; }
+  .save-btn { background: linear-gradient(180deg, #5a3f7a, #382352); border: 1px solid #9a6bc8; }
+  .end-turn-btn { background: linear-gradient(180deg, #a3781f, #6d4c10); border: 1px solid #d4af37; }
+  .hud-btn:hover:not(:disabled) { filter: brightness(1.15); transform: translateY(-1px); }
+
+  .map-frame {
+    width: 100%; overflow: auto; max-height: 72vh;
+    background: #0a1410;
+    border: 2px solid rgba(212, 175, 55, .4);
+    border-radius: 12px;
+    box-shadow: 0 0 50px rgba(0, 0, 0, .6);
+  }
+  #mapCanvas { display: block; margin: 0 auto; width: 100%; height: auto; cursor: pointer; }
+
+  .status-line { margin-top: 12px; min-height: 1.4em; font-style: italic; color: #cdc0a0; font-size: 1rem; }
+  .status-line .err { color: #e07a5f; }
+
+  .legend {
+    display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;
+    margin-top: 10px; font-size: .92rem; color: #cdc0a0;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend .sw { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .legend .sw.gold { background: #e8c83a; border-radius: 50%; }
+  .legend .sw.gems { background: #3fd6c8; border-radius: 50%; }
+  .legend .sw.enc { background: #b02a1a; border-radius: 2px; }
+  .legend .sw.hero { background: #2b4a8f; border: 1px solid #f0d98c; border-radius: 50%; }
+  .legend .sw.town { background: #6b5d4a; border: 1px solid #d4af37; }
+
+  .seed-note { margin-top: 10px; font-size: .8rem; color: #6f7f6a; letter-spacing: .06em; }
+
+  /* ── Overlays (recruit / battle / level-up) ───────── */
+  .overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(4, 8, 6, .82);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .overlay-card {
+    width: 100%; max-width: 620px; max-height: 86vh; overflow: auto;
+    background: linear-gradient(180deg, #16241b, #0c1410);
+    border: 2px solid rgba(212, 175, 55, .45);
+    border-radius: 16px;
+    padding: 22px 24px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, .7);
+    text-align: left;
+  }
+  .overlay-card h2 {
+    margin: 0 0 12px; text-align: center;
+    font-family: "Cinzel Decorative", Georgia, serif;
+    font-weight: 900; letter-spacing: .06em; color: #f0d98c;
+  }
+  .overlay-card .oc-sub { text-align: center; color: #cdc0a0; font-style: italic; margin: 0 0 16px; }
+  .overlay-card .rec-header {
+    display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
+    color: #cdc0a0; font-size: .92rem; margin-bottom: 10px;
+  }
+  .rec-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .rec-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: rgba(255, 255, 255, .04);
+    border: 1px solid rgba(212, 175, 55, .15);
+    border-radius: 8px; padding: 8px 10px;
+  }
+  .rec-info { flex: 1; min-width: 120px; }
+  .rec-info b { color: #e8e0c8; }
+  .rec-stats { color: #9fb8a5; font-size: .85rem; }
+  .rec-cost { color: #f0d98c; font-size: .9rem; min-width: 70px; }
+  .rec-have { color: #8fa396; font-size: .85rem; min-width: 52px; }
+  .rec-btn {
+    font-family: inherit; font-weight: 700; cursor: pointer;
+    background: linear-gradient(180deg, #3a5a3f, #24452f);
+    color: #fff8e0; border: 1px solid #7f9c6b; border-radius: 6px;
+    padding: 4px 10px; font-size: .85rem;
+  }
+  .rec-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .rec-btn:hover:not(:disabled) { filter: brightness(1.15); }
+  .close-btn {
+    display: block; margin: 4px auto 0;
+    font-family: "Cinzel Decorative", Georgia, serif; font-weight: 700; letter-spacing: .12em;
+    background: linear-gradient(180deg, #a3781f, #6d4c10); color: #fff8e0;
+    border: 1px solid #d4af37; border-radius: 8px; padding: 9px 26px; cursor: pointer; font-size: .85rem;
+  }
+  .close-btn:hover { filter: brightness(1.15); }
+  .battle-desc { text-align: center; font-size: 1.1rem; color: #f0d98c; margin: 0 0 14px; }
+  .battle-note { text-align: center; color: #8fa396; font-style: italic; margin: 14px 0 6px; font-size: .9rem; }
+  .oc-section { color: #bfa76a; font-size: .78rem; letter-spacing: .1em; text-transform: uppercase; margin: 10px 0 4px; }
+
+  /* ── Battle ──────────────────────────────────────── */
+  .battle-card { max-width: 760px; }
+  .battle-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .battle-head h2 { margin-bottom: 6px; }
+  .battle-mana { color: #8fd6ff; font-size: .85rem; font-style: italic; }
+  .battle-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 3px;
+    background: rgba(0, 0, 0, .35);
+    border: 1px solid rgba(212, 175, 55, .3);
+    border-radius: 10px;
+    padding: 6px;
+  }
+  .bcell {
+    aspect-ratio: 1.35;
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid rgba(255, 255, 255, .08);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: default;
+    position: relative;
+  }
+  .bcell.has { cursor: pointer; }
+  .unit-chip { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 2px; }
+  .unit-chip.sel { outline: 2px solid #f0d98c; border-radius: 6px; box-shadow: 0 0 10px rgba(240, 217, 140, .6); }
+  .uc-icon {
+    width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Cinzel Decorative", Georgia, serif; font-weight: 900; font-size: .72rem;
+    color: #fff; border: 1.5px solid #f0d98c;
+  }
+  .uc-count { font-size: .72rem; color: #e8e0c8; line-height: 1; }
+  .uc-hp { width: 80%; height: 3px; background: rgba(0, 0, 0, .5); border-radius: 2px; overflow: hidden; }
+  .uc-hp > div { height: 100%; background: linear-gradient(90deg, #5db85d, #a8e06a); }
+  .uc-hp.enemy > div { background: linear-gradient(90deg, #c23b3b, #e07050); }
+  .battle-prompt { text-align: center; color: #f0d98c; margin: 12px 0 4px; min-height: 1.3em; font-size: 1rem; }
+  .battle-log {
+    background: rgba(0, 0, 0, .3); border-radius: 8px; padding: 8px 10px;
+    min-height: 66px; max-height: 130px; overflow: auto;
+    font-size: .88rem; color: #cdc0a0; text-align: left;
+  }
+  .battle-log div { padding: 1px 0; }
+  .battle-log div:first-child { color: #fff3ce; }
+  .battle-btns { display: flex; gap: 10px; justify-content: center; margin-top: 14px; flex-wrap: wrap; }
+  .battle-btns .close-btn { margin: 0; }
+  .fireball-btn { background: linear-gradient(180deg, #8f3a2a, #5c1f16); border: 1px solid #e07050; }
+  .fireball-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ── Level up ─────────────────────────────────────── */
+  .attr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+  .attr-btn {
+    background: rgba(255, 255, 255, .05);
+    border: 1px solid rgba(212, 175, 55, .35);
+    border-radius: 10px;
+    padding: 12px 10px;
+    cursor: pointer;
+    color: #e8e0c8;
+    font-family: "Cormorant Garamond", Georgia, serif;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    transition: transform .12s ease, border-color .12s ease;
+  }
+  .attr-btn:hover { transform: translateY(-2px); border-color: #f0d98c; box-shadow: 0 0 14px rgba(212, 175, 55, .3); }
+  .attr-btn b { font-family: "Cinzel Decorative", Georgia, serif; font-size: .9rem; color: #f0d98c; }
+  .attr-btn span { font-size: .85rem; color: #cdc0a0; }
+  .attr-btn em { font-style: normal; font-weight: 700; color: #7fe08a; font-size: .85rem; }
+
+  /* ── Save / Load ─────────────────────────────────── */
+  .sl-btn-row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 4px; }
+  .sl-btn-row .close-btn { margin: 0; }
+  .sl-status { text-align: center; color: #8fd6ff; font-style: italic; margin: 12px 0 2px; min-height: 1.2em; }
+  .sl-status.err { color: #e07a5f; }
+  .sl-textarea {
+    width: 100%; box-sizing: border-box;
+    background: #0a1410; color: #cdc0a0;
+    border: 1px solid rgba(212, 175, 55, .3); border-radius: 8px;
+    padding: 10px; font-family: monospace; font-size: .76rem;
+    resize: vertical; min-height: 96px;
+  }
+  .sl-hint { color: #8fa396; font-size: .85rem; font-style: italic; text-align: center; margin: 8px 0 2px; }
+
+  footer { margin-top: auto; padding: 18px 20px 26px; color: #6f7f6a; font-size: .85rem; letter-spacing: .06em; }
+  footer .emblem { color: #d4af37; }
+
+  @media (max-width: 640px) {
+    .hud { justify-content: center; }
+    .hud-stats { justify-content: center; }
+  }
+</style>
+
+<!-- Title screen -->
+<div class="title-screen" id="titleScreen">
+  <img class="banner" src="https://user.uploads.dev/file/5663d58dc82dde68bf02ab7fa4054d4a.jpg" alt="Heraldic emblem of a crowned griffin" crossorigin="anonymous">
+  <h1>Heroes of Might<br>and Magic</h1>
+  <p class="subtitle">A Strategic Quest</p>
+  <div class="divider"></div>
+  <p class="tagline">Command your heroes, gather your armies, and conquer the realm of Enroth.</p>
+  <button class="play-btn" id="playBtn">Begin the Quest</button>
+</div>
+
+<!-- Game view -->
+<div class="game-view" id="gameView">
+  <div class="hud">
+    <span class="hud-brand">Heroes of Might and Magic</span>
+    <span class="hud-stats">
+      <span>Turn <b id="turnVal">1</b></span>
+      <span>Moves <b id="movesVal">6/6</b></span>
+      <span>Gold <b id="goldVal">0</b></span>
+      <span>Gems <b id="gemsVal">0</b></span>
+      <span>Army <b id="armyVal">0</b></span>
+      <span>Level <b id="levelVal">1</b></span>
+      <span>Mana <b id="manaVal">10/10</b></span>
+      <span>Explored <b id="exploredVal">0%</b></span>
+    </span>
+    <span class="hud-btns">
+      <button class="hud-btn recruit-btn" id="recruitBtn" disabled>Recruit</button>
+      <button class="hud-btn end-turn-btn" id="endTurnBtn">End Turn</button>
+      <button class="hud-btn new-world-btn" id="newWorldBtn">New World</button>
+      <button class="hud-btn save-btn" id="saveLoadBtn">Save / Load</button>
+    </span>
+  </div>
+  <div class="map-frame"><canvas id="mapCanvas" width="1056" height="720"></canvas></div>
+  <p class="status-line" id="statusEl">Move with arrow keys / WASD, or click a tile to travel there.</p>
+  <div class="legend">
+    <span><span class="sw hero"></span> Hero</span>
+    <span><span class="sw gold"></span> Gold mine</span>
+    <span><span class="sw gems"></span> Gem pile</span>
+    <span><span class="sw town"></span> Town</span>
+    <span><span class="sw enc"></span> Encounter</span>
+    <span>Swamp costs 2 movement</span>
+  </div>
+  <p class="seed-note" id="seedNote"></p>
+</div>
+
+<!-- Recruit panel -->
+<div class="overlay" id="recruitPanel" hidden>
+  <div class="overlay-card">
+    <h2>Recruit Troops</h2>
+    <p class="oc-sub">Your garrison stands ready — spend gold to grow your army.</p>
+    <div class="rec-header">
+      <span>Gold: <b id="recruitGold">0</b></span>
+      <span id="recruitSlots">0/5 slots used</span>
+    </div>
+    <div class="rec-list" id="recruitList"></div>
+    <button class="close-btn" id="recruitCloseBtn">Done</button>
+  </div>
+</div>
+
+<!-- Battle overlay -->
+<div class="overlay" id="battleView" hidden>
+  <div class="overlay-card battle-card">
+    <div class="battle-head">
+      <h2>⚔️ Battle — Round <span id="battleRound">1</span></h2>
+      <span class="battle-mana" id="battleMana">Mana 0/0</span>
+    </div>
+    <p class="battle-desc" id="battleDesc"></p>
+    <div class="battle-grid" id="battleGrid"></div>
+    <p class="battle-prompt" id="battlePrompt"></p>
+    <div class="battle-log" id="battleLog"></div>
+    <div class="battle-btns">
+      <button class="close-btn fireball-btn" id="fireballBtn" hidden>🔥 Fireball</button>
+      <button class="close-btn" id="retreatBtn">Retreat</button>
+      <button class="close-btn" id="returnBtn" hidden>Return to Map</button>
+    </div>
+  </div>
+</div>
+
+<!-- Level up overlay -->
+<div class="overlay" id="levelUpView" hidden>
+  <div class="overlay-card">
+    <h2>⬆️ Level Up!</h2>
+    <p class="oc-sub" id="levelUpText">Choose an attribute to increase.</p>
+    <div class="attr-grid" id="attrGrid"></div>
+  </div>
+</div>
+
+<!-- Save / Load overlay -->
+<div class="overlay" id="saveLoadView" hidden>
+  <div class="overlay-card">
+    <h2>Save &amp; Load</h2>
+    <p class="oc-sub">Session persistence — your realm is stored as a plain-text string.</p>
+    <div class="sl-btn-row">
+      <button class="close-btn" id="saveBtn">Save Game</button>
+      <button class="close-btn" id="loadBtn">Load Saved Game</button>
+    </div>
+    <p class="sl-status" id="slStatus"></p>
+    <p class="oc-section">Save string</p>
+    <textarea class="sl-textarea" id="saveTextarea" rows="6" spellcheck="false"></textarea>
+    <p class="sl-hint">Copy the string above to keep a backup anywhere, or paste a save string below to restore a realm.</p>
+    <div class="sl-btn-row">
+      <button class="close-btn" id="copySaveBtn">Copy to Clipboard</button>
+      <button class="close-btn" id="importBtn">Import from Field</button>
+    </div>
+    <button class="close-btn" id="saveCloseBtn">Done</button>
+  </div>
+</div>
+
+<footer>
+  <span class="emblem">✦</span> A tribute to New World Computing's classic — rebuilt for Perchance <span class="emblem">✦</span>
+</footer>
+
+<script type="module">
+  document.title = "Heroes of Might and Magic: A Strategic Quest";
+
+  import * as Map from "./src/map.js";
+  import { createHero, stepHero, walkHero, endTurn as endHeroTurn, addXp, gainAttribute, regenMana } from "./src/hero.js";
+  import { recruit, canRecruit, findSlot, armySize, slotsUsed, armySummary, takeCasualties } from "./src/army.js";
+  import { UNITS, MAX_ARMY_SLOTS, MAX_UNITS_PER_SLOT } from "./src/units.js";
+  import { startBattle, nextActor, attack, checkEnd, enemyReward, makeEnemyStacks, fireball, canUseFireball, FIREBALL_COST, COLS, ROWS } from "./src/battle.js";
+  import { game, initState } from "./src/state.js";
+
+  const g = game;
+
+  let hoverTile = null;
+  let hoverBlocked = false;
+  let selectedUnit = null;
+  let pendingLevelUps = 0;
+
+  function setStatus(msg, err) {
+    statusEl.textContent = msg || "";
+    statusEl.classList.toggle("err", !!err);
+  }
+
+  function updateHud() {
+    if (!g.hero) return;
+    turnVal.textContent = g.hero.turn;
+    movesVal.textContent = g.hero.movesLeft + "/" + g.hero.maxMoves;
+    goldVal.textContent = g.hero.gold.toLocaleString();
+    gemsVal.textContent = g.hero.gems;
+    armyVal.textContent = armySize(g.hero);
+    levelVal.textContent = g.hero.level;
+    manaVal.textContent = g.hero.mana + "/" + g.hero.maxMana;
+    exploredVal.textContent = Map.exploredPercent(g.map) + "%";
+    seedNote.textContent = "World seed " + g.map.stats.seed + " — every realm is unique.";
+    const onTown = g.map.grid[g.hero.y][g.hero.x].town;
+    recruitBtn.disabled = !onTown || g.mode !== "map";
+  }
+
+  function render() {
+    Map.updateFog(g.map, g.hero);
+    const ctx = mapCanvas.getContext("2d");
+    Map.renderMap(mapCanvas, g.map);
+    Map.drawReachables(ctx, g.map, g.hero);
+    if (hoverTile && Map.isExplored(g.map, hoverTile.x, hoverTile.y)) Map.drawHover(ctx, hoverTile, hoverBlocked);
+    Map.drawHero(ctx, g.hero);
+  }
+
+  function tileFromEvent(e) {
+    const rect = mapCanvas.getBoundingClientRect();
+    return {
+      x: Math.floor(((e.clientX - rect.left) / rect.width) * Map.MAP_W),
+      y: Math.floor(((e.clientY - rect.top) / rect.height) * Map.MAP_H)
+    };
+  }
+
+  function formatGain(gain) {
+    const parts = [];
+    if (gain.gold) parts.push(gain.gold + " gold");
+    if (gain.gems) parts.push(gain.gems + " gems");
+    return parts.join(" and ") || "treasure";
+  }
+
+  function afterMove(collected) {
+    const cell = g.map.grid[g.hero.y][g.hero.x];
+    let msg = collected ? "Collected " + formatGain(collected.gain) + "!" : "";
+    if (cell.encounter) {
+      const enc = g.map.encounters.find(e => e.x === g.hero.x && e.y === g.hero.y);
+      triggerBattle(enc);
+      return;
+    }
+    if (cell.town) msg = (msg ? msg + " " : "") + "You stand at a town — recruit new troops.";
+    setStatus(msg);
+    updateHud();
+    render();
+  }
+
+  function triggerBattle(enc) {
+    g.mode = "battle";
+    battleDesc.textContent = enc ? ("You face " + enc.count + " " + enc.name + "!") : "You face unknown hostiles!";
+    g.battle = startBattle(armySummary(g.hero), makeEnemyStacks(enc, armySummary(g.hero)), {
+      attack: g.hero.attack,
+      defense: g.hero.defense,
+      spellPower: g.hero.spellPower,
+      mana: g.hero.mana,
+      maxMana: g.hero.maxMana
+    });
+    selectedUnit = null;
+    returnBtn.hidden = true;
+    retreatBtn.disabled = false;
+    battleLog.innerHTML = "";
+    battleView.hidden = false;
+    setStatus("");
+    updateHud();
+    stepBattle();
+  }
+
+  function stepBattle() {
+    if (checkEnd(g.battle)) { finishBattle(); return; }
+    const actor = nextActor(g.battle);
+    if (!actor) { finishBattle(); return; }
+    battleRound.textContent = g.battle.round;
+    if (actor.side === "player") {
+      selectedUnit = null;
+      battlePrompt.textContent = "Your turn — select one of your units, then click an enemy to attack.";
+    } else {
+      battlePrompt.textContent = "Enemy " + actor.name + " ×" + actor.count + " strikes!";
+      setTimeout(() => {
+        if (!g.battle || g.battle.over) return;
+        const target = pickTarget(g.battle, actor);
+        if (target) {
+          const res = attack(g.battle, actor, target);
+          addBattleLog("Enemy " + res.attacker.name + " ×" + res.attacker.count + " hits " +
+            (res.defender.side === "player" ? "your " : "") + res.defender.name + " for " + res.dmg +
+            " damage — " + res.casualties + " slain.");
+          updateBattleUI();
+        }
+        stepBattle();
+      }, 650);
+    }
+    updateBattleUI();
+  }
+
+  function pickTarget(battle, attacker) {
+    const foes = battle.units.filter(u => u.side !== attacker.side && u.count > 0);
+    if (!foes.length) return null;
+    foes.sort((a, b) => (b.count * b.atk) - (a.count * a.atk));
+    return foes[0];
+  }
+
+  function unitChip(u) {
+    const hue = u.side === "player" ? "#2b4a8f" : "#b02a1a";
+    const totalHp = u.hp * u.count;
+    const curHp = (u.count - 1) * u.hp + u.hpPool;
+    const pct = Math.max(0, Math.min(100, Math.round((curHp / totalHp) * 100)));
+    return '<div class="unit-chip' + (selectedUnit === u ? " sel" : "") + '">' +
+      '<div class="uc-icon" style="background:' + hue + '">' + u.name[0] + "</div>" +
+      '<div class="uc-count">' + u.count + "</div>" +
+      '<div class="uc-hp' + (u.side === "enemy" ? " enemy" : "") + '"><div style="width:' + pct + '%"></div></div>' +
+      "</div>";
+  }
+
+  function updateBattleUI() {
+    const cells = [];
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < COLS; x++) {
+        const u = g.battle.units.find(u2 => u2.x === x && u2.y === y && u2.count > 0);
+        cells.push('<div class="bcell' + (u ? " has" : "") + '" data-x="' + x + '" data-y="' + y + '">' + (u ? unitChip(u) : "") + "</div>");
+      }
+    }
+    battleGrid.innerHTML = cells.join("");
+    battleMana.textContent = "Mana " + g.battle.mana + "/" + g.battle.maxMana;
+    if (!g.battle.over) {
+      fireballBtn.hidden = false;
+      const cd = g.battle.fireballCooldown || 0;
+      fireballBtn.disabled = !canUseFireball(g.battle);
+      fireballBtn.textContent = cd > 0
+        ? ("🔥 Fireball (cooldown " + cd + ")")
+        : ("🔥 Fireball (" + FIREBALL_COST + " mana)");
+    } else {
+      fireballBtn.hidden = true;
+    }
+  }
+
+  function addBattleLog(msg) {
+    const div = document.createElement("div");
+    div.textContent = msg;
+    battleLog.prepend(div);
+    while (battleLog.children.length > 6) battleLog.lastChild.remove();
+  }
+
+  function applyBattleCasualties() {
+    const losses = {};
+    for (const init of g.battle.playerInitial) {
+      const cur = g.battle.units.find(u => u.side === "player" && u.id === init.id);
+      const now = cur ? cur.count : 0;
+      if (init.count - now > 0) losses[init.id] = init.count - now;
+    }
+    if (Object.keys(losses).length) takeCasualties(g.hero, losses);
+  }
+
+  function finishBattle() {
+    const end = checkEnd(g.battle);
+    g.battle.over = end;
+    retreatBtn.disabled = true;
+    applyBattleCasualties();
+    g.hero.mana = g.battle.mana;
+    if (end.winner === "player") {
+      const rew = enemyReward(g.battle.enemyStacks);
+      g.hero.gold += rew.gold;
+      const ups = addXp(g.hero, rew.xp);
+      battlePrompt.textContent = "Victory! You gain " + rew.gold + " gold and " + rew.xp + " XP.";
+      addBattleLog("VICTORY! +" + rew.gold + " gold, +" + rew.xp + " XP");
+      if (ups > 0) openLevelUps(ups);
+    } else if (end.winner === "enemy") {
+      battlePrompt.textContent = "Defeat — your army has been annihilated.";
+      addBattleLog("Defeat — all your troops have fallen.");
+    } else {
+      battlePrompt.textContent = "The field lies empty.";
+    }
+    returnBtn.hidden = false;
+    updateBattleUI();
+  }
+
+  function consumeEncounter() {
+    const cell = g.map.grid[g.hero.y][g.hero.x];
+    if (cell.encounter) {
+      cell.encounter = false;
+      const i = g.map.encounters.findIndex(e => e.x === g.hero.x && e.y === g.hero.y);
+      if (i >= 0) g.map.encounters.splice(i, 1);
+      g.map.stats.encounters = g.map.encounters.length;
+    }
+  }
+
+  function leaveBattle(msg) {
+    if (g.battle) g.hero.mana = g.battle.mana;
+    consumeEncounter();
+    g.mode = "map";
+    battleView.hidden = true;
+    g.battle = null;
+    selectedUnit = null;
+    setStatus(msg);
+    updateHud();
+    render();
+    autoSave();
+  }
+
+  function openLevelUps(count) {
+    pendingLevelUps = count;
+    renderAttrGrid();
+    levelUpView.hidden = false;
+  }
+
+  function renderAttrGrid() {
+    levelUpText.textContent = "Choose an attribute to increase (" + pendingLevelUps + " level-up" + (pendingLevelUps > 1 ? "s" : "") + " remaining)";
+    const h = g.hero;
+    const attrs = [
+      ["attack", "Attack", h.attack],
+      ["defense", "Defense", h.defense],
+      ["spellPower", "Spell Power", h.spellPower],
+      ["knowledge", "Knowledge", h.knowledge]
+    ];
+    attrGrid.innerHTML = attrs.map(([attr, label, val]) =>
+      '<button class="attr-btn" data-attr="' + attr + '"><b>' + label + '</b><span>Level ' + val + '</span><em>+1</em></button>'
+    ).join("");
+    attrGrid.querySelectorAll(".attr-btn").forEach(b => {
+      b.addEventListener("click", () => {
+        const attr = b.dataset.attr;
+        gainAttribute(g.hero, attr);
+        pendingLevelUps--;
+        setStatus("Level up complete — " + attr + " increased!");
+        updateHud();
+        if (pendingLevelUps > 0) {
+          renderAttrGrid();
+        } else {
+          levelUpView.hidden = true;
+          if (g.mode === "battle" && g.battle) updateBattleUI();
+        }
+      });
+    });
+  }
+
+  retreatBtn.addEventListener("click", () => {
+    if (g.battle && g.battle.over) return;
+    leaveBattle("You retreat from the field — no rewards gained.");
+  });
+
+  returnBtn.addEventListener("click", () => {
+    const won = g.battle && g.battle.over && g.battle.over.winner === "player";
+    leaveBattle(won
+      ? "Victory! The realm grows richer."
+      : "Your army lies broken — recruit new troops at a town.");
+  });
+
+  fireballBtn.addEventListener("click", () => {
+    if (!g.battle || !canUseFireball(g.battle)) return;
+    const res = fireball(g.battle);
+    if (!res) return;
+    addBattleLog("Your hero casts Fireball — " + res.totalDamage + " damage across the enemy line!");
+    battleMana.textContent = "Mana " + g.battle.mana + "/" + g.battle.maxMana;
+    updateBattleUI();
+    if (checkEnd(g.battle)) { finishBattle(); return; }
+  });
+
+  battleGrid.addEventListener("click", (e) => {
+    const cell = e.target.closest(".bcell");
+    if (!cell || !g.battle || g.battle.over) return;
+    const x = +cell.dataset.x, y = +cell.dataset.y;
+    const unit = g.battle.units.find(u => u.x === x && u.y === y && u.count > 0);
+    if (!unit) return;
+    if (unit.side === "player") {
+      selectedUnit = unit;
+      updateBattleUI();
+      return;
+    }
+    if (!selectedUnit) {
+      battlePrompt.textContent = "Select one of your units first.";
+      return;
+    }
+    const res = attack(g.battle, selectedUnit, unit);
+    addBattleLog("Your " + res.attacker.name + " ×" + res.attacker.count + " hits " + res.defender.name +
+      " for " + res.dmg + " damage — " + res.casualties + " slain.");
+    selectedUnit = null;
+    updateBattleUI();
+    stepBattle();
+  });
+
+  function recruitError(reason) {
+    return {
+      gold: "Not enough gold.",
+      slots: "Army is full — at most " + MAX_ARMY_SLOTS + " unit types.",
+      capacity: "That unit slot is full (" + MAX_UNITS_PER_SLOT + ").",
+      "unknown unit": "Unknown unit."
+    }[reason] || "Cannot recruit.";
+  }
+
+  function renderRecruitPanel() {
+    recruitGold.textContent = g.hero.gold.toLocaleString();
+    recruitSlots.textContent = slotsUsed(g.hero) + "/" + MAX_ARMY_SLOTS + " slots used";
+    recruitList.innerHTML = UNITS.map(u => {
+      const cur = findSlot(g.hero, u.id);
+      const have = cur ? cur.count : 0;
+      const btn = n => {
+        const r = canRecruit(g.hero, u.id, n);
+        return '<button class="rec-btn" data-id="' + u.id + '" data-n="' + n + '"' + (r.ok ? "" : " disabled") + ">+" + n + "</button>";
+      };
+      return '<div class="rec-row">' +
+        '<div class="rec-info"><b>' + u.name + '</b> <span class="rec-stats">A' + u.atk + " D" + u.def + " HP" + u.hp + "</span></div>" +
+        '<div class="rec-cost">' + u.cost + " gold</div>" +
+        '<div class="rec-have">own ' + have + "</div>" +
+        btn(1) + btn(5) +
+      "</div>";
+    }).join("");
+    recruitList.querySelectorAll(".rec-btn").forEach(b => {
+      b.addEventListener("click", () => {
+        const r = recruit(g.hero, b.dataset.id, Number(b.dataset.n));
+        if (r.ok) setStatus("Recruited " + r.count + " " + r.name + " for " + r.cost + " gold.");
+        else setStatus(recruitError(r.reason), true);
+        renderRecruitPanel();
+        updateHud();
+      });
+    });
+  }
+
+  recruitBtn.addEventListener("click", () => {
+    if (!g.hero || g.mode !== "map") return;
+    if (!g.map.grid[g.hero.y][g.hero.x].town) {
+      setStatus("Recruiting requires standing at a town.", true);
+      return;
+    }
+    renderRecruitPanel();
+    recruitPanel.hidden = false;
+  });
+  recruitCloseBtn.addEventListener("click", () => { recruitPanel.hidden = true; });
+
+  function newWorld() {
+    const seed = Math.floor(Math.random() * 1e9);
+    const map = Map.initWorldMap(mapCanvas, seed);
+    const hero = createHero(map);
+    initState(map, hero, seed);
+    recruitPanel.hidden = true;
+    battleView.hidden = true;
+    levelUpView.hidden = true;
+    hoverTile = null;
+    updateHud();
+    render();
+    setStatus("A new realm is revealed. Move with arrow keys / WASD, or click a tile to travel there.");
+  }
+
+  playBtn.addEventListener("click", () => {
+    titleScreen.hidden = true;
+    gameView.classList.add("visible");
+    newWorld();
+  });
+
+  newWorldBtn.addEventListener("click", newWorld);
+
+  endTurnBtn.addEventListener("click", () => {
+    if (!g.hero || g.mode !== "map") return;
+    endHeroTurn(g.hero);
+    regenMana(g.hero, 2);
+    updateHud();
+    render();
+    setStatus("Turn " + g.hero.turn + " begins — movement and some mana restored.");
+    autoSave();
+  });
+
+  const KEYMAP = {
+    ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+    w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0],
+    W: [0, -1], S: [0, 1], A: [-1, 0], D: [1, 0]
+  };
+  document.addEventListener("keydown", (e) => {
+    if (!g.hero || g.mode !== "map" || !gameView.classList.contains("visible")) return;
+    const dir = KEYMAP[e.key];
+    if (!dir) return;
+    e.preventDefault();
+    const res = stepHero(g.map, g.hero, dir[0], dir[1]);
+    if (!res.ok) {
+      setStatus(res.reason === "impassable" ? "Impassable — water and mountains block movement." : "Out of movement — press End Turn.", true);
+      return;
+    }
+    afterMove(res.collected);
+  });
+
+  mapCanvas.addEventListener("mousemove", (e) => {
+    if (!g.hero) return;
+    const t = tileFromEvent(e);
+    const inBounds = t.x >= 0 && t.y >= 0 && t.x < Map.MAP_W && t.y < Map.MAP_H;
+    const explored = inBounds && Map.isExplored(g.map, t.x, t.y);
+    hoverTile = explored ? t : null;
+    hoverBlocked = explored ? !Map.isPassable(g.map, t.x, t.y) : false;
+    render();
+  });
+  mapCanvas.addEventListener("mouseleave", () => {
+    hoverTile = null;
+    render();
+  });
+
+  mapCanvas.addEventListener("click", (e) => {
+    if (!g.hero || g.mode !== "map") return;
+    const t = tileFromEvent(e);
+    if (!Map.isExplored(g.map, t.x, t.y)) {
+      setStatus("Beyond the edge of sight — unexplored territory.", true);
+      return;
+    }
+    const res = walkHero(g.map, g.hero, t.x, t.y);
+    if (!res.ok) {
+      setStatus(res.reason === "impassable" ? "Impassable — water and mountains block movement." : "Cannot reach that tile.", true);
+    } else if (res.reached && res.steps === 0) {
+      setStatus("The hero is already there.");
+    } else if (!res.reached && !res.stoppedAtEncounter) {
+      setStatus("Movement ended early — out of movement points. End the turn to continue.", true);
+    } else {
+      afterMove(res.collected);
+      return;
+    }
+    updateHud();
+    render();
+  });
+
+  // ── Save / Load (Roadmap task 21) ──────────────────────────────────
+  const SAVE_KEY = "homm_strategic_save";
+
+  function serializeState() {
+    if (!g.map || !g.hero) return null;
+    return JSON.stringify({
+      v: 1,
+      hero: g.hero,
+      map: {
+        grid: g.map.grid.map(row => row.map(c => ({ t: c.t, resource: c.resource, encounter: !!c.encounter, town: !!c.town }))),
+        resources: g.map.resources,
+        encounters: g.map.encounters,
+        towns: g.map.towns,
+        stats: g.map.stats,
+        visibility: g.map.visibility ? Array.from(g.map.visibility) : null
+      },
+      mode: g.mode === "battle" ? "map" : g.mode,
+      seed: g.seed
+    });
+  }
+
+  function deserializeState(str) {
+    const data = JSON.parse(str);
+    if (!data || data.v !== 1 || !data.hero || !data.map || !Array.isArray(data.map.grid) || !data.map.grid.length) throw new Error("bad-format");
+    const map = {
+      grid: data.map.grid.map(row => row.map(c => ({
+        t: c.t || "grass",
+        resource: c.resource || null,
+        encounter: !!c.encounter,
+        town: !!c.town
+      }))),
+      resources: data.map.resources || [],
+      encounters: data.map.encounters || [],
+      towns: data.map.towns || [],
+      stats: data.map.stats || { seed: data.seed || 0 }
+    };
+    if (Array.isArray(data.map.visibility)) map.visibility = Uint8Array.from(data.map.visibility);
+    return { hero: data.hero, map, mode: data.mode === "battle" ? "map" : (data.mode || "map"), seed: data.seed || map.stats.seed || 0 };
+  }
+
+  function applySave(hero, map, mode, seed) {
+    initState(map, hero, seed);
+    g.mode = mode;
+    g.battle = null;
+    recruitPanel.hidden = true;
+    battleView.hidden = true;
+    levelUpView.hidden = true;
+    pendingLevelUps = 0;
+    selectedUnit = null;
+    hoverTile = null;
+    updateHud();
+    render();
+  }
+
+  function applySaveString(str, okMsg) {
+    let state;
+    try {
+      state = deserializeState(str);
+    } catch (e) {
+      slStatus.textContent = "Import failed — that is not a valid save string.";
+      slStatus.classList.add("err");
+      return false;
+    }
+    slStatus.classList.remove("err");
+    applySave(state.hero, state.map, state.mode, state.seed);
+    slStatus.textContent = okMsg;
+    setStatus(okMsg);
+    return true;
+  }
+
+  function writeLocalSave(str) {
+    try { localStorage.setItem(SAVE_KEY, str); return true; } catch (e) { return false; }
+  }
+  function readLocalSave() {
+    try { return localStorage.getItem(SAVE_KEY); } catch (e) { return null; }
+  }
+
+  function autoSave() {
+    if (!g.map || !g.hero || g.mode !== "map") return;
+    const str = serializeState();
+    if (str) writeLocalSave(str);
+  }
+
+  saveLoadBtn.addEventListener("click", () => {
+    if (!g.map || !g.hero) return;
+    if (g.mode !== "map") { setStatus("Saving is only possible on the world map.", true); return; }
+    saveTextarea.value = serializeState();
+    slStatus.classList.remove("err");
+    slStatus.textContent = readLocalSave() ? "A browser save exists — Load resumes it." : "No browser save yet.";
+    saveLoadView.hidden = false;
+  });
+
+  saveBtn.addEventListener("click", () => {
+    if (!g.map || !g.hero) return;
+    const str = serializeState();
+    saveTextarea.value = str;
+    slStatus.classList.remove("err");
+    slStatus.textContent = writeLocalSave(str) ? "Game saved to this browser." : "Save failed — browser storage unavailable.";
+  });
+
+  loadBtn.addEventListener("click", () => {
+    const str = readLocalSave();
+    if (!str) { slStatus.classList.add("err"); slStatus.textContent = "No saved game in this browser."; return; }
+    if (applySaveString(str, "Saved game loaded.")) saveLoadView.hidden = true;
+  });
+
+  copySaveBtn.addEventListener("click", async () => {
+    const text = saveTextarea.value;
+    slStatus.classList.remove("err");
+    try {
+      await navigator.clipboard.writeText(text);
+      slStatus.textContent = "Save string copied to clipboard.";
+    } catch (e) {
+      saveTextarea.select();
+      document.execCommand("copy");
+      slStatus.textContent = "Save string copied.";
+    }
+  });
+
+  importBtn.addEventListener("click", () => {
+    if (applySaveString(saveTextarea.value, "Save string imported — game restored.")) saveLoadView.hidden = true;
+  });
+
+  saveCloseBtn.addEventListener("click", () => { saveLoadView.hidden = true; });
+
+  window.getGameState = () => game;
+  window.gameState = () => game;
+  window.serializeGame = serializeState;
+  window.loadGameString = applySaveString;
+</script>

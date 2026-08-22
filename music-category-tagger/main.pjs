@@ -1,0 +1,629 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// MUSIC-CATEGORY-TAGGER — a Rathji template-based tool
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Paste a raw audio file list (PowerShell Get-ChildItem, ls -la, or plain
+// newline-separated filenames), set a base URL, and this tool generates:
+//   1. `audioTracks`  — a native 2-space indented Perchance list. Every track
+//      node exposes title, file, type, mood and tags.
+//   2. Filtered selectors — calmBackgroundList, townExplorationList,
+//      dungeonAmbientList and stingerFanfares, built with inline
+//      .filter() + .selectOne syntax.
+//   3. A copy-ready HTML5 <audio> player with Play/Pause, Skip, Volume,
+//      pool switching and fallback error handling.
+//
+// Categorization is driven by the editable keyword dictionaries below.
+// Tweak a list and the tool picks it up immediately.
+//
+// More generators by Rathji: https://perchance.org/rathjis-generators
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── TEMPLATE TO-DO LIST ────────────────────────────────────────────────────
+// Feature checklist for this template. Tick items off (remove the line) as
+// they're implemented in index.html.
+//   ✓ Multi-line file-list textarea
+//   ✓ Base URL input
+//   ✓ 4-axis keyword-tagging heuristics (type / mood / environment / profile)
+//   ✓ Clean + normalize + camelCase key generation
+//   ✓ audioTracks hierarchy with title / file / type / mood / tags
+//   ✓ Filtered selectors (.filter() + .selectOne)
+//   ✓ HTML5 player scaffolding with error handling + controls
+//   ✓ Copy Perchance code / Copy player buttons (dark mode UI)
+//   ✓ Live player preview + sample data
+// ───────────────────────────────────────────────────────────────────────────
+
+$meta
+  title = music-category-tagger
+  description = Paste any audio file list and generate a Perchance audio engine: a categorized audioTracks list, filtered selectors (calm/town/dungeon/stingers) and a copy-ready HTML5 player. A Rathji template-based tool.
+  image = https://user.uploads.dev/file/aa7250fc42621385853b2eff967d012b.jpg
+  tags = rathji, music, audio, tagger, categorize, soundtrack, tool, generator, perchance, helper, template
+  header
+    mode = minimal
+
+// ── 1. HEURISTIC KEYWORD DICTIONARIES ──────────────────────────────────────
+// These lists power the categorizer. Add/remove words freely — matching is
+// whole-word and case-insensitive, so "town" won't match "Townswatch".
+
+// Usability type — skip first, then strongest signal wins.
+audioHeurSkip
+  harsh
+  noise
+  screech
+  abrasive
+  static
+  distortion
+  feedback
+  grating
+  shriek
+  squeal
+  scraping
+  glitch
+  broken
+  test
+  scratch
+  detuned
+  offkey
+  off-key
+  silence
+
+audioHeurStinger // strong stinger signals
+  fanfare
+  sting
+  stinger
+  jingle
+  pickup
+  item
+  catch
+  game over
+  gameover
+  level up
+  levelup
+  level clear
+  stage clear
+  victory
+  success
+  complete
+  reward
+  coin
+  treasure
+  quest
+  chime
+  ding
+  boop
+  blip
+  beep
+  alert
+  unlock
+  transition
+  win
+  defeated
+  cleared
+
+audioHeurStingerWeak // only count if the track has no loop keywords
+  get
+  open
+  clear
+
+audioHeurActive
+  battle
+  boss
+  combat
+  fight
+  war
+  duel
+  arena
+  race
+  chase
+  escape
+  attack
+  pursuit
+  showdown
+  assault
+  siege
+  frenzy
+  charge
+  danger
+  threat
+  intense
+  action
+  rush
+
+audioHeurLoop
+  theme
+  loop
+  bgm
+  ost
+  music
+  town
+  village
+  city
+  field
+  forest
+  meadow
+  plains
+  mountain
+  desert
+  ocean
+  sea
+  coast
+  lake
+  river
+  beach
+  temple
+  shrine
+  sanctuary
+  church
+  dungeon
+  cave
+  castle
+  ruins
+  tower
+  mine
+  catacomb
+  crypt
+  house
+  home
+  shop
+  inn
+  tavern
+  garden
+  valley
+  sky
+  wind
+  rain
+  snow
+  winter
+  summer
+  spring
+  autumn
+  day
+  night
+  morning
+  sunset
+  dawn
+  dusk
+  menu
+  title
+  world
+  map
+  area
+  overworld
+  background
+  atmosphere
+  ambiance
+  main
+  harbor
+  port
+
+// Mood — the category with the most keyword hits wins (ties → first listed).
+audioHeurMoods
+  peaceful
+    calm
+    peace
+    serene
+    gentle
+    quiet
+    soft
+    soothing
+    lullaby
+    tranquil
+    relax
+    rest
+    tender
+    warm
+    comfort
+    morning
+    spring
+    meadow
+    garden
+    breeze
+    sun
+    sanctuary
+    meditation
+    dusk
+    dawn
+    sunset
+    sunrise
+    starlight
+  ambient
+    ambient
+    atmosphere
+    atmospheric
+    drone
+    pad
+    space
+    texture
+    background
+    wind
+    rain
+    night
+    dream
+    floating
+    ethereal
+    deep
+    field
+    forest
+    lake
+    ocean
+    stars
+  tense
+    tense
+    tension
+    suspense
+    suspenseful
+    threat
+    danger
+    ominous
+    dread
+    hostile
+    dark
+    deep
+    chase
+    pursuit
+    panic
+    uneasy
+    nervous
+    battle
+    boss
+    combat
+    war
+    storm
+    thunder
+    dungeon
+    cave
+    ruins
+    tomb
+    crypt
+  heroic
+    heroic
+    hero
+    epic
+    triumph
+    grand
+    majestic
+    glory
+    brave
+    legend
+    warrior
+    saga
+    anthem
+    victory
+    conquer
+    crusade
+  mysterious
+    mystery
+    mysterious
+    secret
+    ancient
+    ruins
+    puzzle
+    enigma
+    magic
+    arcane
+    riddle
+    hidden
+    fog
+    strange
+    otherworldly
+    whisper
+    whispers
+    shadow
+    occult
+    relic
+  cheerful
+    cheer
+    cheerful
+    happy
+    upbeat
+    bright
+    joy
+    jolly
+    playful
+    whimsical
+    sunny
+    dance
+    celebration
+    festive
+    fun
+    lively
+    cute
+    pop
+    melody
+    shop
+    fanfare
+    jingle
+    arcade
+    day
+  melancholic
+    sad
+    melancholy
+    melancholic
+    sorrow
+    grief
+    lonely
+    longing
+    somber
+    mournful
+    wistful
+    bittersweet
+    rain
+    quiet
+    goodbye
+    farewell
+    lost
+    nostalgia
+    tears
+    dusk
+    empty
+  creepy
+    creepy
+    horror
+    haunted
+    ghost
+    spooky
+    scary
+    nightmare
+    cursed
+    sinister
+    macabre
+    haunt
+    demon
+    witch
+    dark
+    dread
+    grave
+    tomb
+    crypt
+    abyss
+
+// Environment — added to a track's tags when matched.
+audioHeurEnvs
+  town
+    town
+    village
+    city
+    market
+    street
+    plaza
+    port
+    harbor
+    gate
+    square
+    house
+    home
+  dungeon
+    dungeon
+    cave
+    cavern
+    catacomb
+    crypt
+    mine
+    ruins
+    castle
+    tower
+    labyrinth
+    sewers
+    tomb
+    vault
+    abyss
+    depths
+  field
+    field
+    plains
+    meadow
+    grass
+    grassland
+    overworld
+    outdoor
+    valley
+    mountain
+    hill
+    coast
+    sea
+    ocean
+    desert
+    snow
+    forest
+    jungle
+    swamp
+    lake
+    river
+    beach
+    sky
+    wind
+    farm
+    garden
+  tavern
+    tavern
+    inn
+    pub
+    bar
+    ale
+    mead
+    drink
+  cutscene
+    cutscene
+    cinematic
+    story
+    intro
+    outro
+    opening
+    ending
+    credits
+    narration
+    event
+    dialogue
+    title
+    menu
+    reveal
+    epilogue
+    prologue
+  battle
+    battle
+    boss
+    combat
+    fight
+    war
+    duel
+    arena
+    race
+    chase
+    escape
+    siege
+    assault
+    showdown
+  shop
+    shop
+    store
+    merchant
+    market
+    bazaar
+    kiosk
+    vendor
+    trade
+  sacred
+    sacred
+    temple
+    church
+    cathedral
+    shrine
+    chapel
+    sanctuary
+    holy
+    altar
+    monastery
+    prayer
+    choir
+    hymn
+  indoor
+    house
+    home
+    indoor
+    room
+    hall
+    castle
+    interior
+    cabin
+    hut
+    palace
+    mansion
+    library
+
+// Sound profile — added to a track's tags when matched.
+audioHeurProfiles
+  acoustic
+    acoustic
+    guitar
+    folk
+    strum
+    unplugged
+    live
+    mandolin
+    banjo
+    ukulele
+  piano
+    piano
+    ivories
+    grand
+    keys
+  harp
+    harp
+    lyre
+    harpischord
+  strings
+    violin
+    viola
+    cello
+    string
+    strings
+    quartet
+    ensemble
+    bowed
+  woodwinds
+    woodwind
+    woodwinds
+    flute
+    oboe
+    clarinet
+    bassoon
+    recorder
+    panpipe
+    pan pipes
+    whistle
+    bagpipe
+  orchestral
+    orchestra
+    orchestral
+    symphony
+    symphonic
+    philharmonic
+  synth
+    synth
+    synthesizer
+    electronic
+    electro
+    synthwave
+    vaporwave
+    techno
+    analog
+    analogue
+    modular
+  chiptune
+    chiptune
+    8bit
+    8-bit
+    nes
+    snes
+    gameboy
+    arcade
+    pixel
+    chip
+    retro
+    square wave
+    bleep
+  heavy-percussion
+    percussion
+    drums
+    drum
+    taiko
+    timpani
+    pounding
+    marching
+    war drums
+    snare
+    kettledrum
+  minimal
+    minimal
+    sparse
+    solo
+    intimate
+    drone
+    bare
+
+// ── 2. SAMPLE DATA ─────────────────────────────────────────────────────────
+// Raw sample listing shown when you press "Load sample" (a PowerShell
+// Get-ChildItem dump). $output joins it back into one multi-line string.
+audioSampleList
+  Mode                 LastWriteTime         Length Name
+  ----                 -------------         ------ ----
+  -a----         3/15/2024   9:41 AM          52378 01 - Village Theme.mp3
+  -a----         3/15/2024   9:41 AM          44210 02 - Town Square Day.mp3
+  -a----         3/15/2024   9:44 AM          61203 03 - Forest of Whispers.mp3
+  -a----         3/15/2024   9:47 AM          88921 04 - Battle! Boss Theme.mp3
+  -a----         3/15/2024   9:50 AM          71344 05 - Dungeon Crawl.mp3
+  -a----         3/15/2024   9:52 AM          18509 06 - Item Get Fanfare.mp3
+  -a----         3/15/2024   9:52 AM          12077 07 - Level Clear Jingle.mp3
+  -a----         3/15/2024   9:55 AM          50982 08 - Temple Sanctuary.mp3
+  -a----         3/15/2024   9:58 AM          47410 09 - Tavern Night.mp3
+  -a----         3/15/2024  10:01 AM          43881 10 - Shop Keep Melody.mp3
+  -a----         3/15/2024  10:03 AM          50122 11 - Lake at Dusk.mp3
+  -a----         3/15/2024  10:05 AM          74550 12 - Chase Scene.mp3
+  -a----         3/15/2024  10:08 AM          39870 13 - Sad Goodbye.mp3
+  -a----         3/15/2024  10:11 AM          55644 14 - Ancient Ruins Mystery.mp3
+  -a----         3/15/2024  10:12 AM          23920 15 - Game Over.mp3
+  -a----         3/15/2024  10:12 AM          31108 16 - White Noise Static.mp3
+  -a----         3/15/2024  10:15 AM          29174 17 - Victory Fanfare.mp3
+  -a----         3/15/2024  10:18 AM          60780 18 - Castle Courtyard.mp3
+  -a----         3/15/2024  10:21 AM          43510 19 - Piano Meditation.mp3
+  -a----         3/15/2024  10:24 AM          46603 20 - 8-Bit Arcade Run.mp3
+  $output = [this.joinItems("\n")]

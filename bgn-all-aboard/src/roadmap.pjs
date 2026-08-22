@@ -1,0 +1,97 @@
+# 🚂 ALL ABOARD! — Implementation Backlog
+Project: A complete recreation of Ticket to Ride (North America rules) as a Perchance generator.
+Generator: All Aboard! — built on the existing BGN table skeleton (lobby, local/AI/online modes, server-plugin rooms).
+Scope decisions locked in: original NA map (36 cities, ~78 routes), 2–5 players locally/AI, 2 players online; seeded deterministic PRNG for testability; canvas board renderer.
+
+## Workflow & Execution Rules
+1. Pick ONLY the first uncompleted task below.
+2. Implement that single task, write corresponding validation tests, verify it works in the live preview.
+3. Update `.pjs` to mark it `[x]` complete, then stop to await review before the next task.
+4. Task style: atomic, end-result only, with explicit thresholds/formulas/state transitions.
+
+## Mode 2: Expansion Requests
+Append new Phase blocks directly below, continuing sequential task numbering from the previous total (currently 51).
+
+#### Phase 1: Core Foundation Domain
+1. **[x] Deliver app shell & branding:** Provide the branded shell (title "All Aboard!", tagline, theme, colors) with a loading screen showing the hero image, animated progress, and a fade into the lobby; confirm the hero image, accent color `#e0a53a`, and responsive layout render correctly across desktop and mobile widths.
+2. **[x] Define the game state model:** Create a single serializable `state` object with typed fields for players (name, role, hand counts by color, trains left, score, claimed routes, tickets), decks (train deck, discard, 5 face-up, ticket deck), turn (index, action substate, phase), and game over data; validate every mutation so illegal states are impossible to construct.
+3. **[x] Implement the phase state machine:** Enforce states setup → playing → gameOver with legal substates per turn (chooseAction, drawingCards, claimingRoute, drawingTickets); every transition must be validated and invalid ones rejected with a reason.
+4. **[x] Build the North America map data:** Define 36 cities with pixel coordinates and 78 distinct city pairs — 56 single routes + 22 double routes = 100 route segments — each with endpoints, color (one of the eight route colors — purple, blue, orange, white, green, yellow, black, red — or gray), and length 1–6; add a validator asserting route uniqueness, endpoint existence, length bounds, color validity, and on-board coordinates.
+5. **[x] Add a seeded deterministic PRNG:** Implement a seedable generator (mulberry32) and route ALL shuffle/draw/select decisions through it so any game replays identically given a seed; expose a `newGame(seed)` entry point used by tests.
+
+#### Phase 2: Deck & Card Management
+6. **[x] Build the train-card deck:** Create the 110-card deck (12 of each of the 8 colors — purple, blue, orange, white, green, yellow, black, red — plus 14 locomotives), shuffle with the seeded PRNG, and support draw-from-top with automatic discard-pile reshuffle when the deck empties.
+7. **[x] Maintain the face-up row and discard:** Keep 5 face-up train cards, refilling to 5 after each draw; if 3 of the 5 face-up cards are locomotives, discard all 5 and replace with 5 new ones; taking a face-up locomotive limits the turn to 1 card, and a locomotive revealed as a replacement cannot be taken immediately.
+8. **[x] Build the destination-ticket deck:** Create the 30 destination tickets (city pairs with point values 4–22), shuffled by the PRNG, with a discard pile and reshuffle-on-empty.
+9. **[x] Implement the draw-3-keep-≥1 ticket routine:** Given a player, draw 3 tickets from the deck, present them, accept a non-empty subset to keep, return discarded ones to the ticket discard; track each ticket's state (unstarted / connected / complete) per player; mid-game draws keep ≥1 (the initial setup deal keeps ≥2 of 3).
+10. **[x] Track hands with integrity invariants:** Maintain per-player train-card counts by color; assert hand totals never go negative and that each draw/claim leaves hands consistent with deck+discard+face-up accounting.
+
+#### Phase 3: Turn & Route Mechanics
+11. **[x] Implement the three legal turn actions:** On a turn a player chooses exactly one of: draw up to 2 train cards (blind deck or face-up, honoring the locomotive single-draw rule), claim a route, or draw 3 destination tickets; the turn ends only when the chosen action completes.
+12. **[x] Validate route claims:** Accept a claim only when: the route is unclaimed, the player has trains ≥ route length, the player has enough cards of one matching color (gray routes accept any single color), and for double-route pairs the second segment is blocked in 2–3 player games (only one of the pair usable).
+13. **[x] Apply route claims:** Deduct the paid cards and trains, mark the route claimed by the player, add the route's points to the player's score using the official table (1→1, 2→2, 3→4, 4→7, 5→10, 6→15), and log the move.
+14. **[x] Sequence turns fairly:** Advance the active player index after each completed action; when the game ends mid-round, give every other player exactly one more turn so all players have played an equal number of turns.
+
+#### Phase 4: Routing & Scoring Engine
+15. **[x] Compute connectivity over claimed routes:** Implement a graph search (DFS/BFS) over a player's own claimed-route graph that answers "are these two cities connected?" in O(V+E).
+16. **[x] Detect ticket completion:** Mark each destination ticket complete when its two cities are connected in the player's claimed-route graph; update ticket states immediately after every route claim.
+17. **[x] Compute the longest continuous path:** For each player, calculate the length of their longest continuous path of trains (trains may pass through a city at most... path may revisit nodes only when required by junctions) and identify the single longest across all players; award 10 points to every player tied for the longest.
+18. **[x] Implement final scoring & winner resolution:** Final score = route points + completed ticket values − incomplete ticket values + longest-path bonus (10); winner is highest score, tie-broken by completed tickets then longest path; produce a full score breakdown object for the results screen.
+
+#### Phase 5: AI Opponents
+19. **[x] AI card-drawing policy:** Given a hand and the face-up row, choose (blind draw / face-up card / locomotive) targeting the colors needed by the AI's ticket routes; difficulty tiers (easy/normal/hard) mix in random and greedy choices; always produces a legal action.
+20. **[x] AI route-claim policy:** Evaluate every claimable route by score gain + ticket-connectivity gain + length feasibility; pick greedily (hard) or with noise (easy); never attempts an illegal claim.
+21. **[x] AI ticket-draw policy:** Decide whether to draw 3 tickets and which subset to keep based on expected connectivity of the hand; keeps at least 1.
+22. **[x] AI legality guarantee:** Run every AI decision through the same validated action engine as human players; a full game vs 1–3 AI completes without ever hitting an invalid action.
+
+#### Phase 6: Board Rendering & UI
+23. **[x] Render the board canvas:** Draw the map (background, cities with labels, all routes with their colors and length ticks) and claimed trains in player colors with a player-color legend; the canvas must scale responsively to screen width and look correct at 480px and 1200px.
+24. **[x] Render the face-up card row and deck:** Show the 5 face-up train cards (color chip + train glyph), deck/discard counts, and a click-to-draw interaction with visual feedback (card fly, deck shrink).
+25. **[x] Render player hands & panels:** Per-player panel showing train-card counts by color, hand size, trains-left counter, running score, and expandable destination-ticket list; highlight the active player.
+26. **[x] Implement route-claim interaction:** On click of an unclaimed route, highlight it and show the card cost; clicking again confirms, a cancel/different-click aborts; claimed routes are unclickable.
+27. **[x] Build the action UI:** Turn banner ("Alice's turn — draw 2 cards / claim / draw tickets"), enabled/disabled action buttons reflecting legality, a running move log, and clear "waiting/thinking" states during AI and network turns.
+28. **[x] Build modals & overlays:** Ticket-draw keep dialog (3 tickets, keep ≥1), full game-over summary with per-player score breakdown (routes, tickets +/-, longest path), and a how-to-play modal covering all official rules.
+
+#### Phase 7: Local & AI Game Completion
+29. **[x] Implement hotseat mode:** 2–5 human players on one screen with name entry, pass-and-play privacy (hand/ticket views toggle to the active player), and correct turn rotation.
+30. **[x] Implement end-of-game flow:** Trigger when a player's trains reach ≤2 after a claim; play the final equalizing turns, run final scoring, and display the winner + full breakdown.
+31. **[x] Full-game integration test:** Run a scripted complete game (seeded PRNG, 3 AI) end-to-end; assert turn count, legal actions only, correct final scores, and a deterministic winner for the same seed.
+
+#### Phase 8: Persistence & UX
+32. **[x] Save & load games:** Serialize the full state to JSON, persist locally (localStorage/kv), show a "Continue" option in the lobby, and support deleting the save; a restored game resumes with identical board/hands/scores.
+33. **[x] Undo last action:** Keep a bounded snapshot stack and allow undoing the most recent completed action (card draws, route claims, ticket draws) in local/AI games.
+
+#### Phase 9: Online Multiplayer (server-plugin)
+34. **[x] Define the online move protocol:** For 2-player rooms, define a move payload schema (action + params + full state snapshot) submitted via the existing `move` rpc on your turn; the acting player's snapshot is authoritative and both clients rehydrate from it.
+35. **[x] Synchronize online turns:** On join/reconnect, fetch the latest snapshot and rebuild the board/hands; handle presence, disconnect/resign/claim-win, and rematch via the existing rpcs; block inputs when it is not your turn.
+36. **[x] Online leaderboard:** Submit the winner's score via `submitScore` and render the top-10 leaderboard in the lobby with the player's name input.
+
+#### Phase 10: Polish & Meta
+37. **[x] Sound & music:** Add WebAudio SFX for card draw, route claim, ticket draw, and game end plus a toggleable background loop (train-era theme), with a mute switch that persists.
+38. **[x] Listing & QA pass:** Set `$meta.image` and verify the listing screenshot, hero, and loading screen; check responsiveness at mobile widths, canvas performance on low-end devices, and that the whole app runs with zero console errors.
+
+#### Phase 11: Mobile, Aids & Results Polish
+39. **[x] Mobile & touch support:** Make the game fully usable on phones — compact card/panel/action-button sizing at ≤560px, no horizontal overflow, and `touch-action:manipulation` so canvas taps, card taps, and buttons work without double-tap zoom.
+40. **[x] Route-hint helper:** Add a 💡 Hints toggle (persisted) that highlights unclaimed routes — green dashed outline = claimable right now with your hand, gold glow = on a shortest path for one of your tickets.
+41. **[x] Game-over details & personal records:** Add a "Show details" toggle in the game-over modal listing each player's claimed routes, ticket outcomes (✓/✗), and longest-path length; track per-player personal records (games, wins, best score) in localStorage and show the record line in the game-over modal.
+
+#### Phase 12: Career, Inputs & Daily Challenge
+42. **[x] Career stats panel:** Add a 📊 Stats button in the lobby opening a modal with per-player-name lifetime stats (games, wins, best score, win rate) persisted in localStorage ("ttr_stats"); every finished game updates them via updateStats() called from the results flow; clear-stats button included.
+43. **[x] Keyboard shortcuts:** Global hotkeys — 1 draw cards, 2 claim route, 3 draw tickets, Enter confirms a selected claim, Esc cancels selection/closes modals, S save, U undo, H hints toggle — never firing while typing in an input; the help modal lists them; claiming via Enter verified end-to-end.
+44. **[x] House rules:** Optional rule toggles in the setup modal — allow claiming the second segment of a double route in 2–3 player games, trains threshold that ends the game (0/1/2, default 2), and opening ticket minimum (2 or 3) — merged into the engine state via mergeRules() and enforced by the engine (doubleRouteLocked, end-trains trigger, ticket-keep minimum); preferences persist in localStorage ("ttr_rules") and load into the setup UI.
+45. **[x] Shareable result card:** In the game-over modal, a "Share" button opens a card with the winner, scores, longest-path bonus and a 1200×630 canvas preview; supports copying share text, downloading the PNG, and native share — all verified.
+46. **[x] Daily challenge:** A daily seed-based challenge (same seed for all players, official rules, vs 1 AI) with a lobby panel showing today's date, your best score, and a top-10 leaderboard of the day; scores are submitted to the shared BGN leaderboard day-tagged in the score's extra field and filtered back out for the panel; local best persists in localStorage ("ttr_daily"). Note: an initial comments-plugin design was abandoned because IntersectionObserver is suppressed in the preview iframe — the shared leaderboard approach has no such dependency.
+
+#### Phase 13: Progress, Replay & Advanced Modes
+47. **[x] Achievements:** 12 unlockable badges (first game/win, 5/25 wins, routes claimed, longest-path bonus, 3 tickets in a game, 200+ score, 5-player local game, daily rider, sharer) awarded at game end against cumulative career stats and persisted in localStorage ("ttr_ach"); lobby 🏅 button opens the badge grid with locked/unlocked states.
+48. **[x] Game history archive:** Every finished match (date, mode, players, ranking with scores) is recorded to localStorage ("ttr_history", capped at 50) and shown in a lobby 📜 modal with a clear-history button; recording hooks into the results flow.
+49. **[x] Replay viewer:** The app snapshots the state at the start of every turn (cloneState, capped 300; undo and online games excluded), and the game-over modal gains a ▶ Replay button that steps the recorded frames on a dedicated canvas with prev/play/next controls, live scores/trains readout, and Esc or ✕ to exit back to the live state.
+50. **[x] AI speed & skip to end:** A lobby ⚡ AI speed selector (slow/normal/fast/instant, persisted in "ttr_aiSpeed") drives the AI think-delay, and a ⏩ Finish button (visible during AI turns in vs-AI games) fast-forwards the remaining AI turns synchronously to the result; verified end-to-end on a full 188-turn game.
+51. **[x] Challenge codes:** A lobby 🔢 modal maps 6-character base-31 codes (no 0/O/1/I/L) to PRNG seeds — the same code plays the identical board for everyone; codes round-trip through codeFromSeed/seedFromCode, invalid input is rejected, the result screen and share text carry the code, and Play again replays the same board.
+
+#### Bugfix pass (post-51 verification)
+- **[x] Fix AI freeze on "no legal claim":** `legalActions()` only returns actions that are actually executable (deck/tickets non-empty; at least one route the active player can afford), so the AI's random fallback could no longer enter `claimingRoute` with nothing claimable — previously that dead-ended the turn and looped "AI turn error" forever, freezing the game.
+- **[x] Fix 3-locomotive face-up flush freeze:** when the remaining train piles are all (or almost all) locomotives, the 3+-loco flush could never converge, throwing mid-mutation and leaving an illegal 5-loco row that blocked `completeTurn` forever. The flush now gives up gracefully (`faceUpStuck` flag, validator + compact snapshot updated) so play continues; each loco stays takeable 1/turn.
+- **[x] Dead-board auto-end:** when no action is executable for the active player (AI or human), the turn completes an empty card-draw so `completeTurn`'s stall guard triggers the final round instead of stalling.
+- **[x] AI-turn recovery backstop:** `runAiStep` now recovers a broken AI turn via `TtR.forceCompleteTurn` (new engine export) instead of infinitely retrying the same failing turn.
+- Verified: engine test suite 245/245, 120 randomized full 4-player AI games, and a full app-level vs-3-AI game (176 turns) all complete with no errors.

@@ -1,0 +1,845 @@
+<!-- Latent Mask Tool — paint a mask, regenerate only that region -->
+
+<style>
+  :root{
+    --bg:#131318; --panel:#1c1c24; --panel2:#23232e; --border:#2e2e3b;
+    --text:#e8e8f0; --muted:#9a9ab0; --accent:#7aa2ff; --accent2:#b08cff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  body{text-align:left}
+  .hidden{display:none!important}
+
+  header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--panel)}
+  header .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;font-size:18px}
+  header h1{font-size:17px;margin:0;font-weight:650}
+  header .tag{color:var(--muted);font-size:13px}
+
+  main{display:flex;gap:18px;padding:18px;align-items:flex-start}
+  #workspaceCtn{flex:1 1 62%;min-width:0}
+  #panelCtn{flex:1 1 38%;max-width:420px;display:flex;flex-direction:column;gap:14px}
+
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px}
+
+  #loadBar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  #loadBar input[type=url]{flex:1;min-width:150px}
+  .btn{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;
+    padding:7px 12px;font-size:13px;cursor:pointer;transition:background .15s,border-color .15s}
+  .btn:hover{background:#2b2b38}
+  .btn.active{border-color:var(--accent);color:#fff}
+  .btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#0d0d12;font-weight:600;border:none}
+  .btn.primary:hover{filter:brightness(1.08)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.small{padding:4px 9px;font-size:12px}
+
+  input[type=url],input[type=text],input[type=number],textarea{
+    background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;
+    padding:8px 10px;font-size:13px;font-family:inherit}
+  input[type=number]{width:90px}
+  textarea{width:100%;resize:vertical;min-height:64px}
+  label{font-size:12px;color:var(--muted);display:block;margin:10px 0 4px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .field{flex:1}
+
+  #canvasWrap{position:relative;border:1px solid var(--border);border-radius:12px;overflow:hidden;
+    background:repeating-conic-gradient(#1a1a22 0% 25%, #20202a 0% 50%) 0 0/22px 22px;min-height:280px;
+    display:flex;align-items:center;justify-content:center}
+  #stage{display:block;max-width:100%;max-height:62vh;touch-action:none;cursor:crosshair}
+  #dropHint{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);
+    font-size:14px;pointer-events:none;text-align:center;padding:20px}
+  #dropHint strong{color:var(--text)}
+
+  #toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}
+  #toolbar .spacer{flex:1}
+  #maskPct{font-size:12px;color:var(--muted);min-width:70px;text-align:right}
+  input[type=range]{width:100px;accent-color:var(--accent)}
+  .lbl{font-size:12px;color:var(--muted)}
+
+  #genBtn{width:100%;padding:11px;font-size:14px;border-radius:10px;margin-top:14px}
+  #tips{font-size:12px;color:var(--muted);line-height:1.55}
+  #tips b{color:var(--text)}
+
+  #compare{position:relative;margin-top:6px;border:1px solid var(--border);border-radius:10px;overflow:hidden;
+    user-select:none;touch-action:none;cursor:ew-resize;background:#000;max-height:380px}
+  #compare img{display:block;width:100%}
+  #cmpBefore{position:relative;width:100%;height:auto}
+  #cmpAfter{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain}
+  #cmpDivider{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 6px rgba(0,0,0,.8);pointer-events:none}
+  #cmpDivider::after{content:"◂ ▸";position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    background:#fff;color:#111;font-size:11px;padding:2px 5px;border-radius:6px;white-space:nowrap}
+  #cmpLabels{position:absolute;top:6px;left:6px;right:6px;display:flex;justify-content:space-between;
+    font-size:11px;color:#fff;text-shadow:0 1px 3px #000;pointer-events:none}
+  #cmpLabels span{background:rgba(0,0,0,.45);padding:2px 7px;border-radius:5px}
+
+  #loading{position:fixed;inset:0;background:rgba(10,10,14,.75);display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:16px;z-index:50;backdrop-filter:blur(2px)}
+  .spinner{width:44px;height:44px;border-radius:50%;border:4px solid #33333f;border-top-color:var(--accent);
+    animation:spin 0.9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #loading .status{color:var(--text);font-size:14px;max-width:340px;text-align:center}
+  #loading .hint{color:var(--muted);font-size:12px;max-width:340px;text-align:center}
+
+  #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#2a1a1a;color:#ffb4b4;
+    border:1px solid #5a2a2a;padding:9px 16px;border-radius:9px;font-size:13px;z-index:60;display:none}
+
+  .chip{font-size:12px;padding:4px 9px;border-radius:20px;background:var(--panel2);border:1px solid var(--border);
+    color:var(--muted);cursor:pointer}
+  .chip:hover{color:var(--text);border-color:var(--accent)}
+
+  @media (max-width:900px){
+    main{flex-direction:column}
+    #panelCtn{max-width:none;width:100%}
+  }
+</style>
+
+<header>
+  <div class="logo">🎨</div>
+  <h1>Latent Mask Tool</h1>
+  <span class="tag">paint a mask → regenerate only that region</span>
+</header>
+
+<main>
+  <section id="workspaceCtn">
+    <div class="card">
+      <div id="loadBar">
+        <button class="btn" id="loadBtn">⬆ Upload image…</button>
+        <input type="url" id="urlInput" placeholder="…or paste an image URL">
+        <button class="btn small" id="urlLoadBtn">Load</button>
+        <button class="btn small" id="sampleBtn">Load sample</button>
+      </div>
+      <div id="canvasWrap">
+        <canvas id="stage" width="400" height="300"></canvas>
+        <div id="dropHint">Drop an image here or upload one to start<br><br>Then <strong>paint over the area you want to change</strong></div>
+      </div>
+      <div id="toolbar">
+        <button class="btn active" id="brushBtn">🖌 Paint</button>
+        <button class="btn" id="eraserBtn">🧽 Erase</button>
+        <span class="lbl">Size</span><input type="range" id="sizeRange" min="4" max="150" value="40">
+        <span class="lbl">Soft</span><input type="range" id="softRange" min="0" max="100" value="50">
+        <button class="btn small" id="fillBtn" title="Fill the whole image with the mask">Fill</button>
+        <button class="btn small" id="clearBtn">Clear</button>
+        <button class="btn small" id="invertBtn">Invert</button>
+        <span class="spacer"></span>
+        <button class="btn small" id="undoBtn">↩ Undo</button>
+        <button class="btn small" id="redoBtn">↪ Redo</button>
+        <button class="btn small" id="maskOnlyBtn">Mask view</button>
+        <button class="btn small" id="dlMaskBtn">Download mask</button>
+        <span id="maskPct"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="panelCtn">
+    <div class="card">
+      <label for="promptInput">What should the painted area become?</label>
+      <textarea id="promptInput" placeholder="e.g. a sparkling turquoise lake surrounded by pine trees"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="chip" data-p="a vast field of wildflowers">🌼 flowers</button>
+        <button class="chip" data-p="a large ancient oak tree">🌳 oak tree</button>
+        <button class="chip" data-p="an empty grassy meadow, no objects">🧹 remove it</button>
+        <button class="chip" data-p="a cozy stone cottage with warm glowing windows">🏠 cottage</button>
+      </div>
+      <label for="negInput">Avoid (negative prompt)</label>
+      <input type="text" id="negInput" value="blurry, low quality, artifacts, warped, distorted, deformed, extra objects">
+      <label style="margin-top:10px; display:flex; align-items:center; gap:8px; cursor:pointer">
+        <input type="checkbox" id="styleMatchInput" checked>
+        Match the original art style (recommended)
+      </label>
+      <label style="margin-top:6px; display:flex; align-items:center; gap:8px; cursor:pointer" title="Slower (two generations) but removes the painted object more cleanly before drawing the new content">
+        <input type="checkbox" id="twoPassInput">
+        Two-pass edit — cleaner removal (slower)
+      </label>
+      <div class="row">
+        <div class="field">
+          <label for="strengthInput">Edit strength <span id="strengthVal">0.60</span></label>
+          <input type="range" id="strengthInput" min="5" max="95" value="60" style="width:100%">
+        </div>
+        <div>
+          <label for="seedInput">Seed</label>
+          <input type="number" id="seedInput" value="-1" title="-1 = random">
+        </div>
+      </div>
+      <button class="btn primary" id="genBtn">✨ Generate</button>
+      <div id="resultCtn" class="hidden" style="margin-top:6px">
+        <label>Result — drag the handle to compare</label>
+        <div id="compare">
+          <img id="cmpBefore" alt="original">
+          <img id="cmpAfter" alt="result">
+          <div id="cmpDivider"></div>
+          <div id="cmpLabels"><span>new</span><span>original</span></div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn small" id="dlResultBtn">💾 Download result</button>
+          <button class="btn small" id="useAsBaseBtn">Use as new image</button>
+          <button class="btn small" id="retryBtn">🔄 Try again</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" id="tips">
+      <b>How it works</b><br>
+      Perchance's image API supports reference-image editing (img2img) but not true latent-mask inpainting, so this
+      tool fills the painted region with noise, regenerates it via image-to-image, then composites the original pixels
+      back everywhere you didn't paint. For best results: work on <b>photographs</b>, paint <b>tightly</b> around a
+      small-to-medium target, and use <b>two-pass</b> mode for clean object removal. "Use as new image" chains edits together.
+    </div>
+  </section>
+</main>
+
+<div id="loading" class="hidden">
+  <div class="spinner"></div>
+  <div class="status" id="loadingStatus">Working…</div>
+  <div class="hint">First generation may take 15–40 seconds</div>
+</div>
+<div id="toast"></div>
+<input type="file" id="fileInput" accept="image/*" class="hidden">
+
+<script>
+(() => {
+  const stage = document.getElementById('stage');
+  const ctx = stage.getContext('2d');
+  const canvasWrap = document.getElementById('canvasWrap');
+  const dropHint = document.getElementById('dropHint');
+  const fileInput = document.getElementById('fileInput');
+  const urlInput = document.getElementById('urlInput');
+  const promptInput = document.getElementById('promptInput');
+  const negInput = document.getElementById('negInput');
+  const strengthInput = document.getElementById('strengthInput');
+  const strengthVal = document.getElementById('strengthVal');
+  const seedInput = document.getElementById('seedInput');
+  const genBtn = document.getElementById('genBtn');
+  const maskPct = document.getElementById('maskPct');
+  const loading = document.getElementById('loading');
+  const loadingStatus = document.getElementById('loadingStatus');
+  const toast = document.getElementById('toast');
+  const resultCtn = document.getElementById('resultCtn');
+  const cmpBefore = document.getElementById('cmpBefore');
+  const cmpAfter = document.getElementById('cmpAfter');
+  const cmpDivider = document.getElementById('cmpDivider');
+  const compare = document.getElementById('compare');
+
+  const RES = [{w:512,h:512},{w:512,h:768},{w:768,h:512},{w:768,h:768}];
+  const RED = 'rgba(255,40,40,1)';
+  let S = {
+    image:null, naturalW:0, naturalH:0, naturalCv:null,
+    workCv:null, workW:0, workH:0,
+    resW:0, resH:0, imgX:0, imgY:0, imgW:0, imgH:0,
+    origPadded:null, mask:null, maskCtx:null, maskWhite:null,
+    scale:1, tool:'brush', brushSize:40, softness:0.5,
+    showMaskOnly:false, undo:[], redo:[], painting:false, lastPt:null,
+    resultCv:null, busy:false,
+  };
+
+  const SAMPLE = 'https://user.uploads.dev/file/491232bc07abad6098bae2bd3b6a5143.jpg';
+
+  function toastMsg(msg){
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => toast.style.display = 'none', 4500);
+  }
+  function setBusy(b, status){
+    loading.classList.toggle('hidden', !b);
+    if(b && status) loadingStatus.textContent = status;
+  }
+  function pickRes(w, h){
+    const a = w/h;
+    let best = RES[0], bd = Infinity;
+    for(const r of RES){
+      const d = Math.abs(a - r.w/r.h);
+      if(d < bd){ bd = d; best = r; }
+    }
+    return best;
+  }
+  function loadImageFromSrc(src){
+    return new Promise((res, rej) => {
+      const im = new Image();
+      if(typeof src === 'string' && /^https?:/.test(src)) im.crossOrigin = 'anonymous';
+      im.onload = () => res(im);
+      im.onerror = () => rej(new Error('could not load that image'));
+      im.src = src;
+    });
+  }
+  function padCanvas(src, rw, rh){
+    const sc = Math.min(rw/src.width, rh/src.height);
+    const dw = Math.max(1, Math.round(src.width*sc));
+    const dh = Math.max(1, Math.round(src.height*sc));
+    const dx = Math.floor((rw-dw)/2);
+    const dy = Math.floor((rh-dh)/2);
+    const cv = document.createElement('canvas'); cv.width = rw; cv.height = rh;
+    const c = cv.getContext('2d');
+    c.drawImage(src, dx, dy, dw, dh);
+    const srcData = c.getImageData(dx, dy, dw, dh).data;
+    const full = c.getImageData(0, 0, rw, rh);
+    const f = full.data;
+    for(let y = 0; y < rh; y++){
+      for(let x = 0; x < rw; x++){
+        if(x >= dx && x < dx+dw && y >= dy && y < dy+dh) continue;
+        const cx = Math.min(Math.max(x-dx, 0), dw-1);
+        const cy = Math.min(Math.max(y-dy, 0), dh-1);
+        const si = (cy*dw + cx)*4;
+        const di = (y*rw + x)*4;
+        f[di] = srcData[si]; f[di+1] = srcData[si+1]; f[di+2] = srcData[si+2]; f[di+3] = 255;
+      }
+    }
+    c.putImageData(full, 0, 0);
+    return {canvas: cv, dx, dy, dw, dh};
+  }
+  function buildPadded(){
+    const r = pickRes(S.workW, S.workH);
+    S.resW = r.w; S.resH = r.h;
+    const pad = padCanvas(S.workCv, r.w, r.h);
+    S.origPadded = pad.canvas;
+    S.imgX = pad.dx; S.imgY = pad.dy; S.imgW = pad.dw; S.imgH = pad.dh;
+    S.mask = document.createElement('canvas'); S.mask.width = r.w; S.mask.height = r.h;
+    S.maskCtx = S.mask.getContext('2d');
+    S.maskWhite = document.createElement('canvas'); S.maskWhite.width = r.w; S.maskWhite.height = r.h;
+  }
+  function initFromImage(img){
+    S.image = img;
+    const cap = Math.min(1, 2048/Math.max(img.naturalWidth, img.naturalHeight));
+    S.naturalW = Math.max(1, Math.round(img.naturalWidth*cap));
+    S.naturalH = Math.max(1, Math.round(img.naturalHeight*cap));
+    const m = Math.max(S.naturalW, S.naturalH);
+    const s = Math.min(1, 768/m);
+    S.workW = Math.max(1, Math.round(S.naturalW*s));
+    S.workH = Math.max(1, Math.round(S.naturalH*s));
+    S.workCv = document.createElement('canvas');
+    S.workCv.width = S.workW; S.workCv.height = S.workH;
+    S.workCv.getContext('2d').drawImage(img, 0, 0, S.workW, S.workH);
+    S.naturalCv = document.createElement('canvas');
+    S.naturalCv.width = S.naturalW; S.naturalCv.height = S.naturalH;
+    S.naturalCv.getContext('2d').drawImage(img, 0, 0);
+    buildPadded();
+    S.undo = []; S.redo = []; S.showMaskOnly = false; S.resultCv = null;
+    document.getElementById('maskOnlyBtn').textContent = 'Mask view';
+    dropHint.classList.add('hidden');
+    resultCtn.classList.add('hidden');
+    fitStage();
+    updateCoverage();
+    render();
+    requestAnimationFrame(() => setTimeout(() => fitStage(), 60));
+  }
+  function fitStage(){
+    if(!S.image) return;
+    const wrapW = canvasWrap.clientWidth - 2;
+    const wrapH = Math.min(window.innerHeight*0.62, 620);
+    const ds = Math.min(wrapW/S.resW, wrapH/S.resH);
+    stage.style.width = Math.round(S.resW*ds) + 'px';
+    stage.style.height = Math.round(S.resH*ds) + 'px';
+    stage.width = Math.round(S.resW*ds);
+    stage.height = Math.round(S.resH*ds);
+    S.scale = stage.width / S.resW;
+    render();
+  }
+  function render(){
+    ctx.clearRect(0, 0, stage.width, stage.height);
+    if(!S.image){
+      ctx.fillStyle = '#1c1c24';
+      ctx.fillRect(0, 0, stage.width, stage.height);
+      ctx.fillStyle = '#666';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Load an image to begin', stage.width/2, stage.height/2);
+      return;
+    }
+    const w = stage.width, h = stage.height;
+    ctx.imageSmoothingEnabled = true;
+    if(S.showMaskOnly){
+      ctx.fillStyle = '#0e0e13';
+      ctx.fillRect(0, 0, w, h);
+      const mc = S.maskWhite.getContext('2d');
+      mc.clearRect(0, 0, S.resW, S.resH);
+      mc.fillStyle = '#fff';
+      mc.fillRect(0, 0, S.resW, S.resH);
+      mc.globalCompositeOperation = 'destination-in';
+      mc.drawImage(S.mask, 0, 0);
+      mc.globalCompositeOperation = 'source-over';
+      ctx.drawImage(S.maskWhite, 0, 0, w, h);
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(S.imgX*S.scale+0.5, S.imgY*S.scale+0.5, S.imgW*S.scale, S.imgH*S.scale);
+    }else{
+      ctx.drawImage(S.origPadded, 0, 0, w, h);
+      ctx.drawImage(S.mask, 0, 0, w, h);
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(S.imgX*S.scale+0.5, S.imgY*S.scale+0.5, S.imgW*S.scale, S.imgH*S.scale);
+    }
+  }
+  function updateCoverage(){
+    if(!S.image){ maskPct.textContent = ''; return; }
+    const md = S.maskCtx.getImageData(0, 0, S.resW, S.resH).data;
+    let cnt = 0;
+    for(let y = 0; y < S.imgH; y++){
+      const row = (S.imgY + y)*S.resW + S.imgX;
+      for(let x = 0; x < S.imgW; x++){
+        if(md[(row + x)*4 + 3] > 10) cnt++;
+      }
+    }
+    maskPct.textContent = 'mask: ' + (100*cnt/(S.imgW*S.imgH)).toFixed(1) + '%';
+  }
+  function snapshot(){
+    return S.maskCtx.getImageData(0, 0, S.resW, S.resH);
+  }
+  function pushUndo(){
+    S.undo.push(snapshot());
+    if(S.undo.length > 30) S.undo.shift();
+    S.redo = [];
+  }
+  function undo(){
+    if(!S.undo.length) return;
+    S.redo.push(snapshot());
+    S.maskCtx.putImageData(S.undo.pop(), 0, 0);
+    updateCoverage(); render();
+  }
+  function redo(){
+    if(!S.redo.length) return;
+    S.undo.push(snapshot());
+    S.maskCtx.putImageData(S.redo.pop(), 0, 0);
+    updateCoverage(); render();
+  }
+  function setTool(t){
+    S.tool = t;
+    document.getElementById('brushBtn').classList.toggle('active', t === 'brush');
+    document.getElementById('eraserBtn').classList.toggle('active', t === 'eraser');
+  }
+  function paintDot(cx, cy){
+    const mc = S.maskCtx;
+    mc.save();
+    mc.globalCompositeOperation = S.tool === 'brush' ? 'source-over' : 'destination-out';
+    const r = S.brushSize;
+    const core = Math.max(0.5, r*(1-S.softness));
+    const g = mc.createRadialGradient(cx, cy, core, cx, cy, Math.max(1, r));
+    g.addColorStop(0, RED);
+    g.addColorStop(1, 'rgba(255,40,40,0)');
+    mc.fillStyle = g;
+    mc.beginPath();
+    mc.arc(cx, cy, Math.max(1, r), 0, Math.PI*2);
+    mc.fill();
+    mc.restore();
+  }
+  function strokeTo(x, y){
+    if(S.lastPt){
+      const dx = x - S.lastPt[0], dy = y - S.lastPt[1];
+      const d = Math.hypot(dx, dy);
+      const steps = Math.max(1, Math.round(d / Math.max(1, S.brushSize*0.25)));
+      for(let i = 1; i <= steps; i++) paintDot(S.lastPt[0]+dx*i/steps, S.lastPt[1]+dy*i/steps);
+    }else{
+      paintDot(x, y);
+    }
+    S.lastPt = [x, y];
+    render();
+  }
+  function evToPadded(e){
+    const rect = stage.getBoundingClientRect();
+    let x = (e.clientX - rect.left)/S.scale;
+    let y = (e.clientY - rect.top)/S.scale;
+    x = Math.min(Math.max(x, S.imgX), S.imgX+S.imgW);
+    y = Math.min(Math.max(y, S.imgY), S.imgY+S.imgH);
+    return [x, y];
+  }
+  stage.addEventListener('pointerdown', e => {
+    if(!S.image || S.busy) return;
+    S.painting = true;
+    S.lastPt = null;
+    try{ stage.setPointerCapture(e.pointerId); }catch(err){}
+    pushUndo();
+    strokeTo(...evToPadded(e));
+  });
+  stage.addEventListener('pointermove', e => {
+    if(!S.painting) return;
+    strokeTo(...evToPadded(e));
+  });
+  const endStroke = () => {
+    if(!S.painting) return;
+    S.painting = false;
+    updateCoverage();
+    render();
+  };
+  stage.addEventListener('pointerup', endStroke);
+  stage.addEventListener('pointercancel', endStroke);
+
+  function fillMask(){
+    if(!S.image) return;
+    pushUndo();
+    S.maskCtx.save();
+    S.maskCtx.globalCompositeOperation = 'source-over';
+    S.maskCtx.fillStyle = RED;
+    S.maskCtx.fillRect(S.imgX, S.imgY, S.imgW, S.imgH);
+    S.maskCtx.restore();
+    updateCoverage(); render();
+  }
+  function clearMask(){
+    if(!S.image) return;
+    pushUndo();
+    S.maskCtx.clearRect(0, 0, S.resW, S.resH);
+    updateCoverage(); render();
+  }
+  function invertMask(){
+    if(!S.image) return;
+    pushUndo();
+    const id = S.maskCtx.getImageData(0, 0, S.resW, S.resH);
+    for(let y = 0; y < S.imgH; y++){
+      const row = (S.imgY + y)*S.resW + S.imgX;
+      for(let x = 0; x < S.imgW; x++){
+        const i = (row + x)*4 + 3;
+        id.data[i] = 255 - id.data[i];
+      }
+    }
+    S.maskCtx.putImageData(id, 0, 0);
+    updateCoverage(); render();
+  }
+  function downloadMask(){
+    if(!S.image) return;
+    const wc = document.createElement('canvas'); wc.width = S.resW; wc.height = S.resH;
+    const wctx = wc.getContext('2d');
+    wctx.fillStyle = '#fff';
+    wctx.fillRect(0, 0, S.resW, S.resH);
+    wctx.globalCompositeOperation = 'destination-in';
+    wctx.drawImage(S.mask, 0, 0);
+    const cv = document.createElement('canvas'); cv.width = S.naturalW; cv.height = S.naturalH;
+    const c = cv.getContext('2d');
+    c.fillStyle = '#000';
+    c.fillRect(0, 0, S.naturalW, S.naturalH);
+    c.drawImage(wc, S.imgX, S.imgY, S.imgW, S.imgH, 0, 0, S.naturalW, S.naturalH);
+    const a = document.createElement('a');
+    a.href = cv.toDataURL('image/png');
+    a.download = 'latent-mask.png';
+    a.click();
+  }
+
+  function buildInitForWindow(win, baseCv){
+    const cv = document.createElement('canvas'); cv.width = win.w; cv.height = win.h;
+    const c = cv.getContext('2d');
+    c.drawImage(baseCv, win.x, win.y, win.w, win.h, 0, 0, win.w, win.h);
+    const id = c.getImageData(0, 0, win.w, win.h);
+    const d = id.data;
+    const mw = S.maskCtx.getImageData(win.x, win.y, win.w, win.h).data;
+    for(let i = 0; i < d.length; i += 4){
+      const a = mw[i+3]/255;
+      if(a <= 0) continue;
+      const w = Math.min(1, a);
+      const nv = (Math.random() + Math.random() + Math.random())/3*255;
+      const noise = (d[i]*0.12 + nv*0.88);
+      d[i]   = Math.round(d[i]*(1-w) + noise*w);
+      d[i+1] = Math.round(d[i+1]*(1-w) + noise*w);
+      d[i+2] = Math.round(d[i+2]*(1-w) + noise*w);
+    }
+    c.putImageData(id, 0, 0);
+    const r = pickRes(win.w, win.h);
+    const pad = padCanvas(cv, r.w, r.h);
+    return { canvas: pad.canvas, dx: pad.dx, dy: pad.dy, dw: pad.dw, dh: pad.dh };
+  }
+  function maskBounds(md){
+    let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1;
+    for(let y = 0; y < S.resH; y++){
+      const row = y*S.resW;
+      for(let x = 0; x < S.resW; x++){
+        if(md[(row + x)*4 + 3] > 10){
+          if(x < x0) x0 = x; if(x > x1) x1 = x;
+          if(y < y0) y0 = y; if(y > y1) y1 = y;
+        }
+      }
+    }
+    return {x0, y0, x1, y1};
+  }
+
+  async function generateOnce(win, prompt, neg, baseCv, status){
+    setBusy(true, status);
+    const initInfo = buildInitForWindow(win, baseCv);
+    const dataUrl = initInfo.canvas.toDataURL('image/png');
+    const strength = parseFloat(strengthInput.value)/100;
+    const seed = parseInt(seedInput.value, 10);
+    const result = await root.generateImage({
+      prompt,
+      negativePrompt: neg,
+      resolution: initInfo.canvas.width + 'x' + initInfo.canvas.height,
+      seed: Number.isNaN(seed) ? -1 : seed,
+      guidanceScale: 7,
+      referenceImage: { url: dataUrl, blur: strength },
+    });
+
+    let genCv = result.canvas;
+    if(!(genCv instanceof HTMLCanvasElement)){
+      const img = await loadImageFromSrc(result.dataUrl);
+      genCv = document.createElement('canvas');
+      genCv.width = img.naturalWidth; genCv.height = img.naturalHeight;
+      genCv.getContext('2d').drawImage(img, 0, 0);
+    }
+
+    const winCv = document.createElement('canvas'); winCv.width = win.w; winCv.height = win.h;
+    const wctx = winCv.getContext('2d');
+    wctx.drawImage(genCv, initInfo.dx, initInfo.dy, initInfo.dw, initInfo.dh, 0, 0, win.w, win.h);
+    const winId = wctx.getImageData(0, 0, win.w, win.h);
+    const winD = winId.data;
+    const oriId = baseCv.getContext('2d').getImageData(win.x, win.y, win.w, win.h).data;
+    const mwId = S.maskCtx.getImageData(win.x, win.y, win.w, win.h).data;
+    let sr = 0, sg = 0, sb = 0, or = 0, og = 0, ob = 0, n = 0;
+    for(let i = 0; i < winD.length; i += 4){
+      if(mwId[i+3] > 10) continue;
+      sr += winD[i]; sg += winD[i+1]; sb += winD[i+2];
+      or += oriId[i]; og += oriId[i+1]; ob += oriId[i+2];
+      n++;
+    }
+    if(n > 60){
+      const sc = [or/n/Math.max(1, sr/n), og/n/Math.max(1, sg/n), ob/n/Math.max(1, sb/n)];
+      const off = [or/n - sr/n*sc[0], og/n - sg/n*sc[1], ob/n - sb/n*sc[2]];
+      for(let i = 0; i < winD.length; i += 4){
+        for(let c = 0; c < 3; c++){
+          const v = winD[i+c]*sc[c] + off[c];
+          winD[i+c] = Math.max(0, Math.min(255, Math.round((v*0.55) + (winD[i+c]*0.45))));
+        }
+      }
+    }
+    wctx.putImageData(winId, 0, 0);
+    return winCv;
+  }
+
+  async function generate(){
+    if(!S.image || S.busy) return;
+    const prompt = promptInput.value.trim();
+    if(!prompt){
+      toastMsg('Describe what should appear in the painted area first.');
+      promptInput.focus();
+      return;
+    }
+    const md = S.maskCtx.getImageData(0, 0, S.resW, S.resH).data;
+    let any = false;
+    for(let i = 3; i < md.length; i += 4){ if(md[i] > 10){ any = true; break; } }
+    if(!any){
+      toastMsg('Paint a mask over the area you want to change first.');
+      return;
+    }
+
+    S.busy = true;
+    genBtn.disabled = true;
+    setBusy(true, 'Preparing the masked region…');
+    await new Promise(r => setTimeout(r, 30));
+
+    try{
+      const b = maskBounds(md);
+      const bw = b.x1-b.x0+1, bh = b.y1-b.y0+1;
+      const isFull = bw >= S.resW*0.7 || bh >= S.resH*0.7;
+      let win;
+      if(isFull){
+        win = {x:0, y:0, w:S.resW, h:S.resH};
+      }else{
+        const pad = Math.max(32, Math.round(Math.max(bw, bh)*0.45));
+        let wx = Math.max(0, b.x0 - pad);
+        let wy = Math.max(0, b.y0 - pad);
+        let ww = Math.min(S.resW, wx + bw + pad*2) - wx;
+        let wh = Math.min(S.resH, wy + bh + pad*2) - wy;
+        win = {x:wx, y:wy, w:ww, h:wh};
+      }
+
+      const styleMatch = document.getElementById('styleMatchInput').checked;
+      const finalPrompt = prompt + (styleMatch ?
+        ', matching the art style and color palette of the surrounding image exactly, consistent lighting and perspective' : '');
+      const finalNeg = (negInput.value.trim() || 'blurry, low quality, artifacts, warped, distorted') +
+        (styleMatch ? ', photorealistic, 3d render, different art style' : '');
+      const twoPass = document.getElementById('twoPassInput').checked;
+
+      let winCv;
+      if(twoPass && !isFull){
+        const removePrompt = 'remove the object in the painted area, show the natural background of the scene that belongs there, matching the photo lighting and perspective, no objects, no structures, no buildings, no people, no text';
+        const removeNeg = finalNeg + ', object, structure, building, person, people, animal, car, text';
+        winCv = await generateOnce(win, removePrompt, removeNeg, S.origPadded, 'Pass 1 of 2: removing the painted object…');
+        const base2 = document.createElement('canvas');
+        base2.width = S.resW; base2.height = S.resH;
+        const b2ctx = base2.getContext('2d');
+        b2ctx.drawImage(S.origPadded, 0, 0);
+        b2ctx.drawImage(winCv, win.x, win.y);
+        winCv = await generateOnce(win, finalPrompt, finalNeg, base2, 'Pass 2 of 2: drawing the new content…');
+      }else{
+        winCv = await generateOnce(win, finalPrompt, finalNeg, S.origPadded, 'Generating image — this can take 15–40 seconds…');
+      }
+
+      const comp = document.createElement('canvas'); comp.width = S.resW; comp.height = S.resH;
+      const cc = comp.getContext('2d');
+      cc.drawImage(winCv, win.x, win.y);
+      const gd = cc.getImageData(0, 0, S.resW, S.resH);
+      const g = gd.data;
+      const od = S.origPadded.getContext('2d').getImageData(0, 0, S.resW, S.resH).data;
+      for(let i = 0; i < g.length; i += 4){
+        let a = (md[i+3]/255 - 0.08)/0.6;
+        if(a < 0) a = 0;
+        a = Math.min(1, a);
+        g[i]   = Math.round(g[i]*a   + od[i]*(1-a));
+        g[i+1] = Math.round(g[i+1]*a + od[i+1]*(1-a));
+        g[i+2] = Math.round(g[i+2]*a + od[i+2]*(1-a));
+        g[i+3] = 255;
+      }
+      cc.putImageData(gd, 0, 0);
+
+      const crop = document.createElement('canvas'); crop.width = S.workW; crop.height = S.workH;
+      crop.getContext('2d').drawImage(comp, S.imgX, S.imgY, S.imgW, S.imgH, 0, 0, S.workW, S.workH);
+
+      const natural = document.createElement('canvas');
+      natural.width = S.naturalW; natural.height = S.naturalH;
+      natural.getContext('2d').drawImage(crop, 0, 0, S.naturalW, S.naturalH);
+      S.resultCv = natural;
+
+      cmpBefore.src = S.naturalCv.toDataURL('image/png');
+      cmpAfter.src = natural.toDataURL('image/png');
+      setCmpPct(50);
+      resultCtn.classList.remove('hidden');
+    }catch(err){
+      console.error(err);
+      toastMsg('Generation failed: ' + (err && err.message ? err.message : err));
+    }finally{
+      S.busy = false;
+      genBtn.disabled = false;
+      setBusy(false);
+    }
+  }
+
+  function setCmpPct(p){
+    S.cmpPct = p;
+    cmpAfter.style.clipPath = 'inset(0 ' + (100-p) + '% 0 0)';
+    cmpDivider.style.left = p + '%';
+  }
+  function moveCmp(e){
+    const r = compare.getBoundingClientRect();
+    setCmpPct(Math.min(100, Math.max(0, (e.clientX - r.left)/r.width*100)));
+  }
+  compare.addEventListener('pointerdown', e => {
+    try{ compare.setPointerCapture(e.pointerId); }catch(err){}
+    moveCmp(e);
+  });
+  compare.addEventListener('pointermove', e => {
+    if(e.buttons & 1) moveCmp(e);
+  });
+
+  function dlCanvas(cv, name){
+    const a = document.createElement('a');
+    a.href = cv.toDataURL('image/png');
+    a.download = name;
+    a.click();
+  }
+  document.getElementById('dlResultBtn').addEventListener('click', () => {
+    if(S.resultCv) dlCanvas(S.resultCv, 'masked-result.png');
+  });
+  document.getElementById('useAsBaseBtn').addEventListener('click', async () => {
+    if(!S.resultCv) return;
+    try{
+      const img = await loadImageFromSrc(S.resultCv.toDataURL('image/png'));
+      initFromImage(img);
+      toastMsg('Result loaded as the new base image — mask cleared.');
+    }catch(e){ toastMsg('Could not reload the result.'); }
+  });
+  document.getElementById('retryBtn').addEventListener('click', generate);
+
+  async function loadFromUrl(u){
+    setBusy(true, 'Fetching image…');
+    try{
+      let blob;
+      if(/^data:/i.test(u)){
+        blob = await (await fetch(u)).blob();
+      }else if(/^blob:/i.test(u)){
+        blob = await fetch(u).then(r => r.blob());
+      }else{
+        const resp = await root.superFetch(u);
+        if(!resp.ok) throw new Error('HTTP ' + resp.status);
+        blob = await resp.blob();
+      }
+      const objUrl = URL.createObjectURL(blob);
+      try{
+        const img = await loadImageFromSrc(objUrl);
+        initFromImage(img);
+        urlInput.value = '';
+      }finally{
+        URL.revokeObjectURL(objUrl);
+      }
+    }catch(err){
+      toastMsg('Could not load that URL: ' + (err && err.message ? err.message : err));
+    }finally{
+      setBusy(false);
+    }
+  }
+
+  document.getElementById('loadBtn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files && fileInput.files[0];
+    if(!f) return;
+    setBusy(true, 'Loading image…');
+    try{
+      const img = await loadImageFromSrc(URL.createObjectURL(f));
+      initFromImage(img);
+    }catch(e){
+      toastMsg('Could not read that file.');
+    }finally{
+      setBusy(false);
+      fileInput.value = '';
+    }
+  });
+  document.getElementById('urlLoadBtn').addEventListener('click', () => {
+    const u = urlInput.value.trim();
+    if(u) loadFromUrl(u);
+  });
+  document.getElementById('sampleBtn').addEventListener('click', async () => {
+    setBusy(true, 'Loading sample…');
+    try{
+      const img = await loadImageFromSrc(SAMPLE);
+      initFromImage(img);
+    }catch(e){ toastMsg('Could not load the sample.'); }
+    finally{ setBusy(false); }
+  });
+
+  ['dragover', 'dragenter'].forEach(t => canvasWrap.addEventListener(t, e => {
+    e.preventDefault();
+    canvasWrap.style.outline = '2px solid var(--accent)';
+  }));
+  ['dragleave', 'drop'].forEach(t => canvasWrap.addEventListener(t, e => {
+    e.preventDefault();
+    canvasWrap.style.outline = '';
+  }));
+  canvasWrap.addEventListener('drop', async e => {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if(!f) return;
+    setBusy(true, 'Loading image…');
+    try{
+      const img = await loadImageFromSrc(URL.createObjectURL(f));
+      initFromImage(img);
+    }catch(err){ toastMsg('Could not read that file.'); }
+    finally{ setBusy(false); }
+  });
+
+  document.getElementById('brushBtn').addEventListener('click', () => setTool('brush'));
+  document.getElementById('eraserBtn').addEventListener('click', () => setTool('eraser'));
+  document.getElementById('sizeRange').addEventListener('input', e => {
+    S.brushSize = parseInt(e.target.value, 10);
+  });
+  document.getElementById('softRange').addEventListener('input', e => {
+    S.softness = parseInt(e.target.value, 10)/100;
+  });
+  document.getElementById('fillBtn').addEventListener('click', fillMask);
+  document.getElementById('clearBtn').addEventListener('click', clearMask);
+  document.getElementById('invertBtn').addEventListener('click', invertMask);
+  document.getElementById('undoBtn').addEventListener('click', undo);
+  document.getElementById('redoBtn').addEventListener('click', redo);
+  document.getElementById('maskOnlyBtn').addEventListener('click', () => {
+    if(!S.image) return;
+    S.showMaskOnly = !S.showMaskOnly;
+    document.getElementById('maskOnlyBtn').textContent = S.showMaskOnly ? 'Photo view' : 'Mask view';
+    render();
+  });
+  document.getElementById('dlMaskBtn').addEventListener('click', downloadMask);
+  genBtn.addEventListener('click', generate);
+  strengthInput.addEventListener('input', () => {
+    strengthVal.textContent = (parseInt(strengthInput.value, 10)/100).toFixed(2);
+  });
+  document.querySelectorAll('.chip').forEach(ch => ch.addEventListener('click', () => {
+    promptInput.value = ch.dataset.p;
+  }));
+  let resizeT;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => { fitStage(); }, 150);
+  });
+
+  loadImageFromSrc(SAMPLE).then(img => initFromImage(img)).catch(() => {});
+})();
+</script>

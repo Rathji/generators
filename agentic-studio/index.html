@@ -1,0 +1,336 @@
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #0f1117; color: #e6e8ee; text-align: left; }
+  #app { max-width: 1200px; margin: 0 auto; padding: 18px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 20px; margin: 0; color: #c4b5fd; }
+  header .sub { color: #8b93a7; font-size: 13px; }
+  #statusEl { margin-left: auto; font-size: 12px; color: #8b93a7; border: 1px solid #262b3a; border-radius: 999px; padding: 3px 10px; }
+  .control-row { display: flex; gap: 10px; margin: 14px 0; align-items: flex-end; }
+  textarea { flex: 1; background: #171a23; color: #e6e8ee; border: 1px solid #262b3a; border-radius: 10px; padding: 10px 12px; font-size: 14px; resize: vertical; min-height: 60px; font-family: inherit; }
+  textarea:focus { outline: none; border-color: #7c6cf0; }
+  #launchBtn { background: #7c6cf0; color: #fff; border: 0; border-radius: 10px; padding: 12px 18px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  #launchBtn:hover { background: #8f81f5; }
+  #launchBtn:disabled { opacity: 0.55; cursor: wait; }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #4a4f63; border-top-color: #c4b5fd; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 4px 4px 0; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .card { background: #171a23; border: 1px solid #262b3a; border-radius: 12px; padding: 14px; }
+  .card h2 { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: #8b93a7; margin: 0 0 10px; }
+  #logCtn { height: 520px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; }
+  .log-line { padding: 3px 2px; border-bottom: 1px dashed #20252f; }
+  .log-line .t { color: #565e75; }
+  .badge { display: inline-block; border-radius: 6px; color: #fff; font-weight: 700; font-size: 10px; padding: 1px 6px; margin: 0 6px; vertical-align: 1px; }
+  .dim { color: #71798f; }
+  .res { color: #9fb3c8; }
+  .ok { color: #34d399; }
+  .warn { color: #fbbf24; }
+  .bad { color: #f87171; }
+  #finalEl { font-size: 14px; line-height: 1.6; color: #e6e8ee; }
+  #finalEl h2 { font-size: 18px; color: #c4b5fd; margin: 14px 0 6px; }
+  #finalEl h3 { font-size: 15px; color: #a5b4fc; margin: 12px 0 4px; }
+  #finalEl h4 { font-size: 13px; color: #a5b4fc; margin: 10px 0 4px; }
+  #finalEl li { margin-left: 18px; }
+  #finalEl .empty { color: #565e75; }
+  #galleryCtn { margin-top: 12px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .art-item { margin: 0; background: #10131b; border: 1px solid #262b3a; border-radius: 10px; overflow: hidden; }
+  .art-item img { display: block; width: 100%; }
+  .art-item figcaption { font-size: 11px; color: #8b93a7; padding: 6px 8px; }
+  .art-item .loading { padding: 30px; text-align: center; color: #565e75; font-size: 12px; }
+</style>
+
+<div id="app">
+  <header>
+    <h1>Agentic Studio</h1>
+    <span class="sub">CEO orchestrates a Researcher, Writer &amp; Artist</span>
+    <span id="statusEl">idle</span>
+  </header>
+
+  <div class="control-row">
+    <textarea id="promptInput" placeholder="Describe the deliverable. Example: Produce a short illustrated article about the Northern Lights: what causes them and where to see them. Then create one artwork to illustrate it."></textarea>
+    <button id="launchBtn">Launch Studio</button>
+  </div>
+
+  <div class="layout">
+    <section class="card">
+      <h2>Agent activity</h2>
+      <div id="logCtn"><div class="log-line"><span class="dim">Agentic Studio ready. Describe a deliverable and launch — the CEO will delegate research, writing and artwork to its specialists.</span></div></div>
+    </section>
+    <section class="card">
+      <h2>Deliverable</h2>
+      <div id="finalEl"><span class="empty">The final article/answer will appear here.</span></div>
+      <div id="galleryCtn"></div>
+    </section>
+  </div>
+</div>
+
+<script type="module">
+import * as AF from "https://user.uploads.dev/file/f4e1c1ba3b995b993aaa312e38a0fb36.js";
+
+const AGENT_STYLE = {
+  ceo:        { label: "CEO",        color: "#8b5cf6" },
+  researcher: { label: "Researcher", color: "#10b981" },
+  writer:     { label: "Writer",     color: "#3b82f6" },
+  artist:     { label: "Artist",     color: "#f97316" },
+};
+
+let runtime = null;
+let currentRun = null;
+const runIdToAgent = {};
+
+const logEl = document.getElementById("logCtn");
+const finalEl = document.getElementById("finalEl");
+const galleryEl = document.getElementById("galleryCtn");
+const promptInput = document.getElementById("promptInput");
+const launchBtn = document.getElementById("launchBtn");
+const statusEl = document.getElementById("statusEl");
+const spinnerEl = document.getElementById("spinnerEl");
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function addLog(agentId, html, cls = "") {
+  const a = AGENT_STYLE[agentId] || { label: agentId, color: "#9ca3af" };
+  const line = document.createElement("div");
+  line.className = "log-line " + cls;
+  const now = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  line.innerHTML = `<span class="t">${now}</span> <span class="badge" style="background:${a.color}">${a.label}</span> ${html}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(s) { statusEl.textContent = s; }
+
+function addToGallery(src, caption) {
+  const item = document.createElement("figure");
+  item.className = "art-item";
+  item.innerHTML = `<div class="loading">generating…</div><img src="${esc(src)}" alt="${esc(caption)}" loading="lazy" hidden><figcaption>${esc(caption)}</figcaption>`;
+  galleryEl.appendChild(item);
+  const img = item.querySelector("img");
+  img.addEventListener("load", () => { item.querySelector(".loading").remove(); img.hidden = false; });
+}
+
+function renderFinal(text) {
+  let html = esc(text)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "<i>$1</i>")
+    .replace(/\*\*\*/g, "")
+    .replace(/^### (.*)$/gm, "<h4>$1</h4>")
+    .replace(/^## (.*)$/gm, "<h3>$1</h3>")
+    .replace(/^# (.*)$/gm, "<h2>$1</h2>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^\s*[-*] (.*)$/gm, "<li>$1</li>")
+    .replace(/\n{2,}/g, "</p><p>")
+    .replace(/\n/g, "<br>");
+  finalEl.innerHTML = "<p>" + html + "</p>";
+}
+
+function fmtArgs(args) {
+  try {
+    const s = JSON.stringify(args);
+    return s.length > 80 ? s.slice(0, 80) + "…" : s;
+  } catch { return ""; }
+}
+
+function handleEvent(type, data) {
+  switch (type) {
+    case "run_start": {
+      const a = data.agentId || "agent";
+      runIdToAgent[data.runId] = a;
+      addLog(a, `▶ run started <span class="dim">— ${esc(String(data.input || "").slice(0, 120))}</span>`);
+      setStatus("running…");
+      break;
+    }
+    case "run_end": {
+      const a = runIdToAgent[data.runId] || "agent";
+      addLog(a, `■ finished <span class="dim">(${esc(data.status)} · ${data.steps} steps)</span>`, data.status === "done" ? "ok" : data.status === "error" ? "bad" : "warn");
+      break;
+    }
+    case "delegate": {
+      addLog("ceo", `⇄ delegating to <b>${esc(data.agent)}</b> <span class="dim">— ${esc(String(data.task || "").slice(0, 100))}</span>`);
+      break;
+    }
+    case "tool_call": {
+      const a = runIdToAgent[data.runId] || "agent";
+      addLog(a, `🔧 <b>${esc(data.tool)}</b><span class="dim">(${esc(fmtArgs(data.args))})</span>`);
+      break;
+    }
+    case "tool_result": {
+      const a = runIdToAgent[data.runId] || "agent";
+      addLog(a, `<span class="res">↳ ${esc(String(data.result || "").slice(0, 180))}</span>`);
+      break;
+    }
+    case "tool_error": {
+      const a = runIdToAgent[data.runId] || "agent";
+      addLog(a, `<span class="bad">✗ ${esc(String(data.result || "tool error").slice(0, 180))}</span>`);
+      break;
+    }
+    case "policy_deny": {
+      addLog("ceo", `<span class="bad">⛔ policy denied ${esc(data.tool)}: ${esc(data.reason)}</span>`);
+      break;
+    }
+    case "error": {
+      addLog("ceo", `<span class="bad">✖ error: ${esc(data.message)}</span>`);
+      break;
+    }
+    case "sub_event": {
+      handleEvent(data.type, data.data);
+      break;
+    }
+    default: break;
+  }
+}
+
+function wireRun(run) {
+  run.events.onAny((type, ...args) => {
+    try { handleEvent(type, args[0] && typeof args[0] === "object" ? args[0] : { data: args[0] }); } catch { /* ignore */ }
+  });
+}
+
+const capabilities = {
+  fetch: (url, opts) => root.superFetch(url, { signal: opts && opts.signal }),
+  text: (instruction) => root.generateText(instruction),
+  image: async (prompt, opts) => {
+    const r = await root.generateImage(prompt, opts || { resolution: "768x768" });
+    return (r && r.dataUrl) || r;
+  },
+  storage: root.kv,
+};
+
+async function buildStudio() {
+  if (runtime) return runtime;
+  const adapter = AF.createJsonDecisionAdapter({ generateText: root.generateText, fallbackToText: true });
+  const builtins = AF.createBuiltinTools(capabilities, {
+    enabled: AF.FRAMEWORK_CONFIG.tools.enabled.filter((t) => t !== "web_search"),
+    remote: { allowHosts: null },
+  });
+
+  const createArtwork = AF.defineTool({
+    name: "create_artwork",
+    description: "Generates an image from a text prompt and displays it live in the studio gallery. Returns the caption of the created image.",
+    schema: {
+      prompt: { type: "string", required: true, desc: "detailed visual prompt: subject, composition, style, mood, colors" },
+      caption: { type: "string", required: false, desc: "short caption shown under the image" },
+    },
+    guidance: "Use create_artwork for every image the task needs.",
+    timeoutMs: 240000,
+    run: async (ctx, args) => {
+      const r = await root.generateImage(args.prompt, { resolution: "512x512" });
+      const src = (r && r.dataUrl) || r;
+      addToGallery(src, args.caption || args.prompt);
+      return "Image created and displayed with caption: " + (args.caption || args.prompt);
+    },
+  });
+
+  runtime = AF.createRuntime({
+    adapters: { json: adapter },
+    capabilities,
+    maxRunDurationMs: 600000,
+    maxSteps: 10,
+    tools: [...builtins, createArtwork],
+    memory: AF.createMemory({ backend: "storage", storage: root.kv, folder: "agentMemory" }),
+    agents: {
+      ceo: AF.defineAgent({
+        id: "ceo",
+        name: "CEO",
+        model: "json",
+        description: "Orchestrator that plans work and coordinates the studio's specialist agents.",
+        instructions: [
+          "You are the CEO of an AI creative studio. You coordinate specialist agents to produce polished deliverables.",
+          "AVAILABLE SPECIALISTS — delegate to them instead of doing their work yourself:",
+          "  - researcher: web research and fact-finding (returns a sourced brief)",
+          "  - writer: polished prose and articles (returns the written piece)",
+          "  - artist: creates and displays images (returns a caption)",
+          "WORKFLOW: (1) Understand the request. (2) Delegate one well-scoped subtask at a time — usually research first, then writing, then artwork. (3) Use each result to plan the next step. (4) When you have everything you need, produce the FINAL answer.",
+          "Delegate tasks must be self-contained (specialists have no other context). Hand the writer the researcher's notes so the piece is grounded in them.",
+          "The final answer is the deliverable shown to the user: a title, well-organized sections, and the specialists' outputs woven together. Write it in the same language as the request.",
+          "Skip specialists a request does not need (e.g. no artwork for a pure research question).",
+        ],
+        tools: [],
+      }),
+      researcher: AF.defineAgent({
+        id: "researcher",
+        name: "Researcher",
+        model: "json",
+        description: "Finds facts and sources on the web and returns a concise, sourced research brief.",
+        instructions: [
+          "You are a web researcher. For the delegated task, gather accurate, current facts.",
+          "Use the wikipedia tool to find encyclopedic articles (try several query phrasings if the first returns nothing useful), and the fetch tool to read full pages when a URL is known or cited.",
+          "Never invent facts or URLs. If something cannot be verified, say so explicitly.",
+          "Use calc for any arithmetic and get_time when the current date matters.",
+          "Finish with the final answer: a concise research brief with the key facts, names, numbers, and the source URLs you used.",
+        ],
+        tools: ["wikipedia", "fetch", "summarize", "calc", "get_time", "memory_remember", "memory_recall"],
+      }),
+      writer: AF.defineAgent({
+        id: "writer",
+        name: "Writer",
+        model: "json",
+        description: "Turns research notes into engaging, well-structured prose.",
+        instructions: [
+          "You are a professional writer. Turn the material provided in your task into polished prose.",
+          "Write clearly and vividly: a strong opening, well-organized sections, and a satisfying close. Match the tone to the request.",
+          "Do not invent facts beyond what the material provides.",
+          "Do not delegate. Finish with the final answer containing the complete written piece.",
+        ],
+        tools: [],
+      }),
+      artist: AF.defineAgent({
+        id: "artist",
+        name: "Artist",
+        model: "json",
+        description: "Creates and displays images from text prompts.",
+        instructions: [
+          "You are an illustrator. For the delegated task, craft a detailed visual prompt and call create_artwork to generate and display the image.",
+          "Make the prompt specific: subject, composition, style, mood, colors (e.g. 'cinematic, painterly, flat vector, golden hour').",
+          "One well-chosen image is usually enough; create several only if the task clearly needs distinct images.",
+          "Do not delegate. Finish with the final answer: a one-line caption describing what you created.",
+        ],
+        tools: ["create_artwork"],
+      }),
+    },
+  });
+  return runtime;
+}
+
+async function launchStudio() {
+  const rt = await buildStudio();
+  const input = promptInput.value.trim();
+  if (!input || (currentRun && currentRun.status === "running")) return;
+  logEl.innerHTML = "";
+  finalEl.innerHTML = '<span class="empty">Working…</span>';
+  galleryEl.innerHTML = "";
+  launchBtn.disabled = true;
+  setStatus("running…");
+  try {
+    const run = rt.run(rt.agents.get("ceo"), input);
+    currentRun = run;
+    wireRun(run);
+    await run.promise;
+    if (run.status === "done" && run.content) {
+      renderFinal(run.content);
+      setStatus("done");
+    } else {
+      addLog("ceo", `<span class="bad">No final answer (${esc(run.status)})${run.error ? ": " + esc(run.error) : ""}</span>`);
+      setStatus("failed");
+    }
+  } catch (e) {
+    addLog("ceo", `<span class="bad">✖ ${esc(e.message)}</span>`);
+    setStatus("failed");
+  } finally {
+    launchBtn.disabled = false;
+  }
+}
+
+launchBtn.addEventListener("click", launchStudio);
+window.launchStudio = launchStudio;
+window.buildStudio = buildStudio;
+window.getStudioState = () => ({
+  ready: !!runtime,
+  runStatus: currentRun && currentRun.status,
+  logLines: logEl.childElementCount,
+  images: galleryEl.childElementCount,
+  finalLen: finalEl.textContent.length,
+});
+</script>
