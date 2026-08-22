@@ -136,6 +136,10 @@ export class SpellCastingSystem {
             : this.status.cure(target, spell.cureStatus).cured
           : [];
         results.push({ target, type: "cureStatus", cured });
+      } else if (spell.kind === "utility") {
+        // Task #148: utility spells (Light) cast no damage — they report an
+        // effect that the world systems (e.g. LightingSystem) read.
+        results.push({ target, type: "utility", utility: spell.utility ?? "light" });
       } else {
         const tstats = this.statsOf(target);
         const base = Math.max(1, spell.power + int - (tstats.mdef ?? 0));

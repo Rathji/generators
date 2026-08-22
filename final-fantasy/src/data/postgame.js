@@ -1,0 +1,75 @@
+// Task #163: Post-game content data — optional secret bosses and item hunts
+// that unlock only after the main story is complete (game_completed / Free
+// Roam). `require.flags` gates availability; `completeFlag` marks each item
+// done; `defeat`-type entries grant a reward on completion.
+
+export const POSTGAME = [
+  {
+    id: "echo_doppelganger",
+    type: "secret_boss",
+    name: "The Hollow Doppelganger",
+    enemy: "echoOfCreation",
+    groupId: "echo_doppelganger",
+    require: { flags: ["game_completed"] },
+    completeFlag: "postgame_echo_slain",
+    hint: "A hollow mirror of the Warriors of Light stirs in the rift beneath the Dark Altar.",
+    onDefeat: { flags: ["postgame_echo_slain"] },
+    reward: { xp: 3000, gold: 1500 },
+  },
+  {
+    id: "shadow_garland",
+    type: "secret_boss",
+    name: "Shadow Garland",
+    enemy: "garland",
+    groupId: "shadow_garland",
+    require: { flags: ["game_completed", "postgame_echo_slain"] },
+    completeFlag: "postgame_garland_slain",
+    hint: "Garland's shadow clings to the ruined shrine, craving a second doom.",
+    onDefeat: { flags: ["postgame_garland_slain"] },
+    reward: { item: "megalixir", count: 1, xp: 4000, gold: 2500 },
+  },
+  {
+    id: "chaos_reborn",
+    type: "secret_boss",
+    name: "Chaos Reborn",
+    enemy: "chaos",
+    groupId: "chaos_reborn",
+    require: { flags: ["game_completed", "postgame_echo_slain", "postgame_garland_slain"] },
+    completeFlag: "postgame_chaos_slain",
+    hint: "Beyond the throne of time, the shape of the first doom learns to breathe again.",
+    onDefeat: { flags: ["postgame_chaos_slain"] },
+    reward: { item: "oathRing", count: 1, xp: 6000, gold: 5000 },
+  },
+  {
+    id: "crystal_shard_hunt",
+    type: "item_hunt",
+    name: "Crystal Shard Hunt",
+    targets: [
+      { itemId: "goblinFang", count: 5, label: "goblin fangs" },
+      { itemId: "runeShard", count: 3, label: "rune shards" },
+      { itemId: "voidShard", count: 2, label: "void shards" },
+    ],
+    require: { flags: ["game_completed"] },
+    completeFlag: "postgame_hunt_done",
+    hint: "Scattered shards of the broken age — gather them for the Cornelia smith.",
+    onDefeat: { flags: ["postgame_hunt_done"] },
+    reward: { item: "masamune", count: 1 },
+  },
+  {
+    id: "shadow_master_hunt",
+    type: "item_hunt",
+    name: "Wanderer's Ledger",
+    targets: [
+      { itemId: "fireGem", count: 1, label: "fire gem" },
+      { itemId: "iceGem", count: 1, label: "ice gem" },
+      { itemId: "thunderGem", count: 1, label: "thunder gem" },
+      { itemId: "holyGem", count: 1, label: "holy gem" },
+      { itemId: "voidGem", count: 1, label: "void gem" },
+    ],
+    require: { flags: ["game_completed", "postgame_hunt_done"] },
+    completeFlag: "postgame_ledger_done",
+    hint: "Five gems, one for each element and the dark between — the Trial Master's final ledger.",
+    onDefeat: { flags: ["postgame_ledger_done"] },
+    reward: { item: "shatteredBlade", count: 1 },
+  },
+];

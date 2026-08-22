@@ -3,6 +3,9 @@ export const DIALOGUE = {
     speaker: "Town Guard",
     branches: [
       { when: { flag: "king_met" }, id: "cornelia.guard.after" },
+      // Task #151: affinity-gated branches — frequent visitors are recognized.
+      { when: (w) => { const aw = w?.world ?? w; return !!(aw?.getAffinity && aw.getAffinity("cornelia_guard") >= 4); }, id: "cornelia.guard.affinity2" },
+      { when: (w) => { const aw = w?.world ?? w; return !!(aw?.getAffinity && aw.getAffinity("cornelia_guard") >= 2); }, id: "cornelia.guard.affinity1" },
       { when: { item: "crystalKey" }, id: "cornelia.guard.key" },
       { id: "cornelia.guard.before" },
     ],
@@ -10,7 +13,19 @@ export const DIALOGUE = {
   "cornelia.guard.before": { speaker: "Town Guard", pages: ["Welcome to Cornelia, traveler.", "The king is worried about the dimming light of the crystals."] },
   "cornelia.guard.key": { speaker: "Town Guard", pages: ["Ah, you carry the Crystal Key. The castle doors are open to you."] },
   "cornelia.guard.after": { speaker: "Town Guard", pages: ["The king is awaiting you in the throne room. Do not keep him waiting."] },
-  "cornelia.elder": { speaker: "Village Elder", pages: ["Long ago, four crystals kept the balance of this world.", "Now their light is fading. Only a chosen party can restore them."] },
+  "cornelia.guard.affinity1": { speaker: "Town Guard", pages: ["Good to see you again, friend — few walk these streets as often as you.", "The caves stir with goblin fangs. The smith pays well for them."] },
+  "cornelia.guard.affinity2": { speaker: "Town Guard", pages: ["You've earned this town's trust, hero of the crystal.", "If ever the castle gates close to you, seek the old road by the fountain — the traveler there knows more than she lets on."] },
+  "cornelia.elder": {
+    speaker: "Village Elder",
+    branches: [
+      // Task #151: the elder shares his wisdom once the hero proves their loyalty.
+      { when: (w) => { const aw = w?.world ?? w; return !!(aw?.getAffinity && aw.getAffinity("cornelia_elder") >= 3); }, id: "cornelia.elder.affinity" },
+      { id: "cornelia.elder.before" },
+    ],
+  },
+  "cornelia.elder.before": { speaker: "Village Elder", pages: ["Long ago, four crystals kept the balance of this world.", "Now their light is fading. Only a chosen party can restore them."] },
+  "cornelia.elder.affinity": { speaker: "Village Elder", pages: ["You return again and again — the mark of a true champion.", "Take this ether. The road ahead will thirst for magic."] },
+  "elfheim.elder.affinity": { speaker: "Elf Elder", pages: ["You have walked among us often, human — the forest remembers your steps.", "Mount Gulg's forges burn for the Earth Crystal. Your aid is honored here."] },
   "cornelia.woman": "I heard a strange sound from the caves to the west...",
   "cornelia.child": "I'm going to be a hero like you someday!",
   "cornelia.innkeeper": { speaker: "Innkeeper", pages: ["Welcome to the Crystal Springs Inn. Rest your weary feet here.", "The beds are soft and the ale is cold — just ask to stay the night."] },
@@ -18,7 +33,14 @@ export const DIALOGUE = {
   // Task #108: the Mysterious Traveler, revealed on the castle road.
   "cornelia.traveler": { speaker: "Mysterious Traveler", pages: ["You found me. Few notice the old road by the fountain.", "Walk it thrice in the age's dark hour and it becomes a road to somewhere... else."] },
   "caves.hermit": { speaker: "Hermit", pages: ["You found my little hideaway in the caves.", "Be careful deeper in — the guardians do not take kindly to strangers."] },
-  "pravo.harbormaster": { speaker: "Harbor Master", pages: ["The ship to the north only sails when the sea is calm.", "Bring back the wind crystal and the waters will settle."] },
+  "pravo.harbormaster": {
+    speaker: "Harbor Master",
+    branches: [
+      { when: { flag: "ship_obtained" }, id: "pravo.harbormaster.after" },
+      { id: "pravo.harbormaster.default" },
+    ],
+  },
+  "pravo.harbormaster.default": { speaker: "Harbor Master", pages: ["The ship to the north only sails when the sea is calm.", "Bring back the wind crystal and the waters will settle."] },
   "pravo.sailor": "The sea is harsh. Only a captain with a brave crew survives it.",
   "elfheim.merchant": {
     speaker: "Merchant",
@@ -301,9 +323,37 @@ export const DIALOGUE = {
   "pravo.housewife": "The fishermen pray to the Sea Shrine each dawn. Lately, the sea answers with storms.",
   "pravo.ship_offer": { speaker: "Harbor Master", pages: ["You seek the northern isles? My ship, the Dawnbreaker, is yours — its captain owes the king a debt.", "The tides are calm. The seas will carry you north."] },
   "pravo.ship_grant": { speaker: "Harbor Master", pages: ["The Dawnbreaker awaits at the dock. She answers the sea breeze, not the oar.", "May the currents favor you, heroes of Cornelia."] },
+  // Task #168: the harbor's new voices — dock hands, fishers, and the priest.
+  "pravo.dockworker": "Load the crates, lads — the Dawnbreaker sails for the wastes at dusk!",
+  "pravo.fisherman": "The east coast runs thick with reef serpents since the storms. Every line comes up gnawed.",
+  "pravo.fisherwife": "My man swears he saw lights off the north headland — sea-foam spirits, he says. The priest tells him to pray harder.",
+  "pravo.dockchild": "I'm going to be a sailor one day! I already know every knot — watch: clove hitch, bowline, sheet bend...",
+  "pravo.resident": "The whole town smells of salt and fish, but I wouldn't trade it. The docks are our heartbeat.",
+  "pravo.armorer": "Forged on the coast, tempered by the salt wind. A blade worth its weight in gold — and priced about the same.",
+  "pravo.priest": "We pray to the Sea Shrine for calm waters. The tide has been cruel of late, but the light always finds the faithful.",
+  "pravo.harbormaster.after": { speaker: "Harbor Master", pages: ["The Dawnbreaker knows the northern route now — charted by brave souls.", "She'll carry you to the wastes whenever the wind is willing."] },
 
   "marsh.trapper": { speaker: "Trapper", pages: ["Beyond this marsh, the waters deepen and the mud swallows the careless.", "The Guardian below feeds on the drowned. Do not linger in the depths."] },
   "marsh.warning": { speaker: "Wanderer", pages: ["This place is cursed. The water here does not reflect the sky — only shadows."] },
+  // Task #173: the Northern Wastes and Northwind Village — the frozen north
+  // beyond Pravog's docks.
+  "northwastes.scout": { speaker: "Wastes Scout", pages: ["The pass through the ridges is narrow — one misstep on the ice and the wolves find you.", "Northwind's folk trade warm furs for iron. They'll know more than I do."] },
+  "northwastes.hunter": { speaker: "Snow Hunter", pages: ["I tracked a frost serpent to the cave mouth, then thought better of it.", "They say the ice inside glows with a crystal light — colder than any winter."] },
+  "northwind.elder": {
+    speaker: "Village Elder",
+    branches: [
+      { when: { flag: "story_frost_crystal_taken" }, id: "northwind.elder.after" },
+      { id: "northwind.elder.default" },
+    ],
+  },
+  "northwind.elder.default": { speaker: "Village Elder", pages: ["We are the last hearth between the wastes and the world.", "Beyond our village stands the Ice Cave. Its deepest chamber sleeps behind a wall of living crystal — only a crystal of equal light may pass."] },
+  "northwind.elder.after": { speaker: "Village Elder", pages: ["You hold the Frost Crystal — the cave's heart beats for you now.", "Take what lies beneath the ice, and let the wastes remember your name."] },
+  "northwind.huntress": { speaker: "Huntress", pages: ["A frost wyrm once nested in those caverns. The cave's beasts keep its cold ways.", "Watch the ice floors — they shine fair and bite hard."] },
+  "northwind.trapper": { speaker: "Trapper", pages: ["Set a line on the ice and the catch comes frozen already.", "The wastes take a careless man whole — boots, pack, and all."] },
+  "northwind.child": { speaker: "Child", pages: ["I found a pretty rock in the cave that glows blue! The elder took it away...", "Said it was a 'crystal of the deep.' I want it back someday."] },
+  "northwind.villager": "Every winter the village shrinks a little more. The warm lands forget us — until the monsters crawl south.",
+  "northwind.shopkeep": { speaker: "Shopkeeper", pages: ["Furs, frost salves, and blades that hold an edge in the cold.", "Take what you need — the wastes don't wait for second trips."] },
+  "plot.frost_crystal_taken": { speaker: "Village Elder", pages: ["You took the Frost Crystal from the cave's mouth? The ice will quiet now.", "The deep chamber is yours to claim, hero."] },
 
   "plot.garland_defeated": { speaker: "King Cornelia", pages: ["Garland has fallen! The princess is safe, and the road to the four crystals lies open.", "Take the ship from Pravog and seek the marshlands to the south."] },
   "plot.marsh_guardian_defeated": { speaker: "King Cornelia", pages: ["The Marsh Guardian is slain — a second crystal's light is within reach.", "The Wind Crystal lies north, beyond the mountains. Only the airship can cross."] },
@@ -318,6 +368,9 @@ export const DIALOGUE = {
   "plot.gulg_guardian_defeated": { speaker: "King Cornelia", pages: ["The Forge Golem has crumbled to dust — the Earth Crystal's flame is yours.", "Three crystals restored. One remains: the Wind Crystal, held by Chaos himself in the shrine.", "Return to the Chaos Shrine when you are ready. The final battle awaits."] },
   "plot.chaos_awaits": { speaker: "King Cornelia", pages: ["The Wind Crystal rests in the shrine's dark altar, and Chaos himself guards it.", "Rest, arm, and return to the shrine when the land is quiet. This is the last road."] },
   "plot.chaos_defeated": { speaker: "King Cornelia", pages: ["Chaos has fallen! The Wind Crystal blazes anew.", "The four crystals shine together, and the darkness is broken at last.", "The world breathes free once more — thanks to you, true heroes of Cornelia."] },
+  // Task #150: the mid-game plot twist — the Mysterious Traveler unmasks the
+  // conspiracy behind the throne after Garland's fall and the Marsh Guardian's.
+  "plot.twist_king": { speaker: "Mysterious Traveler", pages: ["You felled Garland... and the King smiled. Did you not find that strange?", "The knight was a puppet, hero. The fiends answer to a darker voice — one that wears a crown.", "Trust nothing the throne tells you now. The truth lies beyond the eastern sea, where the wind crystal is held."] },
 
   "plot.king_plea": {
     speaker: "King Cornelia",
@@ -396,4 +449,36 @@ export const DIALOGUE = {
   "cornelia.sage.wait": { speaker: "Remembrance Sage", pages: ["The world will wait for your decision, hero — it has waited before.", "Return when you are ready."] },
   "cornelia.sage.cycle": { speaker: "Remembrance Sage", pages: ["This is not the first age I have seen you walk, hero — and your steps fall lighter in it.", "Your strength carried over, your stones stayed lit, and every foe of the realm rose to meet you.", "Should the Keeper of Time fall again, I can turn the world once more. And the hollow at the Hall of Trials still holds its hunger for you."] },
   "cornelia.sage.after_echo": { speaker: "Remembrance Sage", pages: ["You silenced the Echo of Creation — the cry of the world before the crystals.", "No foe the ages can raise will ever frighten you again.", "Rest, hero of every age. When the next cycle ends, I will turn the world a final time."] },
+  // Task #176/#178: the Southern Jungles — the guide who meets the ship and
+  // the hunter who knows every green trail.
+  "jungleguide.greeting": { speaker: "Jungle Guide", pages: ["Welcome to the Southern Jungles, heroes. The river mouth is safe — the deep green is not.", "Follow the lanterns to the village. And mind the ruins: the Old Ones' stones still hold their grudges."] },
+  "jungle.hunter": { speaker: "Jungle Hunter", pages: ["The beasts here hunt in packs, and the ruins echo with things that should stay buried.", "If you seek the Old Ones' hoard, find the Sun-Moss Relic first — the shaman knows its resting place."] },
+  "jungle.elder": {
+    speaker: "Village Elder",
+    pages: [
+      "The jungle has always been. Before the crystals dimmed, before the kingdoms rose — the green was here.",
+      "We are its keepers, as our mothers' mothers were. And the ruins at the river bend are its oldest wound.",
+    ],
+  },
+  "jungle.shaman": { speaker: "Shaman", pages: ["The Old Ones built their halls beneath the temple mound, and walled the deep door with stone that remembers.", "Only the Sun-Moss Relic can part it — a relic our elders hid in the ruins above, where the light still falls.", "Find it in the moss-lit hall beyond the broken stairs. The stones will test you; the relic will answer."] },
+  "jungle.herbalist": { speaker: "Herbalist", pages: ["Vine-bark for fever, moss-spore for aches, and a pinch of sun-leaf to keep the dark at bay.", "The ruins' air is thick with old spores — a care for the lungs is worth more than gold down there."] },
+  "jungle.child": { speaker: "Child", pages: ["I saw the big-eyed beetle march in a line all the way to the ruins! It knew the way, I swear!", "When I'm big I'll be a Ruin Diver, like the stories. The Old Ones' gold will buy the whole village new roofs!"] },
+  "jungle.villager": "The vines grow over everything given half a season. That is the jungle's way — it forgives nothing, forgets nothing.",
+  "jungle.housewife": "The shaman says the ruins stirred last new moon. We light the village lanterns a little brighter since.",
+  "jungle.shopkeep": { speaker: "Trader", pages: ["Vine cord, jungle herbs, and blades that hold an edge in the damp.", "Take what you need — the jungle doesn't wait for second trips."] },
+  "plot.ruins_relic_found": { speaker: "Shaman", pages: ["You hold the Sun-Moss Relic — the Old Ones' light answers you now.", "The deep door of the Sunken Hall beneath the ruins will part for its bearer. Claim what the stones have kept, hero."] },
+  // Task #181/#183: the Western Highlands — Stormhold's roads and court.
+  "highlands.scout": { speaker: "Highlands Scout", pages: ["The passes above the treeline are clear today, but the wind bites hard on the peak.", "Stormhold's banner flies high — but even the Duke's best could not tame the storm at the summit."] },
+  "highlands.guard": { speaker: "Castle Patrol", pages: ["Halt! ...Ah, travelers from the south. The Duke welcomes any who brave the jungle road.", "The storm at the peak has grown worse this season — the old wind-cages on the climb are the only safe footing."] },
+  "highlands.herald": { speaker: "Herald", pages: ["Duke Aldric of Stormhold receives you, heroes of the south.", "The Duke's line has held the highlands since before the crystals faded — and the storm summit has never bowed to any throne."] },
+  "highlands.duke": {
+    speaker: "Duke Aldric",
+    pages: [
+      "You come from the green lands beyond the treeline. The jungle has claimed many brave souls; that you stand here speaks well of you.",
+      "The storm at the Highland Peak is my white whale. It crowns the tallest crag in the realm, and no wind-cage holds at its heart.",
+      "A Gale Cloak will keep your party whole on the climb — my armorer will sell you one. Tame the summit, and the highlands will sing your name forever.",
+    ],
+  },
+  "highlands.duchess": { speaker: "Duchess Seraphine", pages: ["My husband speaks of nothing but that storm.", "Take the cloak, brave the climb, and bring back the still air from the summit — and this court will owe you its finest favor."] },
+  "highlands.captain": { speaker: "Captain Voss", pages: ["My patrols lose men to the peak's wind every winter. Climb with a Gale Cloak and heavy hearts.", "The storm has a voice, they say. Those who hear it and come back down speak of a light at the summit's eye."] },
 };

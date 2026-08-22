@@ -360,4 +360,100 @@ export const CHESTS = [
     },
     flag: "chest_time_throne_opened",
   },
+  // Task #174: Ice Cave chests — the Frost Crystal that parts the crystal
+  // wall rests in a hoard by the upper cave's mouth.
+  {
+    id: "ice_chest_crystal",
+    mapId: "ice_cave_upper",
+    x: 13,
+    y: 8,
+    contents: {
+      items: [{ itemId: "frostCrystal", count: 1 }],
+      loot: [{ itemId: "frostShard", chance: 1, count: 2 }, { itemId: "iceGem", chance: 0.4, count: 1 }],
+      gold: 100,
+    },
+    flag: "chest_ice_crystal_opened",
+  },
+  {
+    id: "ice_chest_west",
+    mapId: "ice_cave_upper",
+    x: 2,
+    y: 7,
+    contents: {
+      loot: [{ itemId: "hiPotion", chance: 1, count: 2 }, { itemId: "frostCloak", chance: 0.5, count: 1 }],
+      gold: 80,
+    },
+    flag: "chest_ice_west_opened",
+  },
+  {
+    id: "ice_chest_chamber",
+    mapId: "ice_cave_b2",
+    x: 9,
+    y: 1,
+    contents: {
+      loot: [{ itemId: "rimeMail", chance: 0.5, count: 1 }],
+      items: [{ itemId: "iceGem", count: 1 }, { itemId: "elixir", count: 1 }],
+      gold: 200,
+    },
+    flag: "chest_ice_chamber_opened",
+  },
+  // Task #176-#185: Southern Jungles & Western Highlands chests. The Sun-Moss
+  // Relic that parts the Sunken Hall's gate rests in the ruins' east hoard;
+  // the peak's windward ledges hide the storm-touched loot.
+  {
+    id: "ruins_relic_hoard",
+    mapId: "ancient_ruins",
+    x: 3,
+    y: 5,
+    contents: {
+      items: [{ itemId: "ruinsRelic", count: 1 }],
+      loot: [{ itemId: "mossSpore", chance: 1, count: 2 }, { itemId: "beetleShell", chance: 0.5, count: 1 }],
+      gold: 120,
+    },
+    flag: "chest_ruins_relic_opened",
+  },
+  {
+    id: "ruins_loot_west",
+    mapId: "ancient_ruins",
+    x: 14,
+    y: 5,
+    contents: {
+      loot: [{ itemId: "hiPotion", chance: 1, count: 2 }, { itemId: "soft", chance: 0.5, count: 1 }],
+      gold: 90,
+    },
+    flag: "chest_ruins_west_opened",
+  },
+  {
+    id: "ruins_loot_chamber",
+    mapId: "ancient_ruins_b2",
+    x: 11,
+    y: 1,
+    contents: {
+      items: [{ itemId: "elixir", count: 1 }],
+      gold: 150,
+    },
+    flag: "chest_ruins_chamber_opened",
+  },
+  {
+    id: "peak_loot_ledge",
+    mapId: "highland_peak",
+    x: 11,
+    y: 7,
+    contents: {
+      loot: [{ itemId: "hiPotion", chance: 1, count: 2 }, { itemId: "galeEssence", chance: 0.5, count: 1 }],
+      gold: 100,
+    },
+    flag: "chest_peak_ledge_opened",
+  },
+  {
+    id: "peak_hoard",
+    mapId: "highland_peak_b2",
+    x: 7,
+    y: 7,
+    contents: {
+      loot: [{ itemId: "stormFeather", chance: 1, count: 2 }, { itemId: "thunderGem", chance: 0.5, count: 1 }],
+      gold: 250,
+    },
+    flag: "chest_peak_hoard_opened",
+  },
 ];

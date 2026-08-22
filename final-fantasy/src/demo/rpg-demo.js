@@ -9,6 +9,7 @@ import { SpellCastingSystem } from "../engine/spellcasting.js";
 import { ShopUI } from "../engine/shop.js";
 import { MiniMap } from "../engine/fog-of-war.js";
 import { GridEntity, MovementSystem } from "../engine/movement.js";
+import { DIRS } from "../engine/grid.js";
 
 const MAP_ID = "caves_of_cornelia";
 const START = { x: 7, y: 3 };
@@ -78,6 +79,13 @@ function moverFor(mapId) {
     sys.setTerrainSpeed(window.ff.terrainSpeedFor(mapId));
     sys.setScale(def.scale ?? 1);
     sys.setWalkabilityHook((x, y) => window.ff.puzzles.blockedAt(mapId, x, y) || window.ff.boundaries.isBlocked(mapId, x, y));
+    // Task #149/#152: revealed secret walls and opened gates become passable
+    // through the passability override (secretWalls + worldVisuals).
+    sys.setPassabilityOverride((x, y) => {
+      const a = window.ff.secretWalls.passabilityOverride(mapId, x, y);
+      if (a) return a;
+      return window.ff.worldVisuals.passabilityOverride(mapId, x, y);
+    });
     movers[mapId] = sys;
   }
   return movers[mapId];
@@ -102,7 +110,9 @@ function hudText() {
   const cycle = window.ff.ngplus ? window.ff.ngplus.cycle() : 1;
   // Task #138: the game clock (day + hour) rides the HUD.
   const time = window.ff.gameClock ? "  Time: " + window.ff.gameClock.label() : "";
-  return "Cycle " + cycle + "  [" + state.mapName + "] (" + state.px + "," + state.py + ") " + (state.player?.travelMode ?? "land") + time + "  Steps " + window.ff.encounters.totalSteps + "  Gold " + party.gold + "\n" + line + "\nGoal: " + goal;
+  // Task #162: the lifetime playtime clock rides the HUD.
+  const played = window.ff.playtime ? "  Played " + window.ff.playtime.label() : "";
+  return "Cycle " + cycle + "  [" + state.mapName + "] (" + state.px + "," + state.py + ") " + (state.player?.travelMode ?? "land") + time + played + "  Steps " + window.ff.encounters.totalSteps + "  Gold " + party.gold + "\n" + line + "\nGoal: " + goal;
 }
 
 // Task #73: landmark hint shown on the world map HUD.
@@ -145,6 +155,15 @@ function renderGrid() {
       const t = terr ? terr.terrainAt(x, y) : "land";
       let cls = "cell" + (explored ? " on" : "");
       if (isP) cls += " player";
+      // Task #148: in dark maps only the lit radius (and the player's own
+      // tile) is visible without a light source.
+      const lit =
+        isP || window.ff.lighting.canSee(mapId, x, y, state.px, state.py);
+      if (!lit) {
+        cls += " dark";
+        cells.push('<div class="' + cls + '">\u00b7</div>');
+        continue;
+      }
       if (explored && tm.isSolid(x, y)) cls += " wall";
       if (explored && t === "water") cls += " water";
       if (explored && t === "mountain") cls += " mountain";
@@ -181,6 +200,14 @@ function renderGrid() {
           }
         }
       }
+      // Task #152: permanent world-state tile patches (opened doors, lit
+      // braziers) override the rendered tile once their plot flag is set.
+      const patch = window.ff.worldVisuals.activePatchAt(mapId, x, y);
+      if (patch) {
+        if (patch.solid === false) cls = cls.replace(" wall", "");
+        char = patch.char ?? char;
+        cls += " " + (patch.cls ?? "");
+      }
       cells.push('<div class="' + cls + '">' + char + "</div>");
     }
   }
@@ -203,6 +230,8 @@ function move(dir) {
   state.px = state.player.x;
   state.py = state.player.y;
   if (moved) {
+    // Task #162: every world step counts toward the lifetime step counter.
+    window.ff.playtime?.addStep();
     window.ff.ambient.tick();
     if (mapId === "overworld") {
       // Task #137: overworld fog reveals only as the player explores (and is
@@ -216,12 +245,42 @@ function move(dir) {
     for (const b of window.ff.npcBarks.tick(mapId, state.px, state.py)) {
       log(b.npc + ": \"" + b.line + "\"");
     }
+    // Task #146: hidden traps spring on the tile just stepped onto.
+    window.ff.traps.onStep();
+    const trapRes = window.ff.traps.check(mapId, state.px, state.py);
+    if (trapRes.ok) {
+      log(trapRes.line);
+      for (const e of trapRes.effects) {
+        if (e.type === "damage") log(e.member.name + " takes " + e.amount + " damage from the trap!");
+        else if (e.type === "status") log(e.member.name + " is afflicted with " + e.status + "!");
+        else if (e.type === "drainGold") log("The trap costs you " + e.amount + " gold.");
+      }
+    }
+    // Task #147: standing on lava/acid burns the party (unless gear protects).
+    const hz = window.ff.hazards.step(mapId, state.px, state.py);
+    if (hz.ok) {
+      if (hz.protected) {
+        log("The " + hz.zone.name + " seethes — but your gear holds it at bay.");
+      } else {
+        log(hz.line);
+        for (const e of hz.events) {
+          if (e.type === "damage") log(e.member.name + " takes " + e.amount + " damage from the " + hz.zone.name + ".");
+          else if (e.type === "status") log(e.member.name + " is afflicted with " + e.status + "!");
+        }
+      }
+    }
     const enc = window.ff.encounters.onStep(mapId, 1);
     if (enc) {
       startBattle(enc);
       return;
     }
     if (checkWorldInteraction()) return;
+    // Task #150: the mid-game plot twist can fire on any step once its flags
+    // are met — it rewrites the party goal and the quest log headline.
+    for (const tw of window.ff.plotTwists.check()) {
+      if (tw.type === "fired") log("PLOT TWIST: " + tw.twist.name + " — the party's goal changes!");
+      else if (tw.type === "resolved") log("The conspiracy resolves — the quest log returns to the main road.");
+    }
     // Task #135: low-probability non-combat events on the overworld.
     const ev = window.ff.randomEvents.roll(mapId);
     if (ev) {
@@ -231,6 +290,28 @@ function move(dir) {
       if (r.amount) log("+" + r.amount + " gold.");
       renderGrid();
       return;
+    }
+  } else {
+    // Task #149: walking INTO a solid tile may reveal a secret wall.
+    const d = DIRS[state.player.facing] ?? null;
+    if (d) {
+      const sec = window.ff.secretWalls.probe(mapId, state.px + d.dx, state.py + d.dy);
+      if (sec.ok) {
+        log(sec.line);
+        for (const e of sec.effects) {
+          if (e.type === "path") log("A hidden passage grinds open through the wall!");
+          else if (e.type === "chest") {
+            log(
+              "Hidden cache! " +
+                (e.items.length ? e.items.map((i) => i.itemId + " x" + i.count).join(", ") : "") +
+                (e.gold ? " +" + e.gold + " gold" : "") +
+                (e.xp ? " +" + e.xp + " XP" : "")
+            );
+          }
+        }
+        renderGrid();
+        return;
+      }
     }
   }
   renderGrid();
@@ -260,6 +341,16 @@ function checkWorldInteraction() {
     const pass = ff.gates.canPass(mapId, state.px, state.py);
     if (!pass.allowed) {
       log(pass.reason || "The way is blocked.");
+      renderGrid();
+      return true;
+    }
+  }
+  // Task #153: narrative pacing gates — "Wait" until mid-game flags are met.
+  const pg = ff.pacingGates.gateAt(mapId, state.px, state.py);
+  if (pg) {
+    const pass = ff.pacingGates.canPass(mapId, state.px, state.py);
+    if (!pass.allowed) {
+      log(pass.reason || "Wait — the way is not yet open.");
       renderGrid();
       return true;
     }
@@ -359,6 +450,11 @@ function moveToMap(mapId, x, y, facing = "S") {
   setPlayerAt(mapId, x, y, facing);
   state.mapName = (window.ff.maps.get(mapId)?.name) ?? mapId;
   window.game.state.setLocation(mapId, x, y, facing);
+  // Task #162/#160: fold the running session into the playtime total, then
+  // quick-save on every map-ID change.
+  window.ff.playtime?.recordSession();
+  const qs = window.ff.autosave?.onTransition(from, mapId, window.game);
+  if (qs?.ok) log("(Auto-save: " + from + " → " + mapId + ".)");
   window.ff.fog.resetAll();
   if (mapId === "overworld") {
     // Task #137: re-hydrate the persisted overworld explored set.
@@ -382,6 +478,11 @@ function startBattle(enc, onWin = null) {
   // -> Executing Action -> Resolving Damage -> End of Round -> ...).
   battle.states = new window.systems.CombatStateMachine();
   for (const e of battle.enemies) window.ff.bossPhases.reset(e);
+  // Task #157/#158: the target cursor locks onto the enemy party and the
+  // turn-order sidebar lists every combatant.
+  window.ff.targetCursor.bind(battle.enemies);
+  window.ff.turnQueueView.build([...window.game.party.members, ...battle.enemies], window.game.party.members);
+  renderTurnQueue();
   // Task #138: a battle takes an hour of in-game time.
   window.ff.gameClock.advanceBattle();
   window.ff.sounds.trigger("battleStart");
@@ -389,16 +490,61 @@ function startBattle(enc, onWin = null) {
   window.ff.music?.setBattle({ active: true, boss: battle.enemies.some((e) => e.boss) });
   typedLog(["--- A " + enc.groupId.replace(/_/g, " ") + " attacks! ---", enc.enemies.map((e) => e.name).join(", ")]);
   state.actionsEl.hidden = false;
+  state.turnQueueEl.hidden = false;
   renderGrid();
   renderEnemies();
+}
+
+// Task #158: the turn-order sidebar — upcoming turns, party blue, enemy red.
+function renderTurnQueue() {
+  if (!battle) return;
+  if (!window.ff.turnQueueView.items().length) return;
+  const parts = window.ff.turnQueueView
+    .items()
+    .map((i) => {
+      const cls = i.active ? "tq-cur" : i.side === "party" ? "tq-party" : "tq-enemy";
+      return '<span class="' + cls + '">' + i.name + "</span>";
+    })
+    .join(" → ");
+  state.turnQueueEl.innerHTML = "Next: " + parts;
 }
 
 function renderEnemies() {
   if (!battle) return;
   const alive = battle.enemies.filter((e) => e.hp > 0);
-  state.enemyEl.textContent = alive.length
-    ? "Enemies: " + alive.map((e) => e.name + " HP" + Math.max(0, e.hp) + (e.boss ? " [BOSS]" : "")).join("  ")
+  // Task #157: enemies render as clickable target rows; the selected row is
+  // marked ▶ and every enemy the attack will fan out to is highlighted.
+  const markers = window.ff.targetCursor.markers(window.game.party.members[0]);
+  state.enemyEl.innerHTML = alive.length
+    ? markers
+        .map((m) => {
+          const cls = "target-row" + (m.selected ? " sel" : m.struck ? " struck" : "") + (m.dead ? " dead" : "");
+          return (
+            '<button class="' + cls + '" data-idx="' + m.index + '">' +
+            (m.selected ? "▶ " : "") +
+            (m.struck ? "* " : "  ") +
+            m.enemy.name +
+            " HP " + Math.max(0, m.enemy.hp) +
+            (m.enemy.boss ? " [BOSS]" : "") +
+            "</button>"
+          );
+        })
+        .join("")
     : "No enemies remaining.";
+  state.enemyEl.querySelectorAll(".target-row:not(.dead)").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.idx);
+      const cur = window.ff.targetCursor.selected;
+      window.ff.targetCursor.bind(battle.enemies);
+      while (window.ff.targetCursor.selected !== battle.enemies[idx] && window.ff.targetCursor.aliveCount()) {
+        window.ff.targetCursor.next();
+      }
+      const moved = window.ff.targetCursor.selected !== cur;
+      renderEnemies();
+      renderTurnQueue();
+      if (moved) log("Target: " + window.ff.targetCursor.selected.name + ".");
+    });
+  });
   state.statusEl.textContent = hudText();
 }
 
@@ -427,6 +573,17 @@ function endBattle() {
     // Task #102: boss victories restore crystals through the plot chain — the
     // diff fires the world's reaction (flash, lore, bridge/gate updates).
     window.ff.crystals.check();
+    // Task #150: boss wins can complete the plot twist's triggers — a fired
+    // twist rewrites the party goal and the quest log headline.
+    for (const tw of window.ff.plotTwists.check()) {
+      if (tw.type === "fired") log("PLOT TWIST: " + tw.twist.name + " — the party's goal changes!");
+      else if (tw.type === "resolved") log("The conspiracy resolves — the quest log returns to the main road.");
+    }
+    // Task #163: beating the story can unlock post-game content (secret
+    // bosses, item hunts) — the check fires once per new unlock.
+    for (const d of window.ff.postgame.check()) {
+      log("POST-GAME: " + d.name + " is now available — " + d.hint);
+    }
     // Task #145: after every win, high-tier gear rolls its break chance.
     const wear = window.ff.gearDurability.afterBattleParty(window.game.party.members);
     for (const e of wear) {
@@ -435,6 +592,8 @@ function endBattle() {
     battle = null;
     state.actionsEl.hidden = true;
     state.enemyEl.textContent = "";
+    state.turnQueueEl.hidden = true;
+    state.turnQueueEl.textContent = "";
   } else if (partyAlive === 0) {
     // Task #127: terminal state on a wipe.
     battle.states?.finish("defeat");
@@ -452,13 +611,16 @@ function endBattle() {
     battle = null;
     state.actionsEl.hidden = true;
     state.enemyEl.textContent = "";
+    state.turnQueueEl.hidden = true;
+    state.turnQueueEl.textContent = "";
   }
   renderGrid();
 }
 
 function onAttack() {
   const hero = window.game.party.members[0];
-  const target = battle.enemies.filter((e) => e.hp > 0)[0];
+  // Task #157: strike the enemy under the target cursor (refresh skips dead).
+  const target = window.ff.targetCursor.refresh();
   if (!hero.isAlive() || !target) return;
   window.ff.sounds.trigger("attack");
   // Task #127: Waiting for Input -> Executing Action -> Resolving Damage.
@@ -471,8 +633,18 @@ function onAttack() {
   window.ff.sounds.trigger(res.allMissed ? "miss" : "hit");
   for (const m of res.messages) log(m);
   if (res.targets.length > 1) log(hero.name + " strikes " + res.targets.length + " enemies at once!");
+  // Task #156: every hit becomes a popup spec + a round summary banner.
+  res.hits.forEach((h, i) => {
+    const ox = state.px + 1 + (i % 3);
+    const oy = state.py + 1 + Math.floor(i / 3);
+    const spec = window.ff.hitIndicators.popupSpec(h);
+    window.ff.damagePopups.add(ox, oy, spec.text, { kind: spec.kind });
+  });
+  const banner = window.ff.hitIndicators.summarize(res.hits);
+  if (banner.dramaticLine) log(banner.dramaticLine);
   enemyTurn();
   renderEnemies();
+  renderTurnQueue();
 }
 
 function onFiraga() {
@@ -493,6 +665,10 @@ function onFiraga() {
   for (const s of window.ff.spellAnimationSync.timelineForText("firaga", lines)) {
     log("(frame " + s.frame + ") " + s.text);
   }
+  // Task #155: floating damage numbers per target.
+  res.results.forEach((r, i) => {
+    window.ff.damagePopups.add(state.px + 1 + (i % 3), state.py + 1 + Math.floor(i / 3), "-" + r.damage, { kind: r.weak ? "crit" : "damage" });
+  });
   enemyTurn();
   renderEnemies();
 }
@@ -543,10 +719,13 @@ function onRun() {
     battle = null;
     state.actionsEl.hidden = true;
     state.enemyEl.textContent = "";
+    state.turnQueueEl.hidden = true;
+    state.turnQueueEl.textContent = "";
     renderGrid();
   } else {
     enemyTurn();
     renderEnemies();
+    renderTurnQueue();
   }
 }
 
@@ -566,6 +745,11 @@ function enemyTurn() {
       continue;
     }
     for (const m of t.result.messages) log(m);
+    // Task #156: incoming damage floats over the party via the indicator spec.
+    const spec = window.ff.hitIndicators.popupSpec(t.result);
+    window.ff.damagePopups.add(state.px, state.py, spec.text, { kind: spec.kind });
+    const banner = window.ff.hitIndicators.summarize([t.result]);
+    if (banner.dramaticLine) log(banner.dramaticLine);
     if (!party.some((p) => p.isAlive())) break;
   }
   const regen = window.ff.manaRegen.tick(party);
@@ -586,6 +770,8 @@ function enemyTurn() {
     if (endR.ok) log("--- End of round " + endR.round + " ---");
   }
   endBattle();
+  // Task #158: after every round the sidebar re-rolls from the survivors.
+  renderTurnQueue();
 }
 
 function onPotion() {
@@ -593,6 +779,8 @@ function onPotion() {
   const res = window.ff.consumables.use("potion");
   if (!res.ok) return log("Potion: " + res.error);
   log("Potion used on " + res.targetId + " — recovers " + (res.healed ?? res.restored ?? "some") + " HP/MP.");
+  // Task #155: healing floats up green.
+  window.ff.damagePopups.add(state.px, state.py, "+" + (res.healed ?? res.restored ?? 0), { kind: "heal" });
   renderGrid();
 }
 
@@ -772,6 +960,9 @@ function mount() {
     #rpgDemo .cell.waystone { background: #16244a; color: #7fd4ff; font-weight: bold; text-shadow: 0 0 4px #3a9fe0; }
     #rpgDemo .cell.echo { background: #2a1240; color: #e07fff; font-weight: bold; text-shadow: 0 0 5px #9a2ac0; }
     #rpgDemo .cell.bridge { background: #2a3320; color: #d8d890; font-weight: bold; text-shadow: 0 0 4px #aab45a; }
+    #rpgDemo .cell.dark { background: #020308; color: #0b0f1c; }
+    #rpgDemo .cell.door { color: #ffd24a; font-weight: bold; text-shadow: 0 0 4px #a86a1a; }
+    #rpgDemo .cell.lit { color: #ff9a3d; font-weight: bold; text-shadow: 0 0 4px #ff6a1a; }
     #rpgDemo .cell.npc { color: #ffd9a0; }
     #rpgDemo .cell.player { color: #ffd24a; font-weight: bold; background: #2a2200; }
     #rpgDemo .log { width: 340px; height: 240px; overflow-y: auto; font-size: 12px; line-height: 1.45; }
@@ -781,6 +972,15 @@ function mount() {
     #rpgDemo button:hover { background: #2a3b6e; }
     #rpgDemo button.act { background: #4a3a08; color: #ffd24a; border-color: #8a6a1a; }
     #rpgDemo .enemy { color: #ff8a8a; font-size: 12px; min-height: 16px; margin-top: 6px; }
+    #rpgDemo .target-row { display: block; width: 100%; text-align: left; background: none; border: 1px solid transparent; color: #ff8a8a; font-family: monospace; font-size: 12px; padding: 2px 4px; cursor: pointer; margin: 1px 0; }
+    #rpgDemo .target-row:hover { background: #161f3e; }
+    #rpgDemo .target-row.sel { border-color: #ffd24a; color: #ffd24a; }
+    #rpgDemo .target-row.struck { color: #ffe9a0; }
+    #rpgDemo .target-row.dead { color: #5a4a52; text-decoration: line-through; cursor: default; }
+    #rpgDemo .turnqueue { font-size: 11px; color: #8fa8e8; min-height: 15px; margin-top: 4px; padding: 3px 6px; border: 1px dashed #2a3b6e; }
+    #rpgDemo .turnqueue .tq-party { color: #7fd4ff; }
+    #rpgDemo .turnqueue .tq-enemy { color: #ff8a8a; }
+    #rpgDemo .turnqueue .tq-cur { color: #ffd24a; font-weight: 700; }
     #rpgDemo .shopwrap { width: 340px; }
     #rpgDemo .forgewrap { width: 340px; }
     #rpgDemo .waywrap { width: 340px; }
@@ -812,6 +1012,7 @@ function mount() {
       <div class="minimap" id="rpgMiniMap"></div>
       <div class="grid" id="rpgGrid"></div>
       <div class="enemy" id="rpgEnemy"></div>
+      <div class="turnqueue" id="rpgTurnQueue" hidden></div>
       <div class="btns">
         <button class="act" id="rpgAttack">Attack</button>
         <button class="act" id="rpgFiraga">Firaga (AoE)</button>
@@ -825,6 +1026,7 @@ function mount() {
         <button id="rpgLand">Walk</button>
         <button id="rpgShip">Board Ship</button>
         <button id="rpgAir">Airship</button>
+        <button id="rpgLight">Light: Off</button>
       </div>
       <div class="btns">
         <button id="rpgShopW">Weapon Shop</button>
@@ -840,6 +1042,12 @@ function mount() {
       <div class="btns">
         <button id="rpgMenuBtn">Menu (M)</button>
         <button id="rpgAudioBtn">Audio: Off</button>
+      </div>
+      <div class="btns">
+        <button id="rpgSettingsBtn">Settings</button>
+        <button id="rpgPostgameBtn">Post-Game</button>
+        <button id="rpgScoreBtn">Score</button>
+        <button id="rpgCreditsBtn">Credits</button>
       </div>
       <div class="nowplaying" id="rpgNowPlaying" hidden></div>
     </div>
@@ -888,6 +1096,7 @@ function mount() {
     statusEl: el.querySelector("#rpgHud"),
     logEl: el.querySelector("#rpgLog"),
     enemyEl: el.querySelector("#rpgEnemy"),
+    turnQueueEl: el.querySelector("#rpgTurnQueue"),
     miniMapEl: el.querySelector("#rpgMiniMap"),
     actionsEl: el.querySelector("#rpgAttack").parentElement,
     travelRow: el.querySelector("#rpgTravel"),
@@ -903,6 +1112,10 @@ function mount() {
     px: 0, py: 0, mapName: "", inCave: false, inBuilding: null, inTown: null, lastWaystoneId: null, player: new GridEntity(0, 0, { facing: "S", id: "hero" }),
   };
   state.miniMap = new MiniMap(state.miniMapEl, { cell: 9 });
+  // Task #155: floating combat numbers overlay the map grid.
+  window.ff.damagePopups.attach(state.gridEl, { cell: 18 });
+  // Task #161: settings' screen size scales the demo UI.
+  window.ff.screenScale.bind(el);
   // Task #102: when a crystal is restored the world reacts — a flash of its
   // color, its lore, and the updated bridge/gate state.
   window.ff.crystals.onRestored((d) => {
@@ -932,6 +1145,14 @@ function mount() {
   el.querySelector("#rpgLand").addEventListener("click", () => setTravel("land"));
   el.querySelector("#rpgShip").addEventListener("click", () => setTravel("ship"));
   el.querySelector("#rpgAir").addEventListener("click", () => setTravel("air"));
+  // Task #148: strike the lantern (or trust the white mage's Light spell) to
+  // push back the darkness of the haunted tower and the Time Rift.
+  el.querySelector("#rpgLight").addEventListener("click", () => {
+    const on = window.ff.lighting.toggleTorch();
+    log(on ? "You strike the lantern — light cuts through the dark!" : "You shroud the lantern's flame.");
+    el.querySelector("#rpgLight").textContent = "Light: " + (on ? "On" : "Off");
+    renderGrid();
+  });
   el.querySelector("#rpgInn").addEventListener("click", () => {
     const res = window.ff.inn.rest();
     if (res.ok) {
@@ -972,6 +1193,8 @@ function mount() {
   el.querySelectorAll(".rpgSaveSlot").forEach((btn) => {
     btn.addEventListener("click", () => {
       const slot = btn.dataset.slot;
+      // Task #162: fold the session in so the save's playtime is current.
+      window.ff.playtime?.recordSession();
       const res = window.ff.boot?.saveCurrent(slot);
       log(res?.ok ? "Saved to " + slot + "." : "Save failed: " + (res?.reason ?? "unknown error"));
       refreshSavePanel();
@@ -990,7 +1213,20 @@ function mount() {
     const next = !window.ff.music.muted;
     window.ff.music.setMuted(next);
     window.ff.sounds.setMuted(next);
+    // Task #161: keep the settings store in sync with the master toggle.
+    window.ff.settings?.set("muted", next);
     refreshMusicUI();
+  });
+  // Task #161: the Settings menu (audio volume, text speed, screen size).
+  el.querySelector("#rpgSettingsBtn").addEventListener("click", openSettingsMenu);
+  // Task #163: post-game content — secret bosses + item hunts.
+  el.querySelector("#rpgPostgameBtn").addEventListener("click", onPostgame);
+  // Task #164: the final score card.
+  el.querySelector("#rpgScoreBtn").addEventListener("click", onScore);
+  // Task #165: the credit roll.
+  el.querySelector("#rpgCreditsBtn").addEventListener("click", () => {
+    log("Credits roll... (Enter/Esc to skip)");
+    import("../ui/credits.js").then((m) => m.mountCreditsOverlay(window.ff.data.TEAM_CREDITS));
   });
   document.addEventListener("click", () => {
     window.ff.sounds.unlock();
@@ -1059,6 +1295,17 @@ function mount() {
     } else if (state) {
       state.moveAcc = 0;
     }
+    // Task #155: animate the floating damage numbers each frame.
+    if (window.ff.damagePopups) {
+      window.ff.damagePopups.update(dt);
+      window.ff.damagePopups.render();
+    }
+    // Task #162: the playtime clock ticks with real time; the running
+    // session folds into the persisted total every ~10s.
+    if (window.ff.playtime) {
+      window.ff.playtime.tick(dt);
+      if (window.ff.playtime.sessionSecs() > 10) window.ff.playtime.recordSession();
+    }
     refreshMusicUI();
     requestAnimationFrame(loop);
   };
@@ -1081,6 +1328,17 @@ function interact() {
     sayDialogue(npc.dialogueId);
     maybeCompleteWaystoneQuest();
     maybeBeginCycle();
+    // Task #151: every conversation deepens the bond — crossing a tier
+    // threshold grants the NPC's one-time recognition reward.
+    const rel = window.ff.npcRelations.add(npc.id, window.ff.npcRelations.def(npc.id)?.talkGain ?? 1);
+    if (rel.ok) {
+      for (const rw of rel.rewards ?? []) {
+        if (rw.reward?.item) log(npc.name + " acknowledges you — " + (window.game.inventory.item(rw.reward.item)?.name ?? rw.reward.item) + " gained!");
+        else if (rw.reward?.gold) log(npc.name + " acknowledges you — " + rw.reward.gold + " gold!");
+        else if (rw.reward?.xp) log(npc.name + " acknowledges you — " + rw.reward.xp + " XP!");
+      }
+      if (rel.tier?.label) log("[" + npc.name + "] affinity " + rel.score + " — " + rel.tier.label + ".");
+    }
     // Task #140: after the talk, hand over any items this NPC accepts — the
     // player always gets the exchange when they have what the NPC wants.
     for (const offer of window.ff.npcExchanges.offersFor(npc.id)) {
@@ -1094,6 +1352,12 @@ function interact() {
             ? " You receive " + r.gold + " gold."
             : "";
           log("You hand over " + (offer.count > 1 ? offer.count + "x " : "") + (window.game.inventory.item(offer.itemId)?.name ?? offer.itemId) + ". " + offer.line + got);
+          // Task #151: trades also build the bond.
+          const er = window.ff.npcRelations.add(offer.npc, window.ff.npcRelations.def(offer.npc)?.exchangeGain ?? 0);
+          for (const rw of er?.rewards ?? []) {
+            if (rw.reward?.item) log(offer.npc + " acknowledges you — " + rw.reward.item + " gained!");
+            else if (rw.reward?.gold) log(offer.npc + " acknowledges you — " + rw.reward.gold + " gold!");
+          }
         }
       } else if (window.game.inventory.count(offer.itemId) > 0) {
         log((window.game.inventory.item(offer.itemId)?.name ?? offer.itemId) + " in hand, but " + npc.name + " needs " + (offer.count - window.game.inventory.count(offer.itemId)) + " more.");
@@ -1377,6 +1641,126 @@ function toggleSavePanel() {
   if (!state.savePanelEl.hidden) refreshSavePanel();
 }
 
+// Task #161: the Settings menu — audio volume, mute, text speed, screen
+// size. Writes through the persisted SettingsStore, which applies the
+// values to the live systems.
+function openSettingsMenu() {
+  const s = window.ff.settings;
+  const overlay = document.createElement("div");
+  overlay.className = "settingsOverlay";
+  overlay.innerHTML = '<div class="settingsPanel"><h3>Settings</h3><div class="settingsRows"></div><div class="btns"><button id="rpgSettingsClose">Close</button></div></div>';
+  const panel = overlay.querySelector(".settingsRows");
+  for (const item of s.all()) {
+    const row = document.createElement("div");
+    row.className = "settingsRow";
+    const label = document.createElement("label");
+    label.textContent = item.def.label;
+    row.appendChild(label);
+    let input;
+    if (item.def.type === "range") {
+      input = document.createElement("input");
+      input.type = "range";
+      input.min = item.def.min;
+      input.max = item.def.max;
+      input.step = item.def.step ?? 0.01;
+      input.value = item.value;
+      input.addEventListener("input", () => s.set(item.key, Number(input.value)));
+    } else if (item.def.type === "toggle") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !!item.value;
+      input.addEventListener("change", () => s.set(item.key, input.checked));
+    } else {
+      input = document.createElement("select");
+      for (const opt of item.def.options ?? []) {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        o.textContent = opt.label ?? opt.value;
+        input.appendChild(o);
+      }
+      input.value = item.value;
+      input.addEventListener("change", () => s.set(item.key, input.value));
+    }
+    row.appendChild(input);
+    panel.appendChild(row);
+  }
+  overlay.querySelector("#rpgSettingsClose").addEventListener("click", () => { overlay.remove(); style.remove(); });
+  document.body.appendChild(overlay);
+  const style = document.createElement("style");
+  style.textContent = `
+    .settingsOverlay { position: fixed; inset: 0; z-index: 55; background: rgba(5,8,18,.78); display: flex; align-items: center; justify-content: center; }
+    .settingsPanel { background: #0a0e1e; border: 2px solid #39456e; padding: 16px 20px; min-width: 320px; }
+    .settingsPanel h3 { margin: 0 0 10px; color: #ffd24a; letter-spacing: .18em; }
+    .settingsRow { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 8px 0; color: #cfe0ff; font-size: 13px; }
+    .settingsRow select { max-width: 160px; }
+  `;
+  document.head.appendChild(style);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) { overlay.remove(); style.remove(); } });
+}
+
+// Task #163: post-game content — start the next available secret boss, or
+// report hunt progress.
+function onPostgame() {
+  const pg = window.ff.postgame;
+  const avail = pg.available();
+  if (!avail.length) {
+    log(pg.describe());
+    if (pg.all().length && pg.all().every((d) => d.done)) log("Every post-game secret has been uncovered. The realm is truly whole.");
+    return;
+  }
+  const boss = avail.find((d) => d.type === "secret_boss");
+  if (boss) {
+    const enc = pg.encounter(boss.id);
+    if (!enc.ok) return log("Post-game: " + enc.error);
+    log("Post-game challenge: " + boss.name + "!");
+    startBattle(
+      { enemies: enc.enemies, groupId: enc.groupId },
+      {
+        onVictory: () => {
+          const done = pg.complete(boss.id);
+          if (done.ok) {
+            log(boss.name + " defeated!");
+            for (const r of done.reward ?? []) {
+              if (r.item) log("  Reward: " + r.item + " x" + r.count + ".");
+              else if (r.gold) log("  Reward: " + r.gold + " gold.");
+              else if (r.xp) log("  Reward: " + r.xp + " XP.");
+            }
+          }
+          for (const d of pg.check()) log("POST-GAME: " + d.name + " is now available — " + d.hint);
+        },
+      }
+    );
+    return;
+  }
+  const hunt = avail.find((d) => d.type === "item_hunt");
+  if (hunt) {
+    const prog = pg.progress(hunt);
+    const lines = prog.targets.map((t) => t.label + " " + t.have + "/" + t.want).join(", ");
+    log("Post-game hunt: " + hunt.name + " — " + lines + ".");
+    if (prog.done) {
+      const done = pg.complete(hunt.id);
+      if (done.ok) {
+        log(hunt.name + " completed!");
+        for (const r of done.reward ?? []) {
+          if (r.item) log("  Reward: " + r.item + " x" + r.count + ".");
+        }
+        for (const d of pg.check()) log("POST-GAME: " + d.name + " is now available — " + d.hint);
+      }
+    } else {
+      log(hunt.hint);
+    }
+    return;
+  }
+  log(pg.describe());
+}
+
+// Task #164: the final score card.
+function onScore() {
+  const ev = window.ff.finalScore.evaluate();
+  log("FINAL SCORE — " + ev.grade + "-rank: " + ev.gradeLabel + " (" + ev.score + "/100)");
+  for (const c of ev.components) log("  " + c.label + ": " + c.points + " (" + c.note + ")");
+}
+
 // Task #218: the Command Menu UI — a DOM list rendered from the
 // CommandMenuSystem's current view, driven by the same keys as the title.
 function escHtml(s) {
@@ -1537,6 +1921,8 @@ export function startRpgDemo() {
     mage.mp = 40;
   }
   window.game.inventory.add("potion", 2);
+  // Task #148: the party carries a lantern into the dark places.
+  window.game.inventory.add("lantern", 1);
   window.ff.gameOver.savepoint("caves_of_cornelia", START.x, START.y, "N", "Cave Entrance");
   window.ff.transitions.start("overworld", 10, 4, "S");
   window.game.state.setLocation("overworld", 10, 4, "S");

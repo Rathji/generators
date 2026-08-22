@@ -10,7 +10,7 @@ export class LightingSystem {
     this.inventory = opts.inventory ?? null;
     this.lightItems = opts.lightItems ?? ["lantern"];
     this.lightSpell = opts.lightSpell ?? "light";
-    this.lightWeapons = opts.lightWeapons ?? [];
+    this.lightWeapons = opts.lightWeapons ?? ["luminary"];
     // Optional manual light flag (e.g. a torch the demo can strike) — raw
     // boolean on the state so it persists.
     this.state = opts.state ?? null;

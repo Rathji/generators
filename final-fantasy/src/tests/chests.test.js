@@ -19,7 +19,7 @@ export function run() {
   const party = new PartyManager({ gold: 0 });
   const sys = new ChestSystem(CHESTS, { state, inventory: inv, party, random: () => 0 });
 
-  check("chests listed", sys.all().length === 31);
+  check("chests listed", sys.all().length === 39);
   check("chestsFor map", sys.chestsFor("caves_of_cornelia").length === 2);
   check("chestAt finds", sys.chestAt("caves_of_cornelia", 10, 9)?.id === "cave_chest_upper");
   check("chestAt empty", sys.chestAt("caves_of_cornelia", 0, 0) === null);
@@ -56,9 +56,9 @@ export function run() {
 
   const reset = new ChestSystem(CHESTS, { state: new GameState() });
   reset.open("cornelia_house", 1, 3);
-  check("remaining count", reset.remaining().length === 30);
+  check("remaining count", reset.remaining().length === 38);
   reset.reset();
-  check("reset reopens all", reset.remaining().length === 31);
+  check("reset reopens all", reset.remaining().length === 39);
 
   return out;
 }

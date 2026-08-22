@@ -1056,9 +1056,9 @@
     eq(b.gardens, 2, "Gardens: 20 cards → 2 VP");
     eq(b.duke, 1, "Duke: 1 Duchy → 1 VP");
     eq(b.vineyard, 1, "Vineyard: 3 Action cards → 1 VP");
-    eq(b.fairgrounds, 2, "Fairgrounds: 11 different cards → 2×1 VP");
+    eq(b.fairgrounds, 4, "Fairgrounds: 11 different cards → 2×2 VP (per-5, official 1E)");
     eq(b.tokens, 5, "5 VP tokens");
-    eq(b.total, 20, "9 static + 2 + 1 + 1 + 2 + 5 = 20");
+    eq(b.total, 22, "9 static + 2 + 1 + 1 + 4 + 5 = 22");
   });
   t("endgame: Gardens scales exactly at 9/10/19/20 cards", () => {
     const g = freshGame2p();
@@ -3068,6 +3068,161 @@
     eq(byId.mill.vp, 1, "Mill is worth 1 VP");
     eq(byId.nobles.vp, 2, "Nobles is worth 2 VP");
     eq(byId.conspirator.text.indexOf("+$2") !== -1, true, "Conspirator pins the official +$2 (not the roadmap's +$1)");
+  });
+
+  /* ══════════════════ Task 162: Cornucopia catalog ══════════════ */
+  t("cornucopia: catalog pins all 13 official kingdom cards plus the 5 Prizes", async () => {
+    await Dominion.cards.init(["base", "base-kingdom", "intrigue", "alchemy", "cornucopia", "hinterlands"]);
+    const set = Dominion.cards.byExpansion("cornucopia").filter((c) => c.inSupply);
+    eq(set.length, 13, "Cornucopia has 13 kingdom cards");
+    const byId = {};
+    for (const c of set) byId[c.id] = c;
+    const expect = {
+      fairgrounds: { cost: 6, types: ["Victory"] },
+      farming_village: { cost: 4, types: ["Action"] },
+      fortune_teller: { cost: 3, types: ["Action", "Attack"] },
+      hamlet: { cost: 2, types: ["Action"] },
+      harvest: { cost: 5, types: ["Action"] },
+      horn_of_plenty: { cost: 5, types: ["Treasure"] },
+      horse_traders: { cost: 4, types: ["Action", "Reaction"] },
+      hunting_party: { cost: 5, types: ["Action"] },
+      jester: { cost: 5, types: ["Action", "Attack"] },
+      menagerie: { cost: 3, types: ["Action"] },
+      remake: { cost: 4, types: ["Action"] },
+      tournament: { cost: 4, types: ["Action"] },
+      young_witch: { cost: 4, types: ["Action", "Attack"] }
+    };
+    deepEq(Object.keys(byId).sort(), Object.keys(expect).sort(), "exactly the official roster");
+    for (const id of Object.keys(expect)) {
+      const c = byId[id];
+      assert(c, "card present: " + id);
+      eq(c.cost.coins, expect[id].cost, id + " cost");
+      eq(c.cost.potion, 0, id + " has no potion cost");
+      eq(c.types.length, expect[id].types.length, id + " exact type count");
+      for (const t of expect[id].types) assert(c.types.indexOf(t) !== -1, id + " has type " + t);
+      assert(c.text && c.text.length > 5, id + " has official text");
+    }
+    const prizes = Dominion.cards.byExpansion("cornucopia").filter((c) => !c.inSupply);
+    eq(prizes.length, 5, "exactly the 5 Prizes (Tournament's non-supply pile)");
+    deepEq(prizes.map((c) => c.id).sort(), ["bag_of_gold", "diadem", "followers", "princess", "trusty_steed"], "Prize roster");
+    for (const c of prizes) {
+      eq(c.cost.coins, 0, c.id + " costs $0");
+      assert(c.types.indexOf("Prize") !== -1, c.id + " is a Prize");
+    }
+    /* Official-text corrections vs the roadmap (tasks 164-176) */
+    eq(byId.fairgrounds.text.indexOf("per 5 differently named") !== -1, true,
+      "Fairgrounds pins the official per-5 formula (not the roadmap's 'per 10')");
+    eq(byId.fairgrounds.vp, null, "Fairgrounds scores via the dynamic vp registry");
+    deepEq(byId.fairgrounds.pileSize, { 2: 8, 3: 12 }, "Victory pile is 8 (2p) / 12 (3p+)");
+    eq(byId.harvest.cost.coins, 5, "Harvest costs $5 (roadmap said $4)");
+    assert(byId.harvest.text.indexOf("Reveal the top 4") !== -1, "Harvest reveals the top 4, not the roadmap's 'reveal hand'");
+    assert(byId.fortune_teller.text.indexOf("+$2") !== -1 && byId.fortune_teller.text.indexOf("Victory card or a Curse") !== -1,
+      "Fortune Teller pins +$2 reveal-until-Victory/Curse (not the roadmap's top-2)");
+    assert(byId.hamlet.text.indexOf("+1 Action; You may discard a card") !== -1,
+      "Hamlet gives +1 Action (roadmap said +2)");
+    assert(byId.farming_village.text.indexOf("until you reveal a Treasure or Action card") !== -1,
+      "Farming Village digs until an Action/Treasure (not the roadmap's top-3)");
+    assert(byId.horse_traders.text.indexOf("set this aside") !== -1,
+      "Horse Traders' Reaction sets itself aside (not the roadmap's discard-2-draw-2)");
+    assert(byId.young_witch.text.indexOf("Discard 2 cards") !== -1, "Young Witch pins 'discard 2 cards' (omitted in the roadmap)");
+    assert(byId.tournament.text.indexOf("or a Duchy") !== -1 && byId.tournament.text.indexOf("+1 Card and +$1") !== -1,
+      "Tournament pins the Duchy fallback and the +1 Card/+$1 bonus");
+    assert(byId.jester.text.indexOf("If it's a Victory card") !== -1, "Jester pins the Victory→Curse rule");
+    assert(byId.horn_of_plenty.text.indexOf("per differently named card you have in play") !== -1,
+      "Horn of Plenty budgets by differently named cards in play (not the roadmap's 'no duplicates')");
+    /* Pinned catalog and the in-development copy must agree on the roster */
+    const pinned = await fetch("src/data/cornucopia.json").then((r) => r.json());
+    const dev = await fetch("src/exp/cornucopia/data.json").then((r) => r.json());
+    deepEq(pinned.cards.map((c) => c.id).sort(), dev.cards.map((c) => c.id).sort(),
+      "src/data and src/exp catalogs agree on the roster");
+  });
+  t("menagerie: catalog pins all 30 official kingdom cards plus Horse and the 20 Ways", async () => {
+    await Dominion.cards.init(["base", "base-kingdom", "intrigue", "alchemy", "seaside", "prosperity", "cornucopia", "hinterlands", "menagerie"]);
+    const set = Dominion.cards.byExpansion("menagerie").filter((c) => c.inSupply);
+    eq(set.length, 30, "Menagerie has 30 kingdom cards");
+    const byId = {};
+    for (const c of set) byId[c.id] = c;
+    const expect = {
+      animal_fair: { cost: 7, types: ["Action"] },
+      barge: { cost: 5, types: ["Action", "Duration"] },
+      black_cat: { cost: 2, types: ["Action", "Attack", "Reaction"] },
+      bounty_hunter: { cost: 4, types: ["Action"] },
+      camel_train: { cost: 3, types: ["Action"] },
+      cardinal: { cost: 4, types: ["Action", "Attack"] },
+      cavalry: { cost: 4, types: ["Action"] },
+      coven: { cost: 5, types: ["Action", "Attack"] },
+      destrier: { cost: 6, types: ["Action"] },
+      displace: { cost: 5, types: ["Action"] },
+      falconer: { cost: 5, types: ["Action", "Reaction"] },
+      fisherman: { cost: 5, types: ["Action"] },
+      gatekeeper: { cost: 5, types: ["Action", "Duration", "Attack"] },
+      goatherd: { cost: 3, types: ["Action"] },
+      groom: { cost: 4, types: ["Action"] },
+      hostelry: { cost: 4, types: ["Action"] },
+      hunting_lodge: { cost: 5, types: ["Action"] },
+      kiln: { cost: 5, types: ["Action"] },
+      livery: { cost: 5, types: ["Action"] },
+      mastermind: { cost: 5, types: ["Action", "Duration"] },
+      paddock: { cost: 5, types: ["Action"] },
+      sanctuary: { cost: 5, types: ["Action"] },
+      scrap: { cost: 3, types: ["Action"] },
+      sheepdog: { cost: 3, types: ["Action", "Reaction"] },
+      sleigh: { cost: 2, types: ["Action", "Reaction"] },
+      snowy_village: { cost: 3, types: ["Action"] },
+      stockpile: { cost: 3, types: ["Treasure"] },
+      supplies: { cost: 2, types: ["Treasure"] },
+      village_green: { cost: 4, types: ["Action", "Duration", "Reaction"] },
+      wayfarer: { cost: 6, types: ["Action"] }
+    };
+    deepEq(Object.keys(byId).sort(), Object.keys(expect).sort(), "exactly the official roster");
+    for (const id of Object.keys(expect)) {
+      const c = byId[id];
+      assert(c, "card present: " + id);
+      eq(c.cost.coins, expect[id].cost, id + " cost");
+      eq(c.cost.potion, 0, id + " has no potion cost");
+      eq(c.types.length, expect[id].types.length, id + " exact type count");
+      for (const t of expect[id].types) assert(c.types.indexOf(t) !== -1, id + " has type " + t);
+      assert(c.text && c.text.length > 5, id + " has official text");
+    }
+    /* Non-supply pieces */
+    const horse = Dominion.cards.get("horse");
+    assert(horse, "Horse is registered");
+    eq(horse.inSupply, false, "Horse is not in the Supply");
+    eq(horse.pileSize, 30, "Horse pile has 30 copies");
+    eq(horse.types.indexOf("Action") !== -1, true, "Horse is an Action");
+    assert(horse.text.indexOf("Return this to its pile") !== -1, "Horse returns to its pile");
+    const ways = Dominion.cards.byExpansion("menagerie").filter((c) => c.types.indexOf("Way") !== -1);
+    eq(ways.length, 20, "exactly the 20 Ways");
+    const wayIds = ways.map((c) => c.id).sort();
+    deepEq(wayIds.slice(0, 3), ["way_of_the_butterfly", "way_of_the_camel", "way_of_the_chameleon"], "Way roster begins as expected");
+    for (const c of ways) {
+      eq(c.cost.coins, 0, c.id + " has no coin cost (landscape)");
+      eq(c.inSupply, false, c.id + " is not in the Supply");
+      assert(c.text && c.text.length > 2, c.id + " has official text");
+    }
+    /* Spot-check the roadmap's mis-stated card texts (tasks 397-416 marked 'per pinned text') */
+    assert(byId.supplies.text.indexOf("Gain a Horse onto your deck") !== -1, "Supplies gains a Horse onto the deck");
+    eq(byId.supplies.treasure, 1, "Supplies gives $1");
+    eq(byId.stockpile.treasure, 3, "Stockpile gives $3");
+    assert(byId.stockpile.text.indexOf("Exile this") !== -1, "Stockpile Exiles itself");
+    assert(byId.black_cat.text.indexOf("gains a Curse") !== -1, "Black Cat Curses on others' turns");
+    assert(byId.cavalry.text.indexOf("return to your Action phase") !== -1, "Cavalry returns to Action phase");
+    assert(byId.mastermind.text.indexOf("three times") !== -1, "Mastermind plays an Action three times");
+    assert(byId.scrap.text.indexOf("per $1 it costs") !== -1, "Scrap chooses per cost");
+    assert(byId.groom.text.indexOf("If it's an Action card, gain a Horse") !== -1, "Groom's conditional gains");
+    assert(byId.fisherman.text.indexOf("this costs $3 less") !== -1, "Fisherman is cheaper with empty discard");
+    assert(byId.destrier.text.indexOf("$1 less per card you've gained") !== -1, "Destrier scales down per gained card");
+    assert(byId.animal_fair.text.indexOf("trash an Action card from your hand") !== -1, "Animal Fair's alternate payment");
+    assert(byId.wayfarer.text.indexOf("same cost as the last other card gained") !== -1, "Wayfarer copies the last gained cost");
+    assert(byId.village_green.text.indexOf("When you discard this other than during Clean-up") !== -1, "Village Green's discard reaction");
+    assert(byId.barge.text.indexOf("Either now or at the start of your next turn") !== -1, "Barge is a choice Duration");
+    /* Pinned catalog matches the in-development copy if it exists (roster only) */
+    const pinned = await fetch("src/data/menagerie.json").then((r) => r.json());
+    const devFetch = await fetch("src/exp/menagerie/data.json").then((r) => r.json()).catch(() => null);
+    if (devFetch) {
+      deepEq(pinned.cards.map((c) => c.id).sort(), devFetch.cards.map((c) => c.id).sort(),
+        "src/data and src/exp catalogs agree on the roster");
+    }
   });
   t("baron: discarding an Estate gives +$4 and +1 Buy", async () => {
     await Dominion.cards.init(["base", "base-kingdom", "intrigue", "alchemy", "cornucopia", "hinterlands"]);
@@ -5167,7 +5322,13 @@
     let ran = 0;
     for (const s of suites) {
       if (selectedSuites !== null && !selectedSuites.has(s.name)) continue;
-      if (s.opts && s.opts.set) {
+      // Stabilize the catalog before each suite: the core suite runs
+      // on the shipped installed sets (mirrors the ?tests=1 page
+      // boot), and each exp suite loads installed + its own set. This
+      // also guards against the page boot's async ensureCards racing
+      // with a direct runAll() call.
+      if (s.name === "core") await Dominion.cards.init(Dominion.SETS.installed);
+      else if (s.opts && s.opts.set) {
         await Dominion.cards.init(Dominion.SETS.installed.concat([s.opts.set]));
       }
       for (const c of s.cases) {

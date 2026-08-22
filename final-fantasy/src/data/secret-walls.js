@@ -19,13 +19,13 @@ export const SECRET_WALLS = [
   {
     id: "shrine_middle_pass",
     mapId: "chaos_shrine",
-    x: 8,
+    x: 10,
     y: 6,
     line: "A keystone slides away — the shrine's heart opens a hidden passage, and a cache within!",
     revealFlag: "secret_shrine_middle_pass",
     effects: [
       // Opens a shortcut between the shrine's upper and lower passages.
-      { type: "path", tiles: [{ x: 8, y: 6 }] },
+      { type: "path", tiles: [{ x: 10, y: 6 }] },
       { type: "chest", contents: { items: [{ itemId: "ether", count: 1 }], gold: 100, xp: 40 } },
     ],
   },

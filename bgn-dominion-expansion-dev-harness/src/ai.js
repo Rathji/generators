@@ -264,6 +264,19 @@
           return order.slice(0, q.count != null ? q.count : 2);
         }
         case "miningVillageTrash": return true;
+        case "youngWitchBane": return q.hasBane === true;
+        case "hamletDiscard": {
+          const order = handIdx().sort((a, b) => cardValue(a.id) - cardValue(b.id));
+          return order.length && cardValue(order[0].id) <= 1 ? order[0].i : null;
+        }
+        case "jesterChoice": return "self";
+        case "tournamentRevealProvince": return q.hasProvince === true;
+        case "gainPrize": {
+          const pref = ["bag_of_gold", "followers", "trusty_steed", "diadem", "princess"];
+          for (const p of pref) if (q.options.indexOf(p) !== -1) return p;
+          return q.options[0] || null;
+        }
+        case "trustySteedChoices": return ["cards", "actions"];
         case "minionMode": return "coins";
         case "noblesChoice": return "cards";
         case "pawnChoices": return ["card", "action"];

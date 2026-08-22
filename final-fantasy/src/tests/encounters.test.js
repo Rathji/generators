@@ -28,9 +28,9 @@ export function run() {
   check("lastEncounter stored", gen.lastEncounter.groupId === third.groupId);
 
   const pick0 = gen.pickGroup("overworld", () => 0);
-  check("weighted pick first", pick0.group === "goblins");
+  check("weighted pick first", pick0.group === ENCOUNTERS.global.table[0].group);
   const pickLast = gen.pickGroup("overworld", () => 0.99);
-  check("weighted pick last", pickLast.group === "bandits");
+  check("weighted pick last", pickLast.group === ENCOUNTERS.global.table[ENCOUNTERS.global.table.length - 1].group);
   check("pickGroup unknown map null", gen.pickGroup("nope", () => 0) === null);
 
   const forced = gen.forceEncounter("caves_of_cornelia", "cave_dwellers");

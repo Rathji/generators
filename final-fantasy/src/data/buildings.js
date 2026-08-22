@@ -77,7 +77,24 @@ export const BUILDINGS = {
       name: "Pravog Chapel",
       town: "pravog",
       door: { x: 10, y: 5 },
-      interior: { mapId: "pravog_shop", x: 3, y: 4, facing: "N" },
+      interior: { mapId: "pravog_church", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    // Task #167: the expanded harbor town — a second residence and an armory.
+    {
+      id: "pravog_house2",
+      name: "House",
+      town: "pravog",
+      door: { x: 1, y: 4 },
+      interior: { mapId: "pravog_house2", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    {
+      id: "pravog_armory",
+      name: "Pravog Armory",
+      town: "pravog",
+      door: { x: 6, y: 5 },
+      interior: { mapId: "pravog_armory", x: 3, y: 4, facing: "N" },
       exit: { x: 3, y: 5, facing: "S" },
     },
   ],
@@ -197,6 +214,83 @@ export const BUILDINGS = {
       door: { x: 4, y: 3 },
       interior: { mapId: "glacierport_shop", x: 3, y: 4, facing: "N" },
       exit: { x: 3, y: 5, facing: "S" },
+    },
+  ],
+  // Task #172: Northwind Village — house, shop, and inn on the wastes' edge;
+  // the cave door (8,7) is a manual transition into the Ice Cave.
+  north_village: [
+    {
+      id: "north_village_house",
+      name: "House",
+      town: "north_village",
+      door: { x: 3, y: 1 },
+      interior: { mapId: "north_village_house", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    {
+      id: "north_village_shop",
+      name: "Northwind Provisions",
+      town: "north_village",
+      door: { x: 9, y: 1 },
+      interior: { mapId: "north_village_shop", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    {
+      id: "north_village_inn",
+      name: "Northwind Inn",
+      town: "north_village",
+      door: { x: 5, y: 3 },
+      interior: { mapId: "north_village_inn", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+  ],
+  // Task #177: Jungle Village — houses, a trader, and a rest house on the
+  // jungle clearing's edge. The south gate (V, 5,7) returns to the jungle.
+  jungle_village: [
+    {
+      id: "jungle_village_house",
+      name: "House",
+      town: "jungle_village",
+      door: { x: 3, y: 1 },
+      interior: { mapId: "jungle_village_house", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    {
+      id: "jungle_village_shop",
+      name: "Jungle Trader",
+      town: "jungle_village",
+      door: { x: 10, y: 1 },
+      interior: { mapId: "jungle_village_shop", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+    {
+      id: "jungle_village_inn",
+      name: "Jungle Rest House",
+      town: "jungle_village",
+      door: { x: 5, y: 4 },
+      interior: { mapId: "jungle_village_inn", x: 3, y: 4, facing: "N" },
+      exit: { x: 3, y: 5, facing: "S" },
+    },
+  ],
+  // Task #182: Stormhold Castle — the highlands' keep. The K fronts lead
+  // into the throne room and keep, B into the barracks; the north gate (V,
+  // 13,1) returns to the highlands road.
+  highlands_castle: [
+    {
+      id: "highlands_castle_throne",
+      name: "Stormhold Throne Room",
+      town: "highlands_castle",
+      door: { x: 3, y: 1 },
+      interior: { mapId: "highlands_castle_throne", x: 5, y: 4, facing: "N" },
+      exit: { x: 5, y: 5, facing: "S" },
+    },
+    {
+      id: "highlands_castle_barracks",
+      name: "Stormhold Barracks",
+      town: "highlands_castle",
+      door: { x: 11, y: 3 },
+      interior: { mapId: "highlands_castle_barracks", x: 4, y: 4, facing: "N" },
+      exit: { x: 4, y: 5, facing: "S" },
     },
   ],
 };

@@ -18,11 +18,23 @@ export class TitleController {
     this.armed = false; // slots mode entered via Delete
   }
 
+  // The most recently written save (drives the Continue shortcut).
+  mostRecent() {
+    return this.slots?.mostRecent?.() ?? null;
+  }
+
   menuItems() {
     const any = this.slots?.any() ?? false;
+    const recent = this.mostRecent();
     return [
       { action: TITLE_ACTIONS.NEW, label: "New Game", key: "N", enabled: true },
-      { action: TITLE_ACTIONS.CONTINUE, label: "Continue", key: "C", enabled: any },
+      {
+        action: TITLE_ACTIONS.CONTINUE,
+        label: "Continue",
+        key: "C",
+        enabled: any,
+        recent,
+      },
       { action: TITLE_ACTIONS.DELETE, label: "Delete Save", key: "D", enabled: any },
     ];
   }
@@ -67,6 +79,15 @@ export class TitleController {
     this.mode = "slots";
     this.cursor = 0;
     this.armed = !!armed;
+    // Task #166: "Continue" drops the cursor straight onto the most recently
+    // played save, so pressing Enter right away resumes where you left off.
+    if (!armed) {
+      const recent = this.mostRecent();
+      if (recent) {
+        const idx = this.slotItems().findIndex((s) => s.slot === recent.slot);
+        if (idx >= 0) this.cursor = idx;
+      }
+    }
     return this.slotItems();
   }
 

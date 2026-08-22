@@ -41,4 +41,37 @@ export const SHOPS = {
     sellRatio: 0.55,
     stock: ["ironSword", "knuckles", "staff", "cloth", "leather", "chain", "potion", "hiPotion", "ether", "soft", "goldNeedle", "cottage"],
   },
+  // Task #167: the Pravog armory — coastal-forged arms at the harbor.
+  pravog_armory: {
+    id: "pravog_armory",
+    name: "Pravog Armory",
+    priceMod: 1,
+    sellRatio: 0.55,
+    stock: ["dagger", "ironSword", "knuckles", "cloth", "leather", "chain", "potion", "antidote", "soft"],
+  },
+  // Task #172: Northwind Provisions — furs, frost salves, and cold-iron arms.
+  north_village_supply: {
+    id: "north_village_supply",
+    name: "Northwind Provisions",
+    priceMod: 1,
+    sellRatio: 0.55,
+    stock: ["ironSword", "knuckles", "staff", "cloth", "leather", "frostCloak", "potion", "hiPotion", "ether", "soft", "goldNeedle", "antidote", "cottage"],
+  },
+  // Task #176-#185: jungle & highland shops — the jungle herbalist's stock
+  // leans on antidotes; the castle armory sells the Gale Cloak that bends the
+  // summit's winds.
+  jungle_village_supply: {
+    id: "jungle_village_supply",
+    name: "Jungle Village Supply",
+    priceMod: 1,
+    sellRatio: 0.55,
+    stock: ["dagger", "ironSword", "staff", "cloth", "leather", "potion", "hiPotion", "antidote", "soft", "jungleHerb"],
+  },
+  highlands_castle_armory: {
+    id: "highlands_castle_armory",
+    name: "Highlands Castle Armory",
+    priceMod: 1,
+    sellRatio: 0.55,
+    stock: ["ironSword", "mythrilSword", "staff", "chain", "plate", "galeCloak", "potion", "hiPotion", "ether", "soft", "cottage"],
+  },
 };

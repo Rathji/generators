@@ -172,6 +172,41 @@ import { GEAR_SETS } from "./data/gear-sets.js";
 import { UseCaseValidator } from "./engine/use-case-validator.js";
 import { GearDurabilitySystem } from "./engine/gear-durability.js";
 import { GEAR_DURABILITY } from "./data/gear-durability.js";
+// Task #146-#155: dungeon environmental hazards (traps, hazard zones,
+// darkness, secret walls) and the narrative/feedback layer (plot twists,
+// NPC relations, world-state visuals, pacing gates, damage popups).
+import { TrapSystem } from "./engine/traps.js";
+import { TRAPS } from "./data/traps.js";
+import { HazardZoneSystem } from "./engine/hazard-zones.js";
+import { HAZARD_ZONES } from "./data/hazard-zones.js";
+import { LightingSystem } from "./engine/lighting.js";
+import { DARK_MAPS, LIGHT_ITEMS, LIGHT_SPELL, LIGHT_WEAPONS } from "./data/lighting.js";
+import { SecretWallSystem } from "./engine/secret-walls.js";
+import { SECRET_WALLS } from "./data/secret-walls.js";
+import { PlotTwistSystem } from "./engine/plot-twist.js";
+import { PLOT_TWISTS } from "./data/plot-twist.js";
+import { NpcRelationSystem } from "./engine/npc-relations.js";
+import { NPC_RELATIONS } from "./data/npc-relations.js";
+import { WorldVisualSystem } from "./engine/world-visuals.js";
+import { WORLD_VISUALS } from "./data/world-visuals.js";
+import { PacingGateSystem } from "./engine/pacing-gates.js";
+import { PACING_GATES } from "./data/pacing-gates.js";
+import { DamagePopupSystem } from "./engine/damage-popups.js";
+// Task #156-#165: combat feedback (hit indicators, target cursor, turn-order
+// sidebar), the quick-save/settings/playtime meta systems, and the end-game
+// layer (post-game content, final score, credit roll).
+import { HitIndicatorSystem } from "./engine/hit-indicators.js";
+import { TargetCursorSystem } from "./engine/target-cursor.js";
+import { TurnQueueView } from "./engine/turn-queue-view.js";
+import { AutoSaveSystem } from "./engine/autosave.js";
+import { SettingsStore } from "./engine/settings.js";
+import { SETTINGS_DEFAULTS } from "./data/settings.js";
+import { PlaytimeTracker } from "./engine/playtime.js";
+import { PostGameSystem } from "./engine/postgame.js";
+import { POSTGAME } from "./data/postgame.js";
+import { FinalScoreSystem } from "./engine/final-score.js";
+import { CreditRoll } from "./engine/credits.js";
+import { TEAM_CREDITS } from "./data/credits.js";
 
 function createDefaultParty() {
   const party = new PartyManager({ gold: 150 });
@@ -196,6 +231,14 @@ function createGame() {
 
 const game = createGame();
 const dialogueWorld = createDialogueWorld(game);
+// Task #151: the NPC relationship tracker — affinity scores ride the state
+// flags, and the dialogue world reads them for affinity-gated branches.
+const npcRelations = new NpcRelationSystem(NPC_RELATIONS, {
+  state: game.state,
+  party: game.party,
+  inventory: game.inventory,
+});
+game.npcRelations = npcRelations;
 // Task #138: the game clock — day/hour advances with overworld steps and
 // battles; NPC schedules consume it. Persists as raw flags on GameState.
 const gameClock = new GameClock({ state: game.state });
@@ -250,6 +293,29 @@ transitions.addLink({ fromMap: "overworld", fromX: 5, fromY: 5, toMap: "mount_gu
   // are met.
   transitions.addLink({ fromMap: "sea_shrine_b2", fromX: 1, fromY: 5, toMap: "sea_vault", toX: 7, toY: 5, facing: "N" });
   transitions.addLink({ fromMap: "cornelia", fromX: 13, fromY: 1, toMap: "trial_hall", toX: 7, toY: 5, facing: "N" });
+  // Task #167/#171: the Dawnbreaker carries the party from Pravog's dock to
+  // the Northern Wastes' shore.
+  transitions.addLink({ fromMap: "pravog", fromX: 13, fromY: 7, toMap: "north_wastes", toX: 1, toY: 12, facing: "N" });
+  transitions.addLink({ fromMap: "north_wastes", fromX: 1, fromY: 12, toMap: "pravog", toX: 13, toY: 7, facing: "E" });
+  // Task #172: the wastes' northern lane reaches Northwind Village.
+  transitions.addLink({ fromMap: "north_wastes", fromX: 18, fromY: 1, toMap: "north_village", toX: 7, toY: 8, facing: "S" });
+  transitions.addLink({ fromMap: "north_village", fromX: 7, fromY: 8, toMap: "north_wastes", toX: 18, toY: 1, facing: "N" });
+  // Task #174: the Ice Cave — entered from the village's cave door or the
+  // wastes' cave mouth (also the dungeon's exit arrival point).
+  transitions.addLink({ fromMap: "north_village", fromX: 8, fromY: 7, toMap: "ice_cave_upper", toX: 7, toY: 5, facing: "N" });
+  transitions.addLink({ fromMap: "north_wastes", fromX: 18, fromY: 9, toMap: "ice_cave_upper", toX: 7, toY: 5, facing: "N" });
+  // Task #176-#185: the Southern Jungles & Western Highlands — Pravog's
+  // southern dock (D planks at 12,6) sails down to the jungle coast; the
+  // jungle road climbs to the Sun-Moss Ruins; the western pass leads up to
+  // Stormhold Castle and, beyond it, the Highland Peak.
+  transitions.addLink({ fromMap: "pravog", fromX: 12, fromY: 6, toMap: "south_jungle", toX: 17, toY: 11, facing: "W" });
+  transitions.addLink({ fromMap: "south_jungle", fromX: 17, fromY: 11, toMap: "pravog", toX: 12, toY: 6, facing: "N" });
+  transitions.addLink({ fromMap: "south_jungle", fromX: 7, fromY: 4, toMap: "jungle_village", toX: 5, toY: 8, facing: "S" });
+  transitions.addLink({ fromMap: "jungle_village", fromX: 8, fromY: 7, toMap: "south_jungle", toX: 7, toY: 4, facing: "N" });
+  transitions.addLink({ fromMap: "south_jungle", fromX: 17, fromY: 8, toMap: "ancient_ruins", toX: 7, toY: 5, facing: "N" });
+  transitions.addLink({ fromMap: "west_highlands", fromX: 3, fromY: 1, toMap: "highlands_castle", toX: 13, toY: 1, facing: "S" });
+  transitions.addLink({ fromMap: "highlands_castle", fromX: 13, fromY: 1, toMap: "west_highlands", toX: 3, toY: 1, facing: "N" });
+  transitions.addLink({ fromMap: "west_highlands", fromX: 14, fromY: 1, toMap: "highland_peak", toX: 7, toY: 13, facing: "N" });
 
 const triggers = new TriggerSystem(dialogueWorld);
 triggers
@@ -305,6 +371,27 @@ gates.add({
   y: 1,
   require: { flag: "story_chrono_defeated" },
   deniedDialogue: "The hall beneath the castle is sealed in stillness. Only the fall of the Keeper of Time could open it.",
+});
+// Task #174: the Ice Cave's descent is barred by a wall of living crystal —
+// only the Frost Crystal's light (found in a hoard by the cave's mouth) can
+// part it.
+gates.add({
+  id: "ice_cave_crystal_gate",
+  mapId: "ice_cave_upper",
+  x: 14,
+  y: 10,
+  require: { item: "frostCrystal" },
+  deniedDialogue: "A wall of living crystal bars the way down — only the Frost Crystal's light may part it.",
+});
+// Task #177: the Sunken Hall's stone door — sealed until the Sun-Moss Relic
+// (found in the ruins' eastern hoard) is held.
+gates.add({
+  id: "ruins_gate",
+  mapId: "ancient_ruins",
+  x: 15,
+  y: 9,
+  require: { item: "ruinsRelic" },
+  deniedDialogue: "The stone door of the Sunken Hall is sealed — only the Sun-Moss Relic may part it.",
 });
 
 const quests = new QuestTracker(QUESTS, game.state);
@@ -410,6 +497,13 @@ npcs.bindSchedules(npcSchedules).bindClock(gameClock);
 const buildings = new BuildingSystem(BUILDINGS);
 buildings.registerTransitions(transitions);
 const dialogue = new DialogueEngine({ world: dialogueWorld, state: game.state });
+// Task #150: the mid-game plot twist — fires once both crystal-arc beats are
+// done, rewrites the party goal flags, and pushes a headline into the log.
+const plotTwists = new PlotTwistSystem(PLOT_TWISTS, {
+  state: game.state,
+  questLog,
+  handlers: { dialogue: (id) => dialogue.start(id) },
+});
 // Task #139/#140/#141: group conversations (multi-NPC dialogue pages),
 // NPC inventory exchanges (give items for rewards), and proximity barks.
 const groupConversation = new GroupConversationSystem({ engine: dialogue, placements: npcs });
@@ -506,6 +600,75 @@ const randomEvents = new RandomEventSystem({
 // Task #143/#145: gear-set bonus detection and the durability/break ledger.
 const gearSets = new GearSetBonusSystem(GEAR_SETS);
 const gearDurability = new GearDurabilitySystem(GEAR_DURABILITY, { party: game.party });
+// Task #146-#149: dungeon environmental hazards — coordinate traps, damage
+// zones (lava/acid, gear-protectable), darkness with light sources, and
+// secret walls that open hidden paths/caches.
+const traps = new TrapSystem(TRAPS, { state: game.state, party: game.party, status });
+const hazards = new HazardZoneSystem(HAZARD_ZONES, {
+  state: game.state,
+  party: game.party,
+  status,
+  // "Gear-protected": the Magma Heart accessory makes the whole party
+  // immune to fire-zone (lava) damage.
+  protectionHook: (zone) =>
+    zone.element === "fire" &&
+    game.party.members.some((m) => m.equipment?.accessory === "magmaHeart"),
+});
+const lighting = new LightingSystem(DARK_MAPS, {
+  state: game.state,
+  party: game.party,
+  inventory: game.inventory,
+  lightItems: LIGHT_ITEMS,
+  lightSpell: LIGHT_SPELL,
+  lightWeapons: LIGHT_WEAPONS,
+});
+const secretWalls = new SecretWallSystem(SECRET_WALLS, {
+  state: game.state,
+  inventory: game.inventory,
+  party: game.party,
+});
+// Task #153: narrative pacing gates ("Wait" until mid-game flags are met).
+const pacingGates = new PacingGateSystem(PACING_GATES, { state: game.state });
+// Task #152: permanent world-state tile/texture patches after plot beats.
+const worldVisuals = new WorldVisualSystem(WORLD_VISUALS, { state: game.state });
+// Task #155: floating combat numbers over the map grid.
+const damagePopups = new DamagePopupSystem({ cell: 18 });
+// Task #156/#157/#158: the combat feedback layer — hit/crit/miss
+// indicators, the target-selection cursor (with multi-target fan), and the
+// turn-order sidebar view over the live TurnOrderQueue.
+const hitIndicators = new HitIndicatorSystem();
+const targetCursor = new TargetCursorSystem({ multiTarget });
+const turnQueueView = new TurnQueueView({ queue: turnQueue });
+// Task #160: the temporary quick-save — written on every map-ID change,
+// kept apart from the three manual slots.
+const autosave = new AutoSaveSystem({ manager: slots.manager });
+// Task #162: the lifetime playtime clock + step counter (persisted as raw
+// number flags on the state).
+const playtime = new PlaytimeTracker({ state: game.state });
+// Task #161: the persistent settings store, wired into the live audio and
+// text systems. Audio starts muted (platform default) until the player
+// flips it here or via the demo's Audio button.
+const screenScale = SettingsStore.createScale();
+const settings = new SettingsStore({ storage: typeof localStorage !== "undefined" ? localStorage : null });
+settings.applyTo({ sounds, music, textScroller, screenScale });
+// Task #163: post-game content — secret bosses + item hunts after the main
+// story; validated against the enemy template system.
+const postgame = new PostGameSystem(POSTGAME, {
+  state: game.state,
+  party: game.party,
+  inventory: game.inventory,
+  enemySystem,
+});
+// Task #164: the end-game score card (S/A/B/C/D rank).
+const finalScore = new FinalScoreSystem({
+  state: game.state,
+  party: game.party,
+  bestiary,
+  playtime,
+});
+// Task #165: the credit roll — the development-team listing, scrolled by
+// the UI overlay.
+const creditRoll = new CreditRoll(TEAM_CREDITS);
 // Task #138: keep the game clock in sync across New Game / Continue resets
 // (its hour/day persist on the state flags, which boot rewrites).
 {
@@ -513,6 +676,8 @@ const gearDurability = new GearDurabilitySystem(GEAR_DURABILITY, { party: game.p
   boot.onAfterReset = () => {
     if (prev) prev();
     gameClock.restore();
+    // Task #162: a restored/continued save re-syncs the playtime session.
+    playtime.restore();
   };
 }
 // Task #128/#132: buff stat deltas and class passive modifiers layer onto
@@ -653,6 +818,24 @@ const systems = {
   GearSetBonusSystem,
   UseCaseValidator,
   GearDurabilitySystem,
+  TrapSystem,
+  HazardZoneSystem,
+  LightingSystem,
+  SecretWallSystem,
+  PlotTwistSystem,
+  NpcRelationSystem,
+  WorldVisualSystem,
+  PacingGateSystem,
+  DamagePopupSystem,
+  HitIndicatorSystem,
+  TargetCursorSystem,
+  TurnQueueView,
+  AutoSaveSystem,
+  SettingsStore,
+  PlaytimeTracker,
+  PostGameSystem,
+  FinalScoreSystem,
+  CreditRoll,
 };
 
 window.game = game;
@@ -761,6 +944,25 @@ window.ff = {
   npcBarks,
   gearSets,
   gearDurability,
+  traps,
+  hazards,
+  lighting,
+  secretWalls,
+  plotTwists,
+  npcRelations,
+  worldVisuals,
+  pacingGates,
+  damagePopups,
+  hitIndicators,
+  targetCursor,
+  turnQueueView,
+  autosave,
+  playtime,
+  settings,
+  screenScale,
+  postgame,
+  finalScore,
+  creditRoll,
   data: {
     ELEMENTS,
     ELEMENT_NAMES,
@@ -829,6 +1031,20 @@ window.ff = {
     NPC_BARKS,
     GEAR_SETS,
     GEAR_DURABILITY,
+    TRAPS,
+    HAZARD_ZONES,
+    DARK_MAPS,
+    LIGHT_ITEMS,
+    LIGHT_SPELL,
+    LIGHT_WEAPONS,
+    SECRET_WALLS,
+    PLOT_TWISTS,
+    NPC_RELATIONS,
+    WORLD_VISUALS,
+    PACING_GATES,
+    SETTINGS_DEFAULTS,
+    POSTGAME,
+    TEAM_CREDITS,
   },
 };
 

@@ -27,7 +27,7 @@ export const CLASSES = {
     id: "whiteMage", name: "White Mage",
     baseHp: 26, baseMp: 14, baseStr: 5, baseInt: 9, baseAgi: 7, baseDef: 3, baseMdef: 8,
     hpPerLevel: 5, mpPerLevel: 5, strPerLevel: 1, intPerLevel: 4, agiPerLevel: 2, defPerLevel: 1, mdefPerLevel: 2,
-    spells: [{ lvl: 1, spell: "cure" }, { lvl: 2, spell: "dia" }, { lvl: 4, spell: "cura" }, { lvl: 5, spell: "esuna" }, { lvl: 7, spell: "curaga" }],
+    spells: [{ lvl: 1, spell: "cure" }, { lvl: 2, spell: "dia" }, { lvl: 3, spell: "light" }, { lvl: 4, spell: "cura" }, { lvl: 5, spell: "esuna" }, { lvl: 7, spell: "curaga" }],
   },
   blackMage: {
     id: "blackMage", name: "Black Mage",

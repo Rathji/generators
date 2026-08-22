@@ -213,4 +213,63 @@ export const DUNGEONS = {
       { mapId: "time_rift", x: 7, y: 1, toMap: "chaos_shrine_b2", toX: 1, toY: 5, facing: "S" },
     ],
   },
+  // Task #174: the Ice Cave — the frozen depths beneath the Northern Wastes,
+  // entered from the wastes' cave mouth. Slippery "+" ice floors slow the
+  // party; the descent to the Crystal Chamber is barred by a wall of living
+  // crystal until the Frost Crystal is held.
+  ice_cave: {
+    id: "ice_cave",
+    name: "The Ice Cave",
+    entry: { mapId: "ice_cave_upper", x: 7, y: 5, facing: "N" },
+    levels: [
+      { mapId: "ice_cave_upper", name: "The Ice Cave", number: 1 },
+      { mapId: "ice_cave_b2", name: "Cave — Crystal Chamber", number: 2 },
+    ],
+    stairs: [
+      { id: "ice_l2_down", fromMap: "ice_cave_upper", x: 14, y: 10, toMap: "ice_cave_b2", toX: 8, toY: 3, facing: "S", level: 2 },
+      { id: "ice_l2_up", fromMap: "ice_cave_b2", x: 14, y: 4, toMap: "ice_cave_upper", toX: 14, toY: 10, facing: "N", level: 1 },
+    ],
+    exits: [
+      { mapId: "ice_cave_upper", x: 7, y: 1, toMap: "north_wastes", toX: 18, toY: 9, facing: "S" },
+    ],
+  },
+  // Task #177: the Ancient Ruins — the moss-choked relic vaults of the
+  // Southern Jungles. The Sun-Moss Relic found on the upper floor parts the
+  // Sunken Hall's sealed door; the hall reeks with spore-vents and the moss
+  // dead.
+  ancient_ruins: {
+    id: "ancient_ruins",
+    name: "The Ancient Ruins",
+    entry: { mapId: "ancient_ruins", x: 7, y: 5, facing: "N" },
+    levels: [
+      { mapId: "ancient_ruins", name: "The Ancient Ruins", number: 1 },
+      { mapId: "ancient_ruins_b2", name: "Ruins — Sunken Hall", number: 2 },
+    ],
+    stairs: [
+      { id: "ruins_l2_down", fromMap: "ancient_ruins", x: 15, y: 9, toMap: "ancient_ruins_b2", toX: 8, toY: 3, facing: "S", level: 2 },
+      { id: "ruins_l2_up", fromMap: "ancient_ruins_b2", x: 14, y: 4, toMap: "ancient_ruins", toX: 15, toY: 9, facing: "N", level: 1 },
+    ],
+    exits: [
+      { mapId: "ancient_ruins", x: 1, y: 4, toMap: "south_jungle", toX: 17, toY: 8, facing: "S" },
+    ],
+  },
+  // Task #184: the Highland Peak — the storm-wracked summit behind the
+  // Western Highlands' pass. Gale gusts claw at climbers without the Gale
+  // Cloak; the Storm Summit's tempest rings the crest.
+  highland_peak: {
+    id: "highland_peak",
+    name: "The Highland Peak",
+    entry: { mapId: "highland_peak", x: 7, y: 13, facing: "N" },
+    levels: [
+      { mapId: "highland_peak", name: "Highland Peak", number: 1 },
+      { mapId: "highland_peak_b2", name: "Peak — Storm Summit", number: 2 },
+    ],
+    stairs: [
+      { id: "peak_l2_up", fromMap: "highland_peak", x: 8, y: 1, toMap: "highland_peak_b2", toX: 7, toY: 5, facing: "S", level: 2 },
+      { id: "peak_l2_down", fromMap: "highland_peak_b2", x: 13, y: 1, toMap: "highland_peak", toX: 8, toY: 1, facing: "N", level: 1 },
+    ],
+    exits: [
+      { mapId: "highland_peak", x: 13, y: 13, toMap: "west_highlands", toX: 14, toY: 1, facing: "S" },
+    ],
+  },
 };

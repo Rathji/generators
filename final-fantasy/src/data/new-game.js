@@ -21,6 +21,8 @@ export const NEW_GAME = {
   items: [
     ["potion", 5],
     ["crystalKey", 1],
+    // Task #148: every hero sets out with a lantern for the dark places.
+    ["lantern", 1],
   ],
 
   // Flags every new game begins with.

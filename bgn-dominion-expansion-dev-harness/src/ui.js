@@ -1816,6 +1816,7 @@
       { term: "Liaison", def: "A card type from Allies that grants Favors, spent on Ally cards." },
       { term: "Omen", def: "A card type from Allies that triggers Hexes." },
       { term: "Prophecy", def: "A card type from Plunder's Prophecies — their goal is met at game end for a bonus." },
+      { term: "Way", def: "A landscape from Menagerie that gives an Action card an alternate ability — play it for its printed text or the Way's instead." },
       { term: "Fate", def: "A card type that gives Boons." },
       { term: "Doom", def: "A card type that gives Hexes." },
       { term: "When you gain / trash / buy", def: "Triggers that fire the moment a card enters that situation, before the rest of the effect continues." },

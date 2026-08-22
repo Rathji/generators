@@ -7,12 +7,33 @@ export class QuestLogSystem {
     this.director = opts.director ?? null; // StoryDirector (milestones)
     this.sideQuests = opts.sideQuests ?? null; // SideQuestSystem
     this.maxEntries = opts.maxEntries ?? 20;
+    // Task #150: an active plot twist becomes the headline goal until the
+    // story catches up (PlotTwistSystem calls setTwist(null) to clear it).
+    this.twist = null;
   }
 
-  // Ordered log entries: current story milestone first, then side quests,
-  // then tracked quests — all with per-objective done state.
+  // A fired mid-game plot twist — {id, name, description, done} — becomes
+  // the primary log entry (changing the party's goal). Pass null to clear.
+  setTwist(twist) {
+    this.twist = twist ?? null;
+    return this;
+  }
+
+  // Ordered log entries: the active plot twist, then current story
+  // milestone, then side quests, then tracked quests.
   entries() {
     const out = [];
+    if (this.twist && !this.twist.done) {
+      out.push({
+        kind: "twist",
+        id: this.twist.id,
+        name: this.twist.name,
+        description: this.twist.description ?? "",
+        status: "active",
+        primary: true,
+        objectives: [],
+      });
+    }
     if (this.director) {
       const ms = this.director.currentMilestone ?? this.director.nextMilestone();
       if (ms) {
@@ -75,7 +96,7 @@ export class QuestLogSystem {
     if (!e.length) return "No active objectives.";
     const lines = [];
     for (const en of e) {
-      const tag = en.kind === "story" ? "Main" : en.kind === "side" ? "Side" : "Quest";
+      const tag = en.kind === "story" ? "Main" : en.kind === "twist" ? "Twist" : en.kind === "side" ? "Side" : "Quest";
       const head =
         "[" + tag + "] " + en.name +
         (en.status === "completed" ? " (done)" : "") +

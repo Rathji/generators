@@ -38,7 +38,11 @@ export class TrapSystem {
   isSprung(trap) {
     if (!trap) return false;
     if (trap.once) return !!(this.state && this.state.getFlag(this._flag(trap)));
-    return this._sprungStep(trap) != null;
+    if (!this.state) return false;
+    const last = this._sprungStep(trap);
+    if (last == null) return false;
+    if (!trap.cooldownSteps) return true;
+    return this.step - last < trap.cooldownSteps;
   }
 
   // Cooldown traps record the step they last fired on (raw number flag).
@@ -66,10 +70,11 @@ export class TrapSystem {
     const trap = this.trapAt(mapId, x, y);
     if (!trap) return { ok: false, error: "no trap", trap: null };
     if (step != null) this.step = Math.max(this.step, step);
-    if (this.isSprung(trap)) return { ok: false, error: "already sprung", trap };
-    if (trap.cooldownSteps) {
+    if (trap.once) {
+      if (this.isSprung(trap)) return { ok: false, error: "already sprung", trap };
+    } else {
       const last = this._sprungStep(trap);
-      if (last != null && this.step - last < trap.cooldownSteps) {
+      if (last != null && (!trap.cooldownSteps || this.step - last < trap.cooldownSteps)) {
         return { ok: false, error: "rearming", trap };
       }
     }

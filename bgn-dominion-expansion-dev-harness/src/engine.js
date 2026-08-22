@@ -67,7 +67,7 @@
     "Reaction", "Attack", "Duration", "Reserve", "Night",
     "Fate", "Doom", "Looter", "Traveler", "Shelter", "Ruins",
     "Knight", "Prize", "Spirit", "Zombie", "Shadow", "Liaison",
-    "Heirloom", "Omen", "Prophecy"
+    "Heirloom", "Omen", "Prophecy", "Way"
   ];
 
   /* ── Player state shape.
@@ -87,7 +87,8 @@
       drawCount: undefined, tacticianActive: false, victoryGainedThisTurn: false,
       lastTurnGains: [], corsairActive: false, corsairTrashed: false, corsairFrom: null,
       quarryActive: false, collectionActive: false, hoardActive: false, tiaraActive: false,
-      warChestNamed: [], buyGainedId: null
+      princessActive: false, warChestNamed: [], buyGainedId: null,
+      chameleonSwap: false, frogTopdeck: [], squirrelDraw: 0, sealTopdeck: false, turtleAside: []
     };
   }
   engine.createPlayer = createPlayer;
@@ -375,6 +376,11 @@
       if (FX_KEYS.indexOf(k) === -1) throw new Error("unknown effect key: " + k);
       if (!Number.isInteger(fx[k]) || fx[k] < 0) throw new Error("effect '" + k + "' must be a non-negative integer");
     }
+    /* Way of the Chameleon: while the player's swap flag is set,
+       every +Cards becomes +$1 and every +$1 becomes +Cards. */
+    if (player(state, playerId).chameleonSwap === true && (fx.cards || fx.coins)) {
+      fx = Object.assign({}, fx, { cards: fx.coins || 0, coins: fx.cards || 0 });
+    }
     if (fx.cards) zones.draw(state, playerId, fx.cards);
     for (const res of RESOURCES) if (fx[res]) addResource(state, playerId, res, fx[res]);
     return player(state, playerId);
@@ -425,11 +431,24 @@
     p.hand.length = 0;
     p.play.length = 0;
     for (const id of kept) p.duration.push(id);
-    for (const id of rest) p.discard.push(id);
+    for (const id of rest) {
+      /* Way of the Frog: a card played via the Way is topdecked at
+         cleanup instead of being discarded. */
+      const fi = p.frogTopdeck.indexOf(id);
+      if (fi !== -1) { p.deck.push(id); p.frogTopdeck.splice(fi, 1); }
+      else p.discard.push(id);
+    }
+    p.frogTopdeck = [];
     while (p.oldDur.length) zones.move(state, loc(playerId, "oldDur"), loc(playerId, "discard"), { fromTop: true });
     const count = kept.length + rest.length;
     state.log.push({ t: "cleanup", player: playerId, count: count, kept: kept.slice() });
     hooks.emit("cleanup", { player: playerId, count: count, kept: kept.slice() });
+    /* Way of the Squirrel: +2 Cards at the end of the turn (drawn
+       after the hand is discarded, kept in hand for the next turn). */
+    if (p.squirrelDraw > 0) {
+      zones.draw(state, playerId, p.squirrelDraw);
+      p.squirrelDraw = 0;
+    }
   }
 
   function drawHand(state, playerId) {
@@ -454,6 +473,9 @@
     else if (state.phase === "draw") { drawHand(state, state.turnPlayer); advancePhase(state); }
   }
   engine.advancePhase = advancePhase;
+  /* Public cleanup (tests drive it directly; the normal turn path runs
+     it via advancePhase). */
+  engine.cleanup = cleanup;
 
   function endBuyPhase(state) {
     const p = player(state, state.turnPlayer);
@@ -500,7 +522,25 @@
     p.collectionActive = false;
     p.hoardActive = false;
     p.tiaraActive = false;
+    p.princessActive = false;
     p.warChestNamed = [];
+    p.chameleonSwap = false;
+    p.sealTopdeck = false;
+    p.frogTopdeck = [];
+    p.squirrelDraw = 0;
+    /* Way of the Turtle: set-aside cards are played at the start of
+       the next turn. */
+    if (p.turtleAside.length) {
+      for (const id of p.turtleAside.slice()) {
+        const idx = p.setAside.indexOf(id);
+        if (idx === -1) continue;
+        zones.move(state, loc(playerId, "setAside"), loc(playerId, "play"), { index: idx });
+        effects.resolve(state, playerId, id, { cardId: id });
+        state.log.push({ t: "turtlePlay", player: playerId, card: id });
+        fireTrigger("play", state, playerId, { cardId: id });
+      }
+      p.turtleAside = [];
+    }
     for (const other of state.players) {
       if (other.id === p.id) continue;
       if (other.corsairFrom === p.id) {
@@ -699,11 +739,21 @@
     if (opts.charge !== false) spendAction(state, playerId);
     zones.move(state, loc(playerId, "hand"), loc(playerId, "play"), { index: idx });
     player(state, playerId).actionsPlayed++;
-    const resolved = effects.resolve(state, playerId, id, { cardId: id, index: idx });
+    let resolved;
+    if (opts.way && effects.has(opts.way)) {
+      /* Way override (Menagerie): play the Action for the Way's text
+         instead of its own. The Way effect receives ctx.cardId = the
+         played Action (its "this"), so it can return it to its pile,
+         set it aside, etc. */
+      resolved = effects.resolve(state, playerId, opts.way, { cardId: id, index: idx, way: opts.way });
+      state.log.push({ t: "wayPlay", player: playerId, card: id, way: opts.way });
+    } else {
+      resolved = effects.resolve(state, playerId, id, { cardId: id, index: idx });
+    }
     state.log.push({ t: "playAction", player: playerId, card: id });
     hooks.emit("actionPlayed", { player: playerId, cardId: id });
     fireTrigger("play", state, playerId, { cardId: id, index: idx });
-    return { cardId: id, from: idx, effect: resolved !== null };
+    return { cardId: id, from: idx, effect: resolved !== null, way: opts.way || null };
   }
 
   engine.actions = { play: playAction };
@@ -739,6 +789,7 @@
     } else if (p.quarryActive && isType(cardId, "Action")) {
       coins = Math.max(0, coins - 1);
     }
+    if (p.princessActive) coins = Math.max(0, coins - 2);
     return coins;
   }
   engine.dynamicCost = dynamicCost;
@@ -746,6 +797,7 @@
   function buyCheck(state, playerId, cardId) {
     const d = cardDef(cardId);
     if (!d) return { ok: false, reason: "unknown card '" + cardId + "'" };
+    if (d && !d.inSupply) return { ok: false, reason: "'" + cardId + "' is not in the supply" };
     if (!(cardId in state.supply)) return { ok: false, reason: "'" + cardId + "' is not in the supply" };
     if (state.supply[cardId] < 1) return { ok: false, reason: "the " + d.name + " pile is empty" };
     const p = player(state, playerId);
@@ -965,6 +1017,21 @@
       return order.slice(0, prompt.count != null ? prompt.count : 2);
     }
     if (prompt.type === "miningVillageTrash") return true;
+    if (prompt.type === "youngWitchBane") return prompt.hasBane === true;
+    if (prompt.type === "hamletDiscard") {
+      const order = prompt.hand
+        .map((id, i) => ({ id, i, cost: costCoins(id) }))
+        .filter((o) => o.cost === 0);
+      return order.length ? order[0].i : null;
+    }
+    if (prompt.type === "jesterChoice") return "self";
+    if (prompt.type === "tournamentRevealProvince") return prompt.hasProvince === true;
+    if (prompt.type === "gainPrize") {
+      const pref = ["bag_of_gold", "followers", "trusty_steed", "diadem", "princess"];
+      for (const p of pref) if (prompt.options.indexOf(p) !== -1) return p;
+      return prompt.options[0] || null;
+    }
+    if (prompt.type === "trustySteedChoices") return ["cards", "actions"];
     if (prompt.type === "minionMode") return "coins";
     if (prompt.type === "noblesChoice") return "cards";
     if (prompt.type === "pawnChoices") return ["card", "action"];
@@ -1100,7 +1167,12 @@
           fireTrigger("reveal", state, targetId, { cardId: c });
           const r = reactions.resolve(state, targetId, c, { attacker: attackerId, attack: attackCardId });
           if (r && r.block) blocked = true;
-          p.hand.push(c);
+          if (r && r.setAside) {
+            p.setAside.push(c);
+            state.log.push({ t: "setAside", player: targetId, card: c });
+          } else {
+            p.hand.push(c);
+          }
           revealed.push(c);
         }
       }
@@ -1802,7 +1874,7 @@
   vp.register("gardens", (state, pid) => Math.floor(playerCards(state, pid).length / 10));
   vp.register("duke", (state, pid) => countOwned(state, pid, "duchy"));
   vp.register("vineyard", (state, pid) => Math.floor(countOwnedByType(state, pid, "Action") / 3));
-  vp.register("fairgrounds", (state, pid) => 2 * Math.floor(uniqueCount(state, pid) / 10));
+  vp.register("fairgrounds", (state, pid) => 2 * Math.floor(uniqueCount(state, pid) / 5));
 
   /* ═══════════════════════════════════════════════════════════════
      SUPPLY SETUP BY PLAYER COUNT (Task 11)
@@ -1850,6 +1922,23 @@
     return sizeFromSpec(def.pileSize == null ? 10 : def.pileSize, nPlayers);
   }
 
+  /* pickBane — Young Witch's setup rule: add an extra Kingdom pile
+     costing exactly $2 or $3 that is not one of the ten kingdom
+     piles. Returns the card id, or null when no legal option exists. */
+  function pickBane(g, cards, kingdom) {
+    const pool = cards.all().filter((c) =>
+      c.inSupply &&
+      BASIC_PILES.indexOf(c.id) === -1 &&
+      c.id !== "potion" &&
+      PROSPERITY_EXTRAS.indexOf(c.id) === -1 &&
+      (c.cost.coins === 2 || c.cost.coins === 3) &&
+      c.cost.potion === 0 &&
+      kingdom.indexOf(c.id) === -1
+    );
+    if (!pool.length) return null;
+    return g.rand.shuffle(pool)[0].id;
+  }
+
   function setupGame(opts) {
     opts = opts || {};
     const cards = (typeof Dominion.cards !== "undefined") ? Dominion.cards : null;
@@ -1895,6 +1984,18 @@
       g.supply[id] = sizeFromSpec(BASIC_PILE_SIZES[id], n);
     }
     for (const id of kingdom) g.supply[id] = resolvePileSize(cards.get(id), n);
+    g.bane = null;
+    if (kingdom.indexOf("young_witch") !== -1) {
+      const bane = pickBane(g, cards, kingdom);
+      if (bane) {
+        g.supply[bane] = resolvePileSize(cards.get(bane), n);
+        g.bane = bane;
+      }
+    }
+    g.prizes = null;
+    if (kingdom.indexOf("tournament") !== -1) {
+      g.prizes = ["bag_of_gold", "diadem", "followers", "princess", "trusty_steed"];
+    }
     if (kingdom.some((id) => costPotion(id) > 0)) {
       g.supply.potion = 16;
     }
@@ -1902,8 +2003,25 @@
       g.supply.colony = sizeFromSpec(BASIC_PILE_SIZES.colony, n);
       g.supply.platinum = 12;
     }
+    /* Menagerie's Horse is a non-supply pile (not buyable) set up
+       whenever Menagerie cards are in play; it is gained only by card
+       effects (Falconer, Sheepdog, …) and empties count toward the
+       game-ending 3-pile rule. */
+    if (kingdom.some((id) => (cards.get(id).expansion || "") === "menagerie")) {
+      g.supply.horse = 30;
+    }
     g.charlatan = kingdom.indexOf("charlatan") !== -1;
     g.aiDifficulty = opts.aiDifficulty || null;
+    g.ways = Array.isArray(opts.ways) ? opts.ways.filter((id) => cards.get(id) && cards.get(id).types.indexOf("Way") !== -1) : [];
+    g.mouseCard = null;
+    if (g.ways.indexOf("way_of_the_mouse") !== -1) {
+      const pool = cards.all().filter((c) =>
+        c.inSupply && c.types.indexOf("Action") !== -1 && c.types.indexOf("Way") === -1 &&
+        c.cost.potion === 0 && (c.cost.coins === 2 || c.cost.coins === 3) &&
+        BASIC_PILES.indexOf(c.id) === -1 && kingdom.indexOf(c.id) === -1
+      );
+      if (pool.length) g.mouseCard = g.rand.shuffle(pool)[0].id;
+    }
 
     for (const p of g.players) {
       for (let i = 0; i < 7; i++) p.deck.push("copper");
@@ -1938,7 +2056,7 @@
      ═══════════════════════════════════════════════════════════════ */
   function serialize(state) {
     const out = {};
-    const order = ["version", "seed", "players", "supply", "trash", "turn", "turnPlayer", "phase", "log", "over", "aiDifficulty", "kingdom", "playerCount", "charlatan"];
+    const order = ["version", "seed", "players", "supply", "trash", "turn", "turnPlayer", "phase", "log", "over", "aiDifficulty", "kingdom", "playerCount", "charlatan", "bane", "prizes"];
     for (const k of order) if (state[k] !== undefined) out[k] = state[k];
     return JSON.parse(JSON.stringify(out));
   }
@@ -1949,7 +2067,7 @@
     if (!Array.isArray(data.players)) throw new Error("saved state is missing players");
     if (!data.supply || typeof data.supply !== "object") throw new Error("saved state is missing supply");
     const g = createGame({ seed: data.seed });
-    for (const k of ["players", "supply", "trash", "turn", "turnPlayer", "phase", "log", "over", "kingdom", "playerCount", "aiDifficulty", "charlatan"]) {
+    for (const k of ["players", "supply", "trash", "turn", "turnPlayer", "phase", "log", "over", "kingdom", "playerCount", "aiDifficulty", "charlatan", "bane", "prizes"]) {
       if (data[k] !== undefined) g[k] = data[k];
     }
     g.version = engine.VERSION;
@@ -2075,6 +2193,33 @@
     try {
       const p = player(state, playerId);
       if (p.lastTurnGains && p.lastTurnGains.length < 40) p.lastTurnGains.push(cardId);
+      /* Way of the Seal: this turn, when you gain a card, you may put
+         it onto your deck. */
+      if (p.sealTopdeck === true) {
+        const dIdx = p.discard.indexOf(cardId);
+        if (dIdx !== -1) {
+          const yes = safeDecide(state, { type: "sealTopdeck", player: playerId, card: cardId });
+          if (yes === true) {
+            p.discard.splice(dIdx, 1);
+            p.deck.push(cardId);
+            state.log.push({ t: "sealTopdeck", player: playerId, card: cardId });
+          }
+        }
+      }
+      /* Exile (Menagerie): when you gain a card, you may discard all
+         the OTHER copies of it from your Exile mat (all-or-none) to
+         your discard pile. This is a discard, so discard triggers
+         (Tunnel, Village Green) fire on the cards that leave Exile. */
+      const exiledCopies = p.exile.filter((c) => c === cardId);
+      if (exiledCopies.length > 0) {
+        const yes = safeDecide(state, { type: "exileDiscard", player: playerId, card: cardId, count: exiledCopies.length });
+        if (yes === true) {
+          p.exile = p.exile.filter((c) => c !== cardId);
+          p.discard.push.apply(p.discard, exiledCopies);
+          state.log.push({ t: "exileDiscard", player: playerId, card: cardId, count: exiledCopies.length });
+          fireTrigger("discard", state, playerId, { cardIds: exiledCopies.slice() });
+        }
+      }
       for (const other of state.players) {
         if (other.id === playerId) continue;
         if (other.blockadeAside.indexOf(cardId) !== -1) {
@@ -2978,6 +3123,25 @@
       const from = opts.from || loc(playerId, "hand");
       const moved = zones.move(state, from, zoneRef.trash, opts);
       fireTrigger("trash", state, playerId, Object.assign({ cardId: moved }, opts));
+      return moved;
+    },
+    exile(state, playerId, opts) {
+      opts = opts || {};
+      const from = opts.from || loc(playerId, "hand");
+      if (refLabel(from) === "p" + playerId + ".exile") throw new Error("card is already on the Exile mat");
+      const moved = zones.move(state, from, loc(playerId, "exile"), opts);
+      state.log.push({ t: "exile", player: playerId, card: moved });
+      return moved;
+    },
+    regain(state, playerId, opts) {
+      opts = opts || {};
+      const to = opts.to || loc(playerId, "discard");
+      const cardId = opts.cardId;
+      const exileArr = zoneArray(state, loc(playerId, "exile"));
+      const idx = (opts.index != null) ? opts.index : exileArr.indexOf(cardId);
+      if (idx === -1) throw new Error("card '" + cardId + "' is not on the Exile mat");
+      const moved = zones.move(state, loc(playerId, "exile"), to, { index: idx });
+      fireTrigger("discard", state, playerId, { cardIds: [moved] });
       return moved;
     },
     reveal(state, playerId, cardIds) {

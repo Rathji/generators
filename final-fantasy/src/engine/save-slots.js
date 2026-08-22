@@ -102,6 +102,22 @@ export class SaveSlotSystem {
     return res.meta ?? null;
   }
 
+  // Every slot with its presence + metadata (for list UIs).
+  list() {
+    return this.ids.map((id) => ({ slot: id, has: this.has(id), meta: this.meta(id) }));
+  }
+
+  // The most recently written occupied slot (drives \"Continue\" shortcuts).
+  mostRecent() {
+    let best = null;
+    for (const id of this.ids) {
+      const m = this.meta(id);
+      if (!m) continue;
+      if (!best || m.savedAt > best.meta.savedAt) best = { slot: id, meta: m };
+    }
+    return best;
+  }
+
   erase(slot) {
     if (!this.ids.includes(slot)) return { ok: false, reason: "invalid_slot" };
     this.manager.delete(slot);

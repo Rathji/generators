@@ -14,6 +14,10 @@ export const ENCOUNTERS = {
       { group: "imp_pack", weight: 2 },
       { group: "wild_beasts", weight: 2 },
       { group: "bandits", weight: 1 },
+      // Task #170: sea birds and shore crabs wander onto the overworld roads
+      // that wind toward Pravog's eastern coast.
+      { group: "gull_flock", weight: 1 },
+      { group: "shore_crabs", weight: 1 },
     ],
   },
   overworld: {
@@ -350,6 +354,114 @@ export const ENCOUNTERS = {
       { group: "sand_hunters", weight: 2 },
       { group: "chrono_cabal", weight: 2 },
       { group: "rift_pack", weight: 1 },
+    ],
+  },
+  // Task #170: the Coastal theme — the full sea-touched pool for maps that
+  // face the eastern shore (reef serpents, tide raiders, and the haunted
+  // wrecks beyond the beach). Lighter than the deep-sea shrine tables.
+  coastal: {
+    rate: 0.12,
+    minGap: 3,
+    table: [
+      { group: "shore_crabs", weight: 3 },
+      { group: "gull_flock", weight: 2 },
+      { group: "reef_serpents", weight: 2 },
+      { group: "tide_raiders", weight: 2 },
+      { group: "coast_wraiths", weight: 1 },
+    ],
+  },
+  // Task #175: the Ice Cave — the wastes' frozen depths. The lower crystal
+  // chamber rolls from the shared `dungeon_ice_cave` theme.
+  ice_cave_upper: {
+    rate: 0.16,
+    minGap: 3,
+    table: [
+      { group: "ice_cave_pack", weight: 3 },
+      { group: "crystal_swarm", weight: 2 },
+      { group: "ice_pack", weight: 2 },
+      { group: "wraith_cabal", weight: 1 },
+    ],
+  },
+  ice_cave_b2: {
+    theme: "dungeon_ice_cave",
+  },
+  dungeon_ice_cave: {
+    rate: 0.18,
+    minGap: 2,
+    table: [
+      { group: "wraith_cabal", weight: 3 },
+      { group: "crystal_swarm", weight: 2 },
+      { group: "ice_wardens", weight: 2 },
+      { group: "ice_cave_pack", weight: 1 },
+    ],
+  },
+  // Task #176-#185: the Southern Jungles and Western Highlands. Jungle maps
+  // draw on vine-choked beasts; the ruins sink into the shared
+  // `dungeon_ruins` theme, and the stormy peaks into `dungeon_peak`.
+  south_jungle: {
+    rate: 0.15,
+    minGap: 3,
+    table: [
+      { group: "jungle_beasts", weight: 3 },
+      { group: "insect_swarm", weight: 2 },
+      { group: "vine_drakes", weight: 2 },
+      { group: "mushroom_folk", weight: 1 },
+    ],
+  },
+  west_highlands: {
+    rate: 0.16,
+    minGap: 3,
+    table: [
+      { group: "highland_wolves", weight: 3 },
+      { group: "cliff_hawks", weight: 2 },
+      { group: "hill_bandits", weight: 2 },
+      { group: "wind_wraiths", weight: 1 },
+    ],
+  },
+  ancient_ruins: {
+    rate: 0.17,
+    minGap: 3,
+    table: [
+      { group: "insect_swarm", weight: 3 },
+      { group: "ruin_undead", weight: 2 },
+      { group: "scarab_horde", weight: 2 },
+      { group: "moss_creepers", weight: 1 },
+    ],
+  },
+  ancient_ruins_b2: {
+    theme: "dungeon_ruins",
+  },
+  dungeon_ruins: {
+    rate: 0.19,
+    minGap: 2,
+    table: [
+      { group: "ruin_undead", weight: 3 },
+      { group: "scarab_horde", weight: 2 },
+      { group: "moss_creepers", weight: 2 },
+      { group: "insect_swarm", weight: 1 },
+    ],
+  },
+  highland_peak: {
+    rate: 0.17,
+    minGap: 3,
+    table: [
+      { group: "hawk_flight", weight: 3 },
+      { group: "gale_wisps", weight: 2 },
+      { group: "wind_wraiths", weight: 2 },
+      { group: "hill_bandits", weight: 1 },
+    ],
+  },
+  highland_peak_b2: {
+    theme: "dungeon_peak",
+  },
+  dungeon_peak: {
+    rate: 0.19,
+    minGap: 2,
+    table: [
+      { group: "storm_cabal", weight: 3 },
+      { group: "wind_guardians", weight: 2 },
+      { group: "hawk_flight", weight: 2 },
+      { group: "gale_wisps", weight: 1 },
     ],
   },
 };

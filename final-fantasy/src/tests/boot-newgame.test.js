@@ -67,9 +67,10 @@ export function run() {
   check("hero poison cleared", world.party.members[0].hasStatus("poison") === false);
   check("classes correct", world.party.members.map((m) => m.classId).join(",") === "warrior,blackMage,whiteMage");
 
-  check("inventory stacks cleared", world.inventory.usedSlots() === 2);
+  check("inventory stacks cleared", world.inventory.usedSlots() === 3);
   check("potion x5", world.inventory.count("potion") === 5);
   check("crystal key x1", world.inventory.count("crystalKey") === 1);
+  check("lantern x1", world.inventory.count("lantern") === 1);
   check("endgame gear gone", world.inventory.count("masamune") === 0 && world.inventory.count("shatteredBlade") === 0);
 
   check("booted flag set", boot.booted === true);
@@ -81,7 +82,7 @@ export function run() {
   world.state.setFlag("king_met", true);
   world.state.setLocation("chaos_shrine", 1, 1, "W");
   boot.newGame();
-  check("second newGame is idempotent", world.party.gold === 150 && world.inventory.usedSlots() === 2 && world.state.location.mapId === "cornelia" && world.state.getFlag("king_met") === false);
+  check("second newGame is idempotent", world.party.gold === 150 && world.inventory.usedSlots() === 3 && world.state.location.mapId === "cornelia" && world.state.getFlag("king_met") === false);
 
   // GameOver checkpoint wired when provided.
   let cp = null;

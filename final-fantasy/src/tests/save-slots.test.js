@@ -106,5 +106,27 @@ export function run() {
   mem.erase("A");
   check("memory erase", mem.has("A") === false);
 
+  // Task #159: slot listing + most-recent-save helper.
+  const origNow = Date.now;
+  const ls = new SaveSlotSystem({ storage });
+  try {
+    Date.now = () => 1000;
+    ls.write("A", game);
+    Date.now = () => 2000;
+    ls.write("C", game);
+  } finally {
+    Date.now = origNow;
+  }
+  const list = ls.list();
+  check("list has all slots", list.length === 3 && list.filter((s) => s.has).length === 2);
+  check("list carries meta", list.find((s) => s.slot === "C").meta?.slot === "C");
+  const mr = ls.mostRecent();
+  check("mostRecent is latest write", mr?.slot === "C" && mr?.meta?.gold === 500);
+  const only = new SaveSlotSystem({ storage: fakeStorage() });
+  only.write("B", game);
+  check("mostRecent falls back to only save", only.mostRecent()?.slot === "B");
+  const none = new SaveSlotSystem({ storage: fakeStorage() });
+  check("mostRecent empty", none.mostRecent() === null);
+
   return out;
 }

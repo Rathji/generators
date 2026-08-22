@@ -29,7 +29,7 @@
     "Action", "Treasure", "Victory", "Curse", "Reaction", "Attack",
     "Duration", "Reserve", "Night", "Fate", "Doom", "Looter", "Traveler",
     "Shelter", "Ruins", "Knight", "Prize", "Spirit", "Zombie", "Shadow",
-    "Liaison", "Heirloom", "Omen", "Prophecy"
+    "Liaison", "Heirloom", "Omen", "Prophecy", "Way"
   ];
 
   const registry = new Map();
@@ -139,19 +139,22 @@
     registry.clear();
     return (async function () {
       let total = 0;
-      const expSets = [];
       for (const s of list) {
         const expResp = await fetch("src/exp/" + s + "/data.json");
         if (expResp.ok) {
           total += loadFromData(await expResp.json()).count;
-          expSets.push(s);
         } else {
           const resp = await fetch("src/data/" + s + ".json");
           if (!resp.ok) throw new Error("catalog fetch failed for " + s + ": HTTP " + resp.status);
           total += loadFromData(await resp.json()).count;
         }
+        /* An in-development set may keep its catalog in src/data/<s>.json
+           (e.g. a pinned/verified catalog) while its implementations live
+           in src/exp/<s>/cards.js — inject the implementation whenever
+           that file exists. */
+        const impl = await fetch("src/exp/" + s + "/cards.js");
+        if (impl.ok) await injectScript("src/exp/" + s + "/cards.js");
       }
-      for (const s of expSets) await injectScript("src/exp/" + s + "/cards.js");
       return { set: list.join(","), count: total };
     })();
   }

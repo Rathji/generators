@@ -47,12 +47,26 @@ export const NPC_PLACEMENTS = {
     { id: "pravog_sailor", name: "Sailor", x: 11, y: 7, facing: "N", dialogueId: "pravo.sailor", sprite: "s" },
     { id: "pravog_merchant", name: "Merchant", x: 10, y: 2, facing: "S", dialogueId: "pravo.merchant", sprite: "m" },
     { id: "pravog_mayor", name: "Mayor", x: 8, y: 3, facing: "S", dialogueId: "pravo.mayor", sprite: "m" },
+    // Task #168: the expanded harbor — dock hands, fishers, and their kin.
+    { id: "pravog_dockworker", name: "Dockworker", x: 13, y: 6, facing: "S", dialogueId: "pravo.dockworker", sprite: "t" },
+    { id: "pravog_fisherman", name: "Fisherman", x: 8, y: 6, facing: "E", dialogueId: "pravo.fisherman", sprite: "t" },
+    { id: "pravog_fisherwife", name: "Fisher's Wife", x: 8, y: 7, facing: "W", dialogueId: "pravo.fisherwife", sprite: "w" },
+    { id: "pravog_dockchild", name: "Dock Boy", x: 11, y: 6, facing: "S", dialogueId: "pravo.dockchild", sprite: "k" },
   ],
   pravog_inn: [
     { id: "pravog_innkeeper", name: "Innkeeper", x: 4, y: 3, facing: "S", dialogueId: "inn.innkeeper", sprite: "i" },
   ],
   pravog_house: [
     { id: "pravog_housewife", name: "Housewife", x: 3, y: 3, facing: "E", dialogueId: "pravo.housewife", sprite: "w" },
+  ],
+  pravog_house2: [
+    { id: "pravog_resident", name: "Resident", x: 3, y: 3, facing: "E", dialogueId: "pravo.resident", sprite: "t" },
+  ],
+  pravog_armory: [
+    { id: "pravog_armorer", name: "Armorer", x: 3, y: 3, facing: "E", dialogueId: "pravo.armorer", sprite: "b" },
+  ],
+  pravog_church: [
+    { id: "pravog_priest", name: "Priest", x: 3, y: 3, facing: "E", dialogueId: "pravo.priest", sprite: "e" },
   ],
   marsh_cave: [
     { id: "marsh_trapper", name: "Trapper", x: 9, y: 7, facing: "W", dialogueId: "marsh.trapper", sprite: "t" },
@@ -107,5 +121,71 @@ export const NPC_PLACEMENTS = {
     { id: "glacierport_child", name: "Child", x: 5, y: 7, facing: "N", dialogueId: "glacierport.child", sprite: "k" },
     { id: "glacierport_fisher", name: "Fisher", x: 2, y: 3, facing: "E", dialogueId: "glacierport.fisher", sprite: "t" },
     { id: "glacierport_merchant", name: "Merchant", x: 2, y: 5, facing: "E", dialogueId: "glacierport.merchant", sprite: "m" },
+  ],
+  // Task #171/#173: the Northern Wastes — scouts who braved the snow and
+  // trade tales of the pass at the wastes' edge.
+  north_wastes: [
+    { id: "north_scout", name: "Wastes Scout", x: 9, y: 4, facing: "E", dialogueId: "northwastes.scout", sprite: "t" },
+    { id: "north_hunter", name: "Snow Hunter", x: 17, y: 10, facing: "N", dialogueId: "northwastes.hunter", sprite: "h" },
+  ],
+  // Task #172/#173: Northwind Village — the wastes' only settlement.
+  north_village: [
+    { id: "north_elder", name: "Village Elder", x: 7, y: 7, facing: "W", dialogueId: "northwind.elder", sprite: "e" },
+    { id: "north_huntress", name: "Huntress", x: 12, y: 5, facing: "N", dialogueId: "northwind.huntress", sprite: "t" },
+    { id: "north_trapper", name: "Trapper", x: 2, y: 5, facing: "E", dialogueId: "northwind.trapper", sprite: "t" },
+    { id: "north_child", name: "Child", x: 5, y: 7, facing: "N", dialogueId: "northwind.child", sprite: "k" },
+    { id: "north_innkeeper", name: "Innkeeper", x: 11, y: 7, facing: "N", dialogueId: "inn.innkeeper", sprite: "i" },
+  ],
+  north_village_house: [
+    { id: "north_villager", name: "Villager", x: 3, y: 3, facing: "E", dialogueId: "northwind.villager", sprite: "t" },
+  ],
+  north_village_shop: [
+    { id: "north_shopkeep", name: "Shopkeeper", x: 3, y: 3, facing: "E", dialogueId: "northwind.shopkeep", sprite: "m" },
+  ],
+  north_village_inn: [
+    { id: "north_innkeeper2", name: "Innkeeper", x: 4, y: 3, facing: "S", dialogueId: "inn.innkeeper", sprite: "i" },
+  ],
+  // Task #176/#178: the Southern Jungles — a guide meets the ship at the
+  // river dock, and a hunter keeps watch by the village lane.
+  south_jungle: [
+    { id: "jungle_guide", name: "Jungle Guide", x: 16, y: 11, facing: "W", dialogueId: "jungleguide.greeting", sprite: "t" },
+    { id: "jungle_hunter", name: "Jungle Hunter", x: 2, y: 8, facing: "E", dialogueId: "jungle.hunter", sprite: "h" },
+  ],
+  // Task #177/#178: Jungle Village — the clearing's residents and the shaman
+  // who keeps the Old Ways (and the ruins' secret).
+  jungle_village: [
+    { id: "jungle_elder", name: "Village Elder", x: 8, y: 4, facing: "S", dialogueId: "jungle.elder", sprite: "e" },
+    { id: "jungle_shaman", name: "Shaman", x: 7, y: 6, facing: "N", dialogueId: "jungle.shaman", sprite: "m" },
+    { id: "jungle_herbalist", name: "Herbalist", x: 2, y: 5, facing: "E", dialogueId: "jungle.herbalist", sprite: "w" },
+    { id: "jungle_child", name: "Child", x: 11, y: 5, facing: "N", dialogueId: "jungle.child", sprite: "k" },
+    { id: "jungle_villager", name: "Villager", x: 6, y: 8, facing: "W", dialogueId: "jungle.villager", sprite: "t" },
+  ],
+  jungle_village_house: [
+    { id: "jungle_housewife", name: "Housewife", x: 3, y: 3, facing: "E", dialogueId: "jungle.housewife", sprite: "w" },
+  ],
+  jungle_village_shop: [
+    { id: "jungle_shopkeep", name: "Trader", x: 3, y: 3, facing: "E", dialogueId: "jungle.shopkeep", sprite: "m" },
+  ],
+  jungle_village_inn: [
+    { id: "jungle_innkeeper", name: "Innkeeper", x: 4, y: 3, facing: "S", dialogueId: "inn.innkeeper", sprite: "i" },
+  ],
+  // Task #181/#183: the Western Highlands — Stormhold's patrol guards on the
+  // windy roads below the castle.
+  west_highlands: [
+    { id: "highlands_scout", name: "Highlands Scout", x: 6, y: 9, facing: "N", dialogueId: "highlands.scout", sprite: "t" },
+    { id: "highlands_patrol", name: "Castle Patrol", x: 12, y: 5, facing: "W", dialogueId: "highlands.guard", sprite: "s" },
+  ],
+  // Task #182/#183: Stormhold Castle — its herald and keep-guard, with the
+  // duke and duchess enthroned within.
+  highlands_castle: [
+    { id: "highlands_herald", name: "Herald", x: 6, y: 3, facing: "S", dialogueId: "highlands.herald", sprite: "h" },
+    { id: "highlands_guard", name: "Keep Guard", x: 10, y: 6, facing: "N", dialogueId: "highlands.guard", sprite: "s" },
+  ],
+  highlands_castle_throne: [
+    { id: "highlands_duke", name: "Duke Aldric", x: 5, y: 3, facing: "S", dialogueId: "highlands.duke", sprite: "n" },
+    { id: "highlands_duchess", name: "Duchess Seraphine", x: 7, y: 3, facing: "S", dialogueId: "highlands.duchess", sprite: "q" },
+  ],
+  highlands_castle_barracks: [
+    { id: "highlands_captain", name: "Captain Voss", x: 4, y: 3, facing: "S", dialogueId: "highlands.captain", sprite: "s" },
   ],
 };

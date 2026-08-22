@@ -13,6 +13,8 @@ export class MusicController {
     this.mapSongs = opts.mapSongs ?? {};
     this.enabled = opts.enabled ?? true;
     this.baseVolume = opts.baseVolume ?? 0.22;
+    // Task #161: player volume setting (0-1) multiplies the base volume.
+    this.userVolume = opts.userVolume ?? 1;
     this.duckVolume = opts.duckVolume ?? 0.35; // multiplier while an overlay is open
     // Task #227: audio is off by default — the player turns it on.
     this._muted = opts.startMuted ?? true;
@@ -94,6 +96,12 @@ export class MusicController {
     return this;
   }
 
+  // Task #161: player volume (0-1) — re-applies the engine volume.
+  setVolume(v) {
+    this.userVolume = Math.max(0, Math.min(1, v));
+    return this._apply();
+  }
+
   mute() {
     return this.setMuted(true);
   }
@@ -148,7 +156,7 @@ export class MusicController {
   _targetVolume() {
     if (!this.enabled) return 0;
     const mult = this._overlay ? this.duckVolume : 1;
-    return this.baseVolume * mult;
+    return this.baseVolume * mult * this.userVolume;
   }
 
   _apply() {

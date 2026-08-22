@@ -129,6 +129,11 @@ export class SoundTriggerSystem {
     return this;
   }
 
+  setVolume(v) {
+    this.engine.volume = Math.max(0, Math.min(1, v));
+    return this;
+  }
+
   get muted() {
     return this.engine.muted;
   }

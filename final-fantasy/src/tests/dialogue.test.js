@@ -18,7 +18,7 @@ export function run() {
   const de = new DialogueEngine();
   check("inactive before start", de.isActive() === false);
   const first = de.start("cornelia.elder");
-  check("start returns first page", first != null && first.text === DIALOGUE["cornelia.elder"].pages[0]);
+  check("start returns first page", first != null && first.text === DIALOGUE["cornelia.elder.before"].pages[0]);
   check("speaker attached", first.speaker === "Village Elder");
   check("page metadata", first.total === 2 && first.page === 1 && first.done === false);
   const second = de.advance();

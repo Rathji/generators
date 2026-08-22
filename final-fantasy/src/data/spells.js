@@ -15,6 +15,10 @@ export const SPELLS = {
   sleep: { id: "sleep", name: "Sleep", mp: 5, power: 0, kind: "status", element: null, target: "single-enemy", inflict: { status: "sleep", chance: 0.85, turns: 2 } },
   hold: { id: "hold", name: "Hold", mp: 6, power: 0, kind: "status", element: null, target: "single-enemy", inflict: { status: "paralysis", chance: 0.6, turns: 2 } },
   esuna: { id: "esuna", name: "Esuna", mp: 6, power: 0, kind: "cureStatus", cureStatus: "all", target: "single-ally" },
+  // Task #148: the Light spell — a utility incantation the white mage learns
+  // at level 3. It casts no damage/heal; the LightingSystem reads knowledge
+  // of it as a light source for dark maps.
+  light: { id: "light", name: "Light", mp: 2, power: 0, kind: "utility", element: null, target: "self", utility: "light" },
   cure: { id: "cure", name: "Cure", mp: 4, power: 30, kind: "heal", target: "single-ally" },
   cura: { id: "cura", name: "Cura", mp: 8, power: 70, kind: "heal", target: "single-ally" },
   curaga: { id: "curaga", name: "Curaga", mp: 16, power: 150, kind: "heal", target: "all-allies" },

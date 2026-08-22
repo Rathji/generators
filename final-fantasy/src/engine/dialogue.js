@@ -22,6 +22,10 @@ export function createDialogueWorld(game) {
     getFlag: (n) => !!(game.state && game.state.getFlag(n)),
     hasItem: (n) => !!(game.inventory && game.inventory.has(n)),
     getLeaderClass: () => (game.party && game.party.members && game.party.members[0] ? game.party.members[0].classId : null),
+    // Task #151: dialogue nodes can gate on NPC affinity (function
+    // conditions) — the relationship system is attached to `game` after it
+    // is constructed in main.js.
+    getAffinity: (npcId) => (game.npcRelations ? game.npcRelations.score(npcId) : 0),
   };
 }
 

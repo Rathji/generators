@@ -33,6 +33,18 @@ function render() {
       const item = items[i];
       btn.classList.toggle("disabled", !item.enabled);
       btn.classList.toggle("cursor", ctl.cursor === i);
+      // Task #166: the Continue row advertises the most recent save so the
+      // player knows what they're resuming.
+      if (btn.dataset.action === "continue") {
+        const recent = item.recent ?? null;
+        const label = btn.querySelector(".tslContinue");
+        if (label) {
+          label.textContent =
+            recent && recent.meta
+              ? `Continue — ${recent.meta.location} · Lv ${recent.meta.level}`
+              : "Continue";
+        }
+      }
     });
   }
 
@@ -72,7 +84,7 @@ function build(callbacks) {
   wrap.innerHTML = `
     <div class="titleMenu" id="titleMenu">
       <button class="titleMenuItem" data-action="new"><span class="tsk">N</span> New Game</button>
-      <button class="titleMenuItem" data-action="continue"><span class="tsk">C</span> Continue</button>
+      <button class="titleMenuItem" data-action="continue"><span class="tsk">C</span> <span class="tslContinue">Continue</span></button>
       <button class="titleMenuItem" data-action="delete"><span class="tsk">D</span> Delete Save</button>
     </div>
     <div class="titleSlots" id="titleSlots" hidden>
