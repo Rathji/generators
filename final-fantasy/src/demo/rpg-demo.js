@@ -463,6 +463,8 @@ function moveToMap(mapId, x, y, facing = "S") {
   window.ff.fog.discoverRadius(mapId, x, y, 2);
   // Task #226: area music follows the map.
   window.ff.music?.setLocation(mapId);
+  // Task #231: visiting a place records it in the Codex.
+  window.ff.codex?.discover("locations", mapId);
   renderGrid();
   // Task #120: crossing a region boundary dips the screen (fade out/in) so
   // the new region "arrives" — fire-and-forget, the swap already happened.
@@ -553,6 +555,8 @@ function endBattle() {
   const partyAlive = window.game.party.members.filter((m) => m.isAlive()).length;
   if (alive.length === 0) {
     const result = window.ff.rewards.resolve(battle.enemies);
+    // Task #231: defeating a foe records it in the Codex.
+    window.ff.codex?.discoverMany("enemies", battle.enemies.map((e) => e.id));
     // Task #127: terminal state on a win.
     battle.states?.finish("victory");
     window.ff.sounds.trigger(result.levelUps.length ? "levelUp" : "victory");
@@ -1900,6 +1904,7 @@ export function startGame(opts = {}) {
   if (window.ff.director.isRunning()) window.ff.director.advance();
   const sqStart = window.ff.sideQuests.start("herbalists_request");
   if (sqStart.ok) log("Side quest accepted: " + sqStart.name);
+  window.ff.codex?.discover("quests", "herbalists_request");
   advancePlot();
   advanceStory();
 }
@@ -1918,6 +1923,8 @@ export function startRpgDemo() {
     mage.hp = mage.getStats().maxHp;
     if (!mage.knowsSpell("firaga")) mage.learnSpell("firaga");
     if (!mage.knowsSpell("water")) mage.learnSpell("water");
+    window.ff.codex?.discover("spells", "firaga");
+    window.ff.codex?.discover("spells", "water");
     mage.mp = 40;
   }
   window.game.inventory.add("potion", 2);
@@ -1943,6 +1950,7 @@ export function startRpgDemo() {
   if (window.ff.director.isRunning()) window.ff.director.advance();
   const sqStart = window.ff.sideQuests.start("herbalists_request");
   if (sqStart.ok) log("Side quest accepted: " + sqStart.name);
+  window.ff.codex?.discover("quests", "herbalists_request");
   advancePlot();
   advanceStory();
 }

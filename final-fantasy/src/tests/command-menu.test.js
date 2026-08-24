@@ -43,8 +43,8 @@ export function run() {
 
   const view = cm.open();
   check("open returns root view", !!view && view.title === "Command");
-  check("root has five items", view.items.length === 5);
-  check("root order", view.items.map((i) => i.id).join(",") === "items,magic,equip,status,formation");
+  check("root has base sections plus codex and map", view.items.length === 7);
+  check("root order", view.items.map((i) => i.id).join(",") === "items,magic,equip,status,formation,codex,map");
   const byId = (id) => view.items.find((i) => i.id === id);
   check("items enabled (potions)", byId("items").disabled === false);
   check("magic enabled (white mage cure)", byId("magic").disabled === false);

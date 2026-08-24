@@ -32,13 +32,28 @@ export async function run() {
   const menu = document.getElementById("titleMenu");
   check("title menu mounted", !!menu);
   const btns = [...document.querySelectorAll(".titleMenuItem")];
-  check("three menu items", btns.length === 3);
-  check("menu order", btns.map((b) => b.dataset.action).join(",") === "new,continue,delete");
-  check("hint present", !!document.getElementById("titleHint"));
+  check("four menu items", btns.length === 4);
+  check("menu order", btns.map((b) => b.dataset.action).join(",") === "new,continue,delete,audio");
+  check("hint mentions audio", (document.getElementById("titleHint")?.textContent ?? "").includes("A Audio"));
   check("slots panel hidden in menu mode", document.getElementById("titleSlots").hidden === true);
   check("new game cursor by default", btns[0].classList.contains("cursor"));
   check("continue disabled with no saves", btns[1].classList.contains("disabled"));
   check("delete disabled with no saves", btns[2].classList.contains("disabled"));
+
+  // Task #227: the title screen has its own Audio toggle, defaulting to OFF,
+  // and it mirrors the in-game master audio state.
+  const audioBtn = document.querySelector('.titleMenuItem[data-action="audio"]');
+  const audioLabel = audioBtn.querySelector(".tslAudio");
+  const musicFix = window.ff.music;
+  const soundsFix = window.ff.sounds;
+  musicFix.setMuted(true);
+  soundsFix.setMuted(true);
+  window.ff.titleScreen?.show(); // re-render so the Audio label reflects state
+  check("title audio default off label", audioLabel.textContent === "Audio: Off");
+  audioBtn.click();
+  check("title audio toggles on", window.ff.music.muted === false && window.ff.sounds.muted === false && audioLabel.textContent === "Audio: On");
+  audioBtn.click();
+  check("title audio toggles off", window.ff.music.muted === true && window.ff.sounds.muted === true && audioLabel.textContent === "Audio: Off");
 
   // Write a save through the boot system, re-open the slots view, verify meta renders.
   boot.newGame();

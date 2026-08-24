@@ -20,6 +20,7 @@ export class Inventory {
     this.maxSlots = opts.maxSlots ?? 30;
     this.maxWeight = opts.maxWeight ?? 100;
     this.stacks = new Map(); // itemId -> number[] of per-stack counts
+    this.onAdd = opts.onAdd ?? null; // (itemId, count) => void
   }
 
   item(itemId) {
@@ -112,6 +113,7 @@ export class Inventory {
       cur.push(put);
       remaining -= put;
     }
+    if (this.onAdd) this.onAdd(itemId, count);
     return true;
   }
 

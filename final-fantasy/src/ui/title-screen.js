@@ -30,6 +30,7 @@ function render() {
   const items = ctl.items();
   if (!inSlots) {
     wrap.querySelectorAll(".titleMenuItem").forEach((btn, i) => {
+      if (btn.dataset.action === "audio") return;
       const item = items[i];
       btn.classList.toggle("disabled", !item.enabled);
       btn.classList.toggle("cursor", ctl.cursor === i);
@@ -74,7 +75,13 @@ function render() {
     ? ctl.armed
       ? "Choose a save to DELETE \u2014 \u2191\u2193 / 1-3 + Enter \u00b7 Esc to cancel"
       : "Choose a save \u2014 \u2191\u2193 / 1-3 + Enter \u00b7 Esc back"
-    : "N New Game \u00b7 C Continue \u00b7 D Delete \u00b7 \u2191\u2193 choose \u00b7 Enter confirm";
+    : "N New Game \u00b7 C Continue \u00b7 D Delete \u00b7 A Audio \u00b7 \u2191\u2193 choose \u00b7 Enter confirm";
+
+  const audioLabel = wrap.querySelector(".tslAudio");
+  if (audioLabel) {
+    const muted = window.ff?.music?.muted ?? true;
+    audioLabel.textContent = muted ? "Audio: Off" : "Audio: On";
+  }
 }
 
 function build(callbacks) {
@@ -86,6 +93,7 @@ function build(callbacks) {
       <button class="titleMenuItem" data-action="new"><span class="tsk">N</span> New Game</button>
       <button class="titleMenuItem" data-action="continue"><span class="tsk">C</span> <span class="tslContinue">Continue</span></button>
       <button class="titleMenuItem" data-action="delete"><span class="tsk">D</span> Delete Save</button>
+      <button class="titleMenuItem titleAudioItem" data-action="audio"><span class="tsk">A</span> <span class="tslAudio">Audio</span></button>
     </div>
     <div class="titleSlots" id="titleSlots" hidden>
       <div class="titleSlot" data-slot="A"><div class="tsl tslName"></div><div class="tsl tslMeta"></div><div class="tsl tslSub"></div></div>
@@ -113,6 +121,7 @@ function build(callbacks) {
       if (action === "new") ctl.confirm();
       else if (action === "continue") ctl.openSlots(false);
       else if (action === "delete") ctl.openSlots(true);
+      else if (action === "audio") toggleTitleAudio();
       render();
     });
   });
@@ -155,12 +164,23 @@ function build(callbacks) {
       if (k === "n") { ctl.cursor = 0; ctl.confirm(); render(); return; }
       if (k === "c") { ctl.cursor = 1; ctl.confirm(); render(); return; }
       if (k === "d") { ctl.cursor = 2; ctl.confirm(); render(); return; }
+      if (k === "a") { ctl.cursor = 3; toggleTitleAudio(); render(); return; }
     } else {
       const n = parseInt(key, 10);
       if (n >= 1 && n <= 3) { ctl.cursor = n - 1; ctl.confirm(); render(); }
     }
   };
   document.addEventListener("keydown", onKey);
+}
+
+function toggleTitleAudio() {
+  const m = window.ff?.music;
+  if (!m) return;
+  m.unlock?.();
+  window.ff.sounds?.unlock?.();
+  const next = !m.muted;
+  m.setMuted(next);
+  window.ff.sounds?.setMuted?.(next);
 }
 
 // Build the interactive title screen once (idempotent).

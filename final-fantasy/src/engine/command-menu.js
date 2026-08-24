@@ -8,6 +8,7 @@ import { EquipSystem, SLOTS } from "./equipment.js";
 import { ITEMS } from "../data/items.js";
 import { SPELLS } from "../data/spells.js";
 import { COMMAND_MENU } from "../data/menu-config.js";
+import { CODEX_SECTIONS } from "../data/codex.js";
 
 const ALLY_SCOPES = new Set(["single-ally", "all-allies", "self"]);
 
@@ -29,7 +30,10 @@ export class CommandMenuSystem {
     this.consumables = opts.consumables ?? null;
     this.spells = opts.spells ?? null;
     this.state = opts.state ?? null;
+    this.codex = opts.codex ?? null;
+    this.worldMap = opts.worldMap ?? null;
     this.config = opts.config ?? COMMAND_MENU;
+    this.sections = opts.sections ?? CODEX_SECTIONS;
     this.equip = opts.equip ?? new EquipSystem(this.inventory);
     this.menu = opts.menu ?? new MenuSystem();
     this.log = opts.log ?? null;
@@ -201,8 +205,132 @@ export class CommandMenuSystem {
       { id: "equip", label: "Equip", hint: "Change gear", action: () => this._push("equip", this._buildEquip, null) },
       { id: "status", label: "Status", hint: "View stats", action: () => this._push("status", this._buildStatus, null) },
       { id: "formation", label: "Formation", hint: "Reorder party", disabled: members.length < 2, action: () => this._push("formation", this._buildFormation, null) },
+      { id: "codex", label: "Codex", hint: "Discovered lore", action: () => this._push("codex", this._buildCodex, null) },
+      { id: "map", label: "Map", hint: "World overview", action: () => this._push("map", this._buildWorldMap, null) },
     ];
     return { title: this.config.title, items };
+  };
+
+  // ----- codex (Task #236) ------------------------------------------------------
+
+  _buildCodex = () => {
+    const items = [];
+    for (const s of this.sections) {
+      const info = this.codex?.sectionInfo(s.id);
+      items.push({
+        id: "codex_" + s.id,
+        label: (info ? info.label : s.label) + "  " + (info ? info.known + "/" + info.total : ""),
+        hint: info && info.total ? Math.round((100 * info.known) / info.total) + "% discovered" : "",
+        action: () => this._push("codex_section", this._buildCodexSection, s.id),
+      });
+    }
+    return { title: "Codex", items };
+  };
+
+  _buildCodexSection = (section) => {
+    const items = [];
+    const entries = this.codex?.entries(section) ?? [];
+    for (const e of entries) {
+      if (!e.discovered) {
+        items.push({ id: "codex_e_" + e.id, label: "?????", hint: "Not yet discovered", action: () => this._push("codex_detail", this._buildCodexDetail, section + ":" + e.id) });
+        continue;
+      }
+      items.push({
+        id: "codex_e_" + e.id,
+        label: e.name,
+        hint: this._codexHint(e),
+        action: () => this._push("codex_detail", this._buildCodexDetail, section + ":" + e.id),
+      });
+    }
+    items.unshift({ id: "back", label: "← Back", action: () => this._replace("codex", this._buildCodex, null) });
+    const def = this.sections.find((s) => s.id === section);
+    return { title: "Codex — " + (def?.label ?? section), items };
+  };
+
+  _codexHint(e) {
+    if (e.kind === "enemy") return [e.elements, e.drops].filter(Boolean).join(" · ") || e.stats?.HP + " HP";
+    if (e.kind === "spell") return (e.kind2 ?? "") + (e.element ? " · " + e.element : "");
+    if (e.kind === "item") return (e.rarity ?? "") + (e.type ? " · " + e.type : "");
+    if (e.kind === "class") return "Adventuring class";
+    if (e.kind === "location") return e.region;
+    if (e.kind === "quest") return (e.objectives?.length ?? 0) + " objective" + (e.objectives?.length === 1 ? "" : "s");
+    return "";
+  }
+
+  _buildCodexDetail = (ref) => {
+    const [section, id] = ref.split(":");
+    const e = this.codex?.entry(section, id);
+    const rows = [];
+    if (e) {
+      if (e.kind === "enemy") {
+        if (e.boss) rows.push({ id: "d_boss", label: "Boss", hint: "A notable foe", disabled: true });
+        for (const [k, v] of Object.entries(e.stats ?? {})) rows.push({ id: "d_" + k, label: k, hint: String(v), disabled: true });
+        if (e.elements) rows.push({ id: "d_elem", label: "Elements", hint: e.elements, disabled: true });
+        rows.push({ id: "d_lore", label: "Lore", hint: e.lore ?? "No account.", disabled: true });
+      } else if (e.kind === "spell") {
+        rows.push({ id: "d_mp", label: "MP", hint: String(e.mp), disabled: true });
+        rows.push({ id: "d_target", label: "Target", hint: e.target ?? "—", disabled: true });
+        if (e.element) rows.push({ id: "d_elem", label: "Element", hint: e.element, disabled: true });
+        rows.push({ id: "d_power", label: "Power", hint: String(e.power ?? "—"), disabled: true });
+      } else if (e.kind === "item") {
+        rows.push({ id: "d_type", label: "Type", hint: (e.type ?? "") + (e.rarity ? " · " + e.rarity : ""), disabled: true });
+        rows.push({ id: "d_desc", label: "Description", hint: e.description ?? "", disabled: true });
+      } else if (e.kind === "class") {
+        for (const [k, v] of Object.entries(e.stats ?? {})) rows.push({ id: "d_" + k, label: k, hint: String(v), disabled: true });
+        if (e.spells?.length) rows.push({ id: "d_spells", label: "Spells", hint: e.spells.join(" · "), disabled: true });
+      } else if (e.kind === "location") {
+        rows.push({ id: "d_region", label: "Region", hint: e.region ?? "", disabled: true });
+        rows.push({ id: "d_lore", label: "Lore", hint: e.lore ?? "", disabled: true });
+      } else if (e.kind === "quest") {
+        rows.push({ id: "d_desc", label: "Goal", hint: e.description ?? "", disabled: true });
+        rows.push({ id: "d_obj", label: "Objectives", hint: e.objectives?.join(" · ") ?? "", disabled: true });
+      }
+    }
+    rows.push({ id: "back", label: "← Back", action: () => this._replace("codex_section", this._buildCodexSection, section) });
+    return { title: (e?.name ?? "Codex") + (e?.discovered ? "" : " — ???"), items: rows };
+  };
+
+  // ----- map (Task #237) ------------------------------------------------------
+
+  _buildWorldMap = () => {
+    const items = [];
+    if (this.worldMap) {
+      const prog = this.worldMap.progress();
+      const legend = this.worldMap.legend();
+      items.push({
+        id: "map_progress",
+        label: `Regions explored  ${prog.visited}/${prog.total}`,
+        hint: prog.visited + " of " + prog.total + " regions charted",
+        disabled: true,
+      });
+      for (const r of legend) {
+        items.push({
+          id: "map_r_" + r.id,
+          label: r.letter + "  " + r.name + (r.visited ? "  ●" : ""),
+          hint: r.visited ? "Explored" : "Uncharted",
+          action: () => this._push("map_detail", this._buildMapRegion, r.id),
+        });
+      }
+    } else {
+      items.push({ id: "map_none", label: "No map available", hint: "", disabled: true });
+    }
+    items.unshift({ id: "back", label: "← Back", action: () => this._replace("root", this._buildRoot, null) });
+    return { title: "World Map", items };
+  };
+
+  _buildMapRegion = (id) => {
+    const region = this.worldMap?.legend().find((r) => r.id === id);
+    const rows = [];
+    if (region) {
+      rows.push({ id: "mr_name", label: region.name, hint: region.visited ? "Explored" : "Uncharted", disabled: true });
+      if (region.visited) {
+        rows.push({ id: "mr_maps", label: "Areas", hint: (this.worldMap.region(id)?.maps ?? []).join(" · "), disabled: true });
+      } else {
+        rows.push({ id: "mr_hint", label: "??", hint: "Travel here to record its lore.", disabled: true });
+      }
+    }
+    rows.push({ id: "back", label: "← Back", action: () => this._replace("map", this._buildWorldMap, null) });
+    return { title: "World Map", items: rows };
   };
 
   // ----- items (Task #213) ----------------------------------------------------

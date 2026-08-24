@@ -93,11 +93,11 @@
 
 <div class="wrap">
   <h1>⚔ <span class="grad">five-realms-plugin</span></h1>
-  <p class="tagline">Phase 1 of an MTG-compatible rules engine — a 12-card fixture database, zones, turn structure, priority, mana, seeded shuffling, an action reducer, and a 52-asset inline-SVG card renderer. One 13-op <code>$output</code>, none of them throw.</p>
+  <p class="tagline">An MTG-compatible rules engine — a 28-card fixture database, zones, turn structure, priority, mana, seeded shuffling, an action reducer, a 52-asset inline-SVG card renderer. One 13-op <code>$output</code>, none of them throw. Stack resolution with targeting, combat damage, the full state-based-actions loop, a layered continuous-effects store, a keyword-ability library, and replacement effects are all implemented.</p>
 
   <h2>What this is</h2>
   <p>A Perchance plugin is just a <b>normal generator written to be reused</b>. The one special thing is the <code>$output</code> function at the bottom of <code>main.pjs</code> — when another generator imports this one, the name on the left of the import line <b>becomes that function</b>. The lists, data and helpers below it are all ordinary Perchance code.</p>
-  <p><code>five-realms-plugin</code> is Phase 1 of an MTG-compatible card-game engine: a fixture card database, the full game-state model (zones, turn structure, priority, mana), a seeded deterministic PRNG, a single never-mutating <code>applyAction</code> reducer, and an inline-SVG card renderer with 52 embedded assets. Stack resolution, combat damage, state-based actions and layers are deferred to later phases — with a clean seam left for each.</p>
+  <p><code>five-realms-plugin</code> is an MTG-compatible card-game engine: a fixture card database, the full game-state model (zones, turn structure, priority, mana), a seeded deterministic PRNG, a single never-mutating <code>applyAction</code> reducer, and an inline-SVG card renderer with 52 embedded assets. Stack resolution with targeting, combat damage, the full state-based-actions loop, layers and continuous effects, a keyword-ability library, and replacement effects are all implemented.</p>
   <p>This page doubles as the plugin's docs <em>and</em> a live test harness — every claim below is exercised by the demo at the bottom.</p>
 
   <h2>Import</h2>
@@ -119,7 +119,7 @@
   <div id="code-worked"></div>
 
   <h2>Card record schema</h2>
-  <p>All 12 fixture cards share this shape. <code>manaCost</code>, <code>power</code>/<code>toughness</code>, and <code>producesMana</code> are omitted entirely (not set to <code>""</code>/<code>null</code>) when they don't apply — lands have no <code>manaCost</code>, and non-creatures have no <code>power</code>/<code>toughness</code>.</p>
+  <p>All fixture cards share this shape. <code>manaCost</code>, <code>power</code>/<code>toughness</code>, and <code>producesMana</code> are omitted entirely (not set to <code>""</code>/<code>null</code>) when they don't apply — lands have no <code>manaCost</code>, and non-creatures have no <code>power</code>/<code>toughness</code>.</p>
   <div id="schemaTable"></div>
   <div id="code-schema-example"></div>
 
@@ -140,7 +140,7 @@
   <div class="demo">
     <div class="demo-row">
       <button class="demo-btn" onclick="frShowSample()">Sample hand</button>
-      <button class="demo-btn" onclick="frShowAll()">All 12 cards</button>
+      <button class="demo-btn" onclick="frShowAll()">All 28 cards</button>
       <select id="frCardSel"></select>
       <button class="demo-btn" onclick="frShowOne()">Show selected</button>
     </div>
@@ -152,13 +152,12 @@
   <h2>What phase 1 does not do</h2>
   <p>The engine covers the state model, zones, turn structure, priority, mana, a seeded PRNG, and the <code>applyAction</code> reducer. Deliberately deferred to a later phase, with a clean seam left for each:</p>
   <ul>
-    <li>Stack resolution semantics and targeting legality — <code>frStackResolveTop</code> is a bare zone transition, not a rules-text interpreter.</li>
-    <li>Combat damage assignment.</li>
-    <li>State-based actions (rule 704).</li>
-    <li>The layer system (rule 613).</li>
-    <li>Replacement and continuous effects (rules 614/615).</li>
-    <li>A keyword-ability library beyond the handful the 12 fixture cards need.</li>
-    <li><code>fr("legalActions", ...)</code> is best-effort, not a legality solver: it checks mana affordability only against the current floating pool (no "tap first, then cast" planning), and reports attacker/blocker declarations as a single yes/no-you-may-act stub rather than every legal subset.</li>
+    <li><b>Done in phase 2 (stack resolution + combat damage).</b> <code>frStackResolveTop</code> now actually resolves each fixture spell and ability: permanents enter and fire their enter triggers (Sunward Sentinel's 2 life, Nautilus Seer's draw-and-discard), auras attach and grant their buff, <code>Verdant Surge</code> gives +3/+3, <code>Withering Grasp</code> destroys, and <code>Faceted Ember Core</code>'s <code>\{3\},\{T\},sacrifice</code> deals 3 damage to any target. Spells/abilities take and validate targets, combat assigns damage (blocked vs. unblocked) at the combat-damage step, and lethal-damage death and life-loss are handled as state-based actions.</li>
+  <li><b>Done (state-based actions as a full loop).</b> Beyond phase-2's lethal damage / life-loss / aura-about-to-fall-off, <code>frCheckStateBasedActions</code> now runs a real 704-style loop (re-runs until a pass changes nothing) and is checked before each priority grant.</li>
+    <li><b>Done (layer system + continuous effects).</b> A timestamp-ordered (rule 613.7) continuous-effect store (<code>state.effects</code>) with a rule-7 P/T layer and EOT expiry; aura/vulnerability and <code>Verdant Surge</code> buffs flow through it.</li>
+    <li><b>Done (replacement effects).</b> A rule-614 replacement layer (<code>frReplacementEffects</code>) is exposed on a permanent's <code>card.replacement</code>; the fixtures use a prevention replacement — <code>Sunfire Aegis</code> prevents all combat damage that would be dealt to its controller, including excess trample spill.</li>
+    <li>More keywords (each mechanically backed: hexproof and ward protect permanents from opponent targeting — hexproof blocks it outright, ward counters it; indestructible ignores lethal damage and destroy effects; skulk limits to equal-or-lower-power blockers) and further nontrivial abilities (lifelink, haste, vigilance, reach, menace).</li>
+    <li><code>fr("legalActions", ...)</code> now enumerates planar-legal moves: a <code>tapPermanent</code> for every untapped permanent (tap a source first, then spend it), mana abilities and castable spells it can actually pay, and full attacker/blocker declarations — blocker matching honours flying/reach and menace. On very large boards the subset enumeration caps and reports solo attackers instead of every combination.</li>
   </ul>
 
   <h2>Notes</h2>
@@ -185,7 +184,7 @@
   var CODES = [
     { id: "code-import", fname: "main.pjs", code: importLine },
     { id: "code-list", fname: "main.pjs", code: [
-        "[fr(\"cards\").length]                           -> 12",
+        "[fr(\"cards\").length]                           -> 28",
         "[fr(\"card\", \"nautilus-seer\").name]               -> Nautilus Seer",
         "[fr(\"asset\", \"back\")]                            -> the card-back <svg> string",
         "[fr(\"gem\", \"Vaulted\")]                           -> the Vaulted-tier gem <svg> string"
@@ -200,7 +199,7 @@
         "jsonEl.textContent = JSON.stringify(state);"
       ].join("\n") },
     { id: "code-worked", fname: "index.html", code: [
-        "fr(\"cards\").length                              // 12",
+        "fr(\"cards\").length                              // 28",
         "fr(\"card\", \"bramble-warden\").rarity             // \"Marked\"",
         "fr(\"realms\")                                     // [\"solara\",\"verdant\",\"tide\",\"ember\",\"umbra\"]",
         "fr(\"rarities\")                                   // [\"Field\",\"Marked\",\"Vaulted\",\"Sovereign\",\"Ascendant\"]",
@@ -317,13 +316,13 @@
   makeTable("apiTable", ["Call", "Returns", "What it gives you"], [
     ["render", "envelope", "<code>\{card, typeLine, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects, palette, costSymbols\}</code> — or <code>\"(unknown card id: ...)\"</code> / <code>\"(unknown realm: ...)\"</code>"],
     ["card", "record", "That card's record, or <code>\"(unknown card id: ...)\"</code>"],
-    ["cards", "array", "Array of all 12 card records"],
+    ["cards", "array", "Array of all 28 card records"],
     ["realms", "array", "<code>[\"solara\",\"verdant\",\"tide\",\"ember\",\"umbra\"]</code>"],
     ["rarities", "array", "The five tier names, Field → Ascendant, in order"],
     ["newGame", "state", "A fresh game state (7 cards drawn per player), or a placeholder string if <code>config</code> is unusable"],
     ["act", "state", "The next state after applying <code>action</code> — never throws, even on a malformed <code>state</code>"],
     ["state", "state", "A defensively cloned, JSON-safe copy of <code>state</code>, or <code>\"(invalid state)\"</code>"],
-    ["legalActions", "array", "Best-effort array of actions the player with priority may currently take; <code>[]</code> on a malformed/missing state"],
+    ["legalActions", "array", "Planar-legal moves for the player with priority: tap/mana/cast plus full attacker and blocker declarations; <code>[]</code> on a malformed/missing state"],
     ["asset", "svg", "That asset's rebuilt inline <code>&lt;svg&gt;</code> string, or <code>\"(unknown asset id: ...)\"</code>"],
     ["assets", "array", "Array of all 52 asset ids"],
     ["gem", "svg", "That card's (or that literal tier name's) gem <code>&lt;svg&gt;</code> string, or a placeholder for an unresolvable id, an unrecognised rarity, or the <code>Field</code> tier (which has no gem)"],

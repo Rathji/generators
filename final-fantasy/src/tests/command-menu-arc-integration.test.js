@@ -11,8 +11,13 @@ export async function run() {
     else out.failed++;
   };
 
-  const boot = window.ff?.boot;
-  const cm = window.ff?.commandMenu;
+  let boot = window.ff?.boot;
+  let cm = window.ff?.commandMenu;
+  if ((!boot || !cm) && typeof window !== "undefined") {
+    for (let i = 0; i < 40; i++) { if (window.ff?.boot && window.ff?.commandMenu) break; await new Promise((r) => setTimeout(r, 150)); }
+    boot = window.ff?.boot;
+    cm = window.ff?.commandMenu;
+  }
   if (!boot || !cm) {
     check("boot + commandMenu wired", false, "missing ff.boot/ff.commandMenu");
     return out;
@@ -36,7 +41,7 @@ export async function run() {
 
   // Root screen.
   cm.open();
-  check("root command screen", cm.render().items.map((i) => i.id).join(",") === "items,magic,equip,status,formation");
+  check("root command screen", cm.render().items.map((i) => i.id).join(",") === "items,magic,equip,status,formation,codex,map");
   check("items row enabled", !cm.render().items.find((i) => i.id === "items").disabled);
 
   // Items -> Potion -> Hero.
@@ -114,7 +119,7 @@ export async function run() {
     window.rpgDemo.helpers.toggleCommandMenu();
     check("panel opens", panel.hidden === false);
     const rows = () => [...document.querySelectorAll("#rpgMenuList .menu-row")];
-    check("root rows rendered", rows().length === 5);
+    check("root rows rendered", rows().length === 7);
     const byId = (id) => rows().find((r) => r.dataset.id === id);
     byId("items").click();
     byId("item_potion").click();

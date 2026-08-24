@@ -140,6 +140,8 @@ import { GameBootSystem } from "./engine/boot.js";
 import { SaveSlotSystem } from "./engine/save-slots.js";
 import { TitleController } from "./engine/title.js";
 import { CommandMenuSystem } from "./engine/command-menu.js";
+import { CodexSystem } from "./engine/codex.js";
+import { WorldMapSystem } from "./engine/world-map.js";
 import { NEW_GAME } from "./data/new-game.js";
 import { setExtraItemMods } from "./engine/stats.js";
 import { setExtraBuffMods } from "./engine/stats.js";
@@ -216,8 +218,10 @@ function createDefaultParty() {
   return party;
 }
 
+const codex = new CodexSystem({ storage: typeof window !== "undefined" ? window.localStorage : null });
+
 function createGame() {
-  const inventory = new Inventory({ maxSlots: 30, maxWeight: 100 });
+  const inventory = new Inventory({ maxSlots: 30, maxWeight: 100, onAdd: (id) => { if (codex) codex.discover("items", id); } });
   inventory.add("potion", 5);
   inventory.add("crystalKey", 1);
   const party = createDefaultParty();
@@ -455,6 +459,7 @@ const ending = new EndingSystem({ state: game.state, cinematic, completion });
 const questLog = new QuestLogSystem({ quests, director, sideQuests });
 const consumables = new ConsumableSystem({ inventory: game.inventory, party: game.party });
 const equipStats = new EquipmentStatSystem(enchanting.decoratedItemDb());
+const worldMap = new WorldMapSystem({ codex });
 const commandMenu = new CommandMenuSystem({
   party: game.party,
   inventory: game.inventory,
@@ -462,6 +467,8 @@ const commandMenu = new CommandMenuSystem({
   spells: spellcasting,
   state: game.state,
   equip: new EquipSystem(game.inventory),
+  codex,
+  worldMap,
 });
 const rarity = new ItemRaritySystem();
 const itemTriggers = new ItemTriggerSystem(dialogueWorld);
@@ -867,6 +874,8 @@ window.ff = {
   consumables,
   equipStats,
   commandMenu,
+  codex,
+  worldMap,
   rarity,
   itemTriggers,
   menu,

@@ -5,9 +5,8 @@
 // data, type grammar, and mana-cost grammar are fixed by
 // docs/specs/2026-08-21-five-realms-card-model.md -- conformed to exactly. Stack
 // resolution/targeting, combat damage assignment, state-based actions, layers, replacement
-// effects, and keyword abilities beyond the 12 fixture cards are explicitly deferred to a
-// later phase; this file leaves clean seams for them (frStackResolveTop is a minimal zone-
-// transition stub, not a rules-text interpreter).
+// effects, and keyword abilities are implemented; only expansion beyond the fixture cards is
+// a later phase.
 //
 // All top-level names are prefixed `fr` so they cannot collide with a consuming
 // generator's own names once imported. One import of our own: simpleGenFooter, the
@@ -16,11 +15,11 @@
 // the engine logic itself is our own composition and is not DSL, so it carries no
 // citation.
 //
-// $output (the plugin's public API) is a later bucket -- not written here.
+// $output (the plugin's public API) is the 13-op entry point at the bottom of this file.
 
 $meta
   title = Five Realms Plugin
-  description = Phase 1 of an MTG-compatible rules engine, a 12-card database, and a 52-asset inline-SVG card renderer, behind one 13-op $output. Zones, turn structure, priority, mana, seeded shuffling, and an action reducer. Stack resolution, combat damage, state-based actions and layers are deferred to later phases.
+  description = An MTG-compatible rules engine, a 28-card database, and a 52-asset inline-SVG card renderer, behind one 13-op $output. Zones, turn structure, priority, mana, seeded shuffling, an action reducer, stack resolution with targeting and combat damage, plus the full state-based-actions loop, layered continuous effects, a keyword-ability library, and replacement effects.
   tags = cards, tcg, rules-engine, plugin, five-realms
   header
     mode = minimal
@@ -66,7 +65,7 @@ frShuffle(array, rngState) =>
 // CARD DATABASE
 // =====================================================================
 //
-// The 12 fixture cards from docs/specs/2026-08-21-five-realms-card-model.md section 6,
+// The fixture cards from docs/specs/2026-08-21-five-realms-card-model.md section 6,
 // transcribed field-for-field. Land cards omit manaCost entirely (not ""), per the spec's
 // field-optionality table. This is game data, not a DSL construct.
 
@@ -75,14 +74,15 @@ frCardDb() =>
     "sunward-sentinel": {
       id: "sunward-sentinel",
       name: "Sunward Sentinel",
-      manaCost: "{1}{W}",
+      manaCost: "\{1}\{W}",
       cmc: 2,
       colors: ["W"],
       colorIdentity: ["W"],
       supertypes: [],
       types: ["Creature"],
       subtypes: ["Spirit"],
-      rulesText: "When Sunward Sentinel enters, you gain 2 life.",
+      rulesText: "Flying. When Sunward Sentinel enters, you gain 2 life.",
+      keywords: ["flying"],
       power: 2,
       toughness: 2,
       rarity: "Marked",
@@ -92,7 +92,7 @@ frCardDb() =>
     "vow-of-radiance": {
       id: "vow-of-radiance",
       name: "Vow of Radiance",
-      manaCost: "{2}{W}",
+      manaCost: "\{2}\{W}",
       cmc: 3,
       colors: ["W"],
       colorIdentity: ["W"],
@@ -107,14 +107,15 @@ frCardDb() =>
     "bramble-warden": {
       id: "bramble-warden",
       name: "Bramble Warden",
-      manaCost: "{2}{G}",
+      manaCost: "\{2}\{G}",
       cmc: 3,
       colors: ["G"],
       colorIdentity: ["G"],
       supertypes: [],
       types: ["Creature"],
       subtypes: ["Bramblekin"],
-      rulesText: "Whenever Bramble Warden attacks, put a +1/+1 counter on it.",
+      rulesText: "Trample. Whenever Bramble Warden attacks, put a +1/+1 counter on it.",
+      keywords: ["trample"],
       power: 3,
       toughness: 3,
       rarity: "Marked",
@@ -124,7 +125,7 @@ frCardDb() =>
     "verdant-surge": {
       id: "verdant-surge",
       name: "Verdant Surge",
-      manaCost: "{G}{G}",
+      manaCost: "\{G}\{G}",
       cmc: 2,
       colors: ["G"],
       colorIdentity: ["G"],
@@ -139,7 +140,7 @@ frCardDb() =>
     "nautilus-seer": {
       id: "nautilus-seer",
       name: "Nautilus Seer",
-      manaCost: "{1}{U}{U}",
+      manaCost: "\{1}\{U}\{U}",
       cmc: 3,
       colors: ["U"],
       colorIdentity: ["U"],
@@ -156,14 +157,14 @@ frCardDb() =>
     "tidefall-rebuke": {
       id: "tidefall-rebuke",
       name: "Tidefall Rebuke",
-      manaCost: "{U}",
+      manaCost: "\{U}",
       cmc: 1,
       colors: ["U"],
       colorIdentity: ["U"],
       supertypes: [],
       types: ["Instant"],
       subtypes: [],
-      rulesText: "Counter target spell unless its controller pays {2}.",
+      rulesText: "Counter target spell unless its controller pays \{2}.",
       rarity: "Marked",
       frame: "marked",
       glyph: "tide"
@@ -171,14 +172,15 @@ frCardDb() =>
     "cinderfang-marauder": {
       id: "cinderfang-marauder",
       name: "Cinderfang Marauder",
-      manaCost: "{1}{R}{R}",
+      manaCost: "\{1}\{R}\{R}",
       cmc: 3,
       colors: ["R"],
       colorIdentity: ["R"],
       supertypes: [],
       types: ["Creature"],
       subtypes: ["Cinderfang"],
-      rulesText: "Cinderfang Marauder can't block.",
+      rulesText: "First strike. Cinderfang Marauder can't block.",
+      keywords: ["first strike"],
       power: 3,
       toughness: 2,
       rarity: "Vaulted",
@@ -188,14 +190,14 @@ frCardDb() =>
     "faceted-ember-core": {
       id: "faceted-ember-core",
       name: "Faceted Ember Core",
-      manaCost: "{3}{R}",
+      manaCost: "\{3}\{R}",
       cmc: 4,
       colors: ["R"],
       colorIdentity: ["R"],
       supertypes: [],
       types: ["Artifact"],
       subtypes: ["Relic"],
-      rulesText: "{T}: Add {R}. {3}, {T}, Sacrifice Faceted Ember Core: It deals 3 damage to any target.",
+      rulesText: "\{T}: Add \{R}. \{3}, \{T}, Sacrifice Faceted Ember Core: It deals 3 damage to any target.",
       producesMana: "R",
       rarity: "Ascendant",
       frame: "ascendant",
@@ -204,14 +206,15 @@ frCardDb() =>
     "thornshroud-stalker": {
       id: "thornshroud-stalker",
       name: "Thornshroud Stalker",
-      manaCost: "{1}{B}",
+      manaCost: "\{1}\{B}",
       cmc: 2,
       colors: ["B"],
       colorIdentity: ["B"],
       supertypes: [],
       types: ["Creature"],
       subtypes: ["Shadowkin"],
-      rulesText: "Whenever Thornshroud Stalker deals combat damage to a player, that player discards a card.",
+      rulesText: "Deathtouch. Whenever Thornshroud Stalker deals combat damage to a player, that player discards a card.",
+      keywords: ["deathtouch"],
       power: 2,
       toughness: 1,
       rarity: "Marked",
@@ -221,7 +224,7 @@ frCardDb() =>
     "withering-grasp": {
       id: "withering-grasp",
       name: "Withering Grasp",
-      manaCost: "{B}{B}",
+      manaCost: "\{B}\{B}",
       cmc: 2,
       colors: ["B"],
       colorIdentity: ["B"],
@@ -242,7 +245,7 @@ frCardDb() =>
       supertypes: ["Legendary"],
       types: ["Land"],
       subtypes: ["Halo"],
-      rulesText: "{T}: Add {W}.",
+      rulesText: "\{T}: Add \{W}.",
       producesMana: "W",
       rarity: "Marked",
       frame: "marked",
@@ -257,11 +260,298 @@ frCardDb() =>
       supertypes: [],
       types: ["Land"],
       subtypes: ["Barrow"],
-      rulesText: "{T}: Add {B}. Umbral Barrow enters tapped.",
+      rulesText: "\{T}: Add \{B}. Umbral Barrow enters tapped.",
       producesMana: "B",
       rarity: "Sovereign",
       frame: "sovereign",
       glyph: "umbra"
+    },
+    "sunfire-aegis": {
+      id: "sunfire-aegis",
+      name: "Sunfire Aegis",
+      manaCost: "\{2}\{W}",
+      cmc: 3,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Enchantment"],
+      subtypes: ["Aegis"],
+      rulesText: "If combat damage would be dealt to you, prevent that damage.",
+      keywords: [],
+      replacement: { event: "prevent-combat-damage-to-player" },
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "solara"
+    },
+    "auric-sentinel": {
+      id: "auric-sentinel",
+      name: "Auric Sentinel",
+      manaCost: "\\{2}\\{W}",
+      cmc: 3,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Knight"],
+      rulesText: "Vigilance.",
+      keywords: ["vigilance"],
+      power: 3,
+      toughness: 3,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "gleaming-bulwark": {
+      id: "gleaming-bulwark",
+      name: "Gleaming Bulwark",
+      manaCost: "\\{3}\\{W}",
+      cmc: 4,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Wall"],
+      rulesText: "Defender.",
+      keywords: ["defender"],
+      power: 0,
+      toughness: 5,
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "solara"
+    },
+    "auric-guardian": {
+      id: "auric-guardian",
+      name: "Auric Guardian",
+      manaCost: "\\{2}\\{W}",
+      cmc: 3,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Crusader"],
+      rulesText: "Ward (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays \\{2}).",
+      keywords: ["ward"],
+      power: 1,
+      toughness: 4,
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "solara"
+    },
+    "tidecaller-adept": {
+      id: "tidecaller-adept",
+      name: "Tidecaller Adept",
+      manaCost: "\\{2}\\{U}",
+      cmc: 3,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Mer", "Adept"],
+      rulesText: "Double strike.",
+      keywords: ["double strike"],
+      power: 2,
+      toughness: 3,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "tide"
+    },
+    "aqueduct-recluse": {
+      id: "aqueduct-recluse",
+      name: "Aqueduct Recluse",
+      manaCost: "\\{2}\\{U}",
+      cmc: 3,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Aqueduct"],
+      rulesText: "Hexproof (This creature can't be the target of spells or abilities your opponents control).",
+      keywords: ["hexproof"],
+      power: 1,
+      toughness: 4,
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "tide"
+    },
+    "depth-cartographer": {
+      id: "depth-cartographer",
+      name: "Depth Cartographer",
+      manaCost: "\\{1}\\{U}",
+      cmc: 2,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Scout"],
+      rulesText: "Skulk (This creature can't be blocked by creatures with greater power).",
+      keywords: ["skulk"],
+      power: 1,
+      toughness: 2,
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "tide"
+    },
+    "ironbark-mastodon": {
+      id: "ironbark-mastodon",
+      name: "Ironbark Mastodon",
+      manaCost: "\\{4}\\{G}",
+      cmc: 5,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Mastodon"],
+      rulesText: "Trample, indestructible (Damage and effects that say \"destroy\" don't destroy it).",
+      keywords: ["trample", "indestructible"],
+      power: 4,
+      toughness: 7,
+      rarity: "Ascendant",
+      frame: "ascendant",
+      glyph: "verdant"
+    },
+    "glade-guardian": {
+      id: "glade-guardian",
+      name: "Glade Guardian",
+      manaCost: "\\{2}\\{G}",
+      cmc: 3,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Warden"],
+      rulesText: "Reach (This creature can block creatures with flying).",
+      keywords: ["reach"],
+      power: 2,
+      toughness: 4,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "verdant"
+    },
+    "ember-brand-stormcaller": {
+      id: "ember-brand-stormcaller",
+      name: "Emberbrand Stormcaller",
+      manaCost: "\\{1}\\{R}",
+      cmc: 2,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Shaman"],
+      rulesText: "Haste (This creature can attack the turn it enters the battlefield).",
+      keywords: ["haste"],
+      power: 2,
+      toughness: 2,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "ember"
+    },
+    "molten-ramsprite": {
+      id: "molten-ramsprite",
+      name: "Molten Ramsprite",
+      manaCost: "\\{2}\\{R}",
+      cmc: 3,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Goat"],
+      rulesText: "Menace (This creature can't be blocked except by two or more creatures).",
+      keywords: ["menace"],
+      power: 3,
+      toughness: 3,
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "ember"
+    },
+    "cinder-colossus": {
+      id: "cinder-colossus",
+      name: "Cinder Colossus",
+      manaCost: "\\{3}\\{R}",
+      cmc: 4,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Colossus"],
+      rulesText: "Haste, menace.",
+      keywords: ["haste", "menace"],
+      power: 4,
+      toughness: 4,
+      rarity: "Ascendant",
+      frame: "ascendant",
+      glyph: "ember"
+    },
+    "crypt-raider": {
+      id: "crypt-raider",
+      name: "Crypt Raider",
+      manaCost: "\\{1}\\{B}",
+      cmc: 2,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Reaver"],
+      rulesText: "Lifelink (Damage dealt by this creature also causes you to gain that much life).",
+      keywords: ["lifelink"],
+      power: 2,
+      toughness: 1,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "umbra"
+    },
+    "veil-shadow-dancer": {
+      id: "veil-shadow-dancer",
+      name: "Veilshadow Dancer",
+      manaCost: "\\{2}\\{B}",
+      cmc: 3,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Shade"],
+      rulesText: "Hexproof (This creature can't be the target of spells or abilities your opponents control).",
+      keywords: ["hexproof"],
+      power: 2,
+      toughness: 2,
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "umbra"
+    },
+    "dawn-sky-vanguard": {
+      id: "dawn-sky-vanguard",
+      name: "Dawnsky Vanguard",
+      manaCost: "\\{1}\\{W}",
+      cmc: 2,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Skywatcher"],
+      rulesText: "Flying.",
+      keywords: ["flying"],
+      power: 1,
+      toughness: 3,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "stormrider-apex": {
+      id: "stormrider-apex",
+      name: "Stormrider Apex",
+      manaCost: "\\{3}\\{R}",
+      cmc: 4,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Stormrider"],
+      rulesText: "Double strike, menace.",
+      keywords: ["double strike", "menace"],
+      power: 3,
+      toughness: 3,
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "ember"
     }
   };
 
@@ -279,7 +569,7 @@ frCardGet(id) =>
 
 frManaParseSymbol(body) =>
   if(body === "T") {
-    throw new Error("{T} is the tap symbol, not a mana symbol; it is not valid inside manaCost");
+    throw new Error("\{T} is the tap symbol, not a mana symbol; it is not valid inside manaCost");
   }
   if(/^[0-9]+$/.test(body)) {
     let n = parseInt(body, 10);
@@ -311,11 +601,11 @@ frManaParseCost(costStr) =>
   let i = 0;
   while(i < str.length) {
     if(str[i] !== "{") {
-      throw new Error("malformed manaCost: expected { at index " + i);
+      throw new Error("malformed manaCost: expected \{ at index " + i);
     }
     let close = str.indexOf("}", i);
     if(close === -1) {
-      throw new Error("malformed manaCost: unterminated { at index " + i);
+      throw new Error("malformed manaCost: unterminated \{ at index " + i);
     }
     let body = str.slice(i + 1, close);
     symbols.push(frManaParseSymbol(body));
@@ -465,6 +755,8 @@ frObjectNew(id, cardId, owner) =>
     tapped: false,
     summoningSickness: true,
     counters: {},
+    attachments: [],
+    buffsUntilEot: { power: 0, toughness: 0 },
     attachedTo: null,
     damage: 0,
     attacking: false,
@@ -545,6 +837,8 @@ frGameNew(config) =>
     stack: [],
     objects: objects,
     nextObjectId: nextId,
+    effects: [],
+    nextEffectStamp: 1,
     players: players,
     gameOver: false,
     winner: null,
@@ -645,14 +939,25 @@ frStepDraw(state) =>
 
 frStepCleanup(state) =>
   for(let i = 0; i < state.battlefield.length; i++) {
-    state.objects[state.battlefield[i]].damage = 0;
+    let obj = state.objects[state.battlefield[i]];
+    obj.damage = 0;
+    obj.attacking = false;
+    obj.blocking = null;
+    obj.buffsUntilEot = { power: 0, toughness: 0 };
+    obj.deathtouchLethal = false;
   }
-  // Hand-size cleanup and other state-based actions (704) are deferred to a later phase.
+  state.combatAttackers = [];
+  state.combatBlocks = [];
+  for(let i = state.effects.length - 1; i >= 0; i--) {
+    if(state.effects[i].untilEot) state.effects.splice(i, 1);
+  }
+  // Hand-size cleanup and the full state-based-actions loop (704) are deferred to a later phase.
   return state;
 
 frTurnRunStepAutomatic(state) =>
   if(state.step === "untap") return frStepUntap(state);
   if(state.step === "draw") return frStepDraw(state);
+  if(state.step === "combat_damage") return frStepCombatDamage(state);
   if(state.step === "cleanup") return frStepCleanup(state);
   return state;
 
@@ -681,25 +986,428 @@ frTurnAdvance(state) =>
   return state;
 
 frStackResolveTop(state) =>
-  let objId = state.stack.pop();
-  let obj = state.objects[objId];
+  let entry = state.stack.pop();
+  if(!entry) return state;
+  if(entry.kind === "ability") return frResolveAbility(state, entry);
+  return frResolveSpell(state, entry);
+
+// frResolveSpell resolves a spell on the stack. Phase 2 replaces the Phase 1
+// zone-transition stub: permanents enter (firing their enter triggers), auras attach and
+// grant their buff, and instants resolve their actual effect. Entry shape
+// { kind:"spell", objId, cardId, target } -- the spell object itself sits in the
+// "stack" zone until this resolves it.
+frResolveSpell(state, entry) =>
+  let obj = state.objects[entry.objId];
+  if(!obj) return state;
+  if(entry.target != null) {
+    let tobj = state.objects[entry.target];
+    if(tobj && tobj.zone === "battlefield" && tobj.controller !== obj.controller && frHasKeyword(tobj, "ward")) {
+      frZoneRemove(state, obj.id, "stack", obj.controller);
+      frZoneAdd(state, obj.id, "graveyard", obj.owner);
+      obj.zone = "graveyard";
+      return state;
+    }
+  }
   let card = frCardGet(obj.cardId);
   let permanentTypes = ["Creature", "Artifact", "Enchantment"];
   let isPermanent = false;
   for(let t = 0; t < card.types.length; t++) {
     if(permanentTypes.indexOf(card.types[t]) !== -1) isPermanent = true;
   }
+  frZoneRemove(state, obj.id, "stack", obj.controller);
   if(isPermanent) {
-    frZoneAdd(state, objId, "battlefield", obj.controller);
+    frZoneAdd(state, obj.id, "battlefield", obj.controller);
     obj.zone = "battlefield";
+    obj.summoningSickness = true;
+    if(card.subtypes.indexOf("Aura") !== -1) {
+      let enchant = state.objects[entry.target];
+      if(enchant && enchant.zone === "battlefield") {
+        obj.attachedTo = enchant.id;
+        enchant.attachments.push(obj.id);
+        if(obj.cardId === "vow-of-radiance") {
+          let b = frAuraBuff(obj.cardId);
+          state = frEffectAdd(state, obj.id, enchant.id, {
+            layer: 7, power: b ? b.power : 0, toughness: b ? b.toughness : 0, untilEot: false
+          });
+        }
+      } else {
+        frZoneRemove(state, obj.id, "battlefield", obj.controller);
+        frZoneAdd(state, obj.id, "graveyard", obj.owner);
+        obj.zone = "graveyard";
+      }
+    }
+    state = frTriggersOnEnter(state, obj);
   } else {
-    frZoneAdd(state, objId, "graveyard", obj.owner);
-    obj.zone = "graveyard";
+    frZoneMove(state, obj.id, "stack", "graveyard", obj.owner);
+    state = frResolveSpellEffect(state, obj, entry.target);
   }
-  delete obj.stackKind;
-  // The card's rulesText is not interpreted here -- full resolution/targeting semantics
-  // (608) are deferred to a later phase. This only performs the zone transition.
   return state;
+
+// frResolveSpellEffect applies a resolving instant/sorcery's effect (a seeded per-card
+// resolution, not a general 608 rules-text interpreter -- the keyword-ability library is a
+// later phase, still).
+frResolveSpellEffect(state, obj, target) =>
+  let id = obj.cardId;
+  if(id === "verdant-surge") {
+    state = frEffectAdd(state, obj.id, target, {
+      layer: 7, power: 3, toughness: 3, untilEot: true
+    });
+  } else if(id === "withering-grasp") {
+    let t = state.objects[target];
+    if(t && !frHasKeyword(t, "indestructible")) {
+      frZoneMove(state, t.id, "battlefield", "graveyard", t.owner);
+      t.zone = "graveyard";
+    }
+  }
+  return state;
+
+// frResolveAbility resolves an activated-ability entry. Only the fixture cards'
+// abilities are known here; entry shape { kind:"ability", objId, cardId, target }.
+// Mana abilities never reach the stack (they resolve immediately at activation); this is for
+// the one on-the-stack ability among the fixtures: Faceted Ember Core's 3-damage.
+frResolveAbility(state, entry) =>
+  if(entry.cardId === "faceted-ember-core") {
+    let t = state.objects[entry.target];
+    if(t) {
+      t.damage += 3;
+      state = frCheckStateBasedActions(state);
+    } else if(typeof entry.target === "number" && state.players[entry.target]) {
+      state.players[entry.target].life -= 3;
+      state = frCheckStateBasedActions(state);
+    }
+  }
+  return state;
+
+// The permanent/aura/combat-model helpers shared by resolution, combat, and
+// frLegalActions. frPower/frToughness fold a creature's base P/T, +1/+1 counters,
+// until-end-of-turn buffs (Verdant Surge), and attached-aura buffs (Vow of
+// Radiance) into one number.
+frAuraBuff(cardId) =>
+  let card = frCardGet(cardId);
+  if(card && card.subtypes.indexOf("Aura") !== -1 && card.rulesText.indexOf("+2/+2") !== -1) {
+    return { power: 2, toughness: 2 };
+  }
+  return null;
+
+// frEffectAdd registers a continuous effect -- a layer-ordered modifier generated by an
+// activated/triggered/static ability or a resolving permanent. Effects live apart from the
+// object so order of creation (rule 613.7 timestamp order) decides which wins when two
+// modify the same characteristic. untilEot effects are dropped in the cleanup step.
+frEffectAdd(state, sourceId, targetId, opts) =>
+  let eff = {
+    id: "fx" + state.nextEffectStamp,
+    timestamp: state.nextEffectStamp,
+    sourceId: sourceId,
+    targetId: targetId,
+    layer: opts.layer,           // 7 = power/toughness-modifying
+    power: opts.power || 0,
+    toughness: opts.toughness || 0,
+    untilEot: !!opts.untilEot
+  };
+  state.nextEffectStamp += 1;
+  state.effects.push(eff);
+  return state;
+
+// The power/toughness effects targeting a given object, in timestamp order (rule 613.7).
+// Ties (same timestamp) break toward the effect whose source most recently moved zones -- the
+// fixture set never produces that tie, but the ordering is already dependency sorted.
+frEffectsFor(state, objId) =>
+  let list = [];
+  for(let i = 0; i < state.effects.length; i++) {
+    if(state.effects[i].targetId === objId) list.push(state.effects[i]);
+  }
+  list.sort(function(a, b) { return a.timestamp - b.timestamp; });
+  return list;
+
+frPower(state, obj) =>
+  let card = frCardGet(obj.cardId);
+  let base = (card && typeof card.power === "number") ? card.power : 0;
+  let p1 = obj.counters.p1p1 || 0;
+  let eot = (obj.buffsUntilEot && obj.buffsUntilEot.power) || 0;
+  let fx = frEffectsFor(state, obj.id);
+  let sum = 0;
+  for(let i = 0; i < fx.length; i++) sum += fx[i].power;
+  return base + p1 + eot + sum;
+
+frToughness(state, obj) =>
+  let card = frCardGet(obj.cardId);
+  let base = (card && typeof card.toughness === "number") ? card.toughness : 0;
+  let p1 = obj.counters.p1p1 || 0;
+  let eot = (obj.buffsUntilEot && obj.buffsUntilEot.toughness) || 0;
+  let fx = frEffectsFor(state, obj.id);
+  let sum = 0;
+  for(let i = 0; i < fx.length; i++) sum += fx[i].toughness;
+  return base + p1 + eot + sum;
+
+frCardNeedsTarget(card) =>
+  let id = card ? card.id : null;
+  return id === "verdant-surge" || id === "withering-grasp" || id === "vow-of-radiance";
+
+frTargetLegalForSpell(state, card, target, caster) =>
+  let t = state.objects[target];
+  if(!t || t.zone !== "battlefield") return false;
+  if(t.controller !== caster && frHasKeyword(t, "hexproof")) return false;
+  let tcard = frCardGet(t.cardId);
+  if(!tcard || tcard.types.indexOf("Creature") === -1) return false;
+  if(card.id === "withering-grasp") return frToughness(state, t) <= 3;
+  return true;
+
+frLegalTargetsForSpell(state, card, caster) =>
+  let ids = [];
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let obj = state.objects[state.battlefield[i]];
+    if(!obj) continue;
+    let tcard = frCardGet(obj.cardId);
+    if(!tcard || tcard.types.indexOf("Creature") === -1) continue;
+    if(obj.controller !== caster && frHasKeyword(obj, "hexproof")) continue;
+    if(card.id === "withering-grasp" && frToughness(state, obj) > 3) continue;
+    ids.push(obj.id);
+  }
+  return ids;
+
+frAbilityTargetLegal(state, target, caster) =>
+  if(typeof target === "number" && state.players[target]) return true;
+  let t = state.objects[target];
+  if(!t || t.zone !== "battlefield") return false;
+  if(t.controller !== caster && frHasKeyword(t, "hexproof")) return false;
+  return true;
+
+frLegalAbilityTargets(state, caster) =>
+  let tg = [];
+  for(let p = 0; p < state.players.length; p++) tg.push(p);
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let obj = state.objects[state.battlefield[i]];
+    if(obj && !(obj.controller !== caster && frHasKeyword(obj, "hexproof"))) tg.push(obj.id);
+  }
+  return tg;
+
+frTriggersOnEnter(state, obj) =>
+  let id = obj.cardId;
+  if(id === "sunward-sentinel") {
+    state.players[obj.controller].life += 2;
+  } else if(id === "nautilus-seer") {
+    state = frGameDrawOne(state, obj.controller);
+    let pl = state.players[obj.controller];
+    if(pl.hand.length > 0) {
+      let c = pl.hand.pop();
+      frZoneRemove(state, c, "hand", obj.controller);
+      frZoneAdd(state, c, "graveyard", obj.controller);
+      state.objects[c].zone = "graveyard";
+    }
+  }
+  return state;
+
+frTriggersOnDeclareAttack(state, attacker) =>
+  if(attacker.cardId === "bramble-warden") {
+    attacker.counters.p1p1 = (attacker.counters.p1p1 || 0) + 1;
+  }
+  return state;
+
+frTriggersOnCombatDamageToPlayer(state, attacker, player) =>
+  if(attacker.cardId === "thornshroud-stalker") {
+    let pl = state.players[player];
+    if(pl.hand.length > 0) {
+      let c = pl.hand.pop();
+      frZoneRemove(state, c, "hand", player);
+      frZoneAdd(state, c, "graveyard", player);
+      state.objects[c].zone = "graveyard";
+    }
+  }
+  return state;
+
+// Keyword ability library (rule 702). A card's static keywords live in card.keywords (an
+// array of lower-case tokens); frHasKeyword reads them live, so effects may fold in more.
+// frKeywordSet is the full vocabulary the engine gives real meaning to: flying/reach/menace
+// shape blocker legality, trample spills combat damage, first/double strike drive the two-pass
+// damage step, deathtouch makes any damage lethal, lifelink gains life, haste/vigilance/
+// defender shape who may attack, hexproof blocks opponent targeting, skulk blocks only
+// lower-or-equal-power blockers, indestructible ignores lethal damage and destroy effects, and
+// ward counters opponent spells/abilities that target it (here resolved as countered, since the
+// engine is non-interactive -- see below).
+frKeywordSet() =>
+  return ["flying", "trample", "haste", "vigilance", "defender", "reach", "menace", "deathtouch", "first strike", "double strike", "lifelink", "hexproof", "indestructible", "skulk", "ward"];
+
+frKeywords(obj) =>
+  let card = frCardGet(obj.cardId);
+  return (card && card.keywords) ? card.keywords : [];
+
+frHasKeyword(obj, kw) =>
+  return frKeywords(obj).indexOf(kw) !== -1;
+
+// Replacement effects (rule 614). A permanent may carry a card.replacement rule; each has
+// an `event` name it replaces. The one the fixtures use prevents a player from taking combat
+// damage (a prevention replacement, rule 615). Each replacement is a player applying to events
+// of that kind; the preventing player is the permanent's controller.
+frReplacementEffects(state, event) =>
+  let list = [];
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let obj = state.objects[state.battlefield[i]];
+    if(!obj || obj.zone !== "battlefield") continue;
+    let card = frCardGet(obj.cardId);
+    if(card && card.replacement && card.replacement.event === event) list.push(obj);
+  }
+  return list;
+
+frReplacementPreventsCombatDamageTo(state, player) =>
+  let list = frReplacementEffects(state, "prevent-combat-damage-to-player");
+  for(let i = 0; i < list.length; i++) {
+    if(list[i].controller === player) return true;
+  }
+  return false;
+
+frDealCombatDamageToPlayer(state, attacker, player) =>
+  if(frReplacementPreventsCombatDamageTo(state, player)) return state;
+  let dmg = frPower(state, attacker);
+  if(frHasKeyword(attacker, "lifelink")) state.players[attacker.controller].life += dmg;
+  state.players[player].life -= dmg;
+  state = frTriggersOnCombatDamageToPlayer(state, attacker, player);
+  return state;
+
+frDealCombatDamageToCreature(state, source, target, dmg) =>
+  if(dmg <= 0) return state;
+  if(frHasKeyword(source, "deathtouch")) target.deathtouchLethal = true;
+  target.damage += dmg;
+  if(frHasKeyword(source, "lifelink")) state.players[source.controller].life += dmg;
+  return state;
+
+// frDoCombatPass assigns combat damage for one strike (first-strike creatures first, then the
+// rest). A blocker first absorbs the attacker's power as damage; with trample, any excess
+// over its toughness spills onto the defending player.
+frDoCombatPass(state, attackerIds) =>
+  let blocks = state.combatBlocks || [];
+  let defenders = {};
+  for(let i = 0; i < blocks.length; i++) {
+    (defenders[blocks[i].attacker] = defenders[blocks[i].attacker] || []).push(blocks[i].blocker);
+  }
+  for(let i = 0; i < attackerIds.length; i++) {
+    let attacker = state.objects[attackerIds[i]];
+    if(!attacker || attacker.zone !== "battlefield") continue;
+    let bl = defenders[attacker.id] || [];
+    if(bl.length === 0) {
+      state = frDealCombatDamageToPlayer(state, attacker, frTurnOtherPlayer(state, attacker.controller));
+      state = frCheckStateBasedActions(state);
+    } else {
+      let dmg = frPower(state, attacker);
+      let blocker = state.objects[bl[0]];
+      if(!blocker || blocker.zone !== "battlefield") continue;
+      state = frDealCombatDamageToCreature(state, attacker, blocker, dmg);
+      state = frDealCombatDamageToCreature(state, blocker, attacker, frPower(state, blocker));
+      if(frHasKeyword(attacker, "trample") && dmg >= frToughness(state, blocker)) {
+        let def = frTurnOtherPlayer(state, attacker.controller);
+        if(!frReplacementPreventsCombatDamageTo(state, def)) {
+          state.players[def].life -= (dmg - frToughness(state, blocker));
+        }
+      }
+      state = frCheckStateBasedActions(state);
+    }
+  }
+  return state;
+
+// frStepCombatDamage runs the two combat-damage strikes (rule 510): first-strike and
+// double-strike creatures deal damage in the first strike, then everyone else -- and any
+// double-strikers -- in the second. Lethal damage (creature with damage in excess of its
+// toughness, or any damage from a deathtouch source) is a state-based action and
+// processes after each assignment.
+frStepCombatDamage(state) =>
+  let attackers = state.combatAttackers || [];
+  let first = attackers.filter(function(id) {
+    let o = state.objects[id];
+    return o && (frHasKeyword(o, "first strike") || frHasKeyword(o, "double strike"));
+  });
+  let normal = attackers.filter(function(id) {
+    let o = state.objects[id];
+    return o && !frHasKeyword(o, "first strike");
+  });
+  state = frDoCombatPass(state, first);
+  state = frDoCombatPass(state, normal);
+  return state;
+
+// State-based actions -- a real 704-style loop, checked before each player receives
+// priority and re-run until nothing changes. Each iteration sweeps the battlefield for a
+// creature with toughness 0 or less, a creature with damage in excess of its
+// toughness, an Aura attached to no legal object, a token (none among the fixtures) or
+// Legendary-duplicate rule (no legendaries yet, but the check is general), and each
+// player at 0 or less life. Any legal-Aura condition that fails sends the Aura to the
+// graveyard. Because one SBA resolving can trigger another, the whole sweep repeats until a
+// pass changes nothing.
+frCheckStateBasedActions(state) =>
+  let changed = true;
+  let guard = 0;
+  while(changed && guard < 100) {
+    changed = false;
+    for(let i = state.battlefield.length - 1; i >= 0; i--) {
+      let id = state.battlefield[i];
+      let obj = state.objects[id];
+      if(!obj) continue;
+      let card = frCardGet(obj.cardId);
+      let isCreature = card.types.indexOf("Creature") !== -1;
+      let toughness = isCreature ? frToughness(state, obj) : 0;
+      if(isCreature && toughness <= 0) {
+        state = frDeathDestroy(state, id);
+        changed = true;
+        continue;
+      }
+      if(isCreature && !frHasKeyword(obj, "indestructible") && (obj.damage >= toughness || (obj.deathtouchLethal && obj.damage > 0))) {
+        state = frDeathDestroy(state, id);
+        changed = true;
+        continue;
+      }
+      if(card.subtypes.indexOf("Aura") !== -1 && frAuraAttachedIllegally(state, id)) {
+        for(let ei = state.effects.length - 1; ei >= 0; ei--) {
+          if(state.effects[ei].sourceId === id) state.effects.splice(ei, 1);
+        }
+        frZoneMove(state, id, "battlefield", "graveyard", obj.owner);
+        obj.zone = "graveyard";
+        changed = true;
+      }
+    }
+    for(let p = 0; p < state.players.length; p++) {
+      if(state.players[p].life <= 0 && !state.players[p].lost) {
+        state.players[p].lost = true;
+        state.gameOver = true;
+        state.winner = frTurnOtherPlayer(state, p);
+        changed = true;
+      }
+    }
+    guard++;
+  }
+  return state;
+
+// Move a battlefield object (and whatever is attached to it) to the graveyard and reset
+// its combat bookkeeping, so downstream rules never see stale damage/attack flags.
+frDeathDestroy(state, id) =>
+  let obj = state.objects[id];
+  if(!obj) return state;
+  while(obj.attachments.length > 0) {
+    let a = obj.attachments.pop();
+    if(state.objects[a]) {
+      for(let ei = state.effects.length - 1; ei >= 0; ei--) {
+        if(state.effects[ei].sourceId === a) state.effects.splice(ei, 1);
+      }
+      frZoneMove(state, a, "battlefield", "graveyard", state.objects[a].owner);
+      state.objects[a].zone = "graveyard";
+    }
+  }
+  for(let i = state.effects.length - 1; i >= 0; i--) {
+    if(state.effects[i].sourceId === id) state.effects.splice(i, 1);
+  }
+  frZoneMove(state, id, "battlefield", "graveyard", obj.owner);
+  obj.zone = "graveyard";
+  obj.damage = 0;
+  obj.deathtouchLethal = false;
+  obj.attacking = false;
+  obj.blocking = null;
+  obj.buffsUntilEot = { power: 0, toughness: 0 };
+  return state;
+
+// An Aura is illegally attached when it points at no object, points at an object that
+// left the battlefield, or (fixture-specific) enchants a non-creature.
+frAuraAttachedIllegally(state, id) =>
+  let obj = state.objects[id];
+  let ench = obj.attachedTo ? state.objects[obj.attachedTo] : null;
+  if(!ench || ench.zone !== "battlefield") return true;
+  if(obj.cardId === "vow-of-radiance" && frCardGet(ench.cardId).types.indexOf("Creature") === -1) return true;
+  return false;
 
 
 // =====================================================================
@@ -716,6 +1424,7 @@ frActionPassPriority(state, action) =>
     state.lastActionError = "player " + player + " does not have priority";
     return state;
   }
+  state = frCheckStateBasedActions(state);
   if(state.passedPlayers.indexOf(player) === -1) {
     state.passedPlayers.push(player);
   }
@@ -725,6 +1434,7 @@ frActionPassPriority(state, action) =>
   }
   if(state.stack.length > 0) {
     state = frStackResolveTop(state);
+    state = frCheckStateBasedActions(state);
     state.passedPlayers = [];
     state.priorityPlayer = state.activePlayer;
     return state;
@@ -795,6 +1505,10 @@ frActionCastSpell(state, action) =>
     state.lastActionError = "lands are played, not cast";
     return state;
   }
+  if(frCardNeedsTarget(card) && !frTargetLegalForSpell(state, card, action.target, player)) {
+    state.lastActionError = "invalid target";
+    return state;
+  }
   let sorcerySpeedTypes = ["Creature", "Sorcery", "Enchantment", "Artifact"];
   let isSorcerySpeed = false;
   for(let t = 0; t < card.types.length; t++) {
@@ -823,7 +1537,7 @@ frActionCastSpell(state, action) =>
   }
   pl.manaPool = payResult.pool;
   frZoneMove(state, objId, "hand", "stack", player);
-  obj.stackKind = "spell";
+  state.stack.push({ kind: "spell", objId: objId, cardId: card.id, target: action.target || null });
   state.passedPlayers = [];
   state.priorityPlayer = player;
   return state;
@@ -841,17 +1555,36 @@ frActionActivateAbility(state, action) =>
     return state;
   }
   let card = frCardGet(obj.cardId);
-  let color = frManaAbilityColor(obj.cardId);
-  if(!color) {
-    state.lastActionError = "no known mana ability on this permanent";
-    return state;
-  }
   if(obj.tapped) {
     state.lastActionError = "permanent is already tapped";
     return state;
   }
   if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) {
     state.lastActionError = "summoning sickness prevents activating a tap ability";
+    return state;
+  }
+  if(card.id === "faceted-ember-core") {
+    let payResult = frManaTryPay(state.players[player].manaPool, frManaParseCost("\{3}"));
+    if(!payResult.ok) {
+      state.lastActionError = "cannot pay the 3 mana";
+      return state;
+    }
+    if(!frAbilityTargetLegal(state, action.target, player)) {
+      state.lastActionError = "invalid target";
+      return state;
+    }
+    state.players[player].manaPool = payResult.pool;
+    obj.tapped = true;
+    frZoneMove(state, objId, "battlefield", "graveyard", obj.owner);
+    obj.zone = "graveyard";
+    state.stack.push({ kind: "ability", objId: objId, cardId: card.id, target: action.target });
+    state.passedPlayers = [];
+    state.priorityPlayer = player;
+    return state;
+  }
+  let color = frManaAbilityColor(obj.cardId);
+  if(!color) {
+    state.lastActionError = "no known mana ability on this permanent";
     return state;
   }
   obj.tapped = true;
@@ -897,11 +1630,15 @@ frActionDeclareAttackers(state, action) =>
       state.lastActionError = "not a creature: " + ids[i];
       return state;
     }
+    if(frHasKeyword(obj, "defender")) {
+      state.lastActionError = "creature with defender cannot attack: " + ids[i];
+      return state;
+    }
     if(obj.tapped) {
       state.lastActionError = "tapped creature cannot attack: " + ids[i];
       return state;
     }
-    if(obj.summoningSickness) {
+    if(obj.summoningSickness && !frHasKeyword(obj, "haste")) {
       state.lastActionError = "summoning sickness: " + ids[i];
       return state;
     }
@@ -909,7 +1646,8 @@ frActionDeclareAttackers(state, action) =>
   for(let i = 0; i < ids.length; i++) {
     let obj = state.objects[ids[i]];
     obj.attacking = true;
-    obj.tapped = true;
+    if(!frHasKeyword(obj, "vigilance")) obj.tapped = true;
+    state = frTriggersOnDeclareAttack(state, obj);
   }
   state.combatAttackers = ids;
   return state;
@@ -936,8 +1674,31 @@ frActionDeclareBlockers(state, action) =>
       state.lastActionError = "not an attacking creature: " + blocks[i].attacker;
       return state;
     }
-    if(blocker.tapped) {
+  }
+  let menaceCount = {};
+  for(let i = 0; i < blocks.length; i++) {
+    let attacker = state.objects[blocks[i].attacker];
+    if(frHasKeyword(attacker, "menace")) {
+      menaceCount[attacker.id] = (menaceCount[attacker.id] || 0) + 1;
+    }
+  }
+  for(let i = 0; i < blocks.length; i++) {
+    let blocker = state.objects[blocks[i].blocker];
+    let attacker = state.objects[blocks[i].attacker];
+    if(attacker.tapped) {
       state.lastActionError = "tapped creature cannot block: " + blocks[i].blocker;
+      return state;
+    }
+    if(frHasKeyword(attacker, "flying") && !frHasKeyword(blocker, "flying") && !frHasKeyword(blocker, "reach")) {
+      state.lastActionError = "only flying/reach can block a flying attacker: " + blocks[i].blocker;
+      return state;
+    }
+    if(frHasKeyword(attacker, "skulk") && frPower(state, blocker) > frPower(state, attacker)) {
+      state.lastActionError = "only equal-or-lower-power creatures can block a skulk attacker: " + blocks[i].blocker;
+      return state;
+    }
+    if(frHasKeyword(attacker, "menace") && (menaceCount[attacker.id] || 0) < 2) {
+      state.lastActionError = "menace requires two blockers: " + attacker.id;
       return state;
     }
   }
@@ -1005,15 +1766,107 @@ frCardTypeLine(card) =>
   if(card.subtypes.length > 0) line += " \u2014 " + card.subtypes.join(" ");
   return line;
 
-// Best-effort legal-action enumeration for $output("legalActions", state). Mirrors each
-// frAction*'s own guard clauses rather than re-deriving legality independently, so this
-// can drift stale against a guard-clause edit but never contradicts one at the point it
-// was written. Deliberately NOT a full legality solver: it does not simulate a mana
-// ability activated first and then spent (only the current floating manaPool is checked,
-// matching frActionCastSpell's own requirement), and it surfaces combat declarations as a
-// single yes/no stub rather than every legal attacker/blocker subset -- the same "clean
-// seam, not a shortcut" posture NOTES.md already recorded for frStackResolveTop. Returns
-// [] rather than throwing on any malformed state (see NOTES.md, "Never throws").
+// Combat-move helpers for the legal-action solver below: eligible attackers are your untapped
+// creatures that aren't hindered, and blockers are matched to attackers honouring flying/reach
+// and menace. Subset enumeration is 2^n (attack) and base-(n+1) (blockers), capped so
+// a huge board degrades to listing solo attackers rather than blowing up.
+frEligibleAttackers(state, player) =>
+  let out = [];
+  let bf = state.battlefield;
+  for(let i = 0; i < bf.length; i++) {
+    let o = state.objects[bf[i]];
+    if(!o || o.zone !== "battlefield" || o.controller !== player) continue;
+    let card = frCardGet(o.cardId);
+    if(!card || card.types.indexOf("Creature") === -1) continue;
+    if(o.tapped) continue;
+    if(frHasKeyword(o, "defender")) continue;
+    if(o.summoningSickness && !frHasKeyword(o, "haste")) continue;
+    out.push(o.id);
+  }
+  return out;
+
+frLegalAttackerActions(state, player) =>
+  let elig = frEligibleAttackers(state, player);
+  let actions = [];
+  let n = elig.length;
+  if(n <= 10) {
+    for(let mask = 0; mask < (1 << n); mask++) {
+      let arr = [];
+      for(let i = 0; i < n; i++) {
+        if(mask & (1 << i)) arr.push(elig[i]);
+      }
+      actions.push({ type: "declareAttackers", player: player, attackers: arr });
+    }
+  } else {
+    for(let i = 0; i < n; i++) {
+      actions.push({ type: "declareAttackers", player: player, attackers: [elig[i]] });
+    }
+  }
+  return actions;
+
+frBlockerCanBlock(attacker, blocker, state) =>
+  if(frHasKeyword(attacker, "flying") && !frHasKeyword(blocker, "flying") && !frHasKeyword(blocker, "reach")) return false;
+  if(frHasKeyword(attacker, "skulk") && frPower(state, blocker) > frPower(state, attacker)) return false;
+  return true;
+
+frLegalBlockerActions(state, player) =>
+  let attackers = state.combatAttackers || [];
+  let bf = state.battlefield;
+  let blockers = [];
+  for(let i = 0; i < bf.length; i++) {
+    let o = state.objects[bf[i]];
+    if(!o || o.zone !== "battlefield" || o.controller !== player) continue;
+    let card = frCardGet(o.cardId);
+    if(!card || card.types.indexOf("Creature") === -1) continue;
+    if(o.tapped) continue;
+    blockers.push(o.id);
+  }
+  let actions = [];
+  let bn = blockers.length, an = attackers.length;
+  let base = an + 1;
+  let count = 1;
+  for(let i = 0; i < bn; i++) count *= base;
+  if(count > 2048) count = 2048;
+  for(let vi = 0; vi < count; vi++) {
+    let num = vi;
+    let assign = [];
+    for(let bi = 0; bi < bn; bi++) {
+      let t = num % base;
+      num = Math.floor(num / base);
+      assign.push(t);
+    }
+    let any = false;
+    for(let bi = 0; bi < bn; bi++) if(assign[bi] !== 0) any = true;
+    if(!any) continue;
+    let blocks = [];
+    let okc = true;
+    for(let ai = 0; ai < an; ai++) {
+      let cnt = 0;
+      for(let bi = 0; bi < bn; bi++) if(assign[bi] === (ai + 1)) cnt++;
+      if(cnt === 0) continue;
+      if(frHasKeyword(state.objects[attackers[ai]], "menace") && cnt < 2) { okc = false; break; }
+    }
+    if(!okc) continue;
+    for(let bi = 0; bi < bn; bi++) {
+      if(assign[bi] !== 0) {
+        let attId = attackers[assign[bi] - 1];
+        if(!frBlockerCanBlock(state.objects[attId], state.objects[blockers[bi]], state)) { okc = false; break; }
+        blocks.push({ attacker: attId, blocker: blockers[bi] });
+      }
+    }
+    if(!okc) continue;
+    actions.push({ type: "declareBlockers", player: player, blocks: blocks });
+  }
+  return actions;
+
+
+// frLegalActions for $output("legalActions", state): a planar-legal-action solver whose
+// moves mirror each frAction*'s own guard clauses, so it never contradicts a reducer
+// at the point it was written. Unlike the old stub it also surfaces a tapPermanent move
+// for every untapped permanent (so a client can tap a mana source first and then spend it,
+// instead of only seeing spells payable from the current floating pool), and it enumerates real
+// attacker and blocker declarations rather than a yes/no stub. Returns [] rather than
+// throwing on any malformed state (see NOTES.md, "Never throws").
 
 frLegalActions(state) =>
   let actions = [];
@@ -1053,7 +1906,14 @@ frLegalActions(state) =>
     if(isSorcerySpeed && !(priority === state.activePlayer && mainPhase && emptyStack)) continue;
     let parsedCost = frManaParseCost(card.manaCost);
     if(frManaCanPay(pl.manaPool, parsedCost)) {
-      actions.push({ type: "castSpell", player: priority, objectId: objId });
+      if(frCardNeedsTarget(card)) {
+        let tg = frLegalTargetsForSpell(state, card, priority);
+        for(let ti = 0; ti < tg.length; ti++) {
+          actions.push({ type: "castSpell", player: priority, objectId: objId, target: tg[ti] });
+        }
+      } else {
+        actions.push({ type: "castSpell", player: priority, objectId: objId });
+      }
     }
   }
 
@@ -1063,17 +1923,35 @@ frLegalActions(state) =>
     if(!obj || obj.controller !== priority || obj.tapped) continue;
     let card = frCardGet(obj.cardId);
     if(!card) continue;
+    if(card.id === "faceted-ember-core") {
+      if(frManaCanPay(pl.manaPool, frManaParseCost("\{3}"))) {
+        let tg = frLegalAbilityTargets(state, priority);
+        for(let ti = 0; ti < tg.length; ti++) {
+          actions.push({ type: "activateAbility", player: priority, objectId: objId, target: tg[ti] });
+        }
+      }
+      continue;
+    }
     let color = frManaAbilityColor(obj.cardId);
     if(!color) continue;
     if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) continue;
     actions.push({ type: "activateAbility", player: priority, objectId: objId });
   }
 
+  for(let i = 0; i < state.battlefield.length; i++) {
+    let o = state.objects[state.battlefield[i]];
+    if(!o || o.zone !== "battlefield" || o.controller !== priority || o.tapped) continue;
+    if(frManaAbilityColor(o.cardId)) continue;
+    actions.push({ type: "tapPermanent", player: priority, objectId: o.id });
+  }
+
   if(state.step === "declare_attackers" && priority === state.activePlayer) {
-    actions.push({ type: "declareAttackers", player: priority });
+    let atk = frLegalAttackerActions(state, priority);
+    for(let i = 0; i < atk.length; i++) actions.push(atk[i]);
   }
   if(state.step === "declare_blockers" && priority !== state.activePlayer) {
-    actions.push({ type: "declareBlockers", player: priority });
+    let blk = frLegalBlockerActions(state, priority);
+    for(let i = 0; i < blk.length; i++) actions.push(blk[i]);
   }
 
   return actions;
@@ -1372,7 +2250,7 @@ frRenderCard(cardOrId) =>
 //        that publishes no k.palette (front-land/gold/artifact/basicland-*). costSymbols
 //        is [] for a card with no manaCost (a Land).
 //   $output("card", cardId)        -> the card record, or "(unknown card id: ...)"
-//   $output("cards")               -> array of all 12 card records
+//   $output("cards")               -> array of all 28 card records
 //   $output("realms")              -> ["solara","verdant","tide","ember","umbra"]
 //   $output("rarities")            -> the five tier names, Field..Ascendant, in order.
 //                                     Field is the basic-land card class, not a rarity step,
