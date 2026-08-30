@@ -117,9 +117,8 @@ here — the repo is just files until step 3.
 ### 3. Push: this repo → live generator (the manual part)
 
 1. Open `https://perchance.org/<slug>#edit`, logged in as the owning account.
-2. **Lists panel** ← the slug's `main.pjs` (or `lists.txt` in the 32 directories still using the
-   old naming — see "Two naming layouts" below). Select all, replace.
-3. **HTML panel** ← the slug's `index.html` (or `html.txt`). Same.
+2. **Lists panel** ← the slug's `main.pjs`. Select all, replace.
+3. **HTML panel** ← the slug's `index.html`. Same.
 4. **`src/*` files**, if the generator has any: open the editor's files panel and re-upload the
    changed file so it replaces the manifest entry perchance tracks. *(Exact UI location still
    undocumented here — note it on your first pass.)*
@@ -143,8 +142,7 @@ diff "<some-scratch-dir>/<slug>/main.pjs"   <slug>/main.pjs
 ```
 
 Identical files confirm the live generator matches what is committed here. With `--src` this
-covers `src/*` too. For a directory still on the old naming, compare against `html.txt` /
-`lists.txt` instead — and expect a one-byte trailing-newline difference, which perchance does not
+covers `src/*` too. Expect a one-byte trailing-newline difference, which perchance does not
 store (see the note in step 1).
 
 **The old method — `fleet-backup.mjs <slug>` then `git diff <slug>/` — cannot be trusted, and not
@@ -277,31 +275,45 @@ variant of the one that does. **Do not delete it.**
 
 ---
 
-## Two naming layouts
+## One naming layout — migrated 2026-08-30
 
-This repo currently holds both, on purpose:
+**This repo is now on `main.pjs`/`index.html` throughout.** T-15, deferred since 2026-08-10, was
+executed on 2026-08-30.
 
 | | count |
 |---|---|
-| directories with `lists.txt`/`html.txt` (old) | 32 (9 template-named ones split to `perchance-templates` on 2026-08-11) |
-| directories with `main.pjs`/`index.html` (new) | 15 (14 of them captured 2026-08-14, plus `q8tgpbvj6l`) |
-| directories with `src/` | 34 |
-| **total directories** | **46** |
+| directories with `main.pjs`/`index.html` (current) | **135 — all of them** |
+| directories with `src/` | 88 |
+| directories still holding `lists.txt`/`html.txt` | **1 — `q8tgpbvj6l`, deliberately** |
+| **total directories** | **135** |
 
 `main.pjs`/`index.html` is perchance's own export convention and what `--layout perchance` writes;
-GitHub renders and syntax-highlights it. The old directories are **not being migrated** — that
-was decided deliberately on 2026-08-10, and the new naming applies going forward only. A directory
-the fleet runner touches therefore ends up holding **both** pairs, as `q8tgpbvj6l` does — but its
-old-naming pair and new-naming pair are not two copies of the same content; see "The state of
-`q8tgpbvj6l`, precisely" above for what each pair actually holds.
+GitHub renders and syntax-highlights it.
 
-`fleet-backup.mjs` requires an explicit slug scope and has no `--all` flag, so nothing spreads the
-duplication repo-wide by accident. Tracked as **T-15** in
-`perchance-manager/docs/open-threads.md`.
+**What the migration did.** 30 directories here were renamed with `git mv` — so file history
+follows the rename rather than reading as a delete plus an add — and the paired `layout` field in
+`perchance-manager/fleet-state.json` was flipped from `reference` to `perchance` **in the same
+change**. That lockstep is the point: renaming without the state flip would have the next
+scheduled run write `lists.txt`/`html.txt` straight back, recreating the duplication the migration
+existed to remove. Content was verified byte-identical across all renamed files by md5 before and
+after; only names changed. The sibling `perchance-templates` repo had its 9 directories migrated
+in the same session.
 
-**The 2026-08-14 catch-up did not change that balance.** It added 14 directories, all of them new
-and all on the new naming, so no existing directory gained a second pair. The old-naming count is
-still 32 and `q8tgpbvj6l` is still the only directory holding both.
+**`bgn-asset-factory` needed resolving, not just renaming.** It held a *stale* `main.pjs`/
+`index.html` pair from 2026-08-20 beside the current `lists.txt`/`html.txt` from 2026-08-21 — the
+stale pair still read `gameGenre = Asset Workshop` where the current one reads `Tool`, and the two
+HTML files differed by 756 lines. The stale pair was removed and the current pair renamed into
+place, so the directory now holds the 2026-08-21 content under the new names.
+
+**`q8tgpbvj6l` was deliberately left holding both pairs.** It is 404 on perchance, `skip: true`,
+and its two pairs are captures from different days that genuinely diverge — the newer `index.html`
+is the *smaller* file. Neither can ever be re-created. See `q8tgpbvj6l/README.md`, which states
+the rule in the directory itself: **delete nothing there.** It is the one intentional
+non-conformity, and the non-conformity is the record.
+
+`fleet-backup.mjs` still requires an explicit slug scope and still has no `--all` flag. That guard
+was originally justified by the two-layout split; with the split gone it is now justified simply
+by routing — the roster spans three repos and one slug must never be captured into this one.
 
 `.gitattributes` here pins LF for `.txt`, `.json`, `.md`, `.js`, **`.pjs`, and `.html`** — the
 last two added 2026-08-10, when git first warned about normalizing the new layout's output.
@@ -328,8 +340,9 @@ The disclaimer survives only inside this repo's relics of that earlier build —
   source, and `docs/open-threads.md`, which is where this repo's open work is actually tracked:
   - **T-13** — `POST /api/save` is perchance's only real write endpoint and nothing reachable from
     a plugin can call it. This is why step 3 above is manual.
-  - **T-15** — the deferred layout migration (32 directories on the old naming, 1 on both). The
-    *deploy* half of this thread closed 2026-08-14; the migration is what remains.
+  - **T-15** — **closed 2026-08-30.** The *deploy* half closed 2026-08-14; the layout migration,
+    deferred since 2026-08-10, was executed 2026-08-30. All 135 directories here are on
+    `main.pjs`/`index.html`, `q8tgpbvj6l` excepted on purpose — see "One naming layout" above.
   - **M-4** — the `fleet-backup.mjs` crash-and-misreport documented under step 1. Read it before
     trusting any capture run's summary.
 - **`Rathji/perchance-reference`** — a corpus of captured third-party generators and the
