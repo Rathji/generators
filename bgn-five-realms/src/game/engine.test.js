@@ -5,9 +5,12 @@ import {
   newGame, snapshot, restore, act, player, life, setLife,
   manaPool, addMana, spendMana, zoneIds, moveCard, cardInstance,
 } from "./engine.js";
+import { PLUGIN_CARD_MAP } from "../cards/plugin.js";
 
 function fixtureDecks() {
-  const ids = root.fr("cards").map((c) => c.id);
+  // engine.newGame merges the Alpha DB over the fixtures (task 22), so filter to
+  // plugin-known fixture cards only — deterministic decks, no Alpha cards in play.
+  const ids = root.fr("cards").map((c) => c.id).filter((id) => !PLUGIN_CARD_MAP[id]);
   const deck = [];
   for (let i = 0; i < 40; i++) deck.push(ids[i % ids.length]);
   return [deck.slice(), deck.slice()];

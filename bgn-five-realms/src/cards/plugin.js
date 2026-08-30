@@ -12,6 +12,8 @@
 
 import { ALPHA_CARDS } from "./data/alpha.js";
 import { parseManaCost, COLORS } from "./schema.js";
+import { alphaAbilities } from "./abilities.js";
+import { alphaTargeting, alphaAbilityTargeting, alphaProtections } from "./targeting.js";
 
 const TYPE_CAP = {
   artifact: "Artifact",
@@ -120,6 +122,21 @@ export function toPluginCard(alpha, index, usedIds) {
   rec.frame = rec.rarity.toLowerCase();
   rec.glyph = identity[0] ? COLOR_TO_GLYPH[identity[0]] || null : null;
   if (producesMana) rec.producesMana = producesMana;
+
+  // Task 21 (target selection): attach the declared target requirements for every spell,
+  // Aura and ability that targets, plus innate protection (target-legality gate). The
+  // query layer in src/game/target.js consumes card.targeting / card.modes /
+  // card.abilityTargeting / card.protections.
+  const tgt = alphaTargeting(alpha.name);
+  if (tgt && tgt.modes) rec.modes = tgt.modes;
+  else if (tgt) rec.targeting = tgt;
+  const abTgt = alphaAbilityTargeting(alpha.name);
+  if (abTgt) rec.abilityTargeting = abTgt;
+  const abil = alphaAbilities(alpha.name);
+  if (abil) rec.abilities = abil;
+  const prot = alphaProtections(alpha.rulesText);
+  if (prot.length) rec.protections = prot;
+
   return rec;
 }
 

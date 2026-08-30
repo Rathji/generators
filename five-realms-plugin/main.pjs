@@ -17,9 +17,76 @@
 //
 // $output (the plugin's public API) is the 13-op entry point at the bottom of this file.
 
+
+// =====================================================================
+// FEATURE TODO (all of #2..#6 implemented; this list is now complete)
+// =====================================================================
+//
+// #2 (multi-color mana abilities / dual lands) is implemented: frActionActivateAbility
+// validates a chosenColor on multi-color producers and adds 1 mana of that color, the
+// dual-land fixture luminous-lagoon ("WU") and the {C} producer prismatic-core are in
+// frCardDb, and frLegalActions offers one action per produced color. #3 (multiple
+// targets & modal "Choose one" spells) is implemented too: card records declare
+// targeting ({ min, max, distinct, slots }) and/or a modes: [...] list, frActionCastSpell
+// validates the chosen mode and the full target-set, frLegalActions enumerates every
+// legal ordered target-set per mode, and resolution reads targets/mode off the stack
+// entry. The rest of this list is not implemented; it is tracked here so the work is
+// not lost. For reference, it deliberately excludes what already exists: combat basics
+// (attackers/blockers/evasion/first-strike/trample-to-player), the keyword library
+// (flying, trample, haste, vigilance, defender, reach, menace, deathtouch, double
+// strike, lifelink, hexproof, indestructible, skulk, ward), triggers on enter/attack/
+// combat-damage, aura attach + buffs, +1/+1 counters, effect layers with timestamps,
+// single-target legality, sorcery/instant timing, the SBA loop (0-toughness, lethal,
+// Aura, life<=0), and seeded RNG/snapshot.
+//
+// #4 (data-driven card effects) is implemented: card records now declare
+// effects/triggers/abilities/auraBuff instead of id-matching. The effect-template
+// library in frApplyOneEffect covers damage / damageAll / life / draw / discard /
+// destroy / pump (+N/+N until EoT) / shield / scry / addMana / token / counter /
+// tutor slots, with X and chosen targets/mode substituted at resolution. Generic
+// activated abilities carry arbitrary costs ({T}, mana, sacrifice self, life), and
+// data-driven triggers fire on enter / attack / combat-damage-to-player. Fixture
+// cards: verdant-surge, ember-conflagration, verdant-call (tokens), ember-hound
+// ({1},{T} pings), faceted-ember-core (combust), tide-banishment (counter), and
+// the trigger suite on sunward-sentinel / nautilus-seer / bramble-warden /
+// thornshroud-stalker. #5 (combat damage assignment order) is implemented, see
+// below. The rest of this list is not implemented yet; it is tracked here so the
+// work is not lost.
+//
+// #5 (combat damage assignment order / double blockers) is implemented:
+// frActionDeclareBlockers now rejects a blocker assigned to two attackers, accepts
+// an optional 1-based order per multi-blocked attacker (either every blocker of an
+// attacker declares an order, or none, and declared orders must be a permutation of
+// 1..n), and normalizes state.combatBlocks into { attacker, blocker, order } sorted
+// by order (insertion order when none declared); frLegalActions enumerates every
+// blocker order permutation (capped at 4096 actions) and the order is what the
+// blocking player picks at declare-blockers time. A pre-existing bug is fixed too:
+// declareBlockers checked the attacker's tapped status, so a tapped attacker could
+// never be blocked. frDoCombatDamage assigns the attacker's power across its
+// blockers in declared order -- lethal to the first blocker, the remainder onward,
+// the last blocker absorbing whatever is left unless trample spills past it to the
+// player -- with damage within a wave simultaneous (SBA runs between waves), and
+// trample spill now travels the full combat-damage path (shields, lifelink,
+// triggers) instead of bypassing it. Fixture test: a 5-power attacker double-blocked
+// by two 3-toughness creatures dies to the first only when order says so. #6 (custom
+// card database injection) is implemented, see below.
+//
+// #6 (custom card database injection + null-safe lookups) is implemented: frGameNew
+// accepts config.cards (a \{id: card\} map merged over frCardDb -- fixture entries stay,
+// custom entries win on a shared id) and publishes the merged database as
+// window.FIVE_REALMS_CARDDB, which frCardGet, $output("cards") and frGameDefaultDeck
+// resolve against until the next newGame (a newGame without config.cards restores the
+// fixture DB -- the same lazy window-global idiom as the art payload). Every frCardGet
+// consumer now null-checks: frCheckStateBasedActions and frResolveSpell skip unknown
+// cards (their subtypes reads are guarded too), and frActionDeclareAttackers rejects
+// one with a clean lastActionError -- a card id outside any DB no longer crashes the
+// reducer/SBA. Fixture test: newGame with a tiny custom DB of non-fixture cards plays
+// a full turn (land, tap, cast, combat, SBA) with zero errors, and a bogus id is
+// skipped, not thrown on. The TODO list is complete.
+
 $meta
   title = Five Realms Plugin
-  description = An MTG-compatible rules engine, a 28-card database, and a 52-asset inline-SVG card renderer, behind one 13-op $output. Zones, turn structure, priority, mana, seeded shuffling, an action reducer, stack resolution with targeting and combat damage, plus the full state-based-actions loop, layered continuous effects, a keyword-ability library, and replacement effects.
+  description = An MTG-compatible rules engine, a 47-card data-driven database, and a 52-asset inline-SVG card renderer, behind one 13-op $output. Zones, turn structure, priority, mana, seeded shuffling, an action reducer, stack resolution with multi-target and modal spells, data-driven card effects (templates, triggers, generic activated abilities), plus the full state-based-actions loop, layered continuous effects, a keyword-ability library, and replacement effects.
   tags = cards, tcg, rules-engine, plugin, five-realms
   header
     mode = minimal
@@ -83,6 +150,7 @@ frCardDb() =>
       subtypes: ["Spirit"],
       rulesText: "Flying. When Sunward Sentinel enters, you gain 2 life.",
       keywords: ["flying"],
+      triggers: [{ when: "enter", effects: [{ op: "life", targets: ["controller"], amount: 2, gain: true }] }],
       power: 2,
       toughness: 2,
       rarity: "Marked",
@@ -100,6 +168,8 @@ frCardDb() =>
       types: ["Enchantment"],
       subtypes: ["Aura"],
       rulesText: "Enchant creature. Enchanted creature gets +2/+2.",
+      targeting: { min: 1, max: 1, slots: [{ types: ["Creature"] }] },
+      auraBuff: { power: 2, toughness: 2 },
       rarity: "Marked",
       frame: "marked",
       glyph: "solara"
@@ -116,6 +186,7 @@ frCardDb() =>
       subtypes: ["Bramblekin"],
       rulesText: "Trample. Whenever Bramble Warden attacks, put a +1/+1 counter on it.",
       keywords: ["trample"],
+      triggers: [{ when: "attack", effects: [{ op: "pump", targets: ["self"], power: 1, toughness: 1, counters: true }] }],
       power: 3,
       toughness: 3,
       rarity: "Marked",
@@ -133,6 +204,8 @@ frCardDb() =>
       types: ["Instant"],
       subtypes: [],
       rulesText: "Target creature gets +3/+3 until end of turn.",
+      targeting: { min: 1, max: 1, slots: [{ types: ["Creature"] }] },
+      effects: [{ op: "pump", targets: [0], power: 3, toughness: 3, untilEot: true }],
       rarity: "Vaulted",
       frame: "vaulted",
       glyph: "verdant"
@@ -148,6 +221,7 @@ frCardDb() =>
       types: ["Creature"],
       subtypes: ["Tideborn"],
       rulesText: "When Nautilus Seer enters, draw a card, then discard a card.",
+      triggers: [{ when: "enter", effects: [{ op: "draw", amount: 1, player: "controller" }, { op: "discard", amount: 1, player: "controller" }] }],
       power: 2,
       toughness: 3,
       rarity: "Marked",
@@ -199,6 +273,12 @@ frCardDb() =>
       subtypes: ["Relic"],
       rulesText: "\{T}: Add \{R}. \{3}, \{T}, Sacrifice Faceted Ember Core: It deals 3 damage to any target.",
       producesMana: "R",
+      abilities: [{
+        name: "combust",
+        cost: { tap: true, mana: "\{3}", sacrificeSelf: true },
+        targeting: { min: 1, max: 1, slots: [{ player: true, types: ["Creature"] }] },
+        effects: [{ op: "damage", targets: [0], amount: 3 }]
+      }],
       rarity: "Ascendant",
       frame: "ascendant",
       glyph: "ember"
@@ -215,6 +295,7 @@ frCardDb() =>
       subtypes: ["Shadowkin"],
       rulesText: "Deathtouch. Whenever Thornshroud Stalker deals combat damage to a player, that player discards a card.",
       keywords: ["deathtouch"],
+      triggers: [{ when: "combatDamageToPlayer", effects: [{ op: "discard", amount: 1, targets: ["opponent"] }] }],
       power: 2,
       toughness: 1,
       rarity: "Marked",
@@ -232,6 +313,8 @@ frCardDb() =>
       types: ["Instant"],
       subtypes: [],
       rulesText: "Destroy target creature with toughness 3 or less.",
+      targeting: { min: 1, max: 1, slots: [{ types: ["Creature"], toughnessLE: 3 }] },
+      effects: [{ op: "destroy", targets: [0] }],
       rarity: "Vaulted",
       frame: "vaulted",
       glyph: "umbra"
@@ -286,7 +369,7 @@ frCardDb() =>
     "auric-sentinel": {
       id: "auric-sentinel",
       name: "Auric Sentinel",
-      manaCost: "\\{2}\\{W}",
+      manaCost: "\{2}\{W}",
       cmc: 3,
       colors: ["W"],
       colorIdentity: ["W"],
@@ -304,7 +387,7 @@ frCardDb() =>
     "gleaming-bulwark": {
       id: "gleaming-bulwark",
       name: "Gleaming Bulwark",
-      manaCost: "\\{3}\\{W}",
+      manaCost: "\{3}\{W}",
       cmc: 4,
       colors: ["W"],
       colorIdentity: ["W"],
@@ -322,14 +405,14 @@ frCardDb() =>
     "auric-guardian": {
       id: "auric-guardian",
       name: "Auric Guardian",
-      manaCost: "\\{2}\\{W}",
+      manaCost: "\{2}\{W}",
       cmc: 3,
       colors: ["W"],
       colorIdentity: ["W"],
       supertypes: [],
       types: ["Creature"],
       subtypes: ["Crusader"],
-      rulesText: "Ward (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays \\{2}).",
+      rulesText: "Ward (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays \{2}).",
       keywords: ["ward"],
       power: 1,
       toughness: 4,
@@ -340,7 +423,7 @@ frCardDb() =>
     "tidecaller-adept": {
       id: "tidecaller-adept",
       name: "Tidecaller Adept",
-      manaCost: "\\{2}\\{U}",
+      manaCost: "\{2}\{U}",
       cmc: 3,
       colors: ["U"],
       colorIdentity: ["U"],
@@ -358,7 +441,7 @@ frCardDb() =>
     "aqueduct-recluse": {
       id: "aqueduct-recluse",
       name: "Aqueduct Recluse",
-      manaCost: "\\{2}\\{U}",
+      manaCost: "\{2}\{U}",
       cmc: 3,
       colors: ["U"],
       colorIdentity: ["U"],
@@ -376,7 +459,7 @@ frCardDb() =>
     "depth-cartographer": {
       id: "depth-cartographer",
       name: "Depth Cartographer",
-      manaCost: "\\{1}\\{U}",
+      manaCost: "\{1}\{U}",
       cmc: 2,
       colors: ["U"],
       colorIdentity: ["U"],
@@ -394,7 +477,7 @@ frCardDb() =>
     "ironbark-mastodon": {
       id: "ironbark-mastodon",
       name: "Ironbark Mastodon",
-      manaCost: "\\{4}\\{G}",
+      manaCost: "\{4}\{G}",
       cmc: 5,
       colors: ["G"],
       colorIdentity: ["G"],
@@ -412,7 +495,7 @@ frCardDb() =>
     "glade-guardian": {
       id: "glade-guardian",
       name: "Glade Guardian",
-      manaCost: "\\{2}\\{G}",
+      manaCost: "\{2}\{G}",
       cmc: 3,
       colors: ["G"],
       colorIdentity: ["G"],
@@ -430,7 +513,7 @@ frCardDb() =>
     "ember-brand-stormcaller": {
       id: "ember-brand-stormcaller",
       name: "Emberbrand Stormcaller",
-      manaCost: "\\{1}\\{R}",
+      manaCost: "\{1}\{R}",
       cmc: 2,
       colors: ["R"],
       colorIdentity: ["R"],
@@ -448,7 +531,7 @@ frCardDb() =>
     "molten-ramsprite": {
       id: "molten-ramsprite",
       name: "Molten Ramsprite",
-      manaCost: "\\{2}\\{R}",
+      manaCost: "\{2}\{R}",
       cmc: 3,
       colors: ["R"],
       colorIdentity: ["R"],
@@ -466,7 +549,7 @@ frCardDb() =>
     "cinder-colossus": {
       id: "cinder-colossus",
       name: "Cinder Colossus",
-      manaCost: "\\{3}\\{R}",
+      manaCost: "\{3}\{R}",
       cmc: 4,
       colors: ["R"],
       colorIdentity: ["R"],
@@ -484,7 +567,7 @@ frCardDb() =>
     "crypt-raider": {
       id: "crypt-raider",
       name: "Crypt Raider",
-      manaCost: "\\{1}\\{B}",
+      manaCost: "\{1}\{B}",
       cmc: 2,
       colors: ["B"],
       colorIdentity: ["B"],
@@ -502,7 +585,7 @@ frCardDb() =>
     "veil-shadow-dancer": {
       id: "veil-shadow-dancer",
       name: "Veilshadow Dancer",
-      manaCost: "\\{2}\\{B}",
+      manaCost: "\{2}\{B}",
       cmc: 3,
       colors: ["B"],
       colorIdentity: ["B"],
@@ -520,7 +603,7 @@ frCardDb() =>
     "dawn-sky-vanguard": {
       id: "dawn-sky-vanguard",
       name: "Dawnsky Vanguard",
-      manaCost: "\\{1}\\{W}",
+      manaCost: "\{1}\{W}",
       cmc: 2,
       colors: ["W"],
       colorIdentity: ["W"],
@@ -538,7 +621,7 @@ frCardDb() =>
     "stormrider-apex": {
       id: "stormrider-apex",
       name: "Stormrider Apex",
-      manaCost: "\\{3}\\{R}",
+      manaCost: "\{3}\{R}",
       cmc: 4,
       colors: ["R"],
       colorIdentity: ["R"],
@@ -552,12 +635,361 @@ frCardDb() =>
       rarity: "Sovereign",
       frame: "sovereign",
       glyph: "ember"
+    },
+    "vast-plains": {
+      id: "vast-plains",
+      name: "Vast Plains",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["W"],
+      supertypes: ["Basic"],
+      types: ["Land"],
+      subtypes: ["Plains"],
+      rulesText: "\{T}: Add \{W}.",
+      producesMana: "W",
+      rarity: "Field",
+      frame: "field",
+      glyph: "solara",
+      image: "https://user.uploads.dev/file/2dcb53c955a225eea2694d9b6dc9a144.png"
+    },
+    "deep-ocean": {
+      id: "deep-ocean",
+      name: "Deep Ocean",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["U"],
+      supertypes: ["Basic"],
+      types: ["Land"],
+      subtypes: ["Island"],
+      rulesText: "\{T}: Add \{U}.",
+      producesMana: "U",
+      rarity: "Field",
+      frame: "field",
+      glyph: "tide",
+      image: "https://user.uploads.dev/file/5a1a8ec36542816066fc52d806f5be4f.png"
+    },
+    "tainted-marsh": {
+      id: "tainted-marsh",
+      name: "Tainted Marsh",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["B"],
+      supertypes: ["Basic"],
+      types: ["Land"],
+      subtypes: ["Swamp"],
+      rulesText: "\{T}: Add \{B}.",
+      producesMana: "B",
+      rarity: "Field",
+      frame: "field",
+      glyph: "umbra",
+      image: "https://user.uploads.dev/file/ac09b4b3cfc6454cd27f00372f77fbe7.png"
+    },
+    "volcanic-peak": {
+      id: "volcanic-peak",
+      name: "Volcanic Peak",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["R"],
+      supertypes: ["Basic"],
+      types: ["Land"],
+      subtypes: ["Mountain"],
+      rulesText: "\{T}: Add \{R}.",
+      producesMana: "R",
+      rarity: "Field",
+      frame: "field",
+      glyph: "ember",
+      image: "https://user.uploads.dev/file/adf1479204558e5baa0998f3230cce94.png"
+    },
+    "ancient-forest": {
+      id: "ancient-forest",
+      name: "Ancient Forest",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["G"],
+      supertypes: ["Basic"],
+      types: ["Land"],
+      subtypes: ["Forest"],
+      rulesText: "\{T}: Add \{G}.",
+      producesMana: "G",
+      rarity: "Field",
+      frame: "field",
+      glyph: "verdant",
+      image: "https://user.uploads.dev/file/8cbbef08e09f6459c4787f35439e52ad.png"
+    },
+    // Multi-color mana fixtures (#2): the WU dual land exercises frActionActivateAbility's
+    // chosenColor validation (producesMana has 2+ color chars), and prismatic-core the
+    // {C} colorless path (producesMana "C" is a single char, but not a WUBRG color).
+    "luminous-lagoon": {
+      id: "luminous-lagoon",
+      name: "Luminous Lagoon",
+      cmc: 0,
+      colors: [],
+      colorIdentity: ["W", "U"],
+      supertypes: [],
+      types: ["Land"],
+      subtypes: ["Lagoon"],
+      rulesText: "\{T}: Add \{W} or \{U}.",
+      producesMana: "WU",
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "solara"
+    },
+    "prismatic-core": {
+      id: "prismatic-core",
+      name: "Prismatic Core",
+      manaCost: "\{1}",
+      cmc: 1,
+      colors: [],
+      colorIdentity: ["C"],
+      supertypes: [],
+      types: ["Artifact"],
+      subtypes: ["Geode"],
+      rulesText: "\{T}: Add \{C}.",
+      producesMana: "C",
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "colourless"
+    },
+    // Multi-target & modal fixtures (#3): twin-dart is a fixed two-target spell, cinder-bolt
+    // the "any target" (player or creature) form, and ember-reckoning a modal "Choose one"
+    // spell -- the mode names the branch frResolveSpellEffect takes, each with its own
+    // targeting. All three declare their target requirements on the record (targeting/modes),
+    // the way every effect-consuming card must from here on.
+    "twin-dart": {
+      id: "twin-dart",
+      name: "Twin Dart",
+      manaCost: "\{1}\{R}",
+      cmc: 2,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Twin Dart deals 1 damage to each of two target creatures.",
+      targeting: {
+        min: 2,
+        max: 2,
+        distinct: true,
+        slots: [{ types: ["Creature"] }, { types: ["Creature"] }]
+      },
+      effects: [{ op: "damage", targets: [0], amount: 1 }, { op: "damage", targets: [1], amount: 1 }],
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "ember"
+    },
+    "cinder-bolt": {
+      id: "cinder-bolt",
+      name: "Cinder Bolt",
+      manaCost: "\{R}",
+      cmc: 1,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Cinder Bolt deals 2 damage to any target.",
+      targeting: { min: 1, max: 1, slots: [{ player: true, types: ["Creature"] }] },
+      effects: [{ op: "damage", targets: [0], amount: 2 }],
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "ember"
+    },
+    "ember-reckoning": {
+      id: "ember-reckoning",
+      name: "Ember Reckoning",
+      manaCost: "\{1}\{R}",
+      cmc: 2,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Choose one \u2014 Ember Reckoning deals 3 damage to target creature; or Ember Reckoning deals 3 damage to target player.",
+      modes: [
+        { name: "creature", targeting: { min: 1, max: 1, slots: [{ types: ["Creature"] }] }, effects: [{ op: "damage", targets: [0], amount: 3 }] },
+        { name: "player", targeting: { min: 1, max: 1, slots: [{ player: true }] }, effects: [{ op: "damage", targets: [0], amount: 3 }] }
+      ],
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "ember"
+    },
+    // X-cost fixtures -- the four spell forms the mana engine must cast: {X} and {X}{X}
+    // costs, both speeds. Their hardcoded cmc counts X as 0 (spec section 5), the same way
+    // frManaParseCost computes it. rulesText is flavor: the engine exposes the chosen x on
+    // the stack entry ({ kind:"spell", ..., x }) for a consumer's effect to use.
+    "solara-benediction": {
+      id: "solara-benediction",
+      name: "Solara Benediction",
+      manaCost: "\{X}\{W}",
+      cmc: 1,
+      colors: ["W"],
+      colorIdentity: ["W"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Prevent the next X damage that would be dealt to you this turn.",
+      effects: [{ op: "shield", targets: ["controller"], amount: "X", untilEot: true }],
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "solara"
+    },
+    "tide-vortex": {
+      id: "tide-vortex",
+      name: "Tide Vortex",
+      manaCost: "\{X}\{X}\{U}",
+      cmc: 1,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Scry X, then draw a card.",
+      effects: [{ op: "scry", amount: "X", player: "controller" }, { op: "draw", amount: 1, player: "controller" }],
+      rarity: "Sovereign",
+      frame: "sovereign",
+      glyph: "tide"
+    },
+    "ember-conflagration": {
+      id: "ember-conflagration",
+      name: "Ember Conflagration",
+      manaCost: "\{X}\{R}",
+      cmc: 1,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Sorcery"],
+      subtypes: [],
+      rulesText: "This spell deals X damage to each creature and player.",
+      effects: [{ op: "damageAll", amount: "X", scope: { creatures: true, players: true } }],
+      rarity: "Ascendant",
+      frame: "ascendant",
+      glyph: "ember"
+    },
+    "umbra-life-drain": {
+      id: "umbra-life-drain",
+      name: "Umbra Life Drain",
+      manaCost: "\{X}\{B}",
+      cmc: 1,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Sorcery"],
+      subtypes: [],
+      rulesText: "Each opponent loses X life and you gain X life.",
+      effects: [
+        { op: "life", targets: ["opponents"], amount: "X", gain: false },
+        { op: "life", targets: ["controller"], amount: "X", gain: true }
+      ],
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "umbra"
+    },
+    // #4 fixtures -- one card per new template the data-driven library must exercise:
+    // verdant-call (token creator), ember-hound (activated {1},{T} ability), tide-banishment
+    // (counter target spell -- a spell-slot target), umbra-whisper (discard), and the
+    // wolf-token record behind verdant-call's tokens. Every fixture carries its effect on
+    // the record (effects / triggers / abilities) with no engine id-matching anywhere.
+    "verdant-call": {
+      id: "verdant-call",
+      name: "Verdant Call",
+      manaCost: "\{2}\{G}",
+      cmc: 3,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Sorcery"],
+      subtypes: [],
+      rulesText: "Create two 1/1 green Wolf creature tokens.",
+      effects: [{ op: "token", cardId: "wolf-token", count: 2, controller: "controller" }],
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "verdant"
+    },
+    "wolf-token": {
+      id: "wolf-token",
+      name: "Wolf",
+      cmc: 0,
+      colors: ["G"],
+      colorIdentity: ["G"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Wolf"],
+      rulesText: "",
+      power: 1,
+      toughness: 1,
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "verdant"
+    },
+    "ember-hound": {
+      id: "ember-hound",
+      name: "Ember Hound",
+      manaCost: "\{2}\{R}",
+      cmc: 3,
+      colors: ["R"],
+      colorIdentity: ["R"],
+      supertypes: [],
+      types: ["Creature"],
+      subtypes: ["Hound"],
+      rulesText: "\{1}, \{T}: Ember Hound deals 1 damage to any target.",
+      power: 3,
+      toughness: 2,
+      abilities: [{
+        name: "snap",
+        cost: { tap: true, mana: "\{1}" },
+        targeting: { min: 1, max: 1, slots: [{ player: true, types: ["Creature"] }] },
+        effects: [{ op: "damage", targets: [0], amount: 1 }]
+      }],
+      rarity: "Marked",
+      frame: "marked",
+      glyph: "ember"
+    },
+    "tide-banishment": {
+      id: "tide-banishment",
+      name: "Tide Banishment",
+      manaCost: "\{1}\{U}",
+      cmc: 2,
+      colors: ["U"],
+      colorIdentity: ["U"],
+      supertypes: [],
+      types: ["Instant"],
+      subtypes: [],
+      rulesText: "Counter target spell.",
+      targeting: { min: 1, max: 1, slots: [{ spell: true }] },
+      effects: [{ op: "counter", targets: [0] }],
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "tide"
+    },
+    "umbra-whisper": {
+      id: "umbra-whisper",
+      name: "Umbra Whisper",
+      manaCost: "\{2}\{B}",
+      cmc: 3,
+      colors: ["B"],
+      colorIdentity: ["B"],
+      supertypes: [],
+      types: ["Sorcery"],
+      subtypes: [],
+      rulesText: "Target player discards two cards.",
+      targeting: { min: 1, max: 1, slots: [{ player: true }] },
+      effects: [{ op: "discard", amount: 2, targets: [0] }],
+      rarity: "Vaulted",
+      frame: "vaulted",
+      glyph: "umbra"
     }
   };
 
 frCardGet(id) =>
-  let db = frCardDb();
+  let db = frActiveCardDb();
   return db[id] || null;
+
+// The card database the engine resolves ids against. A custom DB injected via newGame's
+// config.cards (#6) takes effect as window.FIVE_REALMS_CARDDB (merged over the fixture
+// frCardDb); otherwise the built-in fixture database is used. newGame owns this global the
+// way frInitPayload owns window.FIVE_REALMS_PAYLOAD -- a singleton game plugin.
+frActiveCardDb() =>
+  return window.FIVE_REALMS_CARDDB || frCardDb();
 
 
 // =====================================================================
@@ -613,14 +1045,19 @@ frManaParseCost(costStr) =>
   }
   let cmc = 0;
   let colors = [];
+  let xCount = 0;
   for(let s = 0; s < symbols.length; s++) {
     cmc += symbols[s].cmc;
+    if(symbols[s].kind === "variable") xCount += 1;
     for(let c = 0; c < symbols[s].colors.length; c++) {
       let color = symbols[s].colors[c];
       if(colors.indexOf(color) === -1) colors.push(color);
     }
   }
-  return { symbols: symbols, cmc: cmc, colors: colors };
+  // {X} stays variable in the parsed cost: xCount counts how many X's a cast must pay for,
+  // while cmc stays computed with X as 0 (spec section 5's cmc table). frManaTryPay turns
+  // xCount into generic mana when a concrete x is chosen.
+  return { symbols: symbols, cmc: cmc, colors: colors, xCount: xCount };
 
 frManaEmptyPool() =>
   return { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
@@ -629,12 +1066,20 @@ frManaSymbolOrder(kind) =>
   let order = { colored: 0, colorless: 0, hybridColored: 1, hybridGeneric: 2, generic: 3, variable: 4 };
   return order[kind];
 
-frManaTryPay(pool, parsedCost) =>
+frManaTryPay(pool, parsedCost, x) =>
   let working = {};
   for(let k in pool) working[k] = pool[k];
   let symbols = parsedCost.symbols.slice();
   symbols.sort((a, b) => frManaSymbolOrder(a.kind) - frManaSymbolOrder(b.kind));
   let genericNeeded = 0;
+  let xValue = 0;
+  if(parsedCost.xCount > 0) {
+    if(x === undefined) x = 0;
+    if(typeof x !== "number" || !Number.isInteger(x) || x < 0) {
+      return { ok: false, pool: null, reason: "x must be a non-negative integer" };
+    }
+    xValue = x;
+  }
   for(let i = 0; i < symbols.length; i++) {
     let sym = symbols[i];
     if(sym.kind === "colored") {
@@ -669,9 +1114,11 @@ frManaTryPay(pool, parsedCost) =>
     } else if(sym.kind === "generic") {
       genericNeeded += sym.n;
     }
-    // "variable" ({X}): Phase 1 has no fixture using it; treated as costing 0, per the
-    // spec's cmc table. A real X-value choice is deferred.
+    // "variable" ({X}): contributes nothing to cmc and is paid below as xValue * xCount
+    // generic mana, so {X}{X}{U} at x=2 needs {U} plus 4 generic. x is validated above;
+    // an omitted x defaults to 0, which is always a legal choice.
   }
+  if(parsedCost.xCount > 0) genericNeeded += xValue * parsedCost.xCount;
   if(genericNeeded > 0) {
     let total = 0;
     for(let k in working) total += working[k];
@@ -693,6 +1140,28 @@ frManaPay(pool, parsedCost) =>
   let result = frManaTryPay(pool, parsedCost);
   if(!result.ok) return null;
   return result.pool;
+
+// The largest x a player could afford for an X-cost spell from the floating pool, or null
+// if even x=0 is unpayable (the fixed symbols are unaffordable). Affordability in x is
+// monotonic (more x only ever costs more generic mana), so a binary search over
+// [0, floor(totalPoolMana / xCount)] finds the max exactly. x=0 is always legal when this
+// returns non-null, so frLegalActions offers both 0 and the maximum.
+frMaxAffordableX(pool, parsedCost) =>
+  if(parsedCost.xCount === 0) return 0;
+  if(!frManaTryPay(pool, parsedCost, 0).ok) return null;
+  let total = 0;
+  for(let k in pool) total += pool[k];
+  let lo = 0;
+  let hi = Math.floor(total / parsedCost.xCount);
+  while(lo < hi) {
+    let mid = Math.ceil((lo + hi) / 2);
+    if(frManaTryPay(pool, parsedCost, mid).ok) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
 
 frManaAbilityColor(cardId) =>
   let card = frCardGet(cardId);
@@ -773,11 +1242,12 @@ frObjectNew(id, cardId, owner) =>
 // hand each. Turn 1 begins at the upkeep step (there is nothing to untap yet).
 
 frGameDefaultDeck() =>
-  // A playable stand-in built from the fixture card database: every card twice, padded
-  // with basic-style mana sources so the deck can actually cast what it draws. Exists so
+  // A playable stand-in built from the active card database (the fixture DB, or a custom
+  // DB injected via newGame's config.cards): every card twice, padded with basic-style
+  // mana sources so the deck can actually cast what it draws. Exists so
   // frGameNew is callable with no arguments -- a consumer that just wants a game should
   // not have to supply a decklist, and $output must never throw on a bare "newGame".
-  let ids = Object.keys(frCardDb());
+  let ids = Object.keys(frActiveCardDb());
   let deck = [];
   for(let i = 0; i < ids.length; i++) {
     deck.push(ids[i]);
@@ -792,8 +1262,21 @@ frGameDefaultDeck() =>
 frGameNew(config) =>
   // Tolerant of a missing or partial config: a bare frGameNew() yields a valid two-player
   // game on the default deck. Phase 1 has no deck-legality rules, so any card list is
-  // accepted as given.
+  // accepted as given. A config.cards map ({id: card}) injects a custom card database
+  // (#6): it is merged over the fixture frCardDb (fixture entries stay, custom entries
+  // win on a shared id) and becomes the DB the whole game -- resolution, combat, SBA,
+  // legalActions, render -- resolves card ids against. A later frGameNew without
+  // config.cards restores the fixture database.
   let cfg = config || {};
+  if(cfg.cards && typeof cfg.cards === "object") {
+    let merged = frCardDb();
+    for(let k in cfg.cards) {
+      if(cfg.cards.hasOwnProperty(k)) merged[k] = cfg.cards[k];
+    }
+    window.FIVE_REALMS_CARDDB = merged;
+  } else {
+    window.FIVE_REALMS_CARDDB = null;
+  }
   let seed = cfg.seed === undefined ? 1 : cfg.seed;
   let decks = Array.isArray(cfg.decks) && cfg.decks.length > 0
     ? cfg.decks
@@ -994,13 +1477,17 @@ frStackResolveTop(state) =>
 // frResolveSpell resolves a spell on the stack. Phase 2 replaces the Phase 1
 // zone-transition stub: permanents enter (firing their enter triggers), auras attach and
 // grant their buff, and instants resolve their actual effect. Entry shape
-// { kind:"spell", objId, cardId, target } -- the spell object itself sits in the
-// "stack" zone until this resolves it.
+// { kind:"spell", objId, cardId, targets, target, mode, x } -- targets is the chosen
+// target-set ([] for a spell that takes none), mode the chosen "Choose one" mode (null
+// for a non-modal spell), and x the chosen value of an X-cost spell (0 for a spell with
+// no {X}); `target` mirrors targets[0] for any consumer that still reads a single id. The
+// spell object itself sits in the "stack" zone until this resolves it.
 frResolveSpell(state, entry) =>
   let obj = state.objects[entry.objId];
   if(!obj) return state;
-  if(entry.target != null) {
-    let tobj = state.objects[entry.target];
+  let targets = entry.targets || (entry.target != null ? [entry.target] : []);
+  for(let i = 0; i < targets.length; i++) {
+    let tobj = state.objects[targets[i]];
     if(tobj && tobj.zone === "battlefield" && tobj.controller !== obj.controller && frHasKeyword(tobj, "ward")) {
       frZoneRemove(state, obj.id, "stack", obj.controller);
       frZoneAdd(state, obj.id, "graveyard", obj.owner);
@@ -1009,6 +1496,7 @@ frResolveSpell(state, entry) =>
     }
   }
   let card = frCardGet(obj.cardId);
+  if(!card) return state;
   let permanentTypes = ["Creature", "Artifact", "Enchantment"];
   let isPermanent = false;
   for(let t = 0; t < card.types.length; t++) {
@@ -1019,15 +1507,15 @@ frResolveSpell(state, entry) =>
     frZoneAdd(state, obj.id, "battlefield", obj.controller);
     obj.zone = "battlefield";
     obj.summoningSickness = true;
-    if(card.subtypes.indexOf("Aura") !== -1) {
-      let enchant = state.objects[entry.target];
+    if(card.subtypes && card.subtypes.indexOf("Aura") !== -1) {
+      let enchant = state.objects[targets[0]];
       if(enchant && enchant.zone === "battlefield") {
         obj.attachedTo = enchant.id;
         enchant.attachments.push(obj.id);
-        if(obj.cardId === "vow-of-radiance") {
-          let b = frAuraBuff(obj.cardId);
+        let b = frAuraBuff(obj.cardId);
+        if(b) {
           state = frEffectAdd(state, obj.id, enchant.id, {
-            layer: 7, power: b ? b.power : 0, toughness: b ? b.toughness : 0, untilEot: false
+            layer: 7, power: b.power, toughness: b.toughness, untilEot: false
           });
         }
       } else {
@@ -1039,44 +1527,300 @@ frResolveSpell(state, entry) =>
     state = frTriggersOnEnter(state, obj);
   } else {
     frZoneMove(state, obj.id, "stack", "graveyard", obj.owner);
-    state = frResolveSpellEffect(state, obj, entry.target);
+    state = frResolveSpellEffect(state, obj, entry);
   }
   return state;
 
-// frResolveSpellEffect applies a resolving instant/sorcery's effect (a seeded per-card
-// resolution, not a general 608 rules-text interpreter -- the keyword-ability library is a
-// later phase, still).
-frResolveSpellEffect(state, obj, target) =>
-  let id = obj.cardId;
-  if(id === "verdant-surge") {
-    state = frEffectAdd(state, obj.id, target, {
-      layer: 7, power: 3, toughness: 3, untilEot: true
-    });
-  } else if(id === "withering-grasp") {
+// =====================================================================
+// DATA-DRIVEN CARD EFFECTS (#4)
+// =====================================================================
+//
+// Effects live on the card record, not keyed by card id: a resolving instant/sorcery
+// reads card.effects, a "Choose one" spell reads the chosen mode's effects, triggers
+// read card.triggers (when: "enter" / "attack" / "combatDamageToPlayer"), and activated
+// abilities read card.abilities (each with its own cost, targeting, and effects). Every
+// entry is one op from the template library below; X and the chosen targets/mode are
+// substituted at resolution. The old id-matching in frResolveSpellEffect /
+// frResolveAbility / frTriggers* is gone. Templates: damage, damageAll, life, draw,
+// discard, destroy, pump, tap, untap, shield, scry, addMana, token, counter, tutor.
+//
+// Target references: a number indexes into the entry's chosen target-set; "self" is the
+// permanent that owns the effect (a trigger or ability), "controller" the effect's
+// controller, "opponent" the other player, "opponents" every player but the controller.
+// An effect's `amount` (and pump's power/toughness) is a number or the string "X", which
+// substitutes the entry's chosen x.
+frEffectAmount(value, x) =>
+  if(value === "X") return (typeof x === "number") ? x : 0;
+  return (typeof value === "number") ? value : 0;
+
+frEffectResolveTargets(state, ctx, refs) =>
+  let out = [];
+  let list = Array.isArray(refs) ? refs : (refs === undefined ? [] : [refs]);
+  for(let i = 0; i < list.length; i++) {
+    let r = list[i];
+    if(typeof r === "number") {
+      if(ctx.targets && ctx.targets[r] !== undefined) out.push(ctx.targets[r]);
+    } else if(r === "self") {
+      if(ctx.self !== undefined && ctx.self !== null) out.push(ctx.self);
+    } else if(r === "controller") {
+      out.push(ctx.controller);
+    } else if(r === "opponent") {
+      if(ctx.opponent !== undefined && ctx.opponent !== null) out.push(ctx.opponent);
+      else out.push(frTurnOtherPlayer(state, ctx.controller));
+    } else if(r === "opponents") {
+      for(let p = 0; p < state.players.length; p++) {
+        if(p !== ctx.controller) out.push(p);
+      }
+    }
+  }
+  return out;
+
+frEffectCtx(state, obj, entry) =>
+  return {
+    x: (entry && entry.x !== undefined) ? entry.x : 0,
+    targets: (entry && Array.isArray(entry.targets)) ? entry.targets : [],
+    mode: (entry && entry.mode) || null,
+    self: null,
+    controller: obj ? obj.controller : 0,
+    sourceId: obj ? obj.id : null
+  };
+
+// Consume prevent-damage shields (solara-benediction) that cover `target` and return how
+// much damage remains. Shields are untilEot state.effects entries, not layer effects, so
+// they bypass frEffectAdd and are dropped by the cleanup step like any other untilEot.
+frApplyShields(state, target, amount) =>
+  let remaining = amount;
+  for(let i = state.effects.length - 1; i >= 0 && remaining > 0; i--) {
+    let e = state.effects[i];
+    if(!e || e.type !== "shield") continue;
+    let hits = false;
+    for(let j = 0; j < (e.targets || []).length; j++) {
+      if(e.targets[j] === target) { hits = true; break; }
+    }
+    if(!hits) continue;
+    let used = Math.min(remaining, e.amount);
+    e.amount -= used;
+    remaining -= used;
+    if(e.amount <= 0) state.effects.splice(i, 1);
+  }
+  return { state: state, remaining: remaining };
+
+// The one entry point for spell/ability damage: shields first, then the hit (creature
+// damage respecting indestructible, or player life loss), then the SBA loop.
+frApplyDamage(state, target, amount, sourceId) =>
+  if(amount <= 0) return state;
+  let r = frApplyShields(state, target, amount);
+  state = r.state;
+  let remaining = r.remaining;
+  if(remaining <= 0) return state;
+  if(typeof target === "number") {
+    if(state.players[target]) state.players[target].life -= remaining;
+  } else {
     let t = state.objects[target];
-    if(t && !frHasKeyword(t, "indestructible")) {
-      frZoneMove(state, t.id, "battlefield", "graveyard", t.owner);
+    if(t && t.zone === "battlefield" && !frHasKeyword(t, "indestructible")) {
+      t.damage += remaining;
+    }
+  }
+  return frCheckStateBasedActions(state);
+
+frShuffleLibrary(state, player) =>
+  let pl = state.players[player];
+  if(!pl || pl.library.length <= 1) return state;
+  let r = frShuffle(pl.library, state.rngState);
+  pl.library = r.array;
+  state.rngState = r.state;
+  return state;
+
+frApplyOneEffect(state, eff, ctx) =>
+  let refs = eff.targets;
+  let amount = frEffectAmount(eff.amount, ctx.x);
+  if(eff.op === "damage") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      state = frApplyDamage(state, list[i], amount, ctx.sourceId);
+    }
+  } else if(eff.op === "damageAll") {
+    let scope = eff.scope || {};
+    for(let i = 0; i < state.battlefield.length; i++) {
+      let o = state.objects[state.battlefield[i]];
+      if(!o || o.zone !== "battlefield") continue;
+      if(scope.creatures && frCardGet(o.cardId) && frCardGet(o.cardId).types.indexOf("Creature") !== -1) {
+        state = frApplyDamage(state, o.id, amount, ctx.sourceId);
+      }
+    }
+    if(scope.players) {
+      for(let p = 0; p < state.players.length; p++) {
+        state = frApplyDamage(state, p, amount, ctx.sourceId);
+      }
+    }
+  } else if(eff.op === "life") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      let p = list[i];
+      if(typeof p === "number" && state.players[p]) {
+        if(eff.gain) state.players[p].life += amount;
+        else state.players[p].life -= amount;
+      }
+    }
+    state = frCheckStateBasedActions(state);
+  } else if(eff.op === "draw") {
+    let player = eff.player === "controller" ? ctx.controller : eff.player;
+    if(typeof player === "number") state = frGameDrawN(state, player, amount);
+  } else if(eff.op === "discard") {
+    let list = eff.player !== undefined ? frEffectResolveTargets(state, ctx, [eff.player]) : frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      let p = list[i];
+      if(typeof p !== "number" || !state.players[p]) continue;
+      for(let d = 0; d < amount; d++) {
+        let pl = state.players[p];
+        if(pl.hand.length === 0) break;
+        let c = pl.hand.pop();
+        frZoneRemove(state, c, "hand", p);
+        frZoneAdd(state, c, "graveyard", p);
+        state.objects[c].zone = "graveyard";
+      }
+    }
+  } else if(eff.op === "destroy") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      let t = state.objects[list[i]];
+      if(t && t.zone === "battlefield" && !frHasKeyword(t, "indestructible")) {
+        state = frDeathDestroy(state, list[i]);
+      }
+    }
+  } else if(eff.op === "pump") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    let power = frEffectAmount(eff.power, ctx.x);
+    let toughness = frEffectAmount(eff.toughness !== undefined ? eff.toughness : eff.power, ctx.x);
+    for(let i = 0; i < list.length; i++) {
+      let t = state.objects[list[i]];
+      if(!t || t.zone !== "battlefield") continue;
+      if(eff.counters) {
+        t.counters.p1p1 = (t.counters.p1p1 || 0) + power;
+      } else {
+        state = frEffectAdd(state, ctx.sourceId, t.id, {
+          layer: 7, power: power, toughness: toughness, untilEot: eff.untilEot !== false
+        });
+      }
+    }
+  } else if(eff.op === "tap" || eff.op === "untap") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      let t = state.objects[list[i]];
+      if(t && t.zone === "battlefield") t.tapped = eff.op === "tap";
+    }
+  } else if(eff.op === "shield") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      state.effects.push({ type: "shield", amount: amount, targets: [list[i]], untilEot: true, sourceId: ctx.sourceId });
+    }
+  } else if(eff.op === "scry") {
+    let player = eff.player === "controller" ? ctx.controller : eff.player;
+    let pl = typeof player === "number" ? state.players[player] : null;
+    if(pl) {
+      // Documented simplification: scry X moves the top X cards of the library to the
+      // bottom in order (no peek-and-choose decision in the non-interactive engine).
+      for(let i = 0; i < amount; i++) {
+        if(pl.library.length === 0) break;
+        pl.library.push(pl.library.shift());
+      }
+    }
+  } else if(eff.op === "addMana") {
+    let pool = state.players[ctx.controller].manaPool;
+    for(let color in (eff.mana || {})) {
+      if(eff.mana.hasOwnProperty(color)) pool[color] = (pool[color] || 0) + eff.mana[color];
+    }
+  } else if(eff.op === "token") {
+    let cardId = eff.cardId;
+    if(cardId && frCardGet(cardId)) {
+      let controller = eff.controller === "controller" ? ctx.controller : eff.controller;
+      if(typeof controller !== "number") controller = ctx.controller;
+      let count = eff.count || 1;
+      for(let i = 0; i < count; i++) {
+        let id = "obj" + state.nextObjectId;
+        state.nextObjectId += 1;
+        let tok = frObjectNew(id, cardId, controller);
+        tok.zone = "battlefield";
+        tok.summoningSickness = true;
+        state.objects[id] = tok;
+        state.battlefield.push(id);
+        state = frTriggersOnEnter(state, tok);
+      }
+    }
+  } else if(eff.op === "counter") {
+    let list = frEffectResolveTargets(state, ctx, refs);
+    for(let i = 0; i < list.length; i++) {
+      let t = state.objects[list[i]];
+      if(!t || t.zone !== "stack") continue;
+      for(let s = state.stack.length - 1; s >= 0; s--) {
+        let e = state.stack[s];
+        if(e && e.kind === "spell" && e.objId === t.id) {
+          state.stack.splice(s, 1);
+          break;
+        }
+      }
       t.zone = "graveyard";
+      let gy = state.players[t.owner].graveyard;
+      if(gy.indexOf(t.id) === -1) gy.push(t.id);
+    }
+  } else if(eff.op === "tutor") {
+    let player = eff.player === "controller" ? ctx.controller : eff.player;
+    let pl = typeof player === "number" ? state.players[player] : null;
+    if(pl) {
+      let to = eff.to || "hand";
+      for(let i = 0; i < pl.library.length; i++) {
+        let oid = pl.library[i];
+        if(state.objects[oid] && state.objects[oid].cardId === eff.cardId) {
+          frZoneMove(state, oid, "library", to, player);
+          state.objects[oid].zone = to;
+          state = frShuffleLibrary(state, player);
+          break;
+        }
+      }
     }
   }
   return state;
 
-// frResolveAbility resolves an activated-ability entry. Only the fixture cards'
-// abilities are known here; entry shape { kind:"ability", objId, cardId, target }.
-// Mana abilities never reach the stack (they resolve immediately at activation); this is for
-// the one on-the-stack ability among the fixtures: Faceted Ember Core's 3-damage.
-frResolveAbility(state, entry) =>
-  if(entry.cardId === "faceted-ember-core") {
-    let t = state.objects[entry.target];
-    if(t) {
-      t.damage += 3;
-      state = frCheckStateBasedActions(state);
-    } else if(typeof entry.target === "number" && state.players[entry.target]) {
-      state.players[entry.target].life -= 3;
-      state = frCheckStateBasedActions(state);
-    }
+frApplyEffects(state, effects, ctx) =>
+  if(!Array.isArray(effects)) return state;
+  for(let i = 0; i < effects.length; i++) {
+    state = frApplyOneEffect(state, effects[i], ctx);
   }
   return state;
+
+// frResolveSpellEffect applies a resolving instant/sorcery's declared effect. A modal
+// spell runs the chosen mode's effects; anything else runs card.effects. The template
+// library substitutes X and the chosen targets; no card id is matched here.
+frResolveSpellEffect(state, obj, entry) =>
+  let card = frCardGet(obj.cardId);
+  if(!card) return state;
+  let effects = null;
+  if(entry.mode && Array.isArray(card.modes)) {
+    for(let i = 0; i < card.modes.length; i++) {
+      if(card.modes[i].name === entry.mode) { effects = card.modes[i].effects; break; }
+    }
+  } else {
+    effects = card.effects;
+  }
+  if(!effects) return state;
+  let ctx = frEffectCtx(state, obj, entry);
+  return frApplyEffects(state, effects, ctx);
+
+// frResolveAbility resolves an activated-ability entry by reading the named ability off
+// the card record. Entry shape { kind:"ability", objId, cardId, abilityName, targets }.
+// Mana abilities never reach the stack (they resolve immediately at activation).
+frResolveAbility(state, entry) =>
+  let card = frCardGet(entry.cardId);
+  if(!card || !Array.isArray(card.abilities)) return state;
+  let ability = null;
+  for(let i = 0; i < card.abilities.length; i++) {
+    if(card.abilities[i].name === entry.abilityName) { ability = card.abilities[i]; break; }
+  }
+  if(!ability || !Array.isArray(ability.effects)) return state;
+  let obj = state.objects[entry.objId];
+  let ctx = frEffectCtx(state, obj, entry);
+  ctx.self = entry.objId;
+  return frApplyEffects(state, ability.effects, ctx);
 
 // The permanent/aura/combat-model helpers shared by resolution, combat, and
 // frLegalActions. frPower/frToughness fold a creature's base P/T, +1/+1 counters,
@@ -1084,9 +1828,7 @@ frResolveAbility(state, entry) =>
 // Radiance) into one number.
 frAuraBuff(cardId) =>
   let card = frCardGet(cardId);
-  if(card && card.subtypes.indexOf("Aura") !== -1 && card.rulesText.indexOf("+2/+2") !== -1) {
-    return { power: 2, toughness: 2 };
-  }
+  if(card && card.auraBuff) return card.auraBuff;
   return null;
 
 // frEffectAdd registers a continuous effect -- a layer-ordered modifier generated by an
@@ -1114,7 +1856,10 @@ frEffectAdd(state, sourceId, targetId, opts) =>
 frEffectsFor(state, objId) =>
   let list = [];
   for(let i = 0; i < state.effects.length; i++) {
-    if(state.effects[i].targetId === objId) list.push(state.effects[i]);
+    let e = state.effects[i];
+    if(e.targetId !== objId) continue;
+    if(typeof e.power !== "number" && typeof e.toughness !== "number") continue;
+    list.push(e);
   }
   list.sort(function(a, b) { return a.timestamp - b.timestamp; });
   return list;
@@ -1139,78 +1884,223 @@ frToughness(state, obj) =>
   for(let i = 0; i < fx.length; i++) sum += fx[i].toughness;
   return base + p1 + eot + sum;
 
-frCardNeedsTarget(card) =>
-  let id = card ? card.id : null;
-  return id === "verdant-surge" || id === "withering-grasp" || id === "vow-of-radiance";
+// Targeting & modal-spell model (#3). A card record declares its target requirements
+// on the record itself: `targeting` -- { min, max, distinct, slots: [...] } -- and/or
+// `modes` (a "Choose one" list; each mode carries its own `targeting`). Slots are checked
+// positionally (slot i applies to the i-th chosen target; the last slot repeats if a card
+// takes more targets than it declares slots). `max` may be the string "X" (Fireball-style:
+// the spell's chosen x is the ceiling), in which case validation needs the x from the cast
+// action. `distinct` (default true) forbids choosing the same object/player for two slots.
+// A slot is { player: true } (players legal), { types: [...] } (permanent types), a
+// { player, types } mix ("any target"), { permanent: true } (any permanent), plus an
+// optional `toughnessLE` filter (Withering Grasp). The old id-hardcoded single-target
+// helpers are gone; every consumer reads the declared data.
+frModeNames(card) =>
+  return (card && Array.isArray(card.modes)) ? card.modes.map((m) => m.name) : [];
 
-frTargetLegalForSpell(state, card, target, caster) =>
+frModeLegal(card, mode) =>
+  return frModeNames(card).indexOf(mode) !== -1;
+
+frCardTargeting(card, mode) =>
+  if(!card || typeof card !== "object") return null;
+  if(mode !== undefined && mode !== null) {
+    if(!Array.isArray(card.modes)) return null;
+    for(let i = 0; i < card.modes.length; i++) {
+      if(card.modes[i].name === mode) return card.modes[i].targeting || null;
+    }
+    return null;
+  }
+  return card.targeting || null;
+
+frCardNeedsTarget(card) =>
+  return !!frCardTargeting(card, null) || frModeNames(card).length > 0;
+
+frTargetingMin(t) =>
+  return (typeof t.min === "number") ? t.min : 0;
+
+frTargetingMax(t, x) =>
+  if(t.max === "X") return (typeof x === "number" && x > 0) ? x : 0;
+  return (typeof t.max === "number") ? t.max : 1;
+
+frTargetingSlots(t) =>
+  return (Array.isArray(t.slots) && t.slots.length > 0) ? t.slots : [{ player: true, permanent: true }];
+
+// A slot accepts battlefield permanents when it names types, a toughness filter, or
+// permanent: true explicitly -- a bare { player: true } slot takes players only. A slot
+// with `spell: true` takes spells on the stack instead (object ids in the stack zone).
+frSlotHasPermanentCriteria(slot) =>
+  return slot.permanent === true || (Array.isArray(slot.types) && slot.types.length > 0) ||
+    typeof slot.toughnessLE === "number";
+
+frSlotTargetLegal(state, target, slot, caster) =>
+  if(typeof target === "number") {
+    if(!slot.player || !state.players[target]) return false;
+    return true;
+  }
+  if(slot.spell) {
+    let s = state.objects[target];
+    return !!(s && s.zone === "stack");
+  }
+  if(!frSlotHasPermanentCriteria(slot)) return false;
   let t = state.objects[target];
   if(!t || t.zone !== "battlefield") return false;
   if(t.controller !== caster && frHasKeyword(t, "hexproof")) return false;
   let tcard = frCardGet(t.cardId);
-  if(!tcard || tcard.types.indexOf("Creature") === -1) return false;
-  if(card.id === "withering-grasp") return frToughness(state, t) <= 3;
-  return true;
-
-frLegalTargetsForSpell(state, card, caster) =>
-  let ids = [];
-  for(let i = 0; i < state.battlefield.length; i++) {
-    let obj = state.objects[state.battlefield[i]];
-    if(!obj) continue;
-    let tcard = frCardGet(obj.cardId);
-    if(!tcard || tcard.types.indexOf("Creature") === -1) continue;
-    if(obj.controller !== caster && frHasKeyword(obj, "hexproof")) continue;
-    if(card.id === "withering-grasp" && frToughness(state, obj) > 3) continue;
-    ids.push(obj.id);
+  if(!tcard) return false;
+  if(Array.isArray(slot.types) && slot.types.length > 0) {
+    let ok = false;
+    for(let i = 0; i < slot.types.length; i++) {
+      if(tcard.types.indexOf(slot.types[i]) !== -1) { ok = true; break; }
+    }
+    if(!ok) return false;
   }
-  return ids;
-
-frAbilityTargetLegal(state, target, caster) =>
-  if(typeof target === "number" && state.players[target]) return true;
-  let t = state.objects[target];
-  if(!t || t.zone !== "battlefield") return false;
-  if(t.controller !== caster && frHasKeyword(t, "hexproof")) return false;
+  if(typeof slot.toughnessLE === "number" && frToughness(state, t) > slot.toughnessLE) return false;
   return true;
 
-frLegalAbilityTargets(state, caster) =>
+frTargetSetLegal(state, card, mode, targets, caster, x) =>
+  let targeting = frCardTargeting(card, mode);
+  if(!targeting) {
+    if(Array.isArray(targets) && targets.length > 0) {
+      return { ok: false, reason: "this spell does not take targets" };
+    }
+    return { ok: true, reason: null };
+  }
+  return frTargetSetLegalForTargeting(state, targeting, targets, caster, x);
+
+// Validation against a targeting object directly -- the shared core for spells (via
+// frTargetSetLegal above) and activated abilities (which carry their own targeting).
+frTargetSetLegalForTargeting(state, targeting, targets, caster, x) =>
+  let list = Array.isArray(targets) ? targets : [];
+  let min = frTargetingMin(targeting);
+  let max = frTargetingMax(targeting, x);
+  let count = list.length;
+  if(count < min) {
+    return { ok: false, reason: "requires at least " + min + " target" + (min === 1 ? "" : "s") };
+  }
+  if(count > max) {
+    return { ok: false, reason: "requires at most " + max + " target" + (max === 1 ? "" : "s") };
+  }
+  let slots = frTargetingSlots(targeting);
+  let distinct = targeting.distinct !== false;
+  for(let i = 0; i < count; i++) {
+    let slot = slots[Math.min(i, slots.length - 1)] || slots[slots.length - 1];
+    if(!frSlotTargetLegal(state, list[i], slot, caster)) {
+      return { ok: false, reason: "invalid target #" + (i + 1) };
+    }
+    if(distinct) {
+      for(let j = 0; j < i; j++) {
+        if(list[i] === list[j]) return { ok: false, reason: "targets must be distinct" };
+      }
+    }
+  }
+  return { ok: true, reason: null };
+
+frLegalTargetsForSlot(state, slot, caster) =>
   let tg = [];
-  for(let p = 0; p < state.players.length; p++) tg.push(p);
-  for(let i = 0; i < state.battlefield.length; i++) {
-    let obj = state.objects[state.battlefield[i]];
-    if(obj && !(obj.controller !== caster && frHasKeyword(obj, "hexproof"))) tg.push(obj.id);
+  if(slot.spell) {
+    for(let i = 0; i < state.stack.length; i++) {
+      let e = state.stack[i];
+      if(!e || e.kind !== "spell") continue;
+      let so = state.objects[e.objId];
+      if(so && so.zone === "stack") tg.push(so.id);
+    }
+    return tg;
+  }
+  if(slot.player) {
+    for(let p = 0; p < state.players.length; p++) tg.push(p);
+  }
+  if(frSlotHasPermanentCriteria(slot)) {
+    for(let i = 0; i < state.battlefield.length; i++) {
+      let obj = state.objects[state.battlefield[i]];
+      if(!obj || obj.zone !== "battlefield") continue;
+      if(obj.controller !== caster && frHasKeyword(obj, "hexproof")) continue;
+      let tcard = frCardGet(obj.cardId);
+      if(!tcard) continue;
+      if(Array.isArray(slot.types) && slot.types.length > 0) {
+        let ok = false;
+        for(let q = 0; q < slot.types.length; q++) {
+          if(tcard.types.indexOf(slot.types[q]) !== -1) { ok = true; break; }
+        }
+        if(!ok) continue;
+      }
+      if(typeof slot.toughnessLE === "number" && frToughness(state, obj) > slot.toughnessLE) continue;
+      tg.push(obj.id);
+    }
   }
   return tg;
 
+frTargetCombos(state, slots, count, caster, chosen, out) =>
+  if(chosen.length === count) {
+    out.push(chosen.slice());
+    return;
+  }
+  let slot = slots[chosen.length] || slots[slots.length - 1];
+  let candidates = frLegalTargetsForSlot(state, slot, caster);
+  for(let i = 0; i < candidates.length; i++) {
+    if(chosen.indexOf(candidates[i]) !== -1) continue;
+    chosen.push(candidates[i]);
+    frTargetCombos(state, slots, count, caster, chosen, out);
+    chosen.pop();
+  }
+
+// Enumerates every legal ordered target-set for a spell (one entry per mode when the card
+// is modal). Validation accepts any count up to `max`; enumeration is capped at 2 targets
+// per set so the action list stays bounded on a large board -- a documented limit, not a
+// legality rule.
+frLegalTargetSets(state, card, mode, caster, x) =>
+  let targeting = frCardTargeting(card, mode);
+  if(!targeting) return [];
+  return frLegalTargetSetsForTargeting(state, targeting, caster, x);
+
+// The shared core of frLegalTargetSets -- takes a targeting object directly so activated
+// abilities (which declare their own targeting) enumerate the same way spells do.
+frLegalTargetSetsForTargeting(state, targeting, caster, x) =>
+  let min = frTargetingMin(targeting);
+  let max = frTargetingMax(targeting, x);
+  let cap = Math.min(max, 2);
+  let slots = frTargetingSlots(targeting);
+  let out = [];
+  for(let k = Math.max(min, 0); k <= cap; k++) {
+    frTargetCombos(state, slots, k, caster, [], out);
+  }
+  return out;
+
 frTriggersOnEnter(state, obj) =>
-  let id = obj.cardId;
-  if(id === "sunward-sentinel") {
-    state.players[obj.controller].life += 2;
-  } else if(id === "nautilus-seer") {
-    state = frGameDrawOne(state, obj.controller);
-    let pl = state.players[obj.controller];
-    if(pl.hand.length > 0) {
-      let c = pl.hand.pop();
-      frZoneRemove(state, c, "hand", obj.controller);
-      frZoneAdd(state, c, "graveyard", obj.controller);
-      state.objects[c].zone = "graveyard";
+  let card = frCardGet(obj.cardId);
+  if(card && Array.isArray(card.triggers)) {
+    for(let i = 0; i < card.triggers.length; i++) {
+      let t = card.triggers[i];
+      if(t.when !== "enter") continue;
+      let ctx = frEffectCtx(state, obj, t);
+      ctx.self = obj.id;
+      state = frApplyEffects(state, t.effects, ctx);
     }
   }
   return state;
 
 frTriggersOnDeclareAttack(state, attacker) =>
-  if(attacker.cardId === "bramble-warden") {
-    attacker.counters.p1p1 = (attacker.counters.p1p1 || 0) + 1;
+  let card = frCardGet(attacker.cardId);
+  if(card && Array.isArray(card.triggers)) {
+    for(let i = 0; i < card.triggers.length; i++) {
+      let t = card.triggers[i];
+      if(t.when !== "attack") continue;
+      let ctx = frEffectCtx(state, attacker, t);
+      ctx.self = attacker.id;
+      state = frApplyEffects(state, t.effects, ctx);
+    }
   }
   return state;
 
 frTriggersOnCombatDamageToPlayer(state, attacker, player) =>
-  if(attacker.cardId === "thornshroud-stalker") {
-    let pl = state.players[player];
-    if(pl.hand.length > 0) {
-      let c = pl.hand.pop();
-      frZoneRemove(state, c, "hand", player);
-      frZoneAdd(state, c, "graveyard", player);
-      state.objects[c].zone = "graveyard";
+  let card = frCardGet(attacker.cardId);
+  if(card && Array.isArray(card.triggers)) {
+    for(let i = 0; i < card.triggers.length; i++) {
+      let t = card.triggers[i];
+      if(t.when !== "combatDamageToPlayer") continue;
+      let ctx = frEffectCtx(state, attacker, t);
+      ctx.self = attacker.id;
+      ctx.opponent = player;
+      state = frApplyEffects(state, t.effects, ctx);
     }
   }
   return state;
@@ -1255,71 +2145,134 @@ frReplacementPreventsCombatDamageTo(state, player) =>
   }
   return false;
 
-frDealCombatDamageToPlayer(state, attacker, player) =>
+frDealCombatDamageToPlayer(state, attacker, player, amount) =>
   if(frReplacementPreventsCombatDamageTo(state, player)) return state;
-  let dmg = frPower(state, attacker);
-  if(frHasKeyword(attacker, "lifelink")) state.players[attacker.controller].life += dmg;
-  state.players[player].life -= dmg;
-  state = frTriggersOnCombatDamageToPlayer(state, attacker, player);
+  let dmg = (typeof amount === "number") ? amount : frPower(state, attacker);
+  let r = frApplyShields(state, player, dmg);
+  state = r.state;
+  let remaining = r.remaining;
+  if(frHasKeyword(attacker, "lifelink")) state.players[attacker.controller].life += remaining;
+  state.players[player].life -= remaining;
+  if(remaining > 0) state = frTriggersOnCombatDamageToPlayer(state, attacker, player);
   return state;
 
 frDealCombatDamageToCreature(state, source, target, dmg) =>
   if(dmg <= 0) return state;
+  let r = frApplyShields(state, target.id, dmg);
+  state = r.state;
+  let remaining = r.remaining;
+  if(remaining <= 0) return state;
   if(frHasKeyword(source, "deathtouch")) target.deathtouchLethal = true;
-  target.damage += dmg;
-  if(frHasKeyword(source, "lifelink")) state.players[source.controller].life += dmg;
+  target.damage += remaining;
+  if(frHasKeyword(source, "lifelink")) state.players[source.controller].life += remaining;
   return state;
 
-// frDoCombatPass assigns combat damage for one strike (first-strike creatures first, then the
-// rest). A blocker first absorbs the attacker's power as damage; with trample, any excess
-// over its toughness spills onto the defending player.
-frDoCombatPass(state, attackerIds) =>
+// frDoCombatDamage assigns combat damage for one strike wave (rule 510). Only the creatures in
+// dealIds deal damage this wave: attackers assign their power across the blocking creatures in
+// declared blocker order (lethal to each in turn, the remainder to the last; excess spilling
+// with trample onto the defending player, or hitting the player if unblocked), and blockers put
+// their power on the attacker they blocked. A creature absent from dealIds -- e.g. a non-first-
+// strike blocker during the first-strike wave -- deals nothing here, so it never hits back before it
+// dies. All of a wave's damage is applied simultaneously; state-based actions are checked by the
+// caller between waves.
+frDoCombatDamage(state, dealIds) =>
   let blocks = state.combatBlocks || [];
   let defenders = {};
+  let attackerByBlocker = {};
+  let attackerSet = {};
+  for(let i = 0; i < (state.combatAttackers || []).length; i++) {
+    attackerSet[state.combatAttackers[i]] = true;
+  }
   for(let i = 0; i < blocks.length; i++) {
     (defenders[blocks[i].attacker] = defenders[blocks[i].attacker] || []).push(blocks[i].blocker);
+    attackerByBlocker[blocks[i].blocker] = blocks[i].attacker;
   }
-  for(let i = 0; i < attackerIds.length; i++) {
-    let attacker = state.objects[attackerIds[i]];
-    if(!attacker || attacker.zone !== "battlefield") continue;
-    let bl = defenders[attacker.id] || [];
-    if(bl.length === 0) {
-      state = frDealCombatDamageToPlayer(state, attacker, frTurnOtherPlayer(state, attacker.controller));
-      state = frCheckStateBasedActions(state);
-    } else {
-      let dmg = frPower(state, attacker);
-      let blocker = state.objects[bl[0]];
-      if(!blocker || blocker.zone !== "battlefield") continue;
-      state = frDealCombatDamageToCreature(state, attacker, blocker, dmg);
-      state = frDealCombatDamageToCreature(state, blocker, attacker, frPower(state, blocker));
-      if(frHasKeyword(attacker, "trample") && dmg >= frToughness(state, blocker)) {
-        let def = frTurnOtherPlayer(state, attacker.controller);
-        if(!frReplacementPreventsCombatDamageTo(state, def)) {
-          state.players[def].life -= (dmg - frToughness(state, blocker));
+  for(let i = 0; i < dealIds.length; i++) {
+    let creature = state.objects[dealIds[i]];
+    if(!creature || creature.zone !== "battlefield") continue;
+    let isAttacker = !!attackerSet[creature.id];
+    let bl = defenders[creature.id] || [];
+    if(isAttacker) {
+      if(bl.length === 0) {
+        state = frDealCombatDamageToPlayer(state, creature, frTurnOtherPlayer(state, creature.controller));
+      } else {
+        // The attacker's power is assigned across its blockers in declared order (rule
+        // 510.1c-d): lethal to each in turn, everything left over to the last one, and any
+        // remainder with trample spilling to the player. All of it is applied in this wave
+        // simultaneously -- SBA only runs between waves -- so a blocker that dies to this
+        // damage still deals its own return damage. Damage already marked counts toward
+        // lethal (a 3/3 that has taken 2 needs only 1 more).
+        let live = [];
+        for(let bi = 0; bi < bl.length; bi++) {
+          let blocker = state.objects[bl[bi]];
+          if(blocker && blocker.zone === "battlefield") live.push(blocker);
+        }
+        if(live.length === 0) {
+          if(frHasKeyword(creature, "trample")) {
+            state = frDealCombatDamageToPlayer(state, creature, frTurnOtherPlayer(state, creature.controller), frPower(state, creature));
+          }
+        } else {
+          let remaining = frPower(state, creature);
+          for(let bi = 0; bi < live.length; bi++) {
+            let blocker = live[bi];
+            let lethal = frToughness(state, blocker) - (blocker.damage || 0);
+            if(lethal < 1) lethal = 1;
+            let assigned;
+            if(bi === live.length - 1) {
+              // The last blocker absorbs everything left over (all power must go to
+              // blockers) unless trample, which caps it at lethal so the excess spills.
+              assigned = frHasKeyword(creature, "trample") ? Math.min(remaining, lethal) : remaining;
+            } else {
+              assigned = Math.min(remaining, lethal);
+            }
+            if(assigned > 0) state = frDealCombatDamageToCreature(state, creature, blocker, assigned);
+            remaining -= assigned;
+            if(remaining <= 0) break;
+          }
+          if(remaining > 0 && frHasKeyword(creature, "trample")) {
+            state = frDealCombatDamageToPlayer(state, creature, frTurnOtherPlayer(state, creature.controller), remaining);
+          }
         }
       }
-      state = frCheckStateBasedActions(state);
+    } else {
+      let attacker = state.objects[attackerByBlocker[creature.id]];
+      if(attacker && attacker.zone === "battlefield") {
+        state = frDealCombatDamageToCreature(state, creature, attacker, frPower(state, creature));
+      }
     }
   }
   return state;
 
-// frStepCombatDamage runs the two combat-damage strikes (rule 510): first-strike and
-// double-strike creatures deal damage in the first strike, then everyone else -- and any
-// double-strikers -- in the second. Lethal damage (creature with damage in excess of its
-// toughness, or any damage from a deathtouch source) is a state-based action and
-// processes after each assignment.
+// frStepCombatDamage runs the two combat-damage strikes (rule 510): creatures with first or
+// double strike deal damage first, then everyone else -- and any double-strikers again -- in the
+// second. The full state-based-actions loop (704) runs between the waves, so a creature that
+// dies to first-strike damage is gone before the normal strike and deals no damage (a first-striker
+// that kills its blocker survives its blocker's return hit).
 frStepCombatDamage(state) =>
+  let blocks = state.combatBlocks || [];
+  let firstIds = [];
+  let normalIds = [];
   let attackers = state.combatAttackers || [];
-  let first = attackers.filter(function(id) {
-    let o = state.objects[id];
-    return o && (frHasKeyword(o, "first strike") || frHasKeyword(o, "double strike"));
-  });
-  let normal = attackers.filter(function(id) {
-    let o = state.objects[id];
-    return o && !frHasKeyword(o, "first strike");
-  });
-  state = frDoCombatPass(state, first);
-  state = frDoCombatPass(state, normal);
+  for(let i = 0; i < attackers.length; i++) {
+    let o = state.objects[attackers[i]];
+    if(o && (frHasKeyword(o, "first strike") || frHasKeyword(o, "double strike"))) firstIds.push(o.id);
+  }
+  for(let i = 0; i < blocks.length; i++) {
+    let b = state.objects[blocks[i].blocker];
+    if(b && (frHasKeyword(b, "first strike") || frHasKeyword(b, "double strike"))) firstIds.push(b.id);
+  }
+  state = frDoCombatDamage(state, firstIds);
+  state = frCheckStateBasedActions(state);
+  for(let i = 0; i < attackers.length; i++) {
+    let o = state.objects[attackers[i]];
+    if(o && !frHasKeyword(o, "first strike")) normalIds.push(o.id);
+  }
+  for(let i = 0; i < blocks.length; i++) {
+    let b = state.objects[blocks[i].blocker];
+    if(b && !frHasKeyword(b, "first strike")) normalIds.push(b.id);
+  }
+  state = frDoCombatDamage(state, normalIds);
+  state = frCheckStateBasedActions(state);
   return state;
 
 // State-based actions -- a real 704-style loop, checked before each player receives
@@ -1340,6 +2293,7 @@ frCheckStateBasedActions(state) =>
       let obj = state.objects[id];
       if(!obj) continue;
       let card = frCardGet(obj.cardId);
+      if(!card) continue;
       let isCreature = card.types.indexOf("Creature") !== -1;
       let toughness = isCreature ? frToughness(state, obj) : 0;
       if(isCreature && toughness <= 0) {
@@ -1352,7 +2306,7 @@ frCheckStateBasedActions(state) =>
         changed = true;
         continue;
       }
-      if(card.subtypes.indexOf("Aura") !== -1 && frAuraAttachedIllegally(state, id)) {
+      if(card.subtypes && card.subtypes.indexOf("Aura") !== -1 && frAuraAttachedIllegally(state, id)) {
         for(let ei = state.effects.length - 1; ei >= 0; ei--) {
           if(state.effects[ei].sourceId === id) state.effects.splice(ei, 1);
         }
@@ -1406,7 +2360,11 @@ frAuraAttachedIllegally(state, id) =>
   let obj = state.objects[id];
   let ench = obj.attachedTo ? state.objects[obj.attachedTo] : null;
   if(!ench || ench.zone !== "battlefield") return true;
-  if(obj.cardId === "vow-of-radiance" && frCardGet(ench.cardId).types.indexOf("Creature") === -1) return true;
+  let acard = frCardGet(obj.cardId);
+  if(acard && acard.auraBuff) {
+    let ecard = frCardGet(ench.cardId);
+    if(ecard && ecard.types.indexOf("Creature") === -1) return true;
+  }
   return false;
 
 
@@ -1505,10 +2463,6 @@ frActionCastSpell(state, action) =>
     state.lastActionError = "lands are played, not cast";
     return state;
   }
-  if(frCardNeedsTarget(card) && !frTargetLegalForSpell(state, card, action.target, player)) {
-    state.lastActionError = "invalid target";
-    return state;
-  }
   let sorcerySpeedTypes = ["Creature", "Sorcery", "Enchantment", "Artifact"];
   let isSorcerySpeed = false;
   for(let t = 0; t < card.types.length; t++) {
@@ -1530,14 +2484,49 @@ frActionCastSpell(state, action) =>
   }
   let parsedCost = frManaParseCost(card.manaCost);
   let pl = state.players[player];
-  let payResult = frManaTryPay(pl.manaPool, parsedCost);
+  let x = 0;
+  if(parsedCost.xCount > 0) {
+    x = action.x === undefined ? 0 : action.x;
+    if(typeof x !== "number" || !Number.isInteger(x) || x < 0) {
+      state.lastActionError = "x must be a non-negative integer";
+      return state;
+    }
+  }
+  // Modal spells must name one of the declared modes; targets are validated against the
+  // active mode's (or the card's own) declared targeting, with x available for a
+  // Fireball-style `max: "X"`. An action targeting a spell that takes none is rejected too.
+  if(frModeNames(card).length > 0 && !frModeLegal(card, action.mode)) {
+    state.lastActionError = "invalid mode: choose one of " + frModeNames(card).join(", ");
+    return state;
+  }
+  let targets = Array.isArray(action.targets) ? action.targets : (action.target != null ? [action.target] : []);
+  if(frCardTargeting(card, action.mode)) {
+    let res = frTargetSetLegal(state, card, action.mode, targets, player, x);
+    if(!res.ok) {
+      state.lastActionError = res.reason;
+      return state;
+    }
+  }
+  let payResult = frManaTryPay(pl.manaPool, parsedCost, x);
   if(!payResult.ok) {
     state.lastActionError = "cannot pay mana cost";
     return state;
   }
   pl.manaPool = payResult.pool;
-  frZoneMove(state, objId, "hand", "stack", player);
-  state.stack.push({ kind: "spell", objId: objId, cardId: card.id, target: action.target || null });
+  // The stack zone holds only stack entries, not object ids: remove the spell from the
+  // caster's hand and flag its zone, then push the entry (frStackResolveTop pops it).
+  frZoneRemove(state, objId, "hand", player);
+  obj.zone = "stack";
+  obj.controller = player;
+  state.stack.push({
+    kind: "spell",
+    objId: objId,
+    cardId: card.id,
+    targets: targets,
+    target: targets.length > 0 ? targets[0] : null,
+    mode: action.mode !== undefined && action.mode !== null ? action.mode : null,
+    x: x
+  });
   state.passedPlayers = [];
   state.priorityPlayer = player;
   return state;
@@ -1555,40 +2544,108 @@ frActionActivateAbility(state, action) =>
     return state;
   }
   let card = frCardGet(obj.cardId);
-  if(obj.tapped) {
-    state.lastActionError = "permanent is already tapped";
-    return state;
-  }
-  if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) {
-    state.lastActionError = "summoning sickness prevents activating a tap ability";
-    return state;
-  }
-  if(card.id === "faceted-ember-core") {
-    let payResult = frManaTryPay(state.players[player].manaPool, frManaParseCost("\{3}"));
-    if(!payResult.ok) {
-      state.lastActionError = "cannot pay the 3 mana";
+  let abilities = (card && Array.isArray(card.abilities)) ? card.abilities : [];
+  let produced = frManaAbilityColor(obj.cardId);
+  // A named ability on the action always takes the generic path below -- a card may have
+  // both a mana ability and an activated ability (faceted-ember-core taps for {R} and has
+  // the {3},{T},sacrifice combust). The unnamed path is how mana abilities are activated
+  // (a land tap or {C} producer); it falls back to a card's sole declared ability.
+  if(!action.abilityName) {
+    if(produced) {
+      if(obj.tapped) {
+        state.lastActionError = "permanent is already tapped";
+        return state;
+      }
+      if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) {
+        state.lastActionError = "summoning sickness prevents activating a tap ability";
+        return state;
+      }
+      // A multi-color producer ("WU", ...) requires the chooser: the action must carry a
+      // chosenColor that is one of the produced color chars, and we add 1 mana of that color.
+      // A single-char producer (a basic land, or {C} like prismatic-core) needs no choice.
+      let color = produced;
+      if(produced.length > 1) {
+        let chosen = action.chosenColor;
+        if(typeof chosen !== "string" || chosen.length !== 1 || produced.indexOf(chosen) === -1) {
+          state.lastActionError = "chosenColor must be one of: " + produced;
+          return state;
+        }
+        color = chosen;
+      }
+      obj.tapped = true;
+      state.players[player].manaPool[color] += 1;
+      state.passedPlayers = [];
+      state.priorityPlayer = player;
       return state;
     }
-    if(!frAbilityTargetLegal(state, action.target, player)) {
-      state.lastActionError = "invalid target";
+    if(abilities.length === 0) {
+      state.lastActionError = "no known mana ability on this permanent";
+      return state;
+    }
+    if(abilities.length !== 1) {
+      state.lastActionError = "abilityName required (one of: " + abilities.map((a) => a.name).join(", ") + ")";
+      return state;
+    }
+  }
+  // Generic activated abilities declared on the card record (#4): each carries its own
+  // cost ({T}, mana, life, sacrifice-self), targeting, and effects. Costs are paid only
+  // after the activation is fully validated, and the ability resolves through the same
+  // template library as spells and triggers.
+  let ability = null;
+  if(action.abilityName) {
+    for(let i = 0; i < abilities.length; i++) {
+      if(abilities[i].name === action.abilityName) { ability = abilities[i]; break; }
+    }
+    if(!ability) {
+      state.lastActionError = "unknown ability: " + action.abilityName;
+      return state;
+    }
+  } else {
+    ability = abilities[0];
+  }
+  let cost = ability.cost || {};
+  if(cost.tap) {
+    if(obj.tapped) {
+      state.lastActionError = "permanent is already tapped";
+      return state;
+    }
+    if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) {
+      state.lastActionError = "summoning sickness prevents activating a tap ability";
+      return state;
+    }
+  }
+  let targets = action.targets || [];
+  if(ability.targeting) {
+    let v = frTargetSetLegalForTargeting(state, ability.targeting, targets, player, 0);
+    if(!v.ok) {
+      state.lastActionError = v.reason;
+      return state;
+    }
+  } else if(targets.length > 0) {
+    state.lastActionError = "this ability does not take targets";
+    return state;
+  }
+  if(cost.mana) {
+    let payResult = frManaTryPay(state.players[player].manaPool, frManaParseCost(cost.mana));
+    if(!payResult.ok) {
+      state.lastActionError = "cannot pay the " + cost.mana + " mana";
       return state;
     }
     state.players[player].manaPool = payResult.pool;
-    obj.tapped = true;
+  }
+  if(cost.life) {
+    if(state.players[player].life < cost.life) {
+      state.lastActionError = "cannot pay the life";
+      return state;
+    }
+    state.players[player].life -= cost.life;
+  }
+  if(cost.sacrificeSelf) {
     frZoneMove(state, objId, "battlefield", "graveyard", obj.owner);
     obj.zone = "graveyard";
-    state.stack.push({ kind: "ability", objId: objId, cardId: card.id, target: action.target });
-    state.passedPlayers = [];
-    state.priorityPlayer = player;
-    return state;
   }
-  let color = frManaAbilityColor(obj.cardId);
-  if(!color) {
-    state.lastActionError = "no known mana ability on this permanent";
-    return state;
-  }
-  obj.tapped = true;
-  state.players[player].manaPool[color] += 1;
+  if(cost.tap && obj.zone === "battlefield") obj.tapped = true;
+  state.stack.push({ kind: "ability", objId: objId, cardId: card.id, abilityName: ability.name, targets: targets });
   state.passedPlayers = [];
   state.priorityPlayer = player;
   return state;
@@ -1626,7 +2683,7 @@ frActionDeclareAttackers(state, action) =>
       return state;
     }
     let card = frCardGet(obj.cardId);
-    if(card.types.indexOf("Creature") === -1) {
+    if(!card || card.types.indexOf("Creature") === -1) {
       state.lastActionError = "not a creature: " + ids[i];
       return state;
     }
@@ -1675,6 +2732,16 @@ frActionDeclareBlockers(state, action) =>
       return state;
     }
   }
+  // One creature blocks at most one attacker (rule 509.1b).
+  let seenBlockers = {};
+  for(let i = 0; i < blocks.length; i++) {
+    let bid = blocks[i].blocker;
+    if(seenBlockers[bid]) {
+      state.lastActionError = "a creature can only block one attacker: " + bid;
+      return state;
+    }
+    seenBlockers[bid] = true;
+  }
   let menaceCount = {};
   for(let i = 0; i < blocks.length; i++) {
     let attacker = state.objects[blocks[i].attacker];
@@ -1685,7 +2752,7 @@ frActionDeclareBlockers(state, action) =>
   for(let i = 0; i < blocks.length; i++) {
     let blocker = state.objects[blocks[i].blocker];
     let attacker = state.objects[blocks[i].attacker];
-    if(attacker.tapped) {
+    if(blocker.tapped) {
       state.lastActionError = "tapped creature cannot block: " + blocks[i].blocker;
       return state;
     }
@@ -1702,10 +2769,46 @@ frActionDeclareBlockers(state, action) =>
       return state;
     }
   }
+  // Blocking order: each multi-blocked attacker gets an ordered blocker list (rule 509.2).
+  // Entries may carry an explicit 1-based `order`; if none do, insertion order is used. Either
+  // all of an attacker's entries declare order or none do, and declared orders must be exactly
+  // 1..n. The normalized list is stored on state.combatBlocks, sorted by order.
+  let byAttacker = {};
   for(let i = 0; i < blocks.length; i++) {
-    state.objects[blocks[i].blocker].blocking = blocks[i].attacker;
+    let b = blocks[i];
+    (byAttacker[b.attacker] = byAttacker[b.attacker] || []).push(b);
   }
-  state.combatBlocks = blocks;
+  let normalized = [];
+  for(let attId in byAttacker) {
+    let list = byAttacker[attId];
+    let ordered = typeof list[0].order === "number";
+    let seenOrders = {};
+    for(let j = 0; j < list.length; j++) {
+      if(ordered !== (typeof list[j].order === "number")) {
+        state.lastActionError = "every blocker of an attacker must declare order, or none";
+        return state;
+      }
+      if(ordered) {
+        let o = list[j].order;
+        if(typeof o !== "number" || o < 1 || o > list.length || seenOrders[o]) {
+          state.lastActionError = "invalid blocker order";
+          return state;
+        }
+        seenOrders[o] = true;
+      }
+    }
+    list.sort(function(a, b) {
+      if(!ordered) return 0;
+      return a.order - b.order;
+    });
+    for(let j = 0; j < list.length; j++) {
+      normalized.push({ attacker: list[j].attacker, blocker: list[j].blocker, order: ordered ? list[j].order : (j + 1) });
+    }
+  }
+  for(let i = 0; i < normalized.length; i++) {
+    state.objects[normalized[i].blocker].blocking = normalized[i].attacker;
+  }
+  state.combatBlocks = normalized;
   return state;
 
 frActionConcede(state, action) =>
@@ -1809,6 +2912,25 @@ frBlockerCanBlock(attacker, blocker, state) =>
   if(frHasKeyword(attacker, "skulk") && frPower(state, blocker) > frPower(state, attacker)) return false;
   return true;
 
+// All permutations of a list (iterative, so the pjs engine never has to compile a recursive
+// procedure): [a,b] -> [[a,b],[b,a]]. Used by frLegalBlockerActions to enumerate the blocker
+// orders of a multi-blocked attacker.
+frPermutations(arr) =>
+  let res = [[]];
+  for(let i = 0; i < arr.length; i++) {
+    let next = [];
+    for(let j = 0; j < res.length; j++) {
+      let cur = res[j];
+      for(let k = 0; k <= cur.length; k++) {
+        let copy = cur.slice();
+        copy.splice(k, 0, arr[i]);
+        next.push(copy);
+      }
+    }
+    res = next;
+  }
+  return res;
+
 frLegalBlockerActions(state, player) =>
   let attackers = state.combatAttackers || [];
   let bf = state.battlefield;
@@ -1827,7 +2949,8 @@ frLegalBlockerActions(state, player) =>
   let count = 1;
   for(let i = 0; i < bn; i++) count *= base;
   if(count > 2048) count = 2048;
-  for(let vi = 0; vi < count; vi++) {
+  let cap = 4096;
+  for(let vi = 0; vi < count && actions.length < cap; vi++) {
     let num = vi;
     let assign = [];
     for(let bi = 0; bi < bn; bi++) {
@@ -1835,27 +2958,56 @@ frLegalBlockerActions(state, player) =>
       num = Math.floor(num / base);
       assign.push(t);
     }
+    let groups = [];
+    for(let ai = 0; ai < an; ai++) groups.push([]);
     let any = false;
-    for(let bi = 0; bi < bn; bi++) if(assign[bi] !== 0) any = true;
-    if(!any) continue;
-    let blocks = [];
     let okc = true;
-    for(let ai = 0; ai < an; ai++) {
-      let cnt = 0;
-      for(let bi = 0; bi < bn; bi++) if(assign[bi] === (ai + 1)) cnt++;
-      if(cnt === 0) continue;
-      if(frHasKeyword(state.objects[attackers[ai]], "menace") && cnt < 2) { okc = false; break; }
-    }
-    if(!okc) continue;
     for(let bi = 0; bi < bn; bi++) {
       if(assign[bi] !== 0) {
-        let attId = attackers[assign[bi] - 1];
+        any = true;
+        let ai = assign[bi] - 1;
+        let attId = attackers[ai];
         if(!frBlockerCanBlock(state.objects[attId], state.objects[blockers[bi]], state)) { okc = false; break; }
-        blocks.push({ attacker: attId, blocker: blockers[bi] });
+        groups[ai].push(blockers[bi]);
       }
     }
+    if(!any || !okc) continue;
+    for(let ai = 0; ai < an; ai++) {
+      if(groups[ai].length === 0) continue;
+      if(frHasKeyword(state.objects[attackers[ai]], "menace") && groups[ai].length < 2) { okc = false; break; }
+    }
     if(!okc) continue;
-    actions.push({ type: "declareBlockers", player: player, blocks: blocks });
+    // Per multi-blocked attacker, every blocker order is a distinct legal declaration.
+    let perms = [];
+    for(let ai = 0; ai < an; ai++) {
+      if(groups[ai].length < 2) perms.push(groups[ai].length === 0 ? [] : [groups[ai]]);
+      else perms.push(frPermutations(groups[ai]));
+    }
+    let combos = [[]];
+    for(let ai = 0; ai < an; ai++) {
+      let next = [];
+      let pn = perms[ai].length;
+      for(let c = 0; c < combos.length; c++) {
+        if(pn === 0) {
+          next.push(combos[c].concat([[]]));
+        } else {
+          for(let p = 0; p < pn; p++) {
+            next.push(combos[c].concat([perms[ai][p]]));
+          }
+        }
+      }
+      combos = next;
+      if(combos.length >= cap) break;
+    }
+    for(let c = 0; c < combos.length && actions.length < cap; c++) {
+      let blocks = [];
+      for(let ai = 0; ai < an; ai++) {
+        for(let j = 0; j < combos[c][ai].length; j++) {
+          blocks.push({ attacker: attackers[ai], blocker: combos[c][ai][j], order: j + 1 });
+        }
+      }
+      actions.push({ type: "declareBlockers", player: player, blocks: blocks });
+    }
   }
   return actions;
 
@@ -1905,14 +3057,36 @@ frLegalActions(state) =>
     }
     if(isSorcerySpeed && !(priority === state.activePlayer && mainPhase && emptyStack)) continue;
     let parsedCost = frManaParseCost(card.manaCost);
-    if(frManaCanPay(pl.manaPool, parsedCost)) {
-      if(frCardNeedsTarget(card)) {
-        let tg = frLegalTargetsForSpell(state, card, priority);
-        for(let ti = 0; ti < tg.length; ti++) {
-          actions.push({ type: "castSpell", player: priority, objectId: objId, target: tg[ti] });
+    let xValues = [];
+    if(parsedCost.xCount > 0) {
+      let maxX = frMaxAffordableX(pl.manaPool, parsedCost);
+      if(maxX !== null) {
+        xValues.push(0);
+        if(maxX > 0) xValues.push(maxX);
+      }
+    } else if(frManaCanPay(pl.manaPool, parsedCost)) {
+      xValues.push(0);
+    }
+    for(let xi = 0; xi < xValues.length; xi++) {
+      let modes = frModeNames(card).length > 0 ? frModeNames(card) : [null];
+      for(let mi = 0; mi < modes.length; mi++) {
+        let m = modes[mi];
+        if(frCardTargeting(card, m)) {
+          let sets = frLegalTargetSets(state, card, m, priority, xValues[xi]);
+          for(let si = 0; si < sets.length; si++) {
+            // A spell on the stack can never target itself (e.g. a counter spell).
+            if(sets[si].indexOf(objId) !== -1) continue;
+            let act = { type: "castSpell", player: priority, objectId: objId, targets: sets[si] };
+            if(m !== null) act.mode = m;
+            if(parsedCost.xCount > 0) act.x = xValues[xi];
+            actions.push(act);
+          }
+        } else {
+          let act = { type: "castSpell", player: priority, objectId: objId };
+          if(m !== null) act.mode = m;
+          if(parsedCost.xCount > 0) act.x = xValues[xi];
+          actions.push(act);
         }
-      } else {
-        actions.push({ type: "castSpell", player: priority, objectId: objId });
       }
     }
   }
@@ -1923,19 +3097,37 @@ frLegalActions(state) =>
     if(!obj || obj.controller !== priority || obj.tapped) continue;
     let card = frCardGet(obj.cardId);
     if(!card) continue;
-    if(card.id === "faceted-ember-core") {
-      if(frManaCanPay(pl.manaPool, frManaParseCost("\{3}"))) {
-        let tg = frLegalAbilityTargets(state, priority);
-        for(let ti = 0; ti < tg.length; ti++) {
-          actions.push({ type: "activateAbility", player: priority, objectId: objId, target: tg[ti] });
+    // Generic activated abilities declared on the card record (#4) -- each with its own
+    // cost ({T}, mana, life, sacrifice), targeting, and effects, enumerated through the
+    // same target-set machinery as spells. Offered alongside the mana route when a card
+    // has both (faceted-ember-core taps for {R} and has its combust ability).
+    if(Array.isArray(card.abilities)) {
+      for(let ai = 0; ai < card.abilities.length; ai++) {
+        let ab = card.abilities[ai];
+        let cost = ab.cost || {};
+        if(cost.tap && card.types.indexOf("Creature") !== -1 && obj.summoningSickness) continue;
+        if(cost.life && state.players[priority].life < cost.life) continue;
+        if(cost.mana && !frManaCanPay(pl.manaPool, frManaParseCost(cost.mana))) continue;
+        if(ab.targeting) {
+          let sets = frLegalTargetSetsForTargeting(state, ab.targeting, priority, 0);
+          for(let si = 0; si < sets.length; si++) {
+            actions.push({ type: "activateAbility", player: priority, objectId: objId, abilityName: ab.name, targets: sets[si] });
+          }
+        } else {
+          actions.push({ type: "activateAbility", player: priority, objectId: objId, abilityName: ab.name });
         }
       }
-      continue;
     }
-    let color = frManaAbilityColor(obj.cardId);
-    if(!color) continue;
+    let produced = frManaAbilityColor(obj.cardId);
+    if(!produced) continue;
     if(card.types.indexOf("Creature") !== -1 && obj.summoningSickness) continue;
-    actions.push({ type: "activateAbility", player: priority, objectId: objId });
+    if(produced.length > 1) {
+      for(let ci = 0; ci < produced.length; ci++) {
+        actions.push({ type: "activateAbility", player: priority, objectId: objId, chosenColor: produced[ci] });
+      }
+    } else {
+      actions.push({ type: "activateAbility", player: priority, objectId: objId });
+    }
   }
 
   for(let i = 0; i < state.battlefield.length; i++) {
@@ -1966,12 +3158,14 @@ frLegalActions(state) =>
 // initCardDeck() (card-deck-plugin/lists.txt:29-44, in turn citing
 // examples/wheel-plugin/lists.txt:118 for the lazy-init-a-window-global guard and
 // examples/wheel-plugin/lists.txt:348-352,355 for a bulk vendored/generated literal
-// assigned inside a plain window.NAME = {...} in one JS statement). The object literal
-// below is copied BYTE-FOR-BYTE from game-assets/build/perchance/five-realms-payload.js
-// -- only the `const NAME =` wrapper differs -- and that source file states its own
-// rebuild is proven "52/52 reconstructed byte-identical" by that repo's
-// tools/verify_payload.py before this file ever saw it. Do not hand-edit the object
-// literal below; regenerate it in game-assets and re-paste.
+// assigned inside a plain window.NAME = {...} in one JS statement). The object literal is
+// the B11 payload re-embedded as compact JSON -- byte-identical in VALUE to
+// game-assets/build/perchance/five-realms-payload.js (whose source rebuild is proven
+// "52/52 reconstructed byte-identical" by tools/verify_payload.py) -- re-serialised this
+// session because a multi-line reflow of the payload made the pjs engine misparse its indented
+// continuation lines and hang rendering, so the payload MUST stay on one line. Only the
+// `const NAME =` wrapper differs from the source file's own form. Do not hand-edit the object
+// literal below or reflow it; regenerate it in game-assets and re-paste if it must change.
 //
 // 52 assets (B11, grown from B8's original 12) --
 //   glyphs (5): glyph-solara/verdant/tide/ember/umbra -- colourless still has NO glyph
@@ -2215,6 +3409,7 @@ frRenderCard(cardOrId) =>
   return {
     card: card,
     typeLine: frCardTypeLine(card),
+    imageUrl: card.image || null,
     frontSvg: frontSvg,
     glyphSvg: glyphSvg,
     gemSvg: gemSvg,
@@ -2223,6 +3418,973 @@ frRenderCard(cardOrId) =>
     palette: frontAsset.k.palette,
     costSymbols: costSymbols
   };
+
+
+// =====================================================================
+// FIXTURE TESTS (X-COST ENGINE + MULTI-COLOR MANA + MULTI-TARGET/MODAL)
+// =====================================================================
+//
+// A self-contained harness for the mana/casting engine, runnable on the plugin's
+// own page: `frSelfTest()` returns { total, failed, results } with one { name, ok, detail }
+// per assertion. It exercises frManaParseCost's xCount, frManaTryPay's x handling
+// (including dual-{X} and validation), and the full frActionCastSpell path for the X-cost
+// fixtures (solara-benediction, tide-vortex, ember-conflagration, umbra-life-drain): a
+// free X=0 cast, an X=2 cast, an unaffordable chosen X, and an instant cast at instant
+// timing (non-active player holding priority). It also exercises the multi-color mana
+// engine (#2) via the WU dual luminous-lagoon and the {C} producer prismatic-core: a W
+// tap, a U tap after untap, the still-tapped rejection, an invalid chosenColor rejection,
+// the missing-chosenColor rejection, the two chosenColor actions frLegalActions offers,
+// and {C} colorless production. The multi-target/modal section (#3) covers the
+// data-driven targeting model: twin-dart (two distinct creatures), cinder-bolt ("any
+// target" -- player or creature), ember-reckoning (modal, one mode rejected, target-slot
+// rejection, both resolutions), withering-grasp's toughness filter, and the per-mode
+// target-set enumeration frLegalActions emits. Not part of the $output op surface -- it
+// is an internal self-test, left in for consumers and CI to run.
+
+frSelfTest() =>
+  let results = [];
+  let push = (name, ok, detail) => results.push({ name: name, ok: !!ok, detail: detail === undefined ? "" : detail });
+
+  // -- representation -------------------------------------------------
+  let p1 = frManaParseCost("\{X}\{R}");
+  push("parse {X}{R}: xCount 1, cmc 1",
+    p1.xCount === 1 && p1.cmc === 1 && p1.symbols.length === 2,
+    "got xCount=" + p1.xCount + " cmc=" + p1.cmc);
+  let p2 = frManaParseCost("\{X}\{X}\{U}");
+  push("parse {X}{X}{U}: xCount 2, cmc 1 (dual-X, cmc counts X as 0)",
+    p2.xCount === 2 && p2.cmc === 1,
+    "got xCount=" + p2.xCount + " cmc=" + p2.cmc);
+  let p3 = frManaParseCost("\{1}\{W}");
+  push("parse {1}{W}: xCount 0 (non-X unchanged)",
+    p3.xCount === 0 && p3.cmc === 2,
+    "got xCount=" + p3.xCount + " cmc=" + p3.cmc);
+
+  // -- payment --------------------------------------------------------
+  let pool = { W: 0, U: 0, B: 0, R: 1, G: 0, C: 3 };
+  let pay0 = frManaTryPay(pool, p1, 0);
+  push("pay {X}{R} x=0: {R}{C}{C}{C} -> ok, {C}{C}{C} left",
+    pay0.ok && pay0.pool.C === 3 && pay0.pool.R === 0,
+    "ok=" + pay0.ok + " pool=" + JSON.stringify(pay0.pool));
+  let pay2 = frManaTryPay(pool, p1, 2);
+  push("pay {X}{R} x=2: {R}{C}{C}{C} -> ok, {C} left",
+    pay2.ok && pay2.pool.C === 1 && pay2.pool.R === 0,
+    "ok=" + pay2.ok + " pool=" + JSON.stringify(pay2.pool));
+  let pay4 = frManaTryPay(pool, p1, 4);
+  push("pay {X}{R} x=4: {R}{C}{C}{C} -> unaffordable",
+    !pay4.ok,
+    "ok=" + pay4.ok);
+  let dual = frManaTryPay({ W: 0, U: 1, B: 0, R: 0, G: 0, C: 5 }, p2, 2);
+  push("pay {X}{X}{U} x=2: {U}{C}{C}{C}{C}{C} -> ok, {C} left (2x paid)",
+    dual.ok && dual.pool.C === 1 && dual.pool.U === 0,
+    "ok=" + dual.ok + " pool=" + JSON.stringify(dual.pool));
+  let dual2 = frManaTryPay({ W: 0, U: 1, B: 0, R: 0, G: 0, C: 3 }, p2, 2);
+  push("pay {X}{X}{U} x=2 with only {U}{C}{C}{C}: unaffordable",
+    !dual2.ok,
+    "ok=" + dual2.ok);
+  let badNeg = frManaTryPay(pool, p1, -1);
+  push("pay {X}{R} x=-1: rejected",
+    !badNeg.ok,
+    "ok=" + badNeg.ok);
+  let badFrac = frManaTryPay(pool, p1, 1.5);
+  push("pay {X}{R} x=1.5: rejected",
+    !badFrac.ok,
+    "ok=" + badFrac.ok);
+  let badStr = frManaTryPay(pool, p1, "2");
+  push("pay {X}{R} x=\"2\": rejected",
+    !badStr.ok,
+    "ok=" + badStr.ok);
+  let omitted = frManaTryPay({ W: 0, U: 0, B: 0, R: 1, G: 0, C: 0 }, p1);
+  push("pay {X}{R} x omitted: defaults to 0 (X=0 always legal)",
+    omitted.ok && omitted.pool.R === 0,
+    "ok=" + omitted.ok + " pool=" + JSON.stringify(omitted.pool));
+  let nonX = frManaTryPay({ W: 1, U: 0, B: 0, R: 0, G: 0, C: 1 }, p3, 99);
+  push("pay {1}{W} x=99: x ignored on a non-X cost",
+    nonX.ok && nonX.pool.W === 0 && nonX.pool.C === 0,
+    "ok=" + nonX.ok + " pool=" + JSON.stringify(nonX.pool));
+
+  // -- casting --------------------------------------------------------
+  let d0 = ["ember-conflagration","ember-conflagration","ember-conflagration","ember-conflagration","ember-conflagration","ember-conflagration","ember-conflagration"];
+  let d1 = ["solara-benediction","solara-benediction","solara-benediction","solara-benediction","ember-conflagration","ember-conflagration","ember-conflagration"];
+  let d2 = ["tide-vortex","tide-vortex","tide-vortex","tide-vortex","tide-vortex","tide-vortex","tide-vortex"];
+  let base = frGameNew({ seed: 11, decks: [d0, d1, d2] });
+  let inHand = (state, player, cardId) => {
+    let pl = state.players[player];
+    for(let i = 0; i < pl.hand.length; i++) {
+      if(state.objects[pl.hand[i]].cardId === cardId) return pl.hand[i];
+    }
+    return null;
+  };
+  // the stack zone holds stack entries only; find the spell entry
+  let spellEntry = (st) => {
+    for(let i = 0; i < st.stack.length; i++) {
+      let e = st.stack[i];
+      if(e && typeof e === "object" && e.kind === "spell") return e;
+    }
+    return null;
+  };
+  let setup = (player, mana, step, active, priority) => {
+    let st = frCloneState(base);
+    st.players[player].manaPool = mana;
+    st.step = step || "precombat_main";
+    st.activePlayer = active === undefined ? 0 : active;
+    st.priorityPlayer = priority === undefined ? player : priority;
+    st.stack = [];
+    return st;
+  };
+
+  let s0 = setup(0, { W: 0, U: 0, B: 0, R: 1, G: 0, C: 0 });
+  let obj0 = inHand(s0, 0, "ember-conflagration");
+  let r0 = frActionCastSpell(s0, { type: "castSpell", player: 0, objectId: obj0, x: 0 });
+  let e0 = spellEntry(r0);
+  push("cast ember-conflagration at X=0 (sorcery, main phase): ok, x exposed on stack",
+    r0.lastActionError === null && !!e0 && e0.x === 0 && e0.cardId === "ember-conflagration" &&
+      r0.players[0].manaPool.R === 0,
+    "error=" + r0.lastActionError + " entry=" + JSON.stringify(e0));
+
+  let s2 = setup(0, { W: 0, U: 0, B: 0, R: 1, G: 0, C: 2 });
+  let obj2 = inHand(s2, 0, "ember-conflagration");
+  let r2 = frActionCastSpell(s2, { type: "castSpell", player: 0, objectId: obj2, x: 2 });
+  let e2 = spellEntry(r2);
+  push("cast ember-conflagration at X=2: {R}{C}{C} paid, x=2 on stack",
+    r2.lastActionError === null && !!e2 && e2.x === 2 &&
+      r2.players[0].manaPool.R === 0 && r2.players[0].manaPool.C === 0,
+    "error=" + r2.lastActionError + " entry=" + JSON.stringify(e2));
+
+  let sU = setup(0, { W: 0, U: 0, B: 0, R: 1, G: 0, C: 1 });
+  let objU = inHand(sU, 0, "ember-conflagration");
+  let rU = frActionCastSpell(sU, { type: "castSpell", player: 0, objectId: objU, x: 3 });
+  push("cast ember-conflagration at X=3 with only {R}{C}: rejected, nothing spent",
+    rU.lastActionError === "cannot pay mana cost" && rU.stack.length === 0 &&
+      rU.players[0].manaPool.R === 1 && rU.players[0].manaPool.C === 1,
+    "error=" + rU.lastActionError + " pool=" + JSON.stringify(rU.players[0].manaPool));
+
+  let sBadX = setup(0, { W: 0, U: 0, B: 0, R: 5, G: 0, C: 0 });
+  let objBadX = inHand(sBadX, 0, "ember-conflagration");
+  let rBadX = frActionCastSpell(sBadX, { type: "castSpell", player: 0, objectId: objBadX, x: -2 });
+  push("cast ember-conflagration with x=-2: rejected as invalid",
+    rBadX.lastActionError === "x must be a non-negative integer" && rBadX.stack.length === 0,
+    "error=" + rBadX.lastActionError);
+
+  let sI = setup(1, { W: 1, U: 0, B: 0, R: 0, G: 0, C: 1 }, "precombat_main", 0, 1);
+  let objI = inHand(sI, 1, "solara-benediction");
+  let rI = frActionCastSpell(sI, { type: "castSpell", player: 1, objectId: objI, x: 1 });
+  let eI = spellEntry(rI);
+  push("cast solara-benediction at X=1 at instant timing (player 1, not active): ok",
+    rI.lastActionError === null && !!eI && eI.x === 1 &&
+      rI.players[1].manaPool.W === 0 && rI.players[1].manaPool.C === 0,
+    "error=" + rI.lastActionError + " entry=" + JSON.stringify(eI));
+
+  let sSor = setup(1, { W: 0, U: 0, B: 0, R: 1, G: 0, C: 0 }, "precombat_main", 0, 1);
+  let objSor = inHand(sSor, 1, "ember-conflagration");
+  let rSor = frActionCastSpell(sSor, { type: "castSpell", player: 1, objectId: objSor, x: 0 });
+  push("sorcery X-spell at instant timing: rejected (needs to be the active player)",
+    rSor.lastActionError === "sorcery-speed spell requires being the active player" && rSor.stack.length === 0,
+    "error=" + rSor.lastActionError);
+
+  let sT = setup(2, { W: 0, U: 1, B: 0, R: 0, G: 0, C: 4 }, "precombat_main", 0, 2);
+  let objT = inHand(sT, 2, "tide-vortex");
+  let rT = frActionCastSpell(sT, { type: "castSpell", player: 2, objectId: objT, x: 2 });
+  let eT = spellEntry(rT);
+  push("cast tide-vortex {X}{X}{U} at X=2: {U} + 4 generic paid, x=2 on stack",
+    rT.lastActionError === null && !!eT && eT.x === 2 &&
+      rT.players[2].manaPool.U === 0 && rT.players[2].manaPool.C === 0,
+    "error=" + rT.lastActionError + " entry=" + JSON.stringify(eT));
+
+  // -- legalActions ---------------------------------------------------
+  let sL = setup(0, { W: 0, U: 0, B: 0, R: 1, G: 0, C: 2 });
+  let legal = frLegalActions(sL);
+  let objL = inHand(sL, 0, "ember-conflagration");
+  let forObj = legal.filter((a) => a.type === "castSpell" && a.objectId === objL);
+  let xs = forObj.map((a) => a.x).sort((a, b) => a - b);
+  push("legalActions for ember-conflagration {X}{R} with {R}{C}{C}: offers x=0 and max x=2",
+    forObj.length === 2 && xs.length === 2 && xs[0] === 0 && xs[1] === 2,
+    "xs=" + JSON.stringify(xs) + " actions=" + JSON.stringify(forObj));
+
+  // -- multi-color mana abilities / dual lands (#2) --------------------
+  let dDual = ["luminous-lagoon","luminous-lagoon","luminous-lagoon","luminous-lagoon","luminous-lagoon","luminous-lagoon","luminous-lagoon"];
+  let dColor = ["prismatic-core","prismatic-core","prismatic-core","prismatic-core","prismatic-core","prismatic-core","prismatic-core"];
+  let baseDual = frGameNew({ seed: 3, decks: [dDual, d1] });
+  let baseColor = frGameNew({ seed: 5, decks: [dColor, d1] });
+  // play one of player 0's lands onto an empty battlefield in a main phase
+  let playLand = (base, cardId) => {
+    let st = frCloneState(base);
+    st.step = "precombat_main";
+    st.activePlayer = 0;
+    st.priorityPlayer = 0;
+    st.stack = [];
+    let objId = inHand(st, 0, cardId);
+    let r = frActionPlayLand(st, { type: "playLand", player: 0, objectId: objId });
+    return { state: r, objId: r.battlefield[r.battlefield.length - 1], error: r.lastActionError };
+  };
+  let dl = playLand(baseDual, "luminous-lagoon");
+  push("play the WU dual (luminous-lagoon): ok, untapped on the battlefield",
+    dl.error === null && dl.objId !== undefined,
+    "error=" + dl.error + " objId=" + dl.objId);
+
+  let rDualW = frActionActivateAbility(dl.state, { type: "activateAbility", player: 0, objectId: dl.objId, chosenColor: "W" });
+  push("dual taps for W: manaPool.W 1, no bogus 'WU' key, land tapped",
+    rDualW.lastActionError === null &&
+      rDualW.players[0].manaPool.W === 1 && rDualW.players[0].manaPool.U === 0 &&
+      rDualW.players[0].manaPool["WU"] === undefined &&
+      rDualW.objects[dl.objId].tapped === true,
+    "error=" + rDualW.lastActionError + " pool=" + JSON.stringify(rDualW.players[0].manaPool));
+
+  let rDualTap = frActionActivateAbility(rDualW, { type: "activateAbility", player: 0, objectId: dl.objId, chosenColor: "U" });
+  push("dual taps again while still tapped: rejected (tap check kept)",
+    rDualTap.lastActionError === "permanent is already tapped" &&
+      rDualTap.players[0].manaPool.U === 0,
+    "error=" + rDualTap.lastActionError + " pool=" + JSON.stringify(rDualTap.players[0].manaPool));
+
+  let sDualU = frCloneState(rDualW);
+  sDualU.objects[dl.objId].tapped = false;
+  let rDualU = frActionActivateAbility(sDualU, { type: "activateAbility", player: 0, objectId: dl.objId, chosenColor: "U" });
+  push("dual untapped taps for U: manaPool.U 1, W still 1, land tapped",
+    rDualU.players[0].manaPool.U === 1 && rDualU.players[0].manaPool.W === 1 &&
+      rDualU.objects[dl.objId].tapped === true,
+    "error=" + rDualU.lastActionError + " pool=" + JSON.stringify(rDualU.players[0].manaPool));
+
+  let sDualBad = frCloneState(rDualU);
+  sDualBad.objects[dl.objId].tapped = false;
+  let rDualBad = frActionActivateAbility(sDualBad, { type: "activateAbility", player: 0, objectId: dl.objId, chosenColor: "R" });
+  push("dual rejects invalid chosenColor R: error, not tapped, nothing added",
+    rDualBad.lastActionError === "chosenColor must be one of: WU" &&
+      rDualBad.objects[dl.objId].tapped === false &&
+      rDualBad.players[0].manaPool.W === 1 && rDualBad.players[0].manaPool.U === 1 && rDualBad.players[0].manaPool.R === 0,
+    "error=" + rDualBad.lastActionError + " pool=" + JSON.stringify(rDualBad.players[0].manaPool));
+
+  let rDualNone = frActionActivateAbility(sDualBad, { type: "activateAbility", player: 0, objectId: dl.objId });
+  push("dual without chosenColor: rejected with the produced-color hint",
+    rDualNone.lastActionError === "chosenColor must be one of: WU",
+    "error=" + rDualNone.lastActionError);
+
+  let dl2 = playLand(baseDual, "luminous-lagoon");
+  let legalDual = frLegalActions(dl2.state);
+  let dualActs = legalDual.filter((a) => a.type === "activateAbility" && a.objectId === dl2.objId);
+  push("legalActions for the WU dual: two actions, chosenColor W and U",
+    dualActs.length === 2 && dualActs[0].chosenColor === "W" && dualActs[1].chosenColor === "U",
+    "acts=" + JSON.stringify(dualActs));
+
+  let sCol = frCloneState(baseColor);
+  let objCol = inHand(sCol, 0, "prismatic-core");
+  frZoneMove(sCol, objCol, "hand", "battlefield", 0);
+  sCol.step = "precombat_main";
+  sCol.activePlayer = 0;
+  sCol.priorityPlayer = 0;
+  sCol.stack = [];
+  sCol.players[0].manaPool = frManaEmptyPool();
+  let rCol = frActionActivateAbility(sCol, { type: "activateAbility", player: 0, objectId: objCol });
+  push("{C} producer (prismatic-core): taps and adds 1 colorless mana, no chosenColor needed",
+    rCol.lastActionError === null && rCol.players[0].manaPool.C === 1 &&
+      rCol.players[0].manaPool.W === 0 && rCol.players[0].manaPool["C"] === 1 &&
+      rCol.objects[objCol].tapped === true,
+    "error=" + rCol.lastActionError + " pool=" + JSON.stringify(rCol.players[0].manaPool));
+
+  // -- multiple targets & modal "Choose one" spells (#3) ---------------
+  let dMix = ["twin-dart","cinder-bolt","ember-reckoning","withering-grasp","bramble-warden","bramble-warden","cinderfang-marauder"];
+  let baseMix = frGameNew({ seed: 7, decks: [dMix, d1] });
+  let inHandAll = (st, player, cardId) => {
+    let pl = st.players[player];
+    let out = [];
+    for(let i = 0; i < pl.hand.length; i++) {
+      if(st.objects[pl.hand[i]].cardId === cardId) out.push(pl.hand[i]);
+    }
+    return out;
+  };
+  let boardState = () => {
+    let st = frCloneState(baseMix);
+    st.step = "precombat_main";
+    st.activePlayer = 0;
+    st.priorityPlayer = 0;
+    st.stack = [];
+    st.players[0].manaPool = { W: 0, U: 0, B: 3, R: 6, G: 0, C: 6 };
+    let brambles = inHandAll(st, 0, "bramble-warden");
+    let cinders = inHandAll(st, 0, "cinderfang-marauder");
+    for(let i = 0; i < brambles.length; i++) frZoneMove(st, brambles[i], "hand", "battlefield", 0);
+    for(let i = 0; i < cinders.length; i++) frZoneMove(st, cinders[i], "hand", "battlefield", 0);
+    return st;
+  };
+  let twoCreatures = (st) => {
+    let b = [], c = [];
+    for(let i = 0; i < st.battlefield.length; i++) {
+      let o = st.objects[st.battlefield[i]];
+      if(!o) continue;
+      if(o.cardId === "bramble-warden") b.push(o.id);
+      else if(o.cardId === "cinderfang-marauder") c.push(o.id);
+    }
+    return { b0: b[0], b1: b[1], c0: c[0] };
+  };
+
+  let sTD = boardState();
+  let td = inHand(sTD, 0, "twin-dart");
+  let tdT = twoCreatures(sTD);
+  let rTD = frActionCastSpell(sTD, { type: "castSpell", player: 0, objectId: td, targets: [tdT.b0, tdT.c0] });
+  push("cast twin-dart with 2 target creatures: ok, both on the stack entry",
+    rTD.lastActionError === null && rTD.stack.length === 1 &&
+      rTD.stack[0].targets.length === 2 &&
+      rTD.stack[0].targets[0] === tdT.b0 && rTD.stack[0].targets[1] === tdT.c0,
+    "error=" + rTD.lastActionError + " stack=" + JSON.stringify(rTD.stack));
+
+  let sTD1 = boardState();
+  let td1 = inHand(sTD1, 0, "twin-dart");
+  let rTD1 = frActionCastSpell(sTD1, { type: "castSpell", player: 0, objectId: td1, targets: [twoCreatures(sTD1).b0] });
+  push("cast twin-dart with 1 target: rejected (needs at least 2)",
+    rTD1.lastActionError === "requires at least 2 targets" && rTD1.stack.length === 0,
+    "error=" + rTD1.lastActionError);
+
+  let sTD2 = boardState();
+  let td2 = inHand(sTD2, 0, "twin-dart");
+  let td2T = twoCreatures(sTD2);
+  let rTD2 = frActionCastSpell(sTD2, { type: "castSpell", player: 0, objectId: td2, targets: [td2T.b0, td2T.b0] });
+  push("cast twin-dart with the same creature twice: rejected (targets must be distinct)",
+    rTD2.lastActionError === "targets must be distinct" && rTD2.stack.length === 0,
+    "error=" + rTD2.lastActionError);
+
+  let sTD3 = boardState();
+  let td3 = inHand(sTD3, 0, "twin-dart");
+  let td3T = twoCreatures(sTD3);
+  let rTD3 = frActionCastSpell(sTD3, { type: "castSpell", player: 0, objectId: td3, targets: [td3T.b0, td3T.c0, td3T.b1] });
+  push("cast twin-dart with 3 targets: rejected (at most 2)",
+    rTD3.lastActionError === "requires at most 2 targets" && rTD3.stack.length === 0,
+    "error=" + rTD3.lastActionError);
+
+  let sTD4 = boardState();
+  let td4 = inHand(sTD4, 0, "twin-dart");
+  let rTD4 = frActionCastSpell(sTD4, { type: "castSpell", player: 0, objectId: td4, targets: [1, 1] });
+  push("cast twin-dart targeting players: rejected (slots are creature-only)",
+    rTD4.lastActionError === "invalid target #1" && rTD4.stack.length === 0,
+    "error=" + rTD4.lastActionError);
+
+  let sTD5 = boardState();
+  let td5 = inHand(sTD5, 0, "twin-dart");
+  let td5T = twoCreatures(sTD5);
+  let rTD5 = frActionCastSpell(sTD5, { type: "castSpell", player: 0, objectId: td5, targets: [td5T.b0, td5T.c0] });
+  rTD5 = frStackResolveTop(rTD5);
+  push("resolve twin-dart: each target takes 1 damage",
+    rTD5.objects[td5T.b0].damage === 1 && rTD5.objects[td5T.c0].damage === 1,
+    "damage=" + rTD5.objects[td5T.b0].damage + "," + rTD5.objects[td5T.c0].damage);
+
+  let sCB = boardState();
+  let cb = inHand(sCB, 0, "cinder-bolt");
+  let rCB = frActionCastSpell(sCB, { type: "castSpell", player: 0, objectId: cb, targets: [1] });
+  push("cast cinder-bolt at player 1 (any target): ok",
+    rCB.lastActionError === null && rCB.stack.length === 1 && rCB.stack[0].targets[0] === 1,
+    "error=" + rCB.lastActionError);
+  rCB = frStackResolveTop(rCB);
+  push("resolve cinder-bolt on player 1: 2 life lost",
+    rCB.players[1].life === 18,
+    "life=" + rCB.players[1].life);
+
+  let sCB2 = boardState();
+  let cb2 = inHand(sCB2, 0, "cinder-bolt");
+  let cb2T = twoCreatures(sCB2);
+  let rCB2 = frActionCastSpell(sCB2, { type: "castSpell", player: 0, objectId: cb2, targets: [cb2T.b0] });
+  rCB2 = frStackResolveTop(rCB2);
+  push("resolve cinder-bolt on a creature: 2 damage",
+    rCB2.lastActionError === null && rCB2.objects[cb2T.b0].damage === 2,
+    "error=" + rCB2.lastActionError + " damage=" + rCB2.objects[cb2T.b0].damage);
+
+  let sCB3 = boardState();
+  let cb3 = inHand(sCB3, 0, "cinder-bolt");
+  let artObj = frObjectNew("obj-art-test", "faceted-ember-core", 0);
+  artObj.zone = "battlefield";
+  sCB3.objects["obj-art-test"] = artObj;
+  sCB3.battlefield.push("obj-art-test");
+  let rCB3 = frActionCastSpell(sCB3, { type: "castSpell", player: 0, objectId: cb3, targets: ["obj-art-test"] });
+  push("cast cinder-bolt at an artifact: rejected (slot is creature/player)",
+    rCB3.lastActionError === "invalid target #1" && rCB3.stack.length === 0,
+    "error=" + rCB3.lastActionError);
+
+  let sER = boardState();
+  let er = inHand(sER, 0, "ember-reckoning");
+  let erB = twoCreatures(sER).b0;
+  let rER = frActionCastSpell(sER, { type: "castSpell", player: 0, objectId: er, mode: "creature", targets: [erB] });
+  push("cast ember-reckoning mode 'creature': ok, mode on the stack entry",
+    rER.lastActionError === null && rER.stack.length === 1 && rER.stack[0].mode === "creature" &&
+      rER.stack[0].targets[0] === erB,
+    "error=" + rER.lastActionError + " stack=" + JSON.stringify(rER.stack));
+
+  let sER2 = boardState();
+  let er2 = inHand(sER2, 0, "ember-reckoning");
+  let rER2 = frActionCastSpell(sER2, { type: "castSpell", player: 0, objectId: er2, mode: "player", targets: [1] });
+  push("cast ember-reckoning mode 'player': ok",
+    rER2.lastActionError === null && rER2.stack[0].mode === "player",
+    "error=" + rER2.lastActionError);
+
+  let sER3 = boardState();
+  let er3 = inHand(sER3, 0, "ember-reckoning");
+  let rER3 = frActionCastSpell(sER3, { type: "castSpell", player: 0, objectId: er3, mode: "planeswalker", targets: [1] });
+  push("cast ember-reckoning with an unknown mode: rejected with the mode list",
+    rER3.lastActionError === "invalid mode: choose one of creature, player" && rER3.stack.length === 0,
+    "error=" + rER3.lastActionError);
+
+  let sER4 = boardState();
+  let er4 = inHand(sER4, 0, "ember-reckoning");
+  let rER4 = frActionCastSpell(sER4, { type: "castSpell", player: 0, objectId: er4, targets: [1] });
+  push("cast ember-reckoning with no mode: rejected",
+    rER4.lastActionError === "invalid mode: choose one of creature, player" && rER4.stack.length === 0,
+    "error=" + rER4.lastActionError);
+
+  let sER5 = boardState();
+  let er5 = inHand(sER5, 0, "ember-reckoning");
+  let rER5 = frActionCastSpell(sER5, { type: "castSpell", player: 0, objectId: er5, mode: "creature", targets: [1] });
+  push("cast ember-reckoning mode 'creature' at a player: rejected (slot type)",
+    rER5.lastActionError === "invalid target #1" && rER5.stack.length === 0,
+    "error=" + rER5.lastActionError);
+
+  let sER6 = boardState();
+  let er6 = inHand(sER6, 0, "ember-reckoning");
+  let er6C = twoCreatures(sER6).c0;
+  let rER6 = frActionCastSpell(sER6, { type: "castSpell", player: 0, objectId: er6, mode: "creature", targets: [er6C] });
+  rER6 = frStackResolveTop(rER6);
+  push("resolve ember-reckoning mode 'creature': 3 damage kills the 3/2 via SBA",
+    rER6.objects[er6C].zone === "graveyard",
+    "zone=" + rER6.objects[er6C].zone);
+
+  let sER7 = boardState();
+  let er7 = inHand(sER7, 0, "ember-reckoning");
+  let rER7 = frActionCastSpell(sER7, { type: "castSpell", player: 0, objectId: er7, mode: "player", targets: [1] });
+  rER7 = frStackResolveTop(rER7);
+  push("resolve ember-reckoning mode 'player': 3 life lost",
+    rER7.players[1].life === 17,
+    "life=" + rER7.players[1].life);
+
+  let sWG = boardState();
+  let wg = inHand(sWG, 0, "withering-grasp");
+  let wgB = twoCreatures(sWG).b0;
+  let rWG = frActionCastSpell(sWG, { type: "castSpell", player: 0, objectId: wg, targets: [wgB] });
+  push("cast withering-grasp at a 3/3: ok (declared toughness filter, 3 or less)",
+    rWG.lastActionError === null && rWG.stack.length === 1,
+    "error=" + rWG.lastActionError);
+
+  let sWG2 = boardState();
+  let wg2 = inHand(sWG2, 0, "withering-grasp");
+  let wgB2 = twoCreatures(sWG2).b0;
+  sWG2.objects[wgB2].counters.p1p1 = 1;
+  let rWG2 = frActionCastSpell(sWG2, { type: "castSpell", player: 0, objectId: wg2, targets: [wgB2] });
+  push("cast withering-grasp at a 4/4: rejected (toughness filter)",
+    rWG2.lastActionError === "invalid target #1" && rWG2.stack.length === 0,
+    "error=" + rWG2.lastActionError);
+
+  let sLA = boardState();
+  let legalMix = frLegalActions(sLA);
+  let laTd = inHand(sLA, 0, "twin-dart");
+  let laTdActs = legalMix.filter((a) => a.type === "castSpell" && a.objectId === laTd);
+  push("legalActions for twin-dart: 6 ordered two-target sets from 3 creatures",
+    laTdActs.length === 6 && laTdActs.every((a) => Array.isArray(a.targets) && a.targets.length === 2),
+    "n=" + laTdActs.length + " sample=" + JSON.stringify(laTdActs.slice(0, 1)));
+
+  let laEr = inHand(sLA, 0, "ember-reckoning");
+  let laErActs = legalMix.filter((a) => a.type === "castSpell" && a.objectId === laEr);
+  push("legalActions for ember-reckoning: 3 creature-mode sets + 2 player-mode sets",
+    laErActs.length === 5 &&
+      laErActs.filter((a) => a.mode === "creature").length === 3 &&
+      laErActs.filter((a) => a.mode === "player").length === 2,
+    "n=" + laErActs.length + " modes=" + JSON.stringify(laErActs.map((a) => a.mode)));
+
+  let laCb = inHand(sLA, 0, "cinder-bolt");
+  let laCbActs = legalMix.filter((a) => a.type === "castSpell" && a.objectId === laCb);
+  push("legalActions for cinder-bolt: 2 players + 3 creatures (any target)",
+    laCbActs.length === 5 &&
+      laCbActs.some((a) => a.targets[0] === 1) &&
+      laCbActs.some((a) => typeof a.targets[0] === "string"),
+    "n=" + laCbActs.length + " sample=" + JSON.stringify(laCbActs.slice(0, 2)));
+
+  // -- data-driven card effects (#4) ----------------------------------
+  // Every effect/trigger/ability is declared on the card record and resolved through the
+  // shared template library. These fixture tests walk one card per template: verdant-surge
+  // (pump), ember-conflagration (damageAll), verdant-call (token), ember-hound (activated
+  // {1},{T} ability), faceted-ember-core (activated {3},{T},sacrifice), withering-grasp
+  // (destroy), solara-benediction (shield vs spell and combat damage), tide-vortex (scry +
+  // draw), umbra-life-drain (X life), umbra-whisper (discard), tide-banishment (counter, a
+  // spell-slot target), vow-of-radiance (aura buff), and the enter/attack/combat-damage
+  // triggers (sunward-sentinel, nautilus-seer, bramble-warden, thornshroud-stalker).
+  let dFx0 = [];
+  for(let i = 0; i < 14; i++) dFx0.push("halo-reliquary");
+  let dFx1 = [];
+  for(let i = 0; i < 14; i++) dFx1.push("halo-reliquary");
+  let baseFx = frGameNew({ seed: 17, decks: [dFx0, dFx1] });
+  let fxSetup = (mana) => {
+    let st = frCloneState(baseFx);
+    st.step = "precombat_main";
+    st.activePlayer = 0;
+    st.priorityPlayer = 0;
+    st.stack = [];
+    st.players[0].manaPool = mana;
+    return st;
+  };
+  let fxPut = (st, cardId, controller) => {
+    let id = "fxc" + st.nextObjectId;
+    st.nextObjectId += 1;
+    let o = frObjectNew(id, cardId, controller);
+    o.zone = "battlefield";
+    o.summoningSickness = false;
+    st.objects[id] = o;
+    st.battlefield.push(id);
+    return id;
+  };
+  let fxGive = (st, cardId) => {
+    let id = "fxh" + st.nextObjectId;
+    st.nextObjectId += 1;
+    let o = frObjectNew(id, cardId, 0);
+    o.zone = "hand";
+    st.objects[id] = o;
+    st.players[0].hand.push(id);
+    return id;
+  };
+
+  let sVs = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 2, C: 0 });
+  let vsBram = fxPut(sVs, "bramble-warden", 0);
+  let vs = fxGive(sVs, "verdant-surge");
+  let rVs = frActionCastSpell(sVs, { type: "castSpell", player: 0, objectId: vs, targets: [vsBram] });
+  rVs = frStackResolveTop(rVs);
+  push("resolve verdant-surge: target creature gets +3/+3 until end of turn",
+    frPower(rVs, rVs.objects[vsBram]) === 6 && frToughness(rVs, rVs.objects[vsBram]) === 6,
+    "power=" + frPower(rVs, rVs.objects[vsBram]) + " toughness=" + frToughness(rVs, rVs.objects[vsBram]));
+
+  let sEc = fxSetup({ W: 0, U: 0, B: 0, R: 1, G: 0, C: 2 });
+  let ecBram = fxPut(sEc, "bramble-warden", 0);
+  let ecHound = fxPut(sEc, "ember-hound", 0);
+  let ec = fxGive(sEc, "ember-conflagration");
+  let rEc = frActionCastSpell(sEc, { type: "castSpell", player: 0, objectId: ec, x: 2 });
+  rEc = frStackResolveTop(rEc);
+  push("resolve ember-conflagration X=2: 2 to each player; 3/3 takes 2, 2/2 is destroyed",
+    rEc.objects[ecBram].damage === 2 && rEc.objects[ecHound].zone === "graveyard" &&
+      rEc.players[0].life === 18 && rEc.players[1].life === 18,
+    "bram=" + rEc.objects[ecBram].damage + " houndZone=" + rEc.objects[ecHound].zone +
+      " life=" + rEc.players[0].life + "," + rEc.players[1].life);
+
+  let sVc = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 1, C: 2 });
+  let vc = fxGive(sVc, "verdant-call");
+  let rVc = frActionCastSpell(sVc, { type: "castSpell", player: 0, objectId: vc });
+  rVc = frStackResolveTop(rVc);
+  let wolves = [];
+  for(let i = 0; i < rVc.battlefield.length; i++) {
+    let o = rVc.objects[rVc.battlefield[i]];
+    if(o && o.cardId === "wolf-token") wolves.push(o);
+  }
+  push("resolve verdant-call: creates two 1/1 Wolf tokens under your control",
+    wolves.length === 2 && frPower(rVc, wolves[0]) === 1 && frToughness(rVc, wolves[0]) === 1 &&
+      wolves[0].controller === 0,
+    "n=" + wolves.length);
+
+  let sEh = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 1 });
+  let eh = fxPut(sEh, "ember-hound", 0);
+  let ehBram = fxPut(sEh, "bramble-warden", 0);
+  let rEh = frActionActivateAbility(sEh, { type: "activateAbility", player: 0, objectId: eh, abilityName: "snap", targets: [ehBram] });
+  push("activate ember-hound {1},{T}: on the stack, tapped, mana spent",
+    rEh.lastActionError === null && rEh.stack.length === 1 &&
+      rEh.stack[0].kind === "ability" && rEh.stack[0].abilityName === "snap" &&
+      rEh.objects[eh].tapped === true && rEh.players[0].manaPool.C === 0,
+    "error=" + rEh.lastActionError + " stack=" + JSON.stringify(rEh.stack));
+  rEh = frStackResolveTop(rEh);
+  push("resolve ember-hound snap: 1 damage to the target",
+    rEh.objects[ehBram].damage === 1,
+    "damage=" + rEh.objects[ehBram].damage);
+
+  let sEhSick = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 1 });
+  let ehSick = fxPut(sEhSick, "ember-hound", 0);
+  sEhSick.objects[ehSick].summoningSickness = true;
+  let rEhSick = frActionActivateAbility(sEhSick, { type: "activateAbility", player: 0, objectId: ehSick, abilityName: "snap", targets: [0] });
+  push("activate ember-hound with summoning sickness: rejected, nothing paid",
+    rEhSick.lastActionError === "summoning sickness prevents activating a tap ability" &&
+      rEhSick.stack.length === 0 && rEhSick.players[0].manaPool.C === 1,
+    "error=" + rEhSick.lastActionError);
+
+  let sFe = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 3 });
+  let fe = fxPut(sFe, "faceted-ember-core", 0);
+  let rFe = frActionActivateAbility(sFe, { type: "activateAbility", player: 0, objectId: fe, abilityName: "combust", targets: [1] });
+  push("activate faceted-ember-core {3},{T},sacrifice: on the stack, mana spent, core in graveyard",
+    rFe.lastActionError === null && rFe.stack.length === 1 && rFe.stack[0].abilityName === "combust" &&
+      rFe.players[0].manaPool.C === 0 && rFe.objects[fe].zone === "graveyard",
+    "error=" + rFe.lastActionError + " zone=" + rFe.objects[fe].zone);
+  rFe = frStackResolveTop(rFe);
+  push("resolve faceted-ember-core combust: 3 damage to the chosen player",
+    rFe.players[1].life === 17,
+    "life=" + rFe.players[1].life);
+
+  let sWg = fxSetup({ W: 0, U: 0, B: 2, R: 0, G: 0, C: 0 });
+  let wgBram = fxPut(sWg, "bramble-warden", 0);
+  let wgD = fxGive(sWg, "withering-grasp");
+  let rWg = frActionCastSpell(sWg, { type: "castSpell", player: 0, objectId: wgD, targets: [wgBram] });
+  rWg = frStackResolveTop(rWg);
+  push("resolve withering-grasp: the 3/3 is destroyed to the graveyard",
+    rWg.objects[wgBram].zone === "graveyard",
+    "zone=" + rWg.objects[wgBram].zone);
+
+  let sSs = fxSetup({ W: 1, U: 0, B: 0, R: 0, G: 0, C: 1 });
+  let ss = fxGive(sSs, "sunward-sentinel");
+  let rSs = frActionCastSpell(sSs, { type: "castSpell", player: 0, objectId: ss });
+  rSs = frStackResolveTop(rSs);
+  push("resolve sunward-sentinel: enters and its trigger gains its controller 2 life",
+    rSs.objects[ss].zone === "battlefield" && rSs.players[0].life === 22,
+    "life=" + rSs.players[0].life);
+
+  let sNs = fxSetup({ W: 0, U: 2, B: 0, R: 0, G: 0, C: 1 });
+  let nsHand = sNs.players[0].hand.length;
+  let nsLib = sNs.players[0].library.length;
+  let ns = fxGive(sNs, "nautilus-seer");
+  let rNs = frActionCastSpell(sNs, { type: "castSpell", player: 0, objectId: ns });
+  rNs = frStackResolveTop(rNs);
+  push("resolve nautilus-seer: enters, draws then discards (hand net 0, library -1)",
+    rNs.objects[ns].zone === "battlefield" && rNs.players[0].hand.length === nsHand &&
+      rNs.players[0].library.length === nsLib - 1 && rNs.players[0].graveyard.length === 1,
+    "hand=" + rNs.players[0].hand.length + " lib=" + rNs.players[0].library.length);
+
+  let sBw = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let bw = fxPut(sBw, "bramble-warden", 0);
+  sBw.step = "declare_attackers";
+  let rBw = frActionDeclareAttackers(sBw, { type: "declareAttackers", player: 0, attackers: [bw] });
+  push("bramble-warden attacks: attack trigger adds a +1/+1 counter",
+    rBw.lastActionError === null && (rBw.objects[bw].counters.p1p1 || 0) === 1 &&
+      frPower(rBw, rBw.objects[bw]) === 4,
+    "error=" + rBw.lastActionError + " counters=" + (rBw.objects[bw].counters.p1p1 || 0));
+
+  let sTs = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let ts = fxPut(sTs, "thornshroud-stalker", 0);
+  sTs.step = "declare_attackers";
+  let rTs = frActionDeclareAttackers(sTs, { type: "declareAttackers", player: 0, attackers: [ts] });
+  rTs.step = "combat_damage";
+  rTs.combatBlocks = [];
+  let tsHand = rTs.players[1].hand.length;
+  rTs = frStepCombatDamage(rTs);
+  push("thornshroud-stalker unblocked: deals 2 and its combat-damage trigger makes the opponent discard",
+    rTs.players[1].life === 18 && rTs.players[1].hand.length === tsHand - 1 &&
+      rTs.players[1].graveyard.length === 1,
+    "life=" + rTs.players[1].life + " hand=" + rTs.players[1].hand.length);
+
+  let sSb = fxSetup({ W: 1, U: 0, B: 0, R: 0, G: 0, C: 2 });
+  let sb = fxGive(sSb, "solara-benediction");
+  let rSb = frActionCastSpell(sSb, { type: "castSpell", player: 0, objectId: sb, x: 2 });
+  rSb = frStackResolveTop(rSb);
+  rSb.players[0].manaPool = { W: 0, U: 0, B: 0, R: 1, G: 0, C: 0 };
+  let sbCb = fxGive(rSb, "cinder-bolt");
+  let rSb2 = frActionCastSpell(rSb, { type: "castSpell", player: 0, objectId: sbCb, targets: [0] });
+  rSb2 = frStackResolveTop(rSb2);
+  push("solara-benediction X=2 shield: a 2-damage cinder-bolt is fully prevented",
+    rSb2.players[0].life === 20 && rSb2.objects[sbCb].zone === "graveyard",
+    "life=" + rSb2.players[0].life);
+
+  let sSbC = fxSetup({ W: 1, U: 0, B: 0, R: 0, G: 0, C: 2 });
+  let sbC = fxGive(sSbC, "solara-benediction");
+  let rSbC = frActionCastSpell(sSbC, { type: "castSpell", player: 0, objectId: sbC, x: 2 });
+  rSbC = frStackResolveTop(rSbC);
+  let oppTs = fxPut(rSbC, "thornshroud-stalker", 1);
+  rSbC.step = "declare_attackers";
+  rSbC.activePlayer = 1;
+  rSbC.priorityPlayer = 1;
+  let rSbC2 = frActionDeclareAttackers(rSbC, { type: "declareAttackers", player: 1, attackers: [oppTs] });
+  rSbC2.step = "combat_damage";
+  rSbC2.combatBlocks = [];
+  rSbC2 = frStepCombatDamage(rSbC2);
+  push("solara-benediction shield also prevents combat damage (and no discard trigger fires)",
+    rSbC2.players[0].life === 20 && rSbC2.players[0].hand.length === 7,
+    "life=" + rSbC2.players[0].life + " hand=" + rSbC2.players[0].hand.length);
+
+  let sTv = fxSetup({ W: 0, U: 1, B: 0, R: 0, G: 0, C: 4 });
+  let tvHand0 = sTv.players[0].hand.length;
+  let tv = fxGive(sTv, "tide-vortex");
+  let tvLib0 = sTv.players[0].library.slice();
+  let rTv = frActionCastSpell(sTv, { type: "castSpell", player: 0, objectId: tv, x: 2 });
+  rTv = frStackResolveTop(rTv);
+  let tvLibExp = tvLib0.slice(3).concat(tvLib0.slice(0, 2));
+  push("resolve tide-vortex X=2: scries 2 (top to bottom) then draws 1",
+    rTv.players[0].hand.length === tvHand0 + 1 &&
+      JSON.stringify(rTv.players[0].library) === JSON.stringify(tvLibExp),
+    "hand=" + rTv.players[0].hand.length);
+
+  let sUld = fxSetup({ W: 0, U: 0, B: 1, R: 0, G: 0, C: 2 });
+  let uld = fxGive(sUld, "umbra-life-drain");
+  let rUld = frActionCastSpell(sUld, { type: "castSpell", player: 0, objectId: uld, x: 2 });
+  rUld = frStackResolveTop(rUld);
+  push("resolve umbra-life-drain X=2: each opponent loses 2, its controller gains 2",
+    rUld.players[1].life === 18 && rUld.players[0].life === 22,
+    "life=" + rUld.players[0].life + "," + rUld.players[1].life);
+
+  let sUw = fxSetup({ W: 0, U: 0, B: 2, R: 0, G: 0, C: 1 });
+  let uw = fxGive(sUw, "umbra-whisper");
+  let uwHand = sUw.players[1].hand.length;
+  let rUw = frActionCastSpell(sUw, { type: "castSpell", player: 0, objectId: uw, targets: [1] });
+  rUw = frStackResolveTop(rUw);
+  push("resolve umbra-whisper: target player discards two cards",
+    rUw.players[1].hand.length === uwHand - 2 && rUw.players[1].graveyard.length === 2,
+    "hand=" + rUw.players[1].hand.length + " gy=" + rUw.players[1].graveyard.length);
+
+  let sTb = fxSetup({ W: 0, U: 2, B: 0, R: 1, G: 0, C: 2 });
+  let tcb = fxGive(sTb, "cinder-bolt");
+  let rTb1 = frActionCastSpell(sTb, { type: "castSpell", player: 0, objectId: tcb, targets: [1] });
+  let tb = fxGive(rTb1, "tide-banishment");
+  let rTb2 = frActionCastSpell(rTb1, { type: "castSpell", player: 0, objectId: tb, targets: [tcb] });
+  push("cast tide-banishment on a spell on the stack: ok, two spells stacked",
+    rTb2.lastActionError === null && rTb2.stack.length === 2,
+    "error=" + rTb2.lastActionError + " stack=" + JSON.stringify(rTb2.stack));
+  let rTb3 = frStackResolveTop(rTb2);
+  push("resolve tide-banishment: the target spell is countered (graveyard, off the stack)",
+    rTb3.stack.length === 0 && rTb3.objects[tcb].zone === "graveyard",
+    "stack=" + rTb3.stack.length + " zone=" + rTb3.objects[tcb].zone);
+
+  let sVo = fxSetup({ W: 1, U: 0, B: 0, R: 0, G: 0, C: 2 });
+  let voBram = fxPut(sVo, "bramble-warden", 0);
+  let vow = fxGive(sVo, "vow-of-radiance");
+  let rVo = frActionCastSpell(sVo, { type: "castSpell", player: 0, objectId: vow, targets: [voBram] });
+  rVo = frStackResolveTop(rVo);
+  push("resolve vow-of-radiance: aura attaches and buffs the creature +2/+2",
+    rVo.objects[vow].zone === "battlefield" && rVo.objects[vow].attachedTo === voBram &&
+      frPower(rVo, rVo.objects[voBram]) === 5 && frToughness(rVo, rVo.objects[voBram]) === 5,
+    "power=" + frPower(rVo, rVo.objects[voBram]));
+
+  let sLa = fxSetup({ W: 0, U: 2, B: 0, R: 1, G: 0, C: 2 });
+  let laTb = fxGive(sLa, "tide-banishment");
+  let laCb2 = fxGive(sLa, "cinder-bolt");
+  let rLa0 = frActionCastSpell(sLa, { type: "castSpell", player: 0, objectId: laCb2, targets: [1] });
+  let legalFx = frLegalActions(rLa0);
+  let laTbActs = legalFx.filter((a) => a.type === "castSpell" && a.objectId === laTb);
+  push("legalActions counter-spell: never offers a spell as its own target, targets the stacked spell",
+    laTbActs.length >= 1 &&
+      laTbActs.every((a) => a.targets.indexOf(laTb) === -1) &&
+      laTbActs.some((a) => a.targets.indexOf(laCb2) !== -1),
+    "n=" + laTbActs.length + " sample=" + JSON.stringify(laTbActs.slice(0, 1)));
+
+  let sAe = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 1 });
+  let aeHound = fxPut(sAe, "ember-hound", 0);
+  let legalAe = frLegalActions(sAe);
+  let houndActs = legalAe.filter((a) => a.type === "activateAbility" && a.objectId === aeHound);
+  push("legalActions enumerates ember-hound's snap: one any-target set offered",
+    houndActs.length >= 1 && houndActs[0].abilityName === "snap" &&
+      Array.isArray(houndActs[0].targets) && houndActs[0].targets.length === 1,
+    "n=" + houndActs.length + " sample=" + JSON.stringify(houndActs.slice(0, 1)));
+
+  let sFe2 = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 3 });
+  let fe2 = fxPut(sFe2, "faceted-ember-core", 0);
+  let legalFe = frLegalActions(sFe2);
+  let feActs = legalFe.filter((a) => a.type === "activateAbility" && a.objectId === fe2);
+  push("legalActions enumerates faceted-ember-core's combust: {3},{T},sacrifice offered",
+    feActs.length >= 1 && feActs[0].abilityName === "combust" && feActs[0].targets.length === 1,
+    "n=" + feActs.length + " sample=" + JSON.stringify(feActs.slice(0, 1)));
+
+  // -- combat damage assignment order (#5) ------------------------------
+  // Blockers of a multi-blocked attacker are ordered at declaration; combat damage assigns
+  // the attacker's power in that order (lethal to each in turn, remainder to the last,
+  // trample spilling to the player), applied simultaneously within a wave with SBA between
+  // waves. These walk one wave end to end: declare attackers, declare blockers with orders,
+  // run the damage step.
+  let blkAttack = (st, ids) => {
+    st.step = "declare_attackers";
+    st.activePlayer = 0;
+    st.priorityPlayer = 0;
+    let r = frActionDeclareAttackers(st, { type: "declareAttackers", player: 0, attackers: ids });
+    r.step = "declare_blockers";
+    r.priorityPlayer = 1;
+    return r;
+  };
+  let blkGo = (st, blocks) => {
+    let r = frActionDeclareBlockers(st, { type: "declareBlockers", player: 1, blocks: blocks });
+    if(r.lastActionError !== null) return r;
+    r.step = "combat_damage";
+    r = frStepCombatDamage(r);
+    return r;
+  };
+  let dbBram = "bramble-warden", dbRam = "molten-ramsprite";
+  let sDb = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 2, C: 0 });
+  let dbAtt = fxPut(sDb, "ember-brand-stormcaller", 0);
+  let dbVs = fxGive(sDb, "verdant-surge");
+  let rDb = frActionCastSpell(sDb, { type: "castSpell", player: 0, objectId: dbVs, targets: [dbAtt] });
+  rDb = frStackResolveTop(rDb);
+  rDb = blkAttack(rDb, [dbAtt]);
+  let dbB1 = fxPut(rDb, dbBram, 1);
+  let dbB2 = fxPut(rDb, dbRam, 1);
+  let rDb2 = blkGo(rDb, [
+    { attacker: dbAtt, blocker: dbB1, order: 1 },
+    { attacker: dbAtt, blocker: dbB2, order: 2 }
+  ]);
+  push("5/5 double-blocked by two 3/3s: the first-declared blocker takes lethal and dies, the second survives with 2",
+    rDb2.lastActionError === null &&
+      rDb2.objects[dbB1].zone === "graveyard" &&
+      rDb2.objects[dbB2].zone === "battlefield" && rDb2.objects[dbB2].damage === 2 &&
+      rDb2.objects[dbAtt].zone === "graveyard",
+    "error=" + rDb2.lastActionError + " b1=" + rDb2.objects[dbB1].zone +
+      " b2=" + rDb2.objects[dbB2].zone + "/dmg" + rDb2.objects[dbB2].damage +
+      " att=" + rDb2.objects[dbAtt].zone);
+
+  let sDbR = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 2, C: 0 });
+  let dbAttR = fxPut(sDbR, "ember-brand-stormcaller", 0);
+  let dbVsR = fxGive(sDbR, "verdant-surge");
+  let rDbR = frActionCastSpell(sDbR, { type: "castSpell", player: 0, objectId: dbVsR, targets: [dbAttR] });
+  rDbR = frStackResolveTop(rDbR);
+  rDbR = blkAttack(rDbR, [dbAttR]);
+  let dbB1R = fxPut(rDbR, dbBram, 1);
+  let dbB2R = fxPut(rDbR, dbRam, 1);
+  let rDbR2 = blkGo(rDbR, [
+    { attacker: dbAttR, blocker: dbB1R, order: 2 },
+    { attacker: dbAttR, blocker: dbB2R, order: 1 }
+  ]);
+  push("reversing the order flips which 3/3 takes the lethal hit",
+    rDbR2.objects[dbB1R].zone === "battlefield" && rDbR2.objects[dbB1R].damage === 2 &&
+      rDbR2.objects[dbB2R].zone === "graveyard",
+    "b1=" + rDbR2.objects[dbB1R].zone + "/dmg" + rDbR2.objects[dbB1R].damage +
+      " b2=" + rDbR2.objects[dbB2R].zone);
+
+  let sNb = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let nbAtt = fxPut(sNb, "ember-brand-stormcaller", 0);
+  sNb = blkAttack(sNb, [nbAtt]);
+  let nbB1 = fxPut(sNb, dbBram, 1);
+  let nbB2 = fxPut(sNb, dbRam, 1);
+  let rNb = frActionDeclareBlockers(sNb, { type: "declareBlockers", player: 1, blocks: [
+    { attacker: nbAtt, blocker: nbB2 },
+    { attacker: nbAtt, blocker: nbB1 }
+  ] });
+  push("no orders given: insertion order is recorded (combatBlocks normalized with order fields)",
+    rNb.lastActionError === null && rNb.combatBlocks.length === 2 &&
+      rNb.combatBlocks[0].blocker === nbB2 && rNb.combatBlocks[0].order === 1 &&
+      rNb.combatBlocks[1].blocker === nbB1 && rNb.combatBlocks[1].order === 2,
+    "error=" + rNb.lastActionError + " blocks=" + JSON.stringify(rNb.combatBlocks));
+
+  let sDb2 = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let at1 = fxPut(sDb2, "ember-brand-stormcaller", 0);
+  let at2 = fxPut(sDb2, "sunward-sentinel", 0);
+  sDb2 = blkAttack(sDb2, [at1, at2]);
+  let db2B = fxPut(sDb2, dbBram, 1);
+  let rDb2x = frActionDeclareBlockers(sDb2, { type: "declareBlockers", player: 1, blocks: [
+    { attacker: at1, blocker: db2B },
+    { attacker: at2, blocker: db2B }
+  ] });
+  push("a creature can only block one attacker: double-assignment is rejected",
+    rDb2x.lastActionError === "a creature can only block one attacker: " + db2B,
+    "error=" + rDb2x.lastActionError);
+
+  let sIo = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let ioAtt = fxPut(sIo, "ember-brand-stormcaller", 0);
+  sIo = blkAttack(sIo, [ioAtt]);
+  let ioB1 = fxPut(sIo, dbBram, 1);
+  let ioB2 = fxPut(sIo, dbRam, 1);
+  let rIo = frActionDeclareBlockers(sIo, { type: "declareBlockers", player: 1, blocks: [
+    { attacker: ioAtt, blocker: ioB1, order: 1 },
+    { attacker: ioAtt, blocker: ioB2, order: 1 }
+  ] });
+  push("duplicate blocker orders are rejected",
+    rIo.lastActionError === "invalid blocker order",
+    "error=" + rIo.lastActionError);
+  let rIo2 = frActionDeclareBlockers(sIo, { type: "declareBlockers", player: 1, blocks: [
+    { attacker: ioAtt, blocker: ioB1, order: 1 },
+    { attacker: ioAtt, blocker: ioB2 }
+  ] });
+  push("partial orders (one declared, one not) are rejected",
+    rIo2.lastActionError === "every blocker of an attacker must declare order, or none",
+    "error=" + rIo2.lastActionError);
+
+  let sTr = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let trAtt = fxPut(sTr, "ironbark-mastodon", 0);
+  sTr = blkAttack(sTr, [trAtt]);
+  let trB1 = fxPut(sTr, "wolf-token", 1);
+  let trB2 = fxPut(sTr, "wolf-token", 1);
+  let rTr = blkGo(sTr, [
+    { attacker: trAtt, blocker: trB1, order: 1 },
+    { attacker: trAtt, blocker: trB2, order: 2 }
+  ]);
+  push("4/7 trampler double-blocked by two 1/1s: lethal to each, the remainder tramples to the player",
+    rTr.objects[trB1].zone === "graveyard" && rTr.objects[trB2].zone === "graveyard" &&
+      rTr.objects[trAtt].zone === "battlefield" && rTr.objects[trAtt].damage === 2 &&
+      rTr.players[1].life === 18,
+    "b1=" + rTr.objects[trB1].zone + " b2=" + rTr.objects[trB2].zone +
+      " attDmg=" + rTr.objects[trAtt].damage + " life=" + rTr.players[1].life);
+
+  let sLaB = fxSetup({ W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 });
+  let laBAtt = fxPut(sLaB, "ember-brand-stormcaller", 0);
+  sLaB = blkAttack(sLaB, [laBAtt]);
+  let laBB1 = fxPut(sLaB, dbBram, 1);
+  let laBB2 = fxPut(sLaB, dbRam, 1);
+  let laB = frLegalActions(sLaB);
+  let laBlockActs = laB.filter((a) => a.type === "declareBlockers");
+  let dbActs = laBlockActs.filter((a) => a.blocks.length === 2);
+  push("legalActions enumerates blocker order: the double-block offers both orderings",
+    laBlockActs.length === 4 && dbActs.length === 2 &&
+      dbActs.some((a) => a.blocks[0].blocker === laBB1) &&
+      dbActs.some((a) => a.blocks[0].blocker === laBB2) &&
+      dbActs.every((a) => a.blocks[0].order === 1 && a.blocks[1].order === 2),
+    "n=" + laBlockActs.length + " sample=" + JSON.stringify(laBlockActs));
+
+  // -- custom card database injection + null-safe lookups (#6) ------------
+  // newGame accepts config.cards ({id: card}, merged over frCardDb) so a non-fixture
+  // database can be injected at runtime, and every frCardGet consumer null-checks, so an
+  // unknown card id is skipped (or rejected with a clean lastActionError) rather than
+  // crashing the reducer/SBA. This injects a tiny non-fixture DB and plays a full turn
+  // through it -- land, tap, cast, resolve, attack, block, damage, SBA -- with zero errors.
+  let c6d = [];
+  for(let i = 0; i < 20; i++) c6d.push("edgewood");
+  for(let i = 0; i < 10; i++) c6d.push("glowpaw");
+  for(let i = 0; i < 10; i++) c6d.push("cinderling");
+  let c6Game = frGameNew({ seed: 3, cards: {
+    "edgewood": { id: "edgewood", name: "Edgewood", types: ["Land"], subtypes: [], colorIdentity: ["G"], producesMana: "G", rarity: "Field", frame: "field", glyph: "verdant" },
+    "glowpaw": { id: "glowpaw", name: "Glowpaw", manaCost: "{G}", cmc: 1, colors: ["G"], colorIdentity: ["G"], supertypes: [], types: ["Creature"], subtypes: [], rulesText: "", keywords: [], power: 2, toughness: 2, rarity: "Marked", frame: "marked", glyph: "verdant" },
+    "cinderling": { id: "cinderling", name: "Cinderling", manaCost: "{R}", cmc: 1, colors: ["R"], colorIdentity: ["R"], supertypes: [], types: ["Creature"], subtypes: [], rulesText: "Trample", keywords: ["trample"], power: 2, toughness: 1, rarity: "Marked", frame: "marked", glyph: "ember" }
+  }, decks: [c6d, c6d] });
+  let c6All = Object.keys(c6Game.objects);
+  let c6Known = c6All.length;
+  for(let i = 0; i < c6All.length; i++) {
+    let cid = c6Game.objects[c6All[i]].cardId;
+    if(cid !== "edgewood" && cid !== "glowpaw" && cid !== "cinderling") c6Known -= 1;
+  }
+  push("#6 custom DB: newGame injects cards, merged over the fixture DB",
+    c6Known === c6All.length && c6All.length === 80 && !!frCardGet("glowpaw") &&
+      !!frCardGet("cinderling") && !!frCardGet("edgewood") &&
+      frCardGet("bramble-warden") && frCardGet("bramble-warden").name === "Bramble Warden",
+    "known=" + c6Known + " total=" + c6All.length);
+  let c6 = frCloneState(c6Game);
+  c6.step = "precombat_main"; c6.activePlayer = 0; c6.priorityPlayer = 0; c6.stack = [];
+  c6.players[0].manaPool = frManaEmptyPool(); c6.players[1].manaPool = frManaEmptyPool();
+  let c6Land = frObjectNew("c6l", "edgewood", 0); c6Land.zone = "hand";
+  c6.objects[c6Land.id] = c6Land; c6.players[0].hand.push(c6Land.id);
+  let c6Paw = frObjectNew("c6p", "glowpaw", 0); c6Paw.zone = "hand";
+  c6.objects[c6Paw.id] = c6Paw; c6.players[0].hand.push(c6Paw.id);
+  // p1's blocker goes straight to the battlefield (fxPut-style -- blocking is never
+  // restricted by summoning sickness); the custom-DB cast/resolve path is exercised by
+  // glowpaw below.
+  let c6Cnd = frObjectNew("c6c", "cinderling", 1);
+  c6Cnd.zone = "battlefield"; c6Cnd.summoningSickness = false;
+  c6.objects[c6Cnd.id] = c6Cnd; c6.battlefield.push(c6Cnd.id);
+  let c6R = frActionPlayLand(c6, { type: "playLand", player: 0, objectId: c6Land.id });
+  let c6E1 = c6R.lastActionError;
+  let c6LandZone = c6R.objects[c6Land.id].zone;
+  c6R = frActionActivateAbility(c6R, { type: "activateAbility", player: 0, objectId: c6Land.id });
+  let c6E2 = c6R.lastActionError;
+  let c6Pool = c6R.players[0].manaPool.G;
+  c6R = frActionCastSpell(c6R, { type: "castSpell", player: 0, objectId: c6Paw.id });
+  let c6E3 = c6R.lastActionError;
+  c6R = frStackResolveTop(c6R);
+  c6R.objects[c6Paw.id].summoningSickness = false;
+  let c6PawZone = c6R.objects[c6Paw.id].zone;
+  let c6CndZone = c6R.objects[c6Cnd.id].zone;
+  c6R.step = "declare_attackers"; c6R.activePlayer = 0; c6R.priorityPlayer = 0;
+  c6R = frActionDeclareAttackers(c6R, { type: "declareAttackers", player: 0, attackers: [c6Paw.id] });
+  let c6E4 = c6R.lastActionError;
+  c6R.step = "declare_blockers"; c6R.priorityPlayer = 1;
+  c6R = frActionDeclareBlockers(c6R, { type: "declareBlockers", player: 1, blocks: [{ attacker: c6Paw.id, blocker: c6Cnd.id, order: 1 }] });
+  let c6E5 = c6R.lastActionError;
+  c6R.step = "combat_damage";
+  c6R = frStepCombatDamage(c6R);
+  push("#6 custom DB: full turn (land->tap->cast->combat->SBA) with zero errors",
+    c6E1 === null && c6E2 === null && c6E3 === null && c6E4 === null && c6E5 === null &&
+      c6LandZone === "battlefield" && c6Pool === 1 && c6PawZone === "battlefield" &&
+      c6CndZone === "battlefield" &&
+      c6R.objects[c6Paw.id].zone === "graveyard" && c6R.objects[c6Cnd.id].zone === "graveyard" &&
+      !c6R.gameOver && c6R.winner === null,
+    "errs=[" + [c6E1, c6E2, c6E3, c6E4, c6E5].join("|") + "] pool=" + c6Pool +
+      " glowpaw=" + c6R.objects[c6Paw.id].zone + " cinderling=" + c6R.objects[c6Cnd.id].zone);
+  let c6Bogus = frObjectNew("c6b", "no-such-card-anywhere", 0);
+  c6Bogus.zone = "battlefield";
+  c6.objects[c6Bogus.id] = c6Bogus; c6.battlefield.push(c6Bogus.id);
+  let c6Sba = frCheckStateBasedActions(c6);
+  c6Sba.step = "declare_attackers";
+  let c6Atk = frActionDeclareAttackers(c6Sba, { type: "declareAttackers", player: 0, attackers: [c6Bogus.id] });
+  push("#6 null-safe: an unknown card id is skipped by SBA and rejected cleanly by declareAttackers",
+    c6Sba.objects[c6Bogus.id].zone === "battlefield" &&
+      c6Atk.lastActionError === "not a creature: c6b",
+    "sbaZone=" + c6Sba.objects[c6Bogus.id].zone + " atkErr=" + c6Atk.lastActionError);
+
+  let failed = 0;
+  for(let i = 0; i < results.length; i++) {
+    if(!results[i].ok) failed += 1;
+  }
+  return { total: results.length, failed: failed, results: results };
 
 
 // =====================================================================
@@ -2242,15 +4404,18 @@ frRenderCard(cardOrId) =>
 // value, per op, documented here):
 //
 //   $output("render", cardIdOrCardRecord)
-//     -> { card, typeLine, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects, palette,
-//        costSymbols } for a resolvable card, else "(unknown card id: ...)" /
-//        "(unknown realm: ...)". glyphSvg is null for a colourless card (or any realm
-//        whose glyph asset does not exist). gemSvg/gemSmallSvg are null for a `Field`
-//        (basic land) card or any unrecognised rarity. palette is undefined for a front
-//        that publishes no k.palette (front-land/gold/artifact/basicland-*). costSymbols
-//        is [] for a card with no manaCost (a Land).
+//     -> { card, typeLine, imageUrl, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects,
+//        palette, costSymbols } for a resolvable card, else "(unknown card id: ...)" /
+//        "(unknown realm: ...)". imageUrl is the card's full-card art image URL when the
+//        card record carries an `image` field (the five basic lands), else null --
+//        consumers that want to show the actual card face should prefer it over the
+//        procedural frontSvg. glyphSvg is null for a colourless card (or any realm whose
+//        glyph asset does not exist). gemSvg/gemSmallSvg are null for a `Field` (basic
+//        land) card or any unrecognised rarity. palette is undefined for a front that
+//        publishes no k.palette (front-land/gold/artifact/basicland-*). costSymbols is []
+//        for a card with no manaCost (a Land).
 //   $output("card", cardId)        -> the card record, or "(unknown card id: ...)"
-//   $output("cards")               -> array of all 28 card records
+//   $output("cards")               -> array of all 47 card records
 //   $output("realms")              -> ["solara","verdant","tide","ember","umbra"]
 //   $output("rarities")            -> the five tier names, Field..Ascendant, in order.
 //                                     Field is the basic-land card class, not a rarity step,
@@ -2261,7 +4426,19 @@ frRenderCard(cardOrId) =>
 //                                     frApplyAction's own guard clauses to absorb (e.g.
 //                                     state is not an object at all -- frApplyAction
 //                                     already guards a malformed ACTION, not a malformed
-//                                     STATE; this op closes that gap, see NOTES.md)
+//                                     STATE; this op closes that gap, see NOTES.md).
+//                                     A castSpell action on an X-cost card takes an
+//                                     `x` field (a non-negative integer; X=0 is the
+//                                     default when omitted). The engine pays x * xCount +
+//                                     the fixed symbols from the floating mana pool and
+//                                     records the chosen value on the stack entry as
+//                                     `x`, so effects can read it. A castSpell action on
+//                                     a targeting card takes `targets` (an ordered array
+//                                     of object ids and/or player indices) and, on a
+//                                     modal card, `mode` (one of the declared "Choose
+//                                     one" mode names) -- both are validated against the
+//                                     card's declared targeting and recorded on the
+//                                     stack entry for the resolution effect.
 //   $output("state", state)        -> a defensively cloned, JSON-safe copy of state, or
 //                                     "(invalid state)" if it cannot be round-tripped
 //   $output("legalActions", state) -> frLegalActions(state) -- see its own comment; []
@@ -2291,7 +4468,7 @@ $output(op, a, b, c, d, e) =>
     return card;
   }
 
-  if(op === "cards") return Object.values(frCardDb());
+  if(op === "cards") return Object.values(frActiveCardDb());
 
   if(op === "realms") return frRealmList();
 

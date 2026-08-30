@@ -1,9 +1,334 @@
-title
-  Nucleus Generator
+// ═══════════════════════════════════════════════════════════════════════════
+// NUCLEUS // v2.0 — a modern, full-featured image generation template
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This is the new "nucleus" — the base framework for simple image generators.
+// It has been updated to the quality bar of voxelcraft (perchance.org/voxelcraft,
+// its direct descendant) and restructured following the rathji-template
+// conventions (perchance.org/rathji-template):
+//
+//   • $meta at the very top (listing-page title/description/image/tags)
+//   • CONFIG lists grouped up top, so the user tweaks words/data — not JS
+//   • helper + entry-point functions that never throw (they return readable
+//     "(...)" placeholders on bad input instead)
+//   • two copyable bonus components (badges + cards) vendored from rathji-template
+//
+// index.html reads everything here through `root.*`. Edit freely.
+// ═══════════════════════════════════════════════════════════════════════════
 
-// IMPORTS
-t2i = {import:t2i-plugin}
-ai = {import:ai-text-plugin}
+// ═══════════════════════════════════════════════════════════════════════════
+// CHAT-TEMPLATE ROADMAP — tick items off (change `[ ]` to `[x]`) as they're built.
+// The goal: evolve this from an image template into a full-feature chat template.
+// ═══════════════════════════════════════════════════════════════════════════
+//   1. [x] Chat transcript UI — message list with user/assistant bubbles;
+//            streaming replies via generateText onChunk
+//   2. [x] Persona system — character cards (rathjiCard) that inject system prompts
+//   3. [x] System-prompt editor — editable persona per conversation, saved to kv
+//   4. [x] Rolling memory — summarize older turns into a memory block
+//   5. [x] Conversation persistence — kv-backed sessions, resume on reload
+//   6. [x] Session manager — create/rename/delete/switch named chats
+//   7. [x] Message actions — copy / regenerate / edit-and-resend / delete
+//   8. [x] Markdown rendering — code blocks, lists, bold in assistant replies
+//   9. [x] Stop button — abort streaming via the promise's .stop()
+//  10. [x] Creativity controls — temperature slider + style selector in settings
+//  11. [x] Image attachments / vision — send an image Blob with the prompt
+//  12. [x] In-chat image generation — "imagine: …" inserts a render as a message
+//  13. [x] Long-context budget — token estimate, auto-trim/summarize
+//  14. [x] Shareable chats — session encoded in the URL
+//  15. [x] Export/import conversations — JSON download/upload
+//  16. [x] Chat search — keyword filter across messages
+//  17. [x] Starter chips — one-tap suggested prompts above the input
+//  18. [x] Persona preset library — prebuilt characters as a config list
+//  19. [x] Slash commands — /help /clear /new /persona /save /imagine /search /export /share
+//  20. [x] Keyboard-first + mobile polish — history recall, / focus, Alt+R regenerate, mobile CSS
+// ═══════════════════════════════════════════════════════════════════════════
 
-output
-  [null]
+$meta
+  title = Nucleus
+  description = A modern, full-featured image generation template. Describe a scene, enhance it with AI, pick a style lens and aspect ratio, then render — with a vault, public gallery, seeds, re-rolls, sound and themes built in.
+  image = https://user.uploads.dev/file/6f6dafb4fc8fd4d55e6b5e9ebf46b4f9.jpg
+  tags = image generation, ai, template, nucleus, art, t2i
+  header
+    mode = minimal
+
+// ── PLUGINS ────────────────────────────────────────────────────────────────
+// Only what we use. Add more (kv-plugin, server-plugin, ...) as you grow the template.
+generateText = {import:ai-text-plugin}
+generateImage = {import:text-to-image-plugin}
+kv = {import:kv-plugin}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. RANDOM PROMPT LISTS — feed the Dice (🎲). Tweak words/weights freely.
+// ═══════════════════════════════════════════════════════════════════════════
+
+nSubject
+  a cozy oak cabin
+  a futuristic neon city at night^2
+  a floating sky island village
+  an ancient jungle temple
+  a grand medieval castle^2
+  a hidden underwater base
+  a giant treehouse
+  a snowy igloo village
+  a lighthouse on a jagged cliff
+  a mysterious wizard's tower
+  a quiet cottage in the woods
+  a colossal abandoned spaceship
+
+nSetting
+  surrounded by misty mountains
+  on the edge of a crystal-clear lake
+  in a field of wildflowers
+  deep in a glowing bioluminescent cave
+  at the top of a waterfall
+  beside a frozen river
+  in the middle of a desert oasis
+  atop rolling green hills
+  in a bamboo forest
+  on a windswept rocky shore
+
+nAtmosphere
+  golden hour lighting
+  moody storm clouds with distant lightning
+  soft morning mist
+  a starry night with a full moon
+  drifting fog at dawn
+  falling cherry blossom petals
+  a warm torchlight glow
+  gentle snow falling
+  rays of light through the canopy
+  a quiet evening with fireflies
+
+nCameo
+  A small fox watching from a distance.
+  A few sheep grazing nearby.
+  A lantern glowing warmly by the door.
+  A cat napping on the doorstep.
+  A tiny boat drifting on the water.
+  Birds circling high overhead.
+  A campfire crackling softly.
+  A winding path leading away.
+
+nRandomPrompt
+  [nSubject] [nSetting], with [nAtmosphere]. [nCameo]
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. STYLE LENSES — the Prism cards in index.html are rendered from this list.
+//    Each entry: label (shown on the card), suffix (appended to the prompt),
+//    and image (the card's thumbnail preview).
+// ═══════════════════════════════════════════════════════════════════════════
+
+nStyles
+  raw
+    label = Raw
+    suffix =
+    image = https://user.uploads.dev/file/871903718e9fe5434ac466662001d7ba.jpg
+  photo
+    label = Photorealistic
+    suffix = photorealistic, 8k, highly detailed, cinematic lighting
+    image = https://user.uploads.dev/file/e3ef2011cf725c86e71e957f9d1e1a37.jpg
+  digital
+    label = Digital Art
+    suffix = digital art, trending on artstation, sharp focus, vivid colors
+    image = https://user.uploads.dev/file/11b96496e0a17397be378556fb4aa7e8.jpg
+  oil
+    label = Oil Painting
+    suffix = oil painting, textured, visible brushstrokes, masterpiece
+    image = https://user.uploads.dev/file/4866df77144d87a7ffda639270e22131.jpg
+  anime
+    label = Anime
+    suffix = anime style, studio ghibli, cel shaded, vibrant
+    image = https://user.uploads.dev/file/6ae1f70464778ee2a6e52885d03b9c6b.jpg
+  cyber
+    label = Cyberpunk
+    suffix = cyberpunk, neon, futuristic, synthwave, high contrast
+    image = https://user.uploads.dev/file/6f6dafb4fc8fd4d55e6b5e9ebf46b4f9.jpg
+  render3d
+    label = 3D Render
+    suffix = 3d render, octane render, unreal engine 5, raytracing
+    image = https://user.uploads.dev/file/1009298eca1f215e094700c66f23e4da.jpg
+  retro
+    label = Retro / VHS
+    suffix = retro, vintage 90s, vaporwave, grainy, lo-fi, VHS aesthetic
+    image = https://user.uploads.dev/file/75815f3ecebe0246cb42c8805f6323ab.jpg
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. CHAT CONFIG — the chat tab's default system prompt. Tweak freely.
+//    (Roadmap items 2/3/18 will turn this into a library of editable personas.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+chatSystemPrompt
+  You are a helpful, friendly assistant built on the Nucleus template.
+  Be warm and concise. If the user asks for an image, suggest describing it
+  in the Render tab — or just answer helpfully with words.
+  $output = [this.joinItems("\n")]
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3b. CHAT PERSONAS — the persona library (roadmap #2/#18). Each entry becomes
+//     a character-card chip in the Chat tab; its `systemPrompt` tells the AI
+//     who to be. `id` must be unique. Every persona's prompt is also editable
+//     per-conversation in the UI (roadmap #3) — tweak these freely.
+// ═══════════════════════════════════════════════════════════════════════════
+
+chatPersonas
+  helper
+    id = helper
+    name = Helper
+    emoji = ✨
+    tagline = Warm, concise all-rounder
+    systemPrompt
+      You are a helpful, friendly assistant built on the Nucleus template.
+      Be warm and concise. If the user asks for an image, suggest describing it
+      in the Render tab — or just answer helpfully with words.
+      $output = [this.joinItems("\n")]
+  writer
+    id = writer
+    name = The Writer
+    emoji = ✍️
+    tagline = Creative prose, stories & lyrics
+    systemPrompt
+      You are a gifted fiction writer. You write vivid, evocative prose with a
+      strong voice and rhythm, in the user's language. Offer story ideas,
+      dialogue, worldbuilding and lyrics when asked.
+      $output = [this.joinItems("\n")]
+  poet
+    id = poet
+    name = The Poet
+    emoji = 🌙
+    tagline = Verse, haiku & lyricism
+    systemPrompt
+      You are a poet. Whenever it fits, respond in verse — haiku, sonnets, free
+      verse, limericks. When prose is needed, keep it lyrical and brief.
+      $output = [this.joinItems("\n")]
+  sage
+    id = sage
+    name = The Sage
+    emoji = 🦉
+    tagline = Wise, patient, philosophical
+    systemPrompt
+      You are a patient, wise mentor. You answer with clarity and depth and
+      encourage reflection, grounding abstract questions in practical examples.
+      $output = [this.joinItems("\n")]
+  coder
+    id = coder
+    name = The Coder
+    emoji = 👩‍💻
+    tagline = Code, bugs & tech answers
+    systemPrompt
+      You are an expert software engineer. You give correct, idiomatic code with
+      brief explanations, prefer simple solutions, and only ask clarifying
+      questions when genuinely needed.
+      $output = [this.joinItems("\n")]
+  dungeon-master
+    id = dungeon-master
+    name = Dungeon Master
+    emoji = 🐉
+    tagline = Runs tabletop RPG adventures
+    systemPrompt
+      You are a tabletop RPG dungeon master. You set vivid scenes, play every
+      NPC, run fair but dramatic dice-driven outcomes, and always end by asking
+      the player what they do next.
+      $output = [this.joinItems("\n")]
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 3c. CHAT STARTERS — one-tap suggested prompts (roadmap #17). Shown above the
+//     input while a chat is still empty; click one to send it instantly. Tweak
+//     freely, or add your own.
+// ═══════════════════════════════════════════════════════════════════════════
+
+chatStarters
+  Write me a short story about a robot who learns to paint.
+  Explain quantum computing like I'm five.
+  Give me 5 ideas for a cozy game to build on Perchance.
+  Plan a three-course dinner for a rainy evening.
+  Write a haiku about the ocean.
+  What are some good questions to ask at a job interview?
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. BONUS COMPONENTS — vendored from rathji-template (perchance.org/rathji-template)
+//    Copyable helpers you can drop anywhere: pretty colored badges and themed
+//    cards. Call them straight from lists or scripts:
+//      [rathjiTemplate("hello")]                          → badge
+//      [rathjiTemplate(nStyles)]                          → badge from a random item
+//      [rathjiCard({ title:"Quest", text:"...", emoji:"🗺️", color:"#22c55e" })]
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Read any value through .evaluateItem so Perchance lists work anywhere a plain value would.
+rathjiTemplateResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem;
+  } catch(e) {}
+  return v;
+
+// ── Badge ──
+rathjiTemplateStamp(text, opts) =>
+  let emoji = opts.emoji || "✨";
+  let color = opts.color || "#7c6cff";
+  return '<span style="display:inline-block;background:' + color + '1a;color:' + color + ';border:1px solid ' + color + '66;border-radius:999px;padding:4px 14px;font-weight:600;font-family:system-ui,sans-serif;">' + emoji + " " + text + "</span>";
+
+rathjiTemplate(input, opts) =>
+  if(input != null && input.text === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.text !== undefined) input = item;
+  }
+  let o = {};
+  if(opts != null) {
+    o.text = rathjiTemplateResolve(input);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.text !== undefined) {
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.text = rathjiTemplateResolve(input);
+  }
+  if(typeof o.text !== "string" || !o.text.trim()) {
+    return "(rathjiTemplate: expected some text — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+  return rathjiTemplateStamp(o.text.trim(), o);
+
+// ── Card ──
+rathjiCardStamp(o) =>
+  let emoji = o.emoji || "🃏";
+  let color = o.color || "#7c6cff";
+  return '<div style="background:' + color + '14;border:1px solid ' + color + '44;border-left:4px solid ' + color + ';border-radius:14px;padding:16px 18px;text-align:left;">' +
+    '<div style="font-size:1.6rem;line-height:1;">' + emoji + '</div>' +
+    '<div style="font-weight:700;margin-top:8px;">' + o.title + '</div>' +
+    '<div style="margin-top:4px;font-size:.92rem;opacity:.75;">' + o.text + '</div></div>';
+
+rathjiCard(input, opts) =>
+  if(input != null && input.title === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.title !== undefined) input = item;
+  }
+  let o = {};
+  if(opts != null) {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(opts.text);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.title !== undefined) {
+    o.title = rathjiTemplateResolve(input.title);
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(input);
+  }
+  if(typeof o.title !== "string" || !o.title.trim()) o.title = o.text;
+  if(typeof o.text !== "string" || !o.text.trim()) o.text = o.title;
+  if(typeof o.title !== "string" || !o.title.trim()) {
+    return "(rathjiCard: expected a title — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+  return rathjiCardStamp(o);

@@ -93,7 +93,7 @@
 
 <div class="wrap">
   <h1>⚔ <span class="grad">five-realms-plugin</span></h1>
-  <p class="tagline">An MTG-compatible rules engine — a 28-card fixture database, zones, turn structure, priority, mana, seeded shuffling, an action reducer, a 52-asset inline-SVG card renderer. One 13-op <code>$output</code>, none of them throw. Stack resolution with targeting, combat damage, the full state-based-actions loop, a layered continuous-effects store, a keyword-ability library, and replacement effects are all implemented.</p>
+  <p class="tagline">An MTG-compatible rules engine — a 47-card data-driven fixture database (incl. five basic lands), zones, turn structure, priority, mana, seeded shuffling, an action reducer, a 52-asset inline-SVG card renderer. One 13-op <code>$output</code>, none of them throw. Stack resolution with multi-target and modal spells, data-driven card effects (templates, triggers, generic activated abilities), combat damage, the full state-based-actions loop, a layered continuous-effects store, a keyword-ability library, and replacement effects are all implemented.</p>
 
   <h2>What this is</h2>
   <p>A Perchance plugin is just a <b>normal generator written to be reused</b>. The one special thing is the <code>$output</code> function at the bottom of <code>main.pjs</code> — when another generator imports this one, the name on the left of the import line <b>becomes that function</b>. The lists, data and helpers below it are all ordinary Perchance code.</p>
@@ -140,7 +140,7 @@
   <div class="demo">
     <div class="demo-row">
       <button class="demo-btn" onclick="frShowSample()">Sample hand</button>
-      <button class="demo-btn" onclick="frShowAll()">All 28 cards</button>
+      <button class="demo-btn" onclick="frShowAll()">All 47 cards</button>
       <select id="frCardSel"></select>
       <button class="demo-btn" onclick="frShowOne()">Show selected</button>
     </div>
@@ -157,7 +157,8 @@
     <li><b>Done (layer system + continuous effects).</b> A timestamp-ordered (rule 613.7) continuous-effect store (<code>state.effects</code>) with a rule-7 P/T layer and EOT expiry; aura/vulnerability and <code>Verdant Surge</code> buffs flow through it.</li>
     <li><b>Done (replacement effects).</b> A rule-614 replacement layer (<code>frReplacementEffects</code>) is exposed on a permanent's <code>card.replacement</code>; the fixtures use a prevention replacement — <code>Sunfire Aegis</code> prevents all combat damage that would be dealt to its controller, including excess trample spill.</li>
     <li>More keywords (each mechanically backed: hexproof and ward protect permanents from opponent targeting — hexproof blocks it outright, ward counters it; indestructible ignores lethal damage and destroy effects; skulk limits to equal-or-lower-power blockers) and further nontrivial abilities (lifelink, haste, vigilance, reach, menace).</li>
-    <li><code>fr("legalActions", ...)</code> now enumerates planar-legal moves: a <code>tapPermanent</code> for every untapped permanent (tap a source first, then spend it), mana abilities and castable spells it can actually pay, and full attacker/blocker declarations — blocker matching honours flying/reach and menace. On very large boards the subset enumeration caps and reports solo attackers instead of every combination.</li>
+    <li><b>Done (custom card database injection).</b> <code>fr("newGame", \{ cards: ... \})</code> accepts a <code>\{id: card\}</code> map merged over the fixture DB — every op resolves card ids against it until the next <code>newGame</code>, and unknown card ids are skipped or rejected cleanly rather than crashing the reducer/SBA.</li>
+    <li><code>fr("legalActions", ...)</code> now enumerates planar-legal moves: a <code>tapPermanent</code> for every untapped permanent (tap a source first, then spend it), mana abilities and castable spells it can actually pay, and full attacker/blocker declarations — blocker matching honours flying/reach and menace, and each multi-blocked attacker is offered once per blocker order. On very large boards the subset enumeration caps and reports solo attackers instead of every combination.</li>
   </ul>
 
   <h2>Notes</h2>
@@ -184,7 +185,7 @@
   var CODES = [
     { id: "code-import", fname: "main.pjs", code: importLine },
     { id: "code-list", fname: "main.pjs", code: [
-        "[fr(\"cards\").length]                           -> 28",
+        "[fr(\"cards\").length]                           -> 47",
         "[fr(\"card\", \"nautilus-seer\").name]               -> Nautilus Seer",
         "[fr(\"asset\", \"back\")]                            -> the card-back <svg> string",
         "[fr(\"gem\", \"Vaulted\")]                           -> the Vaulted-tier gem <svg> string"
@@ -199,7 +200,7 @@
         "jsonEl.textContent = JSON.stringify(state);"
       ].join("\n") },
     { id: "code-worked", fname: "index.html", code: [
-        "fr(\"cards\").length                              // 28",
+        "fr(\"cards\").length                              // 47",
         "fr(\"card\", \"bramble-warden\").rarity             // \"Marked\"",
         "fr(\"realms\")                                     // [\"solara\",\"verdant\",\"tide\",\"ember\",\"umbra\"]",
         "fr(\"rarities\")                                   // [\"Field\",\"Marked\",\"Vaulted\",\"Sovereign\",\"Ascendant\"]",
@@ -219,6 +220,30 @@
         "fr(\"legalActions\", state).length                 // > 0 -- at minimum passPriority and concede",
         "state = fr(\"act\", state, { type: \"passPriority\", player: state.priorityPlayer });",
         "fr(\"state\", state)                               // a clone safe to stash/serialize",
+        "",
+        "// X-cost spells: the castSpell action takes an `x` field",
+        "fr(\"card\", \"ember-conflagration\").manaCost       // \"{X}{R}\", and its cmc is 1 (X counts as 0)",
+        "state = fr(\"act\", state, { type: \"castSpell\", player: state.priorityPlayer, objectId: state.players[0].hand[0], x: 2 });",
+        "state.stack[0].x                              // 2 -- the chosen X is on the stack entry",
+        "// X = 0 is always legal; an unaffordable x leaves lastActionError set",
+        "",
+        "// multi-target & modal spells: targeting/modes live on the card record,",
+        "fr( \"card\", \"twin-dart\" ).targeting.min         // 2 -- two target creatures",
+        "fr( \"card\", \"twin-dart\" ).targeting.slots      // [{types:[\"Creature\"]},{types:[\"Creature\"]}]",
+        "fr( \"card\", \"ember-reckoning\" ).modes          // [{name:\"creature\",...},{name:\"player\",...}]",
+        "// and castSpell takes targets:[...] plus, on a modal card, a mode:",
+        "state = fr(\"act\", state, { type: \"castSpell\", player: state.priorityPlayer,",
+        "  objectId: state.players[0].hand[0], targets: [state.battlefield[0], state.battlefield[1]], mode: \"creature\" });",
+        "// an illegal count, target type, or mode sets lastActionError instead of throwing",
+        "",
+        "// custom card database: newGame accepts config.cards (merged over the fixture DB)",
+        "var custom = { my-creature: { id: \"my-creature\", name: \"My Creature\", manaCost: \"{2}\", cmc: 2,",
+        "  types: [\"Creature\"], subtypes: [], power: 3, toughness: 3, glyph: \"verdant\" } };",
+        "var g = fr(\"newGame\", { seed: 1, cards: custom,",
+        "  decks: [ [\"my-creature\", \"halo-reliquary\", \"halo-reliquary\"], [\"halo-reliquary\"] ] });",
+        "fr(\"cards\").length                              // 48 -- the custom card merged into the DB",
+        "// unknown card ids are skipped (SBA) or rejected (actions) with no crash",
+        "",
         "",
         "fr(\"asset\", \"back\")                              // the card-back <svg> string",
         "fr(\"assets\").length                              // 52"
@@ -240,8 +265,26 @@
         "  rarity: \"Vaulted\",",
         "  frame: \"vaulted\",",
         "  glyph: \"ember\"",
-        "}"
-      ].join("\n") },
+        "}",
+        "// data-driven effects (#4): a bolt with a generic {1},{T} activated ability",
+        "{",
+        "  id: \"ember-hound\",",
+        "  name: \"Ember Hound\",",
+        "  manaCost: \"{2}{R}\",",
+        "  cmc: 3,",
+        "  colors: [\"R\"],",
+        "  colorIdentity: [\"R\"],",
+        "  supertypes: [],",
+        "  types: [\"Creature\"],",
+        "  subtypes: [\"Hound\"],",
+        "  rulesText: \"{1},{T}: Ember Hound deals 1 damage to any target.\",",
+        "  power: 3,",
+        "  toughness: 2,",
+        "  rarity: \"Marked\",",
+        "  frame: \"marked\",",
+        "  glyph: \"ember\",",
+        "  abilities: [{ name: \"snap\", cost: { tap: true, mana: \"{1}\" }, targeting: { min: 1, max: 1, slots: [{ player: true, permanent: true }] }, effects: [{ type: \"damage\", amount: 1, targets: 0 }] }]",
+        "}"      ].join("\n") },
     { id: "code-frontsel", fname: "front selection", code: [
         "basic land (rarity === \"Field\")  -> front-basicland-<realm>   (front-land if no realm)",
         "any other Land                    -> front-land",
@@ -314,15 +357,15 @@
   }
 
   makeTable("apiTable", ["Call", "Returns", "What it gives you"], [
-    ["render", "envelope", "<code>\{card, typeLine, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects, palette, costSymbols\}</code> — or <code>\"(unknown card id: ...)\"</code> / <code>\"(unknown realm: ...)\"</code>"],
+    ["render", "envelope", "<code>\{card, typeLine, imageUrl, frontSvg, glyphSvg, gemSvg, gemSmallSvg, rects, palette, costSymbols\}</code> — or <code>\"(unknown card id: ...)\"</code> / <code>\"(unknown realm: ...)\"</code>. <code>imageUrl</code> is the full-card art image (present for the five basic lands), <code>null</code> otherwise"],
     ["card", "record", "That card's record, or <code>\"(unknown card id: ...)\"</code>"],
-    ["cards", "array", "Array of all 28 card records"],
+    ["cards", "array", "Array of all card records in the active database — the 47 fixtures, or the merged custom database after a <code>newGame</code> with <code>config.cards</code>"],
     ["realms", "array", "<code>[\"solara\",\"verdant\",\"tide\",\"ember\",\"umbra\"]</code>"],
     ["rarities", "array", "The five tier names, Field → Ascendant, in order"],
-    ["newGame", "state", "A fresh game state (7 cards drawn per player), or a placeholder string if <code>config</code> is unusable"],
-    ["act", "state", "The next state after applying <code>action</code> — never throws, even on a malformed <code>state</code>"],
+    ["newGame", "state", "A fresh game state (7 cards drawn per player), or a placeholder string if <code>config</code> is unusable. <code>config.cards</code> (a <code>\{id: card\}</code> map) injects a custom card database, merged over the built-in fixture DB — fixture entries stay, custom entries win on a shared id — and every op (<code>act</code>, <code>legalActions</code>, <code>cards</code>, <code>render</code>, combat, SBA) resolves ids against it until the next <code>newGame</code> (a call without <code>config.cards</code> restores the fixture DB). A card id outside any DB is skipped or rejected with a clean <code>lastActionError</code>, never thrown on"],
+    ["act", "state", "The next state after applying <code>action</code> — never throws, even on a malformed <code>state</code>. A <code>castSpell</code> action on an X-cost card takes <code>x</code> (a non-negative integer, <code>X=0</code> when omitted) and records the chosen value on the stack entry as <code>x</code>. A <code>castSpell</code> action on a targeting card takes <code>targets</code> (an ordered array of object ids and/or player indices) and, on a modal card, <code>mode</code> (one of the declared mode names) — both validated against the card's declared targeting and recorded on the stack entry for the resolution effect. A <code>castSpell</code> action on a counterspell takes a spell's object id (its <code>targeting.slots</code> carries <code>spell: true</code>, and a spell never offers itself). An <code>activateAbility</code> action on a data-driven ability takes <code>abilityName</code> (one of the card's declared <code>abilities</code> — e.g. Ember Hound's <code>snap</code>, Faceted Ember Core's <code>combust</code>) plus <code>targets</code> where the ability targets; costs (<code>{T}</code>, mana, sacrifice self, life) are paid on activation and the named ability's effects resolve off the stack. On a multi-color mana producer (producesMana with 2+ chars, e.g. the WU dual land) the same action instead takes <code>chosenColor</code> — one of the produced colors, else the action is rejected. A <code>declareBlockers</code> action takes <code>blocks</code> (an array of \{attacker, blocker\} entries — a blocker may appear on only one attacker; the entries for a multi-blocked attacker may each carry an optional 1-based <code>order</code> — either every entry for that attacker declares one, or none — and combat damage is then assigned down that order: lethal to the first, remainder onward, trample spilling to the player)"],
     ["state", "state", "A defensively cloned, JSON-safe copy of <code>state</code>, or <code>\"(invalid state)\"</code>"],
-    ["legalActions", "array", "Planar-legal moves for the player with priority: tap/mana/cast plus full attacker and blocker declarations; <code>[]</code> on a malformed/missing state"],
+    ["legalActions", "array", "Planar-legal moves for the player with priority: tap/mana/cast plus full attacker and blocker declarations (a multi-blocked attacker is enumerated once per blocker order); <code>[]</code> on a malformed/missing state"],
     ["asset", "svg", "That asset's rebuilt inline <code>&lt;svg&gt;</code> string, or <code>\"(unknown asset id: ...)\"</code>"],
     ["assets", "array", "Array of all 52 asset ids"],
     ["gem", "svg", "That card's (or that literal tier name's) gem <code>&lt;svg&gt;</code> string, or a placeholder for an unresolvable id, an unrecognised rarity, or the <code>Field</code> tier (which has no gem)"],
@@ -336,7 +379,7 @@
   makeTable("schemaTable", ["Field", "Type", "Notes"], [
     ["id", "string", "machine slug, e.g. <code>\"bramble-warden\"</code> — what <code>fr(\"card\", ...)</code>/<code>fr(\"render\", ...)</code> take"],
     ["name", "string", "display name"],
-    ["manaCost", "string", "e.g. <code>\"\{1\}\{R\}\{R\}\"</code>; omitted for lands"],
+    ["manaCost", "string", "e.g. <code>\"\{1\}\{R\}\{R\}\"</code> or an X-cost <code>\"\{X\}\{R\}\"</code> (its <code>cmc</code> counts X as 0); omitted for lands"],
     ["cmc", "number", "always present, <code>0</code> for lands"],
     ["colors", "string[]", "from <code>WUBRG</code>"],
     ["colorIdentity", "string[]", "from <code>WUBRG</code>"],
@@ -344,9 +387,15 @@
     ["types", "string[]", "e.g. <code>[\"Creature\"]</code>"],
     ["subtypes", "string[]", "feeds <code>typeLine</code> after an em dash"],
     ["rulesText", "string", "plain text, not parsed by this plugin"],
+    ["targeting", "object", "on spells that take targets: <code>\\{min, max, distinct, slots\\}</code> — <code>min</code>/<code>max</code> are the required/allowed target count (<code>max</code> may be the string <code>\"X\"</code>, Fireball-style), <code>distinct</code> (default <code>true</code>) forbids picking the same target twice, and <code>slots</code> is one entry per position: <code>\\{player: true\\}</code>, <code>\\{types: [\\\"Creature\\\"]\\}</code>, a <code>\\{player, types\\}</code> mix (\"any target\"), or <code>\\{permanent: true\\}</code>, or <code>\\{spell: true}\\}</code> — a spell on the stack, for counterspells like Tide-Banishment, plus an optional <code>toughnessLE</code> filter (Withering Grasp). The last slot repeats for spells with more targets than declared slots"],
+    ["modes", "array", "on modal \"Choose one\" spells: <code>[\\{name, targeting\\}, ...]</code> — the mode names the branch resolution takes and each mode carries its own <code>targeting</code> (e.g. Ember Reckoning's <code>creature</code>/<code>player</code> modes)"],
+    ["effects", "array", "on spells/abilities: the declared effect templates resolved off the stack, e.g. <code>[{type: \"pump\", amount: 3, targets: 0, untilEot: true}]</code> (Verdant Surge), <code>[{type: \"damageAll\", amount: \"X\", both: true}]</code> (Ember Conflagration), <code>[{type: \"token\", cardId: \"wolf-token\", amount: 2}]</code> (Verdant Call), <code>[{type: \"counter\"}]</code> (Tide-Banishment), <code>[{type: \"scry\", amount: \"X\"}, {type: \"draw\", amount: 1}]</code> (Tide Vortex) — <code>amount: \"X\"</code> takes the chosen X; <code>targets</code> is a target-set position number, an array of positions, or a string <code>\"self\"/\"controller\"/\"opponent\"/\"opponents\"</code>"],
+    ["triggers", "array", "on cards with triggers: <code>[{when: \"enter\", effects: [...]}]</code> — <code>when</code> is <code>enter</code>, <code>attack</code>, or <code>combatDamageToPlayer</code>; effects resolve with <code>targets: \"self\"</code> meaning the permanent itself — Sunward Sentinel gains 2 life on enter, Nautilus Seer draws then discards, Bramble Warden pumps itself with a +1/+1 counter on attack, Thornshroud Stalker forces a discard when it deals combat damage to a player"],
+    ["abilities", "array", "on permanents with generic activated abilities: <code>[{name, cost, targeting, effects}]</code> — <code>cost</code> mixes <code>tap</code>, <code>mana</code> (e.g. <code>\"{3}\"</code>), <code>sacrificeSelf</code>, and/or <code>life</code>; <code>targeting</code> uses the same slot grammar as spells. Ember Hound's <code>snap</code> is <code>{1},{T}</code>, 1 damage to any target; Faceted Ember Core's <code>combust</code> is <code>{3},{T}</code>, sacrifice, 3 damage to any target"],
+    ["auraBuff", "object", "on auras: the <code>{power, toughness}</code> bonus granted to the enchanted creature while attached (Vow of Radiance is <code>+2/+2</code>)"],
     ["power", "number", "creatures only"],
     ["toughness", "number", "creatures only"],
-    ["producesMana", "string", "only on the 3 fixture permanents with a tap ability"],
+    ["producesMana", "string", "on the fixture permanents with a tap ability; a 2+ character value is a multi-color producer — <code>activateAbility</code> then requires a <code>chosenColor</code> (one of the produced colors) and adds 1 mana of that color (the WU dual land Luminous Lagoon)"],
     ["rarity", "string", "drives <code>fr(\"render\", ...)</code>'s <code>gemSvg</code>/<code>gemSmallSvg</code> and, via <code>=== \"Field\"</code>, its front selection"],
     ["frame", "string", "the tier's machine slug; recorded and returned, not read by this plugin's own renderer (frame is chosen by realm/card class, not by this field)"],
     ["glyph", "string", "one of the 5 realms, or <code>\"colourless\"</code>"]
@@ -427,6 +476,9 @@
     var r = fr("render", cardId);
     if (!r || typeof r !== "object") {
       return '<div class="fr-card-error">' + escHtml(String(r)) + "</div>";
+    }
+    if (r.imageUrl) {
+      return '<div class="fr-card-front"><img src="' + r.imageUrl + '" alt="" style="display:block;width:300px;height:420px;object-fit:cover;"></div>';
     }
     var card = r.card, rects = r.rects, palette = r.palette;
     var titleColor = palette ? palette.titleText : "#e2e8f0";

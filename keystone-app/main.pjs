@@ -1,6 +1,284 @@
-// --- KEYSTONE PROTOCOL: LOGIC LAYER ---
+// ═══════════════════════════════════════════════════════════════════════════
+// KEYSTONE CHAT v2 — a modern AI chat template for Perchance
+// ───────────────────────────────────────────────────────────────────────────
+// 🪄 FREE TEMPLATE — fork, copy and remix freely. If you build on it, a
+//    little credit back to "Keystone Chat" would be appreciated. 🧡
+//    Built on the rathji-template design system (https://perchance.org/rathji-template).
+// Restructured in the style of rathji-template:
+//   $meta        — title / description / tags shown on the listing page
+//   imports      — the plugins this template needs
+//   chatPresets  — ready-to-go starter scenarios, loadable from the sidebar
+//   rathji*      — copyable badge & card components (vendored from rathji-template)
+//
+// The heavy chat logic lives in index.html so that manual stream handling
+// (Keystone Protocol Rule 8) can write directly to the DOM.
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══ FEATURE BACKLOG — say a number and I'll build it ══════════════════════
+// The 20 feature ideas for Keystone Chat. Implemented ones are marked [x].
+// 1.  [x] Share a conversation via URL hash — one link that loads the whole chat.
+// 2.  [x] Multiple AI personas — switch between several characters mid-chat.
+// 3.  [x] Per-message edit / delete — inline buttons on each bubble.
+// 4.  [x] Multi-bot rooms — several AI characters in one scene, taking turns.
+// 5.  [x] Narrator line type — a "Story:" line styled differently from dialogue.
+// 6.  [x] Memory vault — pinned notes injected into the prompt each turn.
+// 7.  [x] Temperature / max-length sliders in the settings panel.
+//     → "Creativity" (Grounded/Balanced/Wild) + "Reply length" sliders. The
+//     ai-text-plugin exposes no temperature/maxTokens knobs, so these steer the
+//     prompt itself ([TONE] + [LENGTH] sections).
+// 8.  [x] Quick-reply buttons under the input ("Yes", "No", custom).
+// 9.  [x] Typing effect + optional sound effects for new messages.
+// 10. [x] Chat branching — snapshot the log, explore forks, jump back.
+// 11. [ ] In-chat art — generateImage portraits of characters and scenes.
+// 12. [ ] Preset manager — create, save, and delete your own presets.
+// 13. [ ] Chat stats — message counts, turns, words per character.
+// 14. [ ] Auto dark mode — respect prefers-color-scheme.
+// 15. [x] Search within the chat log (highlight matches).
+//     → 🔍 toolbar button opens a search row; typing hides non-matching messages
+//     and highlights matches, with prev/next jumping and a match counter.
+// 16. [x] Per-user profiles synced with kv-plugin (+secret-plugin for private bits).
+//     → Named setups (all sidebar fields + chat log) saved in kv-plugin. Each
+//     profile has optional private notes, encrypted with the user's own
+//     secret-plugin keypair — exported profiles keep them locked to the keyholder.
+// 17. [x] Comments / guestbook for the generator via comments-plugin.
+// 18. [x] Mobile input polish — emoji picker, mic-to-text.
+// 19. [x] i18n — multilingual UI strings (en/es/fr/de; add more in STRINGS).
+// 20. [x] Per-turn token & cost meter in the status bar.
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = Keystone Chat
+  description = A full-featured AI chat template for Perchance: editable history, personas & scenarios, one-click presets, themes and settings. Fork it and make it your own.
+  tags = chat, ai, roleplay, template, rathji, keystone
+  header
+    mode = minimal
+
 ai = {import:ai-text-plugin}
 favicon = {import:favicon-plugin}
+kv = {import:kv-plugin}
+secretPlugin = {import:secret-plugin}
+commentsPlugin = {import:comments-plugin}
 
-// That's it! The heavy logic is handled in the script below to ensure
-// Rule 8 (Manual Stream Handling) works correctly with the DOM.
+// ── PRESETS: starter scenarios the user can load from the sidebar ─────────
+// Each preset fills the scenario / names / descriptions / instructions fields
+// and seeds the chat with the character's opening line.
+
+chatPresets
+  tavern
+    label = ⚔️ Fantasy Tavern
+    scenario = You walk into the Crossed Antlers, a warm, smoky tavern at the edge of the Whispering Woods. A bard is tuning a lute, and the innkeeper Elara watches you from behind the bar.
+    botName = Elara
+    botDesc = Innkeeper at the Crossed Antlers. Warm, witty, sharp-eyed; knows every rumor in the valley and is fiercely protective of her regulars.
+    narrator = The fire
+    personas = Elara | Innkeeper at the Crossed Antlers. Warm, witty, sharp-eyed; knows every rumor in the valley.\nDarian | A traveling bard with a silver tongue, a quick fiddle, and a secret debt.
+    userDesc = A weary traveler who just arrived after a long road through the forest.
+    instructions = Be descriptive, keep replies to one or two sentences, and let the player's choices shape the evening.
+    opening = Welcome to the Crossed Antlers, friend. You look like you've seen some weather. What'll it be — ale, a bed, or a story?
+
+  noir
+    label = 🕵️ Detective Noir
+    scenario = Los Angeles, 1948. Rain-slicked streets, jazz drifting from a speakeasy below. Detective Marlow sits behind his desk, hat pulled low, a case file open.
+    botName = Marlow
+    botDesc = Hard-boiled private detective. Cynical, sharp-tongued, secretly decent. Speaks in clipped, world-weary prose.
+    narrator = The rain
+    userDesc = The client — an heiress with secrets, who just walked into his office.
+    instructions = Keep the noir mood thick; short, punchy lines. Describe the scene through smells, shadows and rain.
+    opening = Six months of no cases, and then you walk in dripping rain like a bad omen. Sit down, Miss. Tell me what you're really here for.
+
+  cyber
+    label = 🌆 Cyberpunk Alley
+    scenario = Neon-drenched streets of Neo-Tokyo, 2089. Kira, a street doc with chrome-plated arms, runs a tiny clinic under the noodle shop.
+    botName = Kira
+    botDesc = Street medic and fixer. Sarcastic, pragmatic, with a soft spot for lost causes. Knows every back alley and every price.
+    narrator = The city
+    personas = Kira | Street medic and fixer. Sarcastic, pragmatic, with a soft spot for lost causes.\nGhost | A netrunner who never shows his face. Calm, cryptic, always three moves ahead.
+    userDesc = A stranger who just collapsed through her door with a bio-mod glitching.
+    instructions = Punchy cyberpunk slang, fast-paced dialogue, and one atmospheric detail per reply.
+    opening = Hey, careful with the door. Sit down, let me see the arm. Yeah, that mod's fried. What did they tell you it was worth?
+
+  starship
+    label = 🚀 Starship Bridge
+    scenario = The starship Meridian is three days out from the Frontier, and everything is overdue — supplies, repairs, and one very overdue cargo run.
+    botName = Commander Vale
+    botDesc = Captain of the Meridian. Calm under pressure, dry humor, cares about her crew more than her commission.
+    narrator = Mission log
+    userDesc = A new crew member reporting for your first shift on the bridge.
+    instructions = Crisp, professional sci-fi dialogue with dry humor; keep it short and cinematic.
+    opening = You're right on time, which makes you either very good or very suspicious. Take a seat at navigation — and don't touch the red button.
+
+  manor
+    label = 🏚️ Haunted Manor
+    scenario = Rain hammers the windows of Blackthorn Manor. The family lawyer has gathered you all for the reading of a very strange will.
+    botName = Evelyn
+    botDesc = The manor's caretaker. Pale, polite, unsettlingly calm. Has lived here her whole life and knows exactly what the house wants.
+    narrator = The house
+    personas = Evelyn | The manor's caretaker. Pale, polite, unsettlingly calm.\nAshcroft | The family butler. Ancient, stooped, speaks in formal whispers.
+    userDesc = An heir who has never been to the manor until tonight.
+    instructions = Slow-burn gothic horror; build dread with small details. Never break the eerie mood.
+    opening = The others are already inside. I'd stay close to me, if I were you — the house is particular about who it remembers.
+
+// ── RATHJI-TEMPLATE COMPONENTS (vendored below) ─────────────────────────────
+
+// ── 1. LISTS (options + presets) ───────────────────────────────────────────
+
+// An options node is a list whose items are `key = value` pairs — pass it to
+// rathjiTemplate() and it reads each key.
+
+rathjiTemplateOpts
+  text = hello
+  emoji = 🌊
+  color = #22d3ee
+
+// A list of preset options nodes. Pass the whole list and rathjiTemplate()
+// picks a random item — a handy way to offer "themes".
+
+rathjiTemplatePresets
+  cosmic
+    text = Cosmic
+    emoji = 🌌
+    color = #8b5cf6
+  ocean
+    text = Ocean
+    emoji = 🌊
+    color = #22d3ee
+  ember
+    text = Ember
+    emoji = 🔥
+    color = #f97316
+
+
+// ── 2. HELPERS ─────────────────────────────────────────────────────────────
+
+// Read any value through .evaluateItem so Perchance lists work anywhere a
+// plain value would.
+rathjiTemplateResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem; // pjs node → its evaluated value
+  } catch(e) {}
+  return v; // raw JS value → as-is
+
+rathjiTemplateStamp(text, opts) =>
+  let emoji = opts.emoji || "✨";
+  let color = opts.color || "#7c6cff";
+  return '<span style="display:inline-block;background:' + color + '1a;color:' + color + ';border:1px solid ' + color + '66;border-radius:999px;padding:4px 14px;font-weight:600;font-family:system-ui,sans-serif;">' + emoji + " " + text + "</span>";
+
+
+// ── 3. ENTRY POINT ─────────────────────────────────────────────────────────
+// Accepts, all through ONE function:
+//   rathjiTemplate("hi")                       plain value
+//   rathjiTemplate("hi", {color:"#f00"})       value + options object
+//   rathjiTemplate({text:"hi", color:"#f00"})  options object alone
+//   rathjiTemplate(rathjiTemplateOpts)         options read from a list node
+//   rathjiTemplate(rathjiTemplatePresets)      a LIST of options → picks a random one
+//
+// Options are distinguished from plain values the way the text-to-image-plugin
+// does it: an options node has a known key (here: `text`), a plain value does
+// not. Every value — string, number, item — is read through .evaluateItem so
+// Perchance lists work anywhere a plain value would.
+//
+// Never throw — return a readable "(...)" placeholder on bad input.
+
+rathjiTemplate(input, opts) =>
+  // A LIST of preset options (rathjiTemplatePresets) has items but no `.text`
+  // key — pick a random item first. A single options node (rathjiTemplateOpts),
+  // an options object, or a plain value all keep their own `.text` (or none at
+  // all). A plain list of strings (items without `.text`) passes through
+  // untouched, so `rathjiTemplate(aPlainList)` evaluates to a random item —
+  // free list support.
+  if(input != null && input.text === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.text !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.text = rathjiTemplateResolve(input);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.text !== undefined) {
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.text !== "string" || !o.text.trim()) {
+    return "(rathjiTemplate: expected some text — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiTemplateStamp(o.text.trim(), o);
+
+
+// ── 4. BONUS COMPONENT: CARDS ──────────────────────────────────────────────
+// A second copyable component that works exactly like the badge: themed cards
+// with a title, description text, emoji and accent color. Same call patterns:
+//   rathjiCard("Hello")
+//   rathjiCard("Hello", { color:"#22c55e" })
+//   rathjiCard({ title:"Hi", text:"...", emoji:"🃏", color:"#7c6cff" })
+//   rathjiCard(rathjiCardOpts)          options read from a list node
+//   rathjiCard(rathjiCardPresets)       a LIST of options → picks a random one
+
+rathjiCardOpts
+  title = Hello
+  text = A generic card that holds a bit of description text.
+  emoji = 🃏
+  color = #7c6cff
+
+rathjiCardPresets
+  hero
+    title = Hero card
+    text = A bold opening card for a section of your page.
+    emoji = 🏆
+    color = #8b5cf6
+  story
+    title = Story time
+    text = A card to hold narrative text, quotes, or lore.
+    emoji = 📖
+    color = #22d3ee
+  tip
+    title = Pro tip
+    text = Cards make generic content blocks easy to reuse.
+    emoji = 💡
+    color = #f59e0b
+
+rathjiCardStamp(o) =>
+  let emoji = o.emoji || "🃏";
+  let color = o.color || "#7c6cff";
+  return '<div style="background:' + color + '14;border:1px solid ' + color + '44;border-left:4px solid ' + color + ';border-radius:14px;padding:16px 18px;text-align:left;">' +
+    '<div style="font-size:1.6rem;line-height:1;">' + emoji + '</div>' +
+    '<div style="font-weight:700;margin-top:8px;">' + o.title + '</div>' +
+    '<div style="margin-top:4px;font-size:.92rem;opacity:.75;">' + o.text + '</div></div>';
+
+rathjiCard(input, opts) =>
+  // Same input handling as rathjiTemplate (options node vs. list of presets).
+  if(input != null && input.title === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.title !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(opts.text);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.title !== undefined) {
+    o.title = rathjiTemplateResolve(input.title);
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.title !== "string" || !o.title.trim()) o.title = o.text;
+  if(typeof o.text !== "string" || !o.text.trim()) o.text = o.title;
+  if(typeof o.title !== "string" || !o.title.trim()) {
+    return "(rathjiCard: expected a title — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiCardStamp(o);

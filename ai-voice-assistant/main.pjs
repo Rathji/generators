@@ -1,58 +1,171 @@
-// Note: Text that comes after "//" is ignored, which allows
-// you to write notes - like the one you're reading now!
+// ═══════════════════════════════════════════════════════════════════════════
+// rathji-template applied to the AI Voice Assistant.
+// The badge + card components below are vendored verbatim from
+// perchance.org/rathji-template — call rathjiTemplate() / rathjiCard()
+// from lists or scripts, no import required.
+// ═══════════════════════════════════════════════════════════════════════════
 
-title
-  Your Generator's Title
+generateText = {import:ai-text-plugin}
+kv = {import:kv-plugin}
+superFetch = {import:super-fetch-plugin}
 
-output
-  {This|That} [animal] is so [adjective]!
-  I wish I could [verb] that [animal].
-  Aren't [animal.pluralForm] just so [adjective]?
-  There must be at least {1-10} [animal]{s} [location]!
-  THE [animal.upperCase]! It's eating the {import:common-noun}!
-  {A} [animal] is a bit like {a} {import:common-noun}. // {A} and {a} will automatically choose "a" and "an" as appropriate
+$meta
+  title = AI Voice Assistant
+  description = A TODO list you manage by voice — tap the mic and talk, or type. Add, check off, edit and delete tasks, all hands-free. Built on the rathji-template design system.
+  image = https://user.uploads.dev/file/7f092576e3054b004305aa3df6802522.jpg
+  tags = voice, assistant, todo, list, speech, rathji, template
+  header
+    mode = minimal
 
-animal
-  pig
-  cow
-  chicken
-  zebra
-  crayfish
-  jellyfish^0.5  // this item is HALF as likely as the others
-  worm^2         // this item is TWICE as likely as the others
-	
-adjective
-  small
-  big
-  cute
-  sneaky
-  unusual
-  helpful
-  mean
-	
-verb
-  pat
-  befriend
-  help
-	
-location
-  on {the|this|that} island
-  in {the|this|that} valley
-  {around|in} here
-  over there
-  under this {thing^2|thingie}
-	
+// ── 1. LISTS (options + presets) ───────────────────────────────────────────
 
-// Tips:
-//  - Highlight multiple lines and press Tab or Shift+Tab to indent and un-indent them all an once
-//  - You can change the URL of your generator by clicking the "settings" button in the top-right
-//  - You can use the sparkle button in the lower-right of the screen to ask the AI to adjust the visual design of your generator.
-//  - Add background images, fonts, and other stuff with plugins:  perchance.org/plugins
-//  - Here are some generators you might like to import:  perchance.org/useful-generators
-//  - Read this page after reading the tutorial:  perchance.org/examples
-//  - There's a gear button in the top-left which you can use to make the lines wrap around when they reach the edge of the screen, and to change the font size. Also, if you add   $output=[this.joinItems("<br>")]   as the first or last item in your list, then writing [yourListName] will magically output all of the items joined together with <br> (which means "line break" in HTML - i.e. a line separator), rather than outputting a random item from the "yourListName" list.
-//  - Ask our friendly community members if you need help:  lemmy.world/c/perchance
+// An options node is a list whose items are `key = value` pairs — pass it to
+// rathjiTemplate() and it reads each key.
+
+rathjiTemplateOpts
+  text = hello
+  emoji = 🌊
+  color = #22d3ee
+
+// A list of preset options nodes. Pass the whole list and rathjiTemplate()
+// picks a random item — a handy way to offer "themes".
+
+rathjiTemplatePresets
+  cosmic
+    text = Cosmic
+    emoji = 🌌
+    color = #8b5cf6
+  ocean
+    text = Ocean
+    emoji = 🌊
+    color = #22d3ee
+  ember
+    text = Ember
+    emoji = 🔥
+    color = #f97316
 
 
+// ── 2. HELPERS ─────────────────────────────────────────────────────────────
+
+// Read any value through .evaluateItem so Perchance lists work anywhere a
+// plain value would.
+rathjiTemplateResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem; // pjs node → its evaluated value
+  } catch(e) {}
+  return v; // raw JS value → as-is
+
+rathjiTemplateStamp(text, opts) =>
+  let emoji = opts.emoji || "✨";
+  let color = opts.color || "#7c6cff";
+  return '<span style="display:inline-block;background:' + color + '1a;color:' + color + ';border:1px solid ' + color + '66;border-radius:999px;padding:4px 14px;font-weight:600;font-family:system-ui,sans-serif;">' + emoji + " " + text + "</span>";
 
 
+// ── 3. ENTRY POINT ─────────────────────────────────────────────────────────
+// Accepts, all through ONE function:
+//   rathjiTemplate("hi")                       plain value
+//   rathjiTemplate("hi", {color:"#f00"})       value + options object
+//   rathjiTemplate({text:"hi", color:"#f00"})  options object alone
+//   rathjiTemplate(rathjiTemplateOpts)         options read from a list node
+//   rathjiTemplate(rathjiTemplatePresets)      a LIST of options → picks a random one
+//
+// Never throw — return a readable "(...)" placeholder on bad input.
+
+rathjiTemplate(input, opts) =>
+  if(input != null && input.text === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.text !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.text = rathjiTemplateResolve(input);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.text !== undefined) {
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.text !== "string" || !o.text.trim()) {
+    return "(rathjiTemplate: expected some text — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiTemplateStamp(o.text.trim(), o);
+
+
+// ── 4. BONUS COMPONENT: CARDS ──────────────────────────────────────────────
+// A second copyable component that works exactly like the badge: themed cards
+// with a title, description text, emoji and accent color. Same call patterns:
+//   rathjiCard("Hello")
+//   rathjiCard("Hello", { color:"#22c55e" })
+//   rathjiCard({ title:"Hi", text:"...", emoji:"🃏", color:"#7c6cff" })
+//   rathjiCard(rathjiCardOpts)          options read from a list node
+//   rathjiCard(rathjiCardPresets)       a LIST of options → picks a random one
+
+rathjiCardOpts
+  title = Hello
+  text = A generic card that holds a bit of description text.
+  emoji = 🃏
+  color = #7c6cff
+
+rathjiCardPresets
+  hero
+    title = Hero card
+    text = A bold opening card for a section of your page.
+    emoji = 🏆
+    color = #8b5cf6
+  story
+    title = Story time
+    text = A card to hold narrative text, quotes, or lore.
+    emoji = 📖
+    color = #22d3ee
+  tip
+    title = Pro tip
+    text = Cards make generic content blocks easy to reuse.
+    emoji = 💡
+    color = #f59e0b
+
+rathjiCardStamp(o) =>
+  let emoji = o.emoji || "🃏";
+  let color = o.color || "#7c6cff";
+  return '<div style="background:' + color + '14;border:1px solid ' + color + '44;border-left:4px solid ' + color + ';border-radius:14px;padding:16px 18px;text-align:left;">' +
+    '<div style="font-size:1.6rem;line-height:1;">' + emoji + '</div>' +
+    '<div style="font-weight:700;margin-top:8px;">' + o.title + '</div>' +
+    '<div style="margin-top:4px;font-size:.92rem;opacity:.75;">' + o.text + '</div></div>';
+
+rathjiCard(input, opts) =>
+  if(input != null && input.title === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.title !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(opts.text);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.title !== undefined) {
+    o.title = rathjiTemplateResolve(input.title);
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.title !== "string" || !o.title.trim()) o.title = o.text;
+  if(typeof o.text !== "string" || !o.text.trim()) o.text = o.title;
+  if(typeof o.title !== "string" || !o.title.trim()) {
+    return "(rathjiCard: expected a title — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiCardStamp(o);

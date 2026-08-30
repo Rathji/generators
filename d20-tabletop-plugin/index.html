@@ -77,11 +77,11 @@
   <p class="tagline">A Perchance tabletop RPG rules framework as a plugin: a single importable <code>$output</code> in front of a modular, D&amp;D-style rules engine. Structure from <b>rathji-plugin-template</b> / <b>card-deck-plugin</b>, conventions from <b>Rathji's Plugin Tutorials</b> — one roadmap task at a time.</p>
 
   <h2>What this is</h2>
-  <p>A Perchance plugin is just a <b>normal generator written to be reused</b>. The one special thing is the <code>$output</code> function at the bottom of <code>main.pjs</code> — when another generator imports this one, the name on the left of the import line <b>becomes that function</b>. The lists, data and helpers below it are all ordinary Perchance code.</p>
+  <p>A Perchance plugin is just a <b>normal generator written to be reused</b>. The one special thing is the <code>$output</code> at the bottom of <code>main.pjs</code> — when another generator imports this one, the name on the left of the import line <b>becomes a plain object API</b> carrying the whole rules engine: <code>root.d20Tabletop.roll(...)</code>, <code>.check(...)</code>, <code>.npc(...)</code>, <code>.selfCheck()</code>, and so on. The lists, data and helpers below it are all ordinary Perchance code.</p>
   <p>This page doubles as the plugin's docs <em>and</em> a live test harness — every claim below is exercised by the demo at the bottom.</p>
 
   <h2>Import</h2>
-  <p>Consuming generators add one line to the <b>top</b> of their lists editor. The name on the left is theirs to choose — it's how they'll call the plugin from now on:</p>
+  <p>Consuming generators add one line to the <b>top</b> of their lists editor. The name on the left is theirs to choose — from then on it's the engine API object:</p>
   <div id="code-import"></div>
 
   <h2>How the template is structured</h2>
@@ -91,19 +91,23 @@
     <tr><td><code>$meta</code></td><td>Title, description and tags — shown on your listing page</td><td>both plugins</td></tr>
     <tr><td>Imports — <code>simpleGenFooter</code></td><td>Bind other generators' <code>$output</code> to names; the standard Perchance footer</td><td>tutorial steps 1–3</td></tr>
     <tr><td>Embedded data — <code>initD20TabletopData()</code></td><td>One lazy-initialised bundle for big payloads (svg templates, word lists, base64 assets). Created once, on first use</td><td><code>card-deck-plugin</code></td></tr>
-    <tr><td>Lists — <code>d20TabletopPresets</code></td><td>Reusable preset values; users can pass these as arguments</td><td>tutorial step 4</td></tr>
+    <tr><td>Lists — <code>d20TabletopPresets</code></td><td>Reusable preset values; users can pass these to the badge</td><td>tutorial step 4</td></tr>
     <tr><td>Helpers — <code>d20TabletopStamp()</code></td><td>The real logic, kept out of <code>$output</code> so it stays thin and testable</td><td><code>card-deck-plugin</code></td></tr>
-    <tr><td><code>$output(...)</code></td><td>The plugin entry point — this is what importers receive</td><td>tutorial step 6</td></tr>
+    <tr><td><code>$output = [d20TabletopEntry()]</code></td><td>The plugin entry point — a single-item list yielding the engine API object importers receive</td><td>game-math / data-viz pattern</td></tr>
   </table>
 
-  <h2>Basic usage</h2>
-  <p>Call it from a list with square brackets — whatever <code>$output</code> returns is rendered into the page:</p>
+  <h2>Engine API</h2>
+  <p>The import binds <code>root.d20Tabletop</code> to a plain object exposing every <code>d20*</code> helper — prefix stripped, camelCased (<code>d20Roll → roll</code>, <code>d20D20 → d20</code>, <code>d20NPC → npc</code>…) — plus <code>version</code>, <code>selfCheck()</code> and the badge (<code>d20Tabletop.badge(text)</code>). Use it from your lists or scripts:</p>
+  <div id="code-engine"></div>
+
+  <h2>Badge</h2>
+  <p>On the plugin's own page the classic call form still renders a pill, and importers get the same via <code>d20Tabletop.badge(...)</code>. Whatever the call returns is rendered into the page:</p>
   <div id="code-list"></div>
-  <p>Or from a <code>&lt;script&gt;</code> tag in index.html, through <code>root.</code>:</p>
+  <p>Or from a <code>&lt;script&gt;</code> tag in index.html:</p>
   <div id="code-script"></div>
   <p>Pass options either as a second argument or as an options-object on its own:</p>
   <div id="code-options"></div>
-  <p>Because list arguments are read with <code>.evaluateItem</code>, users can point your plugin at a plain Perchance list:</p>
+  <p>Because list arguments are read with <code>.evaluateItem</code>, users can point the badge at a plain Perchance list:</p>
   <div id="code-listarg"></div>
 
   <h2>Options</h2>
@@ -133,7 +137,7 @@
   </div>
 
   <h2>Playable DM Toolbox</h2>
-  <p style="color:var(--muted); font-size:.95rem; margin-bottom:18px;">A live test harness driving the campaign-tooling helpers in <code>main.pjs</code> — initiative, encounter building, treasure, and NPC generation. Every button calls the same <code>root.d20*</code> functions an importing generator gets.</p>
+  <p style="color:var(--muted); font-size:.95rem; margin-bottom:18px;">A live test harness driving the campaign-tooling helpers in <code>main.pjs</code> — initiative, encounter building, treasure, and NPC generation. Every button calls the same engine helpers an importing generator gets (<code>root.d20Tabletop.combatAdd</code>, <code>.encounterBuild</code>, <code>.treasureHoard</code>, <code>.npc</code>).</p>
 
   <div class="tools-grid">
 
@@ -212,7 +216,7 @@
   <ul>
     <li><b>Rename.</b> Replace <code>d20Tabletop</code> / <code>d20Tabletop*</code> function names in main.pjs with your plugin's name.</li>
     <li><b>Describe.</b> Update the <code>$meta</code> title, description and tags.</li>
-    <li><b>Write the logic.</b> Add helpers in section 3 and call them from <code>$output</code>. It should return a string (usually HTML) or a Promise.</li>
+    <li><b>Write the logic.</b> Add helpers in section 3 and expose them through the <code>$output = [d20TabletopEntry()]</code> api (the d20 prefix is stripped automatically). The badge methods (<code>.call</code>/<code>.badge</code>) should return a string (usually HTML) or a Promise.</li>
     <li><b>Trim.</b> Delete section 1 (embedded data) and the <code>d20TabletopDefaults()</code> helper if you don't need a payload.</li>
     <li><b>Stay robust.</b> Never throw — return a readable <code>(...)</code> placeholder on bad input, like the template's <code>$output</code> does.</li>
     <li><b>Publish.</b> Save this generator, then import it from anywhere using the standard import syntax — see the Import section above.</li>
@@ -229,8 +233,41 @@
   <ul>
     <li>The template <b>never throws</b> — bad input returns <code>(d20Tabletop: expected some text — …)</code> instead of an exception.</li>
     <li>Arguments support <b>plain values and Perchance lists</b> alike (every pjs value is a node, read through <code>evaluateItem</code>).</li>
-    <li>This page is the demo/test harness — the live demo calls the template's own <code>$output</code> to prove every documented call works.</li>
+    <li>This page is the demo/test harness — the live demo calls the badge (<code>root.d20TabletopCall</code>) and the toolbox drives the engine api helpers (<code>root.d20Tabletop.*</code>) to prove every documented call works.</li>
   </ul>
+
+  <!-- plugin-doctor self-check: paste next to your footer links -->
+  <a href="#" onclick="openPluginDoctor();return false;" style="margin-left:12px;color:#22d3ee;font-weight:600;text-decoration:none" title="Check this plugin against Perchance best practices + your standards">Check standards</a>
+  <div id="pdOverlay" hidden><div class="pd-box"><div class="pd-head"><span>🩺 plugin-doctor</span><button onclick="closePluginDoctor()" title="Close">✕</button></div><iframe id="pdFrame" title="plugin-doctor"></iframe></div></div>
+  <style>
+  #pdOverlay{position:fixed;inset:0;z-index:9800;background:rgba(5,7,12,.88);display:flex;align-items:center;justify-content:center;padding:18px}
+  #pdOverlay[hidden]{display:none}
+  .pd-box{width:min(920px,94vw);height:min(82vh,780px);background:#0a0e17;border:1px solid rgba(124,108,255,.4);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+  .pd-head{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;color:#b7aaff;font:600 14px system-ui,sans-serif;border-bottom:1px solid rgba(124,108,255,.2)}
+  .pd-head button{background:none;border:1px solid rgba(124,108,255,.35);color:#b7aaff;border-radius:6px;cursor:pointer}
+  #pdFrame{flex:1;width:100%;border:0;background:#0a0e17}
+  </style>
+  <script>
+  function openPluginDoctor(){
+    var f=document.getElementById("pdFrame");
+    function run(pid){
+      var base = pid ? "https://"+pid+".perchance.org/plugin-doctor" : "https://perchance.org/plugin-doctor";
+      f.src = base + "?g=" + encodeURIComponent(window.generatorName || "") + "&embed=1&v=" + Date.now();
+      document.getElementById("pdOverlay").hidden=false;
+      document.body.style.overflow="hidden";
+    }
+    fetch("https://perchance.org/api/getGeneratorStats?name=plugin-doctor")
+      .then(function(r){return r.json();})
+      .then(function(j){ run(j && j.publicId); })
+      .catch(function(){ run(null); });
+  }
+  function closePluginDoctor(){
+    document.getElementById("pdOverlay").hidden=true;
+    document.body.style.overflow="";
+  }
+  document.addEventListener("keydown",function(e){ if(e.key==="Escape") closePluginDoctor(); });
+  document.getElementById("pdOverlay").addEventListener("click",function(e){ if(e.target.id==="pdOverlay") closePluginDoctor(); });
+  </script>
 
   <div style="margin-top:60px;">[simpleGenFooter]</div>
 </div>
@@ -248,10 +285,11 @@
 
   var DEMOS = [
     { id: "code-import", fname: "main.pjs", code: importLine },
-    { id: "code-list", fname: "main.pjs", code: "[d20Tabletop(\"hello\")]        // renders a ✨ hello badge\n\n// options can also live in a list node — a `key = value` list:\nd20TabletopOpts\n  text = hello\n  emoji = 🌊\n  color = #22d3ee\n\noutput\n  [d20Tabletop(d20TabletopOpts)]  // options read from the node" },
-    { id: "code-script", fname: "index.html", code: "outputEl.innerHTML = root.d20Tabletop(\"hello\");\noutputEl.innerHTML = root.d20Tabletop(\"hello\", { emoji: \"🌊\", color: \"#22d3ee\" });" },
-    { id: "code-options", fname: "main.pjs", code: "[d20Tabletop(\"hi\", {color:\"#f97316\"})]     // value + options\n[d20Tabletop({text:\"hi\", emoji:\"🌌\"})]      // options object alone" },
-    { id: "code-listarg", fname: "main.pjs", code: "// a LIST of preset options nodes:\nd20TabletopPresets\n  cosmic\n    text = Cosmic\n    emoji = 🌌\n    color = #8b5cf6\n  ocean\n    text = Ocean\n    emoji = 🌊\n    color = #22d3ee\n  ember\n    text = Ember\n    emoji = 🔥\n    color = #f97316\n\n[d20Tabletop(d20TabletopPresets)]  // picks a random preset" }
+    { id: "code-engine", fname: "main.pjs", code: "d20Tabletop = {import:d20-tabletop-plugin}\n\n// the whole engine, ready to call from lists or scripts:\nroot.d20Tabletop.roll(\"3d6+4\")                // {diceResults, diceTotal, modifier, total}\nroot.d20Tabletop.d20(\"advantage\")            // {rolls:[a,b], kept, mode}\nroot.d20Tabletop.check(15, {bonus: 4})       // {outcome, passed, rolls, kept, bonus}\nroot.d20Tabletop.npc({seed: 7})              // {name, race, occupation, age, ...}\nroot.d20Tabletop.selfCheck().pass === true   // true\n\noutput\n  [d20Tabletop.check(15, {bonus: 4}).outcome]  // e.g. \"success\"\n  [d20Tabletop.badge(\"hello\")]                // the classic pill, anywhere" },
+    { id: "code-list", fname: "main.pjs", code: "[d20Tabletop.badge(\"hello\")]        // renders the ✨ badge pill\n\n// options can also live in a list node — a `key = value` list:\nd20TabletopOpts\n  text = hello\n  emoji = 🌊\n  color = #22d3ee\n\noutput\n  [d20Tabletop.badge(d20TabletopOpts)]  // options read from the node" },
+    { id: "code-script", fname: "index.html", code: "outputEl.innerHTML = root.d20Tabletop.badge(\"hello\");\noutputEl.innerHTML = root.d20Tabletop.badge(\"hello\", { emoji: \"🌊\", color: \"#22d3ee\" });" },
+    { id: "code-options", fname: "main.pjs", code: "[d20Tabletop.badge(\"hi\", {color:\"#f97316\"})]     // value + options\n[d20Tabletop.badge({text:\"hi\", emoji:\"🌌\"})]      // options object alone" },
+    { id: "code-listarg", fname: "main.pjs", code: "// a LIST of preset options nodes — pass the whole list and a random preset is\n// picked (each item is read exactly once):\nd20TabletopPresets\n  cosmic\n    text = Cosmic\n    emoji = 🌌\n    color = #8b5cf6\n  ocean\n    text = Ocean\n    emoji = 🌊\n    color = #22d3ee\n  ember\n    text = Ember\n    emoji = 🔥\n    color = #f97316\n\n[d20Tabletop.badge(d20TabletopPresets)]  // picks a random preset" }
   ];
 
   function el(tag, cls, text) {
@@ -294,10 +332,10 @@
   }
 
   // ── Live demo ──
-  // On its own page the plugin is reachable as root.$output — the same
-  // function an importing generator binds. card-deck-plugin's demo page does
-  // exactly this (`var deck = root.$output;`).
-  var d20Tabletop = root.$output;
+  // $output is now a value list whose item is the engine API OBJECT (what an
+  // importer receives). The callable badge lives on as root.d20TabletopCall —
+  // bind that here so the demo keeps the classic d20Tabletop("hello") syntax.
+  var d20Tabletop = root.d20TabletopCall;
 
   var demoTextEl = document.getElementById("demoTextInput");
   var demoEmojiEl = document.getElementById("demoEmojiInput");

@@ -21,13 +21,56 @@ featureTodo
   ✅ 4. Shareable filtered links — URL query params (cat, q, adult, sort) that open a pre-filtered view; wire into dynamic metadata for proper share titles and descriptions
   ✅ 5. Generator comparison — select 2-5 generators, compare stats side-by-side + overlaid trend chart
   ✅ 6. Thumbnail lightbox + gallery mode — click any thumbnail for full-size preview; grid/browse view toggle alongside the table
-  ⬜ 7. CSV/JSON export of the table — export current filtered/sorted view (not just markdown); optional auto-refresh on load with "data fresh as of…" note
-  ⬜ 8. Interactive charts ↔ table linkage — hover tooltips with exact values; click a bar/slice to filter the table to that category
-  ⬜ 9. AI insights digest — "Today in generators" summary via generateText (top gainers, notable new gens, category shifts); AI-assisted category suggestions
-  ⬜ 10. Keep departed generators in history — flag removed gens (darklingslop, ChatNEX vanished silently) as "removed" instead of dropping them, so rankings/history stay consistent
+  ✅ 7. CSV/JSON export of the table — export current filtered/sorted view (not just markdown); optional auto-refresh on load with "data fresh as of…" note
+  ✅ 8. Interactive charts ↔ table linkage — hover tooltips with exact values; click a bar/slice to filter the table to that category
+  ✅ 9. AI insights digest — "Today in generators" summary via generateText (top gainers, notable new gens, category shifts); AI-assisted category suggestions
+  ✅ 10. Keep departed generators in history — flag removed gens (darklingslop, ChatNEX vanished silently) as "removed" instead of dropping them, so rankings/history stay consistent
+  ✅ 11. Spotlight — a daily "Spotlight" puff piece on a top generator (AI-written), auto-queued 5 days in advance; each entry stays hidden until its scheduled live day, so spotlights keep appearing even if you skip updates
 
 kv = {import:kv-plugin}
 rathji = {import:rathji-template}
+generateText = {import:ai-text-plugin}
+
+// ── State machine ────────────────────────────────────────────────
+// A tiny finite-state machine. With states [0, 1], go() toggles
+// 0 -> 1 -> 0. Add more states to the array to grow it, and
+// optional `onEnter(state)` / `onExit(state)` hooks run on each transition.
+//
+// HELPER INSTRUCTIONS:
+//   Whenever the user says "go" in the helper, call `stateMachine.go()`.
+//   That advances the state and triggers `onEnter`, which:
+//     1) saves the new state (kv) so it survives a reload, and
+//     2) the page also picks a new random quote at the bottom of the page.
+//   So "go" => change the state AND swap the Hitchhiker's Guide quote.
+fsm
+  state = 0
+  states = [[0, 1]]
+  quotes = [["Don't Panic.", "The ships hung in the sky in much the same way that bricks don't.", "The answer to the great question of life, the universe and everything is forty-two.", "So long, and thanks for all the fish.", "A towel, it says, is about the most massively useful thing an interstellar hitchhiker can have.", "Time is an illusion. Lunchtime doubly so.", "I love deadlines. I love the whooshing sound they make as they fly by.", "In the beginning the Universe was created. This has made a lot of people very angry and been widely regarded as a bad move.", "Space is big. You just won't believe how vastly, hugely, mind-bogglingly big it is.", "If there's anything more important than my ego around, I want it caught and shot now.", "It is known that there are an infinite number of worlds, simply because there is an infinite amount of space to put them in.", "Oh no, not again.", "The Guide is definitive. Reality is frequently inaccurate.", "Isn't it enough to see that a garden is beautiful without having to believe that there are fairies at the bottom of it too?", "Share and enjoy.", "Don't Panic. And that is what the guide is about."]]
+  pickQuote() =>
+    let arr = Array.isArray(this.quotes) ? this.quotes : this.quotes.selectAll;
+    return arr[Math.floor(Math.random() * arr.length)];
+  onEnter(state) =>
+    // called after each transition with the new state — add side effects here
+    console.log("[fsm] state -> " + state);
+    try { root.kv.fsm.set("state", state).catch(function () {}); } catch (e) {}
+    try { let q = document.getElementById("quoteEl"); if (q) q.textContent = this.pickQuote(); } catch (e) {}
+    return state;
+  go() =>
+    let arr = Array.isArray(this.states) ? this.states : this.states.selectAll;
+    let cur = this.state;
+    let next = arr[(arr.indexOf(cur) + 1) % arr.length];
+    this.state = next;
+    if (typeof this.onEnter === "function") this.onEnter(next);
+    try { if (window.__dashExports && typeof window.__dashExports.saveView === "function") window.__dashExports.saveView(); } catch (e) {}
+    return next;
+  async restore() =>
+    try {
+      let s = await root.kv.fsm.get("state");
+      if (s === 0 || s === 1) this.state = s;
+    } catch (e) {}
+    return this.state;
+
+stateMachine = [fsm]
 
 $meta
   title = Perchance Generator Analytics Dashboard

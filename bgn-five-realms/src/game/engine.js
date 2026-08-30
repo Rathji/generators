@@ -6,6 +6,8 @@
 // plugin's plain state for the pieces Phase 1 doesn't expose (life/mana/zone moves),
 // and every such mutation is recorded in the wrapper's history.
 
+import { alphaDb } from "../cards/db.js";
+
 const fr = (typeof window !== "undefined" && window.root && window.root.fr) ? window.root.fr : null;
 
 export const ZONES = ["library", "hand", "battlefield", "graveyard", "exile", "stack"];
@@ -19,23 +21,39 @@ function clone(x) {
   return JSON.parse(JSON.stringify(x));
 }
 
-// newGame({seed, decks}) -> { raw, history, seed }. decks is an array of card-id lists
-// (one per player). Omitting it uses the plugin's default deck.
+// newGame({seed, decks, rules, cards}) -> { raw, history, seed, _rules }. decks is an array of
+// card-id lists (one per player). Omitting it uses the plugin's default deck. rules
+// carries the gameplay toggles (defaults { manaBurn: true }) that the mana layer reads.
+// cards adds EXTRA card records merged over the Alpha DB (useful for test-only synthetic
+// cards with trigger effects; defaults to none).
+// The full 295-card Alpha DB is always injected via config.cards so the engine can
+// resolve Alpha cards (spell effects, permanent entry, SBA) natively — merged over the
+// plugin's fixture database, which keeps every fixture id working too.
 export function newGame(opts = {}) {
   const engine = requireEngine();
   const raw = engine("newGame", {
     seed: opts.seed,
     decks: opts.decks,
+    cards: Object.assign({}, alphaDb(), opts.cards || {}),
   });
-  return { raw, history: [], seed: opts.seed === undefined ? raw.seed : opts.seed };
+  return {
+    raw,
+    history: [],
+    seed: opts.seed === undefined ? raw.seed : opts.seed,
+    _rules: Object.assign({ manaBurn: true }, opts.rules),
+  };
 }
 
-// snapshot(game) -> plain JSON-safe object capturing state + history.
+// snapshot(game) -> plain JSON-safe object capturing state + history + rules + the
+// continuous-effects keyword overlay (granted keywords are wrapper state, not plugin raw).
 export function snapshot(game) {
   return {
     raw: requireEngine()("state", game.raw),
     history: clone(game.history || []),
     seed: game.seed,
+    _rules: clone(game._rules || { manaBurn: true }),
+    _keywordOverlay: clone(game._keywordOverlay || {}),
+    _regenerating: clone(game._regenerating || {}),
   };
 }
 
@@ -48,6 +66,9 @@ export function restore(snap) {
     raw: requireEngine()("state", snap.raw),
     history: clone(snap.history || []),
     seed: snap.seed,
+    _rules: clone(snap._rules || { manaBurn: true }),
+    _keywordOverlay: clone(snap._keywordOverlay || {}),
+    _regenerating: clone(snap._regenerating || {}),
   };
 }
 
@@ -148,4 +169,27 @@ export function cardInstance(game, objId) {
     if (maybe && typeof maybe === "object") card = maybe;
   } catch (e) {}
   return { obj, card };
+}
+
+// legalActions(game) -> the plugin's planar-legal-action solver for the current state (the
+// $output "legalActions" op). Returns [] on a malformed game. Mirrors the reducer's own
+// guard clauses so a client can enumerate what it may do without tripping the reducer.
+export function legalActions(game) {
+  try {
+    const acts = requireEngine()("legalActions", game.raw);
+    return Array.isArray(acts) ? acts : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+// render(cardIdOrRecord) -> the plugin's render envelope ({card, typeLine, frontSvg,
+// glyphSvg, gemSvg, gemSmallSvg, rects, palette, costSymbols}), or null when unknown.
+export function render(cardId) {
+  try {
+    const out = requireEngine()("render", cardId);
+    return out && typeof out === "object" ? out : null;
+  } catch (e) {
+    return null;
+  }
 }

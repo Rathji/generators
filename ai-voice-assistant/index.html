@@ -1,56 +1,135 @@
-<!-- Interactive voice assistant demo for the voice-tools-plugin.
-     Vendor copy of the plugin lives in src/voice-tools-plugin.js and
-     exposes window.__voiceToolsPluginApi; if main.pjs ever restores the
-     real plugin, getApi() below picks it up first and this copy is a no-op. -->
+<!-- AI Voice Assistant — a TODO list you manage by voice.
+     Design system (dark/light theme, accent swatches, settings gear, toasts)
+     applied from rathji-template (perchance.org/rathji-template).
+     Voice capture comes from the vendored copy of voice-tools-plugin in
+     src/voice-tools-plugin.js; getApi() below prefers a real plugin if main.pjs
+     ever restores one. -->
 
 <script src="src/voice-tools-plugin.js"></script>
 
 <style>
   :root {
-    --bg: #f4f5fa; --panel: #ffffff; --ink: #1b1e2b; --muted: #6b7280;
-    --accent: #5b5bd6; --accent-ink: #fff; --user-bubble: #dcdcff;
-    --asst-bubble: #eceef3; --line: #e2e4ec; --red: #dc2626;
+    --bg: #0a0e17; --card: #141b2d; --card-soft: #0b0f1a; --code-bg: #0b0f1a;
+    --border: rgba(148,163,184,.14); --text: #e2e8f0; --muted: #94a3b8;
+    --accent: #7c6cff; --accent2: #22d3ee;
+    --grad: linear-gradient(92deg, #8b7cff, #22d3ee);
+    --user-bubble: rgba(124,108,255,.16); --asst-bubble: #1a2133;
+    --red: #f87171;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #12141c; --panel: #1a1d29; --ink: #e7e9f2; --muted: #9aa1b2;
-      --user-bubble: #34366e; --asst-bubble: #232735; --line: #2b3040;
-    }
+  html.light {
+    color-scheme: light;
+    --bg: #f5f6fa; --card: #ffffff; --card-soft: #eef1f7; --code-bg: #eef1f7;
+    --border: rgba(15,23,42,.12); --text: #1e293b; --muted: #64748b;
+    --user-bubble: #ece9ff; --asst-bubble: #f1f3f9;
+    --grad: linear-gradient(92deg, #7c5cff, #0ea5e9);
+    --red: #dc2626;
   }
+  html.reduce-motion * { animation: none !important; transition: none !important; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body { text-align: left; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  .app { max-width: 1100px; margin: 0 auto; height: 100vh; display: flex; flex-direction: column; padding: 14px 16px 16px; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 2px 10px; flex-wrap: wrap; }
-  h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 16px; margin: 0; }
-  .tagline { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); text-align: left;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 88px 20px 60px; display: flex; flex-direction: column; min-height: 100vh; }
+
+  /* ── TITLE BAR ─────────────────────────────────────────── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    background: rgba(10, 9, 18, .55); border-bottom: 1px solid var(--border);
+  }
+  html.light nav { background: rgba(255, 255, 255, .7); }
+  nav .nav-inner { max-width: 1100px; margin: 0 auto; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; height: 62px; }
+  .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .1em; font-size: .8rem; color: var(--text); text-transform: uppercase; text-decoration: none; }
+  .nav-actions { position: relative; display: flex; align-items: center; gap: 10px; flex: none; }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; border-radius: 50%;
+    background: rgba(13, 15, 21, .82); border: 1px solid rgba(255, 255, 255, .14);
+    color: var(--text) !important; cursor: pointer; flex: none; padding: 0;
+    transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+  }
+  html.light .icon-btn { background: rgba(255,255,255,.8); border-color: rgba(15,23,42,.15); }
+  .icon-btn:hover { transform: translateY(-1px); border-color: rgba(167, 139, 250, .65); box-shadow: 0 0 12px rgba(139, 92, 246, .35); }
+  .icon-btn svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  .settings-panel {
+    position: absolute; top: calc(100% + 10px); right: 0; z-index: 120;
+    width: 252px; background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, .45); padding: 6px; font-size: .85rem;
+  }
+  .sp-head { padding: 8px 10px 6px; font-weight: 700; font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .sp-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; }
+  .sp-row > label:first-child { color: var(--text); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { background: transparent; border: none; color: var(--muted) !important; padding: 5px 10px; font-size: .78rem; cursor: pointer; font-family: inherit; line-height: 1; }
+  .seg button.on { background: var(--accent2); color: #fff !important; }
+  .swatches { display: inline-flex; gap: 6px; }
+  .swatches button { width: 18px; height: 18px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; background: var(--sw); padding: 0; }
+  .swatches button.on { border-color: #fff; box-shadow: 0 0 0 2px var(--sw); }
+  .sp-foot { padding: 6px 10px 8px; border-top: 1px solid var(--border); margin-top: 4px; }
+  .resetBtn { background: transparent; border: none; color: var(--muted) !important; font-size: .75rem; cursor: pointer; font-family: inherit; padding: 4px 0; }
+  .resetBtn:hover { color: var(--accent2) !important; }
+  .switch { position: relative; width: 34px; height: 19px; cursor: pointer; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch span { position: absolute; inset: 0; background: var(--code-bg); border: 1px solid var(--border); border-radius: 999px; transition: .2s; }
+  .switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--muted); transition: .2s; }
+  .switch input:checked + span { background: var(--accent2); border-color: transparent; }
+  .switch input:checked + span::after { background: #fff; transform: translateX(15px); }
+  .sp-row select { background: var(--code-bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 4px 8px; font-size: .78rem; font-family: inherit; max-width: 130px; }
+  .sp-row select:focus { outline: none; border-color: var(--accent2); }
+  .sp-speed { display: inline-flex; align-items: center; gap: 6px; }
+  .sp-row input[type=range] { width: 84px; accent-color: var(--accent2); margin: 0; }
+  .sp-speedval { color: var(--muted); font-size: .76rem; min-width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* ── APP HEAD ──────────────────────────────────────────── */
+  .app-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 2px 14px; flex-wrap: wrap; }
+  h1 { font-size: 1.7rem; margin: 0; letter-spacing: -0.02em; }
+  h1 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .tagline { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .tagline .badge-slot { margin-left: 8px; vertical-align: middle; }
   .statusbar { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
-  #speakingEl { color: var(--accent); }
-  main { flex: 1; display: flex; gap: 14px; min-height: 0; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  #speakingEl { color: var(--accent2); font-weight: 600; }
+
+  /* ── PANELS ────────────────────────────────────────────── */
+  .app-main { flex: 1; display: flex; gap: 14px; min-height: 0; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .panel-chat { flex: 3; }
   .panel-todo { flex: 2; }
+  .panel-bar { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .panel-bar h2 { font-size: 15px; margin: 0; }
   .chat-scroll { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .bubble { max-width: 85%; padding: 9px 13px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
-  .bubble.user { align-self: flex-end; background: var(--user-bubble); border-bottom-right-radius: 4px; }
-  .bubble.assistant { align-self: flex-start; background: var(--asst-bubble); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bubble.user { align-self: flex-end; background: var(--user-bubble); border: 1px solid rgba(124,108,255,.25); border-bottom-right-radius: 4px; }
+  .bubble.assistant { align-self: flex-start; background: var(--asst-bubble); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .bubble.thinking { display: inline-flex; align-items: center; padding: 12px 14px; }
+  .think-dots { display: inline-flex; gap: 4px; }
+  .think-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: thinkBounce 1.2s infinite; }
+  .think-dots i:nth-child(2) { animation-delay: .15s; }
+  .think-dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes thinkBounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-4px); opacity: 1; } }
   .bubble.live::after { content: "▋"; color: var(--muted); animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
-  .input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
-  #textInput { flex: 1; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); font-size: 14px; min-width: 0; }
-  #textInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
-  button { font: inherit; cursor: pointer; }
-  .mic-btn { border: none; border-radius: 10px; background: var(--accent); color: var(--accent-ink); padding: 10px 14px; font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .input-row { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+  #textInput { flex: 1; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); color: var(--text); font-size: 14px; min-width: 0; font-family: inherit; }
+  #textInput:focus { outline: 2px solid var(--accent2); outline-offset: -1px; border-color: transparent; }
+  .mic-btn { border: none; border-radius: 10px; background: var(--grad); color: #fff; padding: 10px 14px; font-size: 14px; font-weight: 600; white-space: nowrap; cursor: pointer; font-family: inherit; }
+  .mic-btn:hover { filter: brightness(1.08); }
   .mic-btn.listening { background: var(--red); animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .72; } }
-  #sendBtn { border: none; border-radius: 10px; background: var(--ink); color: var(--bg); padding: 10px 16px; font-weight: 600; }
+  #sendBtn { border: none; border-radius: 10px; background: var(--text); color: var(--bg); padding: 10px 16px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  #sendBtn:hover { filter: brightness(1.15); }
   .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 12px 10px; }
-  .chip { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 6px 12px; font-size: 12.5px; }
-  .chip:hover { color: var(--accent); border-color: var(--accent); }
-  .todo-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .chip { border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 999px; padding: 6px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit; transition: all .15s; }
+  .chip:hover { color: var(--accent2); border-color: var(--accent2); transform: translateY(-1px); }
+  .todo-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .todo-head h2 { font-size: 15px; margin: 0; }
   .count { color: var(--muted); font-size: 13px; flex: 1; }
-  .ghost { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; }
+  .list-select { background: var(--code-bg); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 4px 8px; font-size: 12.5px; font-family: inherit; max-width: 130px; }
+  .list-select:focus { outline: 2px solid var(--accent2); outline-offset: -1px; border-color: transparent; }
+  .ghost { border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 8px; padding: 6px 10px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
   .ghost:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
   .ghost:disabled { opacity: .45; cursor: default; }
   .todo-list { list-style: none; margin: 0; padding: 8px 10px; overflow-y: auto; flex: 1; }
@@ -59,28 +138,133 @@
   .todo-num { color: var(--muted); font-size: 13px; min-width: 22px; text-align: right; }
   .todo-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
   .todo-text { flex: 1; font-size: 14px; word-break: break-word; }
+  .todo-main { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .todo-main .todo-text { flex: none; }
+  .todo-note { font-size: 11.5px; color: var(--muted); font-style: italic; word-break: break-word; }
+  .todo-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .todo-tag { font-size: 10.5px; color: var(--accent2); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; line-height: 16px; }
+  .todo-row.done .todo-tag { opacity: .5; }
+  .todo-row.done .todo-note { color: var(--border); }
   .todo-row.done .todo-text { text-decoration: line-through; color: var(--muted); }
-  .todo-x { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; }
+  .todo-x { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; cursor: pointer; }
   .todo-x:hover { color: var(--red); background: var(--bg); }
-  .todo-edit-btn { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; }
-  .todo-edit-btn:hover { color: var(--accent); background: var(--bg); }
-  .todo-edit { flex: 1; padding: 5px 8px; border: 1px solid var(--accent); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 14px; min-width: 0; }
-  .todo-edit:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
-  .empty-note { color: var(--muted); font-size: 13.5px; text-align: center; padding: 24px 12px; }
-  .notice { color: var(--muted); font-size: 12.5px; padding: 2px 12px 10px; }
+  .todo-edit-btn { border: none; background: transparent; color: var(--muted); font-size: 13px; padding: 4px 6px; border-radius: 6px; flex: none; cursor: pointer; }
+  .todo-edit-btn:hover { color: var(--accent2); background: var(--bg); }
+  .todo-edit { flex: 1; padding: 5px 8px; border: 1px solid var(--accent2); border-radius: 7px; background: var(--code-bg); color: var(--text); font-size: 14px; min-width: 0; font-family: inherit; }
+  .todo-edit:focus { outline: 2px solid var(--accent2); outline-offset: -1px; border-color: transparent; }
+  .empty-note { color: var(--muted); font-size: 13.5px; text-align: center; padding: 12px; }
+  .empty-note .rt-card { text-align: left; }
+  .todo-meta { display: flex; align-items: center; gap: 6px; flex: none; }
+  .todo-prio { font-size: 10.5px; font-weight: 600; color: var(--red); border: 1px solid var(--red); padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+  .todo-prio.low { color: var(--muted); border-color: var(--border); font-weight: 400; }
+  .todo-due { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .todo-est { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .todo-due.duetoday { color: var(--accent2); font-weight: 600; }
+  .todo-due.overdue { color: var(--red); font-weight: 600; }
+  .todo-row.prio-high .todo-num { color: var(--red); font-weight: 700; }
+
+  /* ── TOASTS ────────────────────────────────────────────── */
+  #toasts {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%); z-index: 500;
+    display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none;
+  }
+  .toast {
+    background: var(--card); border: 1px solid var(--border); color: var(--text);
+    border-radius: 999px; padding: 9px 18px; font-size: .85rem; font-weight: 500;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .45); animation: toastIn .22s ease;
+    max-width: 90vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .toast.out { opacity: 0; transform: translateY(8px); transition: opacity .3s, transform .3s; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  :focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
+
   @media (max-width: 880px) {
-    .app { height: auto; min-height: 100vh; }
-    main { flex-direction: column; }
+    .wrap { height: auto; min-height: 100vh; }
+    .app-main { flex-direction: column; }
     .panel-chat { min-height: 60vh; }
     .panel-todo { min-height: 40vh; }
   }
+  @media (max-width: 560px) {
+    .nav-brand { display: none; }
+    .wrap { padding: 84px 14px 40px; }
+    h1 { font-size: 1.4rem; }
+  }
 </style>
 
-<div class="app">
-  <header>
+<nav>
+  <div class="nav-inner">
+    <a class="nav-brand" href="#top">🎙️ <span class="grad">AI Voice Assistant</span></a>
+    <div class="nav-actions">
+      <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <div class="sp-head">Settings</div>
+        <div class="sp-row">
+          <label>Theme</label>
+          <div class="seg" id="themeSeg">
+            <button data-theme="dark" class="on">Dark</button>
+            <button data-theme="light">Light</button>
+          </div>
+        </div>
+        <div class="sp-row">
+          <label>Accent</label>
+          <div class="swatches" id="swatches">
+            <button data-accent="#7c6cff" style="--sw:#7c6cff" class="on" title="Violet"></button>
+            <button data-accent="#22d3ee" style="--sw:#22d3ee" title="Cyan"></button>
+            <button data-accent="#ec4899" style="--sw:#ec4899" title="Pink"></button>
+            <button data-accent="#22c55e" style="--sw:#22c55e" title="Green"></button>
+            <button data-accent="#f59e0b" style="--sw:#f59e0b" title="Amber"></button>
+          </div>
+        </div>
+        <div class="sp-row">
+          <label>Text size</label>
+          <div class="seg" id="sizeSeg">
+            <button data-size="15" style="font-size:11px">A</button>
+            <button data-size="16" class="on" style="font-size:12.5px">A</button>
+            <button data-size="18" style="font-size:14px">A</button>
+          </div>
+        </div>
+        <div class="sp-row">
+          <label>Voice</label>
+          <select id="voiceSelect" title="Assistant voice" aria-label="Assistant voice"></select>
+        </div>
+        <div class="sp-row">
+          <label>Speed</label>
+          <span class="sp-speed">
+            <input type="range" id="speedRange" min="0.5" max="1.8" step="0.05" title="Speaking speed" aria-label="Speaking speed">
+            <span class="sp-speedval" id="speedVal">1.05×</span>
+          </span>
+        </div>
+        <div class="sp-row">
+          <label>Reduce motion</label>
+          <label class="switch"><input type="checkbox" id="motionToggle"><span></span></label>
+        </div>
+        <div class="sp-row">
+          <label>Morning greeting</label>
+          <label class="switch"><input type="checkbox" id="greetingToggle"><span></span></label>
+        </div>
+        <div class="sp-row">
+          <label>Due reminders</label>
+          <label class="switch"><input type="checkbox" id="remindToggle"><span></span></label>
+        </div>
+        <div class="sp-foot"><button class="resetBtn" id="settingsReset">Reset to defaults</button></div>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<div id="toasts" aria-live="polite"></div>
+
+<div class="wrap" id="top">
+  <header class="app-head">
     <div>
-      <h1>AI Voice Assistant</h1>
-      <div class="tagline">a TODO list you manage by voice — demo of the voice-tools-plugin</div>
+      <h1>🎙️ <span class="grad">AI Voice Assistant</span></h1>
+      <div class="tagline">a TODO list you manage by voice<span class="badge-slot" id="tagBadge"></span></div>
     </div>
     <div class="statusbar">
       <span id="speakingEl" hidden>🔊 Speaking…</span>
@@ -88,8 +272,11 @@
     </div>
   </header>
 
-  <main>
+  <main class="app-main">
     <section class="panel panel-chat">
+      <div class="panel-bar">
+        <h2>💬 Conversation</h2>
+      </div>
       <div class="chat-scroll" id="chatScrollEl"></div>
       <div class="input-row">
         <button id="micBtn" class="mic-btn">🎤 Talk</button>
@@ -97,12 +284,13 @@
         <button id="sendBtn">Send</button>
       </div>
       <div class="chips" id="chipsCtn"></div>
-      <div class="notice" id="voiceNoticeEl" hidden></div>
     </section>
 
     <section class="panel panel-todo">
       <div class="todo-head">
-        <h2>My To-dos</h2>
+        <h2>✅ To-dos</h2>
+        <select id="listSelect" class="list-select" title="Switch list — say “switch to work list” or “create list work”"></select>
+        <button id="newListBtn" class="ghost" title="New list">＋</button>
         <span class="count" id="countEl"></span>
         <button id="clearAllBtn" class="ghost">Clear all</button>
       </div>
@@ -121,10 +309,20 @@
     return window.__voiceToolsPluginApi || null;
   }
   const tts = getApi();
+  window.__vtTts = tts; // expose to settings script for voice picker
 
-  const VOICE_NAME = "British Lady";
-  const VOICE_RATE = 1.05;
+  // top-level main.pjs names live on `root` in this iframe
+  const rathjiRoot = (typeof root !== "undefined" && root) ? root : null;
+  const rathjiTemplateFn = (rathjiRoot && typeof rathjiRoot.rathjiTemplate === "function") ? rathjiRoot.rathjiTemplate : null;
+  const rathjiCardFn = (rathjiRoot && typeof rathjiRoot.rathjiCard === "function") ? rathjiRoot.rathjiCard : null;
+
   const STORAGE_KEY = "vtAssistant_todos";
+  const DONE_LOG_KEY = "vtAssistant_doneLog";
+  const DEFAULT_VOICE = "British Lady";
+  const DEFAULT_RATE = 1.05;
+  window.vtVoicePrefs = { voice: DEFAULT_VOICE, rate: DEFAULT_RATE };
+  function currentVoice() { return (window.vtVoicePrefs && window.vtVoicePrefs.voice) || DEFAULT_VOICE; }
+  function currentRate() { const r = Number(window.vtVoicePrefs && window.vtVoicePrefs.rate); return (r >= 0.4 && r <= 3) ? r : DEFAULT_RATE; }
 
   // ============ DOM ============
   const chatScrollEl = document.getElementById("chatScrollEl");
@@ -137,7 +335,9 @@
   const clearAllBtn = document.getElementById("clearAllBtn");
   const speakingEl = document.getElementById("speakingEl");
   const statusEl = document.getElementById("statusEl");
-  const voiceNoticeEl = document.getElementById("voiceNoticeEl");
+  const tagBadgeEl = document.getElementById("tagBadge");
+  const listSelect = document.getElementById("listSelect");
+  const newListBtn = document.getElementById("newListBtn");
 
   // ============ state ============
   let todos = [];
@@ -149,21 +349,102 @@
   let liveEl = null;
   let nativeVoiceFallback = null;
   let pendingEdit = null;
+  let holdMode = false;
+  let holdBuffer = "";
+  let pressStart = 0;
+  let wasMicOn = false;
+  let chatLog = [];
+  let persistTimer = null;
+  let chatDirty = false;
+  let pendingConfirm = null;
+  let pendingNote = null;
+  let lists = {};
+  let currentList = "main";
+  let prevState = "[]";
+  let undoStack = [];
+  let doneLog = [];
 
   function loadTodos() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) todos = arr.filter(t => t && typeof t.text === "string");
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      if (Array.isArray(data)) {
+        lists = { main: data.filter(t => t && typeof t.text === "string") };
+        currentList = "main";
+      } else if (data && typeof data === "object" && data.lists) {
+        lists = {};
+        for (const k of Object.keys(data.lists))
+          lists[k] = Array.isArray(data.lists[k]) ? data.lists[k].filter(t => t && typeof t.text === "string") : [];
+        currentList = (typeof data.current === "string" && lists[data.current]) ? data.current : (Object.keys(lists)[0] || "main");
       }
+    } catch (e) {}
+    if (!Object.keys(lists).length) { lists.main = []; currentList = "main"; }
+    else if (!lists[currentList]) currentList = Object.keys(lists)[0];
+    todos = lists[currentList] || (lists[currentList] = []);
+  }
+
+  function persistSnapshot() {
+    try {
+      const snap = { current: currentList, lists: {} };
+      for (const k of Object.keys(lists)) {
+        snap.lists[k] = lists[k].map(t => ({
+          text: t.text, done: !!t.done, created: t.created || Date.now(), due: t.due || null,
+          prio: t.prio || 2, recur: t.recur || null, note: t.note || null,
+          tags: Array.isArray(t.tags) ? t.tags : [], est: t.est || null, list: t.list || "main"
+        }));
+      }
+      prevState = JSON.stringify(snap);
+      localStorage.setItem(STORAGE_KEY, prevState);
     } catch (e) {}
   }
 
   function saveTodos() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(todos.map(t => ({ text: t.text, done: !!t.done, created: t.created || Date.now() }))));
+      undoStack.push(prevState);
+      if (undoStack.length > 60) undoStack.shift();
+      persistSnapshot();
     } catch (e) {}
+  }
+
+  function cleanListName(s) {
+    let n = String(s || "").trim().toLowerCase().replace(/["'`]+/g, "").replace(/^(?:the|my)\s+/, "").replace(/\s+list$/, "");
+    n = n.replace(/\s+/g, "-").replace(/[^a-z0-9\-]+/g, "");
+    return n.slice(0, 24);
+  }
+
+  function resolveList(name) {
+    name = cleanListName(name);
+    if (!name) return null;
+    if (lists[name]) return name;
+    for (const k of Object.keys(lists)) { if (cleanListName(k) === name) return k; }
+    return null;
+  }
+
+  function populateListSelect() {
+    if (!listSelect) return;
+    const names = Object.keys(lists);
+    if (!names.length) names.push("main");
+    listSelect.innerHTML = names.map(n => '<option value="' + escapeHtml(n) + '"' + (n === currentList ? " selected" : "") + ">" + escapeHtml(n) + "</option>").join("");
+  }
+
+  function loadDoneLog() {
+    try {
+      const raw = localStorage.getItem(DONE_LOG_KEY);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) doneLog = arr.filter(e => e && typeof e.ts === "number");
+      }
+    } catch (e) {}
+  }
+
+  function saveDoneLog() {
+    try { localStorage.setItem(DONE_LOG_KEY, JSON.stringify(doneLog.slice(-300))); } catch (e) {}
+  }
+
+  function logDone(text) {
+    doneLog.push({ ts: Date.now(), text: String(text || "") });
+    saveDoneLog();
   }
 
   function escapeHtml(s) {
@@ -176,7 +457,51 @@
     div.innerHTML = escapeHtml(text);
     chatScrollEl.appendChild(div);
     chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+    chatLog.push({ role, text, ts: Date.now() });
+    scheduleChatSave();
     return div;
+  }
+
+  function addThinkingBubble() {
+    const div = document.createElement("div");
+    div.className = "bubble assistant thinking";
+    div.innerHTML = '<span class="think-dots"><i></i><i></i><i></i></span>';
+    chatScrollEl.appendChild(div);
+    chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+    return div;
+  }
+
+  // ---- chat history (kv, survives reloads) ----
+  function scheduleChatSave() {
+    chatDirty = true;
+    if (persistTimer) return;
+    persistTimer = setTimeout(async () => {
+      persistTimer = null;
+      if (!chatDirty) return;
+      chatDirty = false;
+      try {
+        if (root && root.kv && root.kv.voiceChat) await root.kv.voiceChat.set("messages", chatLog.slice(-300));
+      } catch (e) {}
+    }, 300);
+  }
+
+  async function loadChat() {
+    try {
+      if (!root || !root.kv || !root.kv.voiceChat) return false;
+      const saved = await root.kv.voiceChat.get("messages");
+      if (Array.isArray(saved) && saved.length) {
+        chatLog = saved.filter(m => m && typeof m.text === "string" && (m.role === "user" || m.role === "assistant"));
+        for (const m of chatLog) {
+          const div = document.createElement("div");
+          div.className = "bubble " + m.role;
+          div.innerHTML = escapeHtml(m.text);
+          chatScrollEl.appendChild(div);
+        }
+        chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+        return true;
+      }
+    } catch (e) {}
+    return false;
   }
 
   function renderInterim(text) {
@@ -205,12 +530,18 @@
     if (!todos.length) {
       const li = document.createElement("li");
       li.className = "empty-note";
-      li.textContent = "Nothing here yet. Say or type “add buy milk” to get started.";
+      if (rathjiCardFn) {
+        try {
+          li.innerHTML = rathjiCardFn({ title: "Nothing here yet", text: "Say or type “add buy milk” to get started.", emoji: "🗒️", color: "#7c6cff" });
+        } catch (e) { li.textContent = "Nothing here yet. Say or type “add buy milk” to get started."; }
+      } else {
+        li.textContent = "Nothing here yet. Say or type “add buy milk” to get started.";
+      }
       todoListEl.appendChild(li);
     }
     todos.forEach((t, i) => {
       const li = document.createElement("li");
-      li.className = "todo-row" + (t.done ? " done" : "");
+      li.className = "todo-row" + (t.done ? " done" : "") + (t.prio === 1 ? " prio-high" : "");
       const num = document.createElement("span");
       num.className = "todo-num";
       num.textContent = (i + 1) + ".";
@@ -218,12 +549,64 @@
       cb.type = "checkbox";
       cb.checked = !!t.done;
       cb.title = "Mark done";
-      cb.addEventListener("change", () => { t.done = cb.checked; saveTodos(); renderTodos(); });
+      cb.addEventListener("change", () => { if (cb.checked) logDone(t.text); t.done = cb.checked; saveTodos(); renderTodos(); });
+      const main = document.createElement("span");
+      main.className = "todo-main";
       const label = document.createElement("span");
       label.className = "todo-text";
       label.textContent = t.text;
       label.title = "Double-click to edit";
       label.addEventListener("dblclick", () => startInlineEdit(li, t, label, i));
+      main.appendChild(label);
+      if (t.note) {
+        const noteEl = document.createElement("span");
+        noteEl.className = "todo-note";
+        noteEl.textContent = "📝 " + t.note;
+        noteEl.title = "Note";
+        main.appendChild(noteEl);
+      }
+      if (Array.isArray(t.tags) && t.tags.length) {
+        const tagWrap = document.createElement("span");
+        tagWrap.className = "todo-tags";
+        t.tags.forEach(tag => {
+          const tagEl = document.createElement("span");
+          tagEl.className = "todo-tag";
+          tagEl.textContent = "#" + tag;
+          tagEl.title = "Tag";
+          tagWrap.appendChild(tagEl);
+        });
+        main.appendChild(tagWrap);
+      }
+      const meta = document.createElement("span");
+      meta.className = "todo-meta";
+      if (t.prio === 1) {
+        const p = document.createElement("span");
+        p.className = "todo-prio";
+        p.textContent = "⚡ high";
+        p.title = "High priority";
+        meta.appendChild(p);
+      } else if (t.prio === 3) {
+        const p = document.createElement("span");
+        p.className = "todo-prio low";
+        p.textContent = "🌱 low";
+        p.title = "Low priority";
+        meta.appendChild(p);
+      }
+      if (t.due) {
+        const d = document.createElement("span");
+        const diff = dayDiff(t.due);
+        d.className = "todo-due" + (diff < 0 ? " overdue" : diff === 0 ? " duetoday" : "");
+        d.textContent = (diff < 0 ? "⚠ " : "📅 ") + fmtDate(t.due);
+        d.title = diff < 0 ? "Overdue" : "Due " + new Date(t.due).toDateString();
+        meta.appendChild(d);
+      }
+      if (t.est) {
+        const e = document.createElement("span");
+        e.className = "todo-est";
+        e.textContent = "⏱ " + fmtEst(t.est);
+        e.title = "Estimated time";
+        meta.appendChild(e);
+      }
       const ed = document.createElement("button");
       ed.className = "todo-edit-btn";
       ed.textContent = "✎";
@@ -234,10 +617,11 @@
       del.textContent = "✕";
       del.title = "Delete";
       del.addEventListener("click", () => { todos.splice(i, 1); saveTodos(); renderTodos(); });
-      li.append(num, cb, label, ed, del);
+      li.append(num, cb, main, meta, ed, del);
       todoListEl.appendChild(li);
     });
     clearAllBtn.disabled = !todos.length;
+    populateListSelect();
   }
 
   function startInlineEdit(li, t, label, i) {
@@ -247,7 +631,7 @@
     input.className = "todo-edit";
     input.value = t.text;
     input.title = "Enter to save, Esc to cancel";
-    li.replaceChild(input, label);
+    label.parentNode.replaceChild(input, label);
     input.focus();
     input.select();
     let finished = false;
@@ -280,11 +664,11 @@
     if (!tts || !tts.supported || !text || !text.trim()) return;
     speakingEl.hidden = false;
     try {
-      await tts(text, { voice: VOICE_NAME, rate: VOICE_RATE });
+      await tts(text, { voice: currentVoice(), rate: currentRate() });
     } catch (e) {
       try {
         const fallback = await pickNativeVoice();
-        if (fallback) await tts(text, { voice: fallback, rate: VOICE_RATE });
+        if (fallback) await tts(text, { voice: fallback, rate: currentRate() });
       } catch (e2) {}
     }
     speakingEl.hidden = true;
@@ -336,6 +720,20 @@
       .filter(x => x.length > 0);
   }
 
+  function parseDeleteTarget(s) {
+    s = s.trim();
+    if (!s) return null;
+    if (/^(?:that|it|this|undo)$/.test(s) || /^the (?:last|latest) (?:one|task|item)$/.test(s))
+      return { kind: "last" };
+    let m = s.match(/^(?:the )?(?:task|item|todo|number|num|#)?\s*(\d+)(?:st|nd|rd|th)?(?: (?:task|item|todo))?$/);
+    if (m) return { kind: "index", index: +m[1] };
+    m = s.match(/^(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?: one| task| item)?$/);
+    if (m) return { kind: "ordinal", ordinal: m[1] };
+    let text = s.replace(/^the\s+/, "").replace(/^one (?:about|for)\s+/, "").replace(/\s+(?:task|item|todo|chore)s?$/, "").replace(/\s+one$/, "");
+    if (text.length >= 2) return { kind: "fuzzy", text };
+    return null;
+  }
+
   function buildEdit(targetText, newText) {
     const clean = newText == null ? null : newText.replace(/[.!?]+$/, "").trim();
     const target = targetText.trim();
@@ -370,18 +768,157 @@
     return best;
   }
 
-  function parseDeleteTarget(s) {
-    s = s.trim();
+  // ============ task metadata: due dates, priorities, recurring ============
+  const DOW = { monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sunday: 0 };
+
+  function dayDiff(ms) {
+    const now = new Date(); now.setHours(0, 0, 0, 0);
+    const target = new Date(ms); target.setHours(0, 0, 0, 0);
+    return Math.round((target - now) / 86400000);
+  }
+
+  function fmtDate(ms) {
+    const diff = dayDiff(ms);
+    if (diff === 0) return "today";
+    if (diff === 1) return "tomorrow";
+    if (diff === -1) return "yesterday";
+    return new Date(ms).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  function fmtEst(mins) {
+    mins = Math.round(Number(mins) || 0);
+    if (mins >= 60) {
+      const h = Math.floor(mins / 60), m = mins % 60;
+      return m ? (h + "h " + m + "m") : (h + " hour" + (h > 1 ? "s" : ""));
+    }
+    return mins + " min";
+  }
+
+  function toMins(n, unit) {
+    const u = String(unit || "").toLowerCase();
+    return Math.max(1, Math.min(10080, Math.round(parseFloat(n) * (u.charAt(0) === "m" ? 1 : 60))));
+  }
+
+  function parseDue(s) {
+    s = String(s || "").trim().toLowerCase().replace(/^on\s+/, "").replace(/^the\s+/, "");
     if (!s) return null;
-    if (/^(?:that|it|this|undo)$/.test(s) || /^the (?:last|latest) (?:one|task|item)$/.test(s))
-      return { kind: "last" };
-    let m = s.match(/^(?:the )?(?:task|item|todo|number|num|#)?\s*(\d+)(?:st|nd|rd|th)?(?: (?:task|item|todo))?$/);
-    if (m) return { kind: "index", index: +m[1] };
-    m = s.match(/^(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)(?: one| task| item)?$/);
-    if (m) return { kind: "ordinal", ordinal: m[1] };
-    let text = s.replace(/^the\s+/, "").replace(/^one (?:about|for)\s+/, "").replace(/\s+(?:task|item|todo|chore)s?$/, "").replace(/\s+one$/, "");
-    if (text.length >= 2) return { kind: "fuzzy", text };
+    const norm = d => { d.setHours(12, 0, 0, 0); return d.getTime(); };
+    const now = new Date();
+    if (/^today$/.test(s)) return norm(now);
+    if (/^tomorrow$/.test(s)) { const d = new Date(now); d.setDate(d.getDate() + 1); return norm(d); }
+    let m = s.match(/^in\s+(\d+)\s+(day|days|week|weeks)$/);
+    if (m) { const d = new Date(now); const n = +m[1]; const mult = m[2].charAt(0) === "w" ? 7 : 1; d.setDate(d.getDate() + n * mult); return norm(d); }
+    if (/^next\s+week$/.test(s)) { const d = new Date(now); d.setDate(d.getDate() + 7); return norm(d); }
+    if (/^this\s+weekend$/.test(s)) { const d = new Date(now); const sat = d.getDay() === 6 ? 0 : 6 - d.getDay(); d.setDate(d.getDate() + sat); return norm(d); }
+    m = s.match(/^(?:next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/);
+    if (m) {
+      const d = new Date(now);
+      let add = (DOW[m[1]] - d.getDay() + 7) % 7;
+      if (add === 0) add = s.startsWith("next") ? 7 : 7;
+      d.setDate(d.getDate() + add);
+      return norm(d);
+    }
+    m = s.match(/^(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})$/);
+    if (m) { const d = new Date(now.getFullYear(), monthIndex(m[0].split(/\s+/)[0]), +m[1]); if (d < now) d.setFullYear(d.getFullYear() + 1); return norm(d); }
     return null;
+  }
+
+  function monthIndex(name) {
+    return ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"].indexOf(name);
+  }
+
+  function parseRecur(s) {
+    s = String(s || "").toLowerCase();
+    if (/\b(every\s+day|daily|every\s+morning|every\s+evening|every\s+night)\b/.test(s)) return { type: "daily" };
+    if (/\b(every\s+week|weekly|each\s+week)\b/.test(s)) return { type: "weekly" };
+    for (const d of Object.keys(DOW)) {
+      if (new RegExp("\\b(every\\s+" + d + "|each\\s+" + d + "|" + d + "s)\\b").test(s)) return { type: "weekly", dow: DOW[d] };
+    }
+    return null;
+  }
+
+  function nextOccurrence(recur, fromMs) {
+    const d = new Date(fromMs || Date.now());
+    d.setHours(9, 0, 0, 0);
+    if (recur.type === "daily") d.setDate(d.getDate() + 1);
+    else if (recur.type === "weekly" && recur.dow == null) d.setDate(d.getDate() + 7);
+    else {
+      let add = (recur.dow - d.getDay() + 7) % 7;
+      if (add === 0) add = 7;
+      d.setDate(d.getDate() + add);
+    }
+    return d.getTime();
+  }
+
+  const PRIO_WORDS = /\b(?:urgent|asap|high[- ]priority|very\s+important|important|immediately|low[- ]priority|whenever|someday)\b/gi;
+
+  function parseTaskMeta(s) {
+    let t = String(s || "").trim();
+    let due = null, prio = null, recur = null, note = null;
+    const dm = t.match(/[\s,]+due\s+([^,]+)/i);
+    if (dm) {
+      const cand = dm[1].split(/\s+note\b/i)[0].trim();
+      const parsed = parseDue(cand);
+      if (parsed != null) { due = parsed; t = (t.slice(0, dm.index) + t.slice(dm.index + dm[0].length)).replace(/[\s,]+$/, "").trim(); }
+    }
+    const rec = parseRecur(t);
+    if (rec) {
+      recur = rec;
+      t = t.replace(/\b(every\s+day|daily|every\s+morning|every\s+evening|every\s+night|every\s+week|weekly|each\s+week|every\s+monday|every\s+tuesday|every\s+wednesday|every\s+thursday|every\s+friday|every\s+saturday|every\s+sunday|each\s+monday|each\s+tuesday|each\s+wednesday|each\s+thursday|each\s+friday|each\s+saturday|each\s+sunday|mondays|tuesdays|wednesdays|thursdays|fridays|saturdays|sundays)\b/gi, "").replace(/\s{2,}/g, " ").trim();
+    } else {
+      const tm = t.match(/(?:^|\s+)(today|tomorrow|in\s+\d+\s+(?:day|days|week|weeks)|(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2})$/i);
+      if (tm) {
+        const parsed = parseDue(tm[1].trim());
+        if (parsed != null) { due = parsed; t = t.slice(0, tm.index).replace(/[\s,]+$/, "").trim(); }
+      }
+    }
+    const nm = t.match(/[\s,]+(?:with\s+(?:a\s+)?)?note(?:\s*:)?\s+(.+)$/i);
+    if (nm) {
+      let cand = nm[1].replace(/^(?:that\s+)?says?\s+/i, "").replace(/[.!?,]+$/, "").trim();
+      if (cand && !/^(?:to|for|on|in|at|the|my|your|a|an|and|of|with|up|down|out)\b/i.test(cand)) {
+        note = cand;
+        t = t.slice(0, nm.index).replace(/[\s,]+$/, "").trim();
+      }
+    }
+    let tags = [];
+    const TAG_STOP = /^(?:the|a|an|it|them|this|that|these|those|to|my|your|me|one|two|off|out|at|in|on|for|with|by|from|before|after|next|last|and|or)$/i;
+    const ht = t.match(/(?:^|\s)#[a-zA-Z0-9_-]+(?=\s|$)/g);
+    if (ht) {
+      tags = tags.concat(ht.map(s => s.trim().slice(1).toLowerCase()));
+      t = t.replace(/(?:^|\s)#[a-zA-Z0-9_-]+/g, " ").replace(/\s{2,}/g, " ").trim();
+    }
+    const wm = t.match(/(?:^|\s)(?:tags?|hashtag)\s+([a-zA-Z0-9_-]+(?:\s+(?:and|&)\s+[a-zA-Z0-9_-]+)*(?:\s*,\s*[a-zA-Z0-9_-]+)*)\s*$/i);
+    if (wm) {
+      const cands = wm[1].split(/\s*(?:,|&|\band\b)\s*/i).map(x => x.trim()).filter(Boolean);
+      const good = cands.filter(x => !TAG_STOP.test(x));
+      if (good.length) {
+        tags = tags.concat(good.map(x => x.toLowerCase()));
+        t = t.slice(0, wm.index).replace(/[\s,]+$/, "").trim();
+      }
+    }
+    tags = [...new Set(tags)];
+    let est = null;
+    const estM = t.match(/(?:^|\s)(?:takes?|for|about|around|approx(?:imately)?|~|estimated(?: at)?)\s+(?:an?\s+|one\s+)?(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hrs?|hours?)\b/i);
+    if (estM) {
+      const mins = toMins(estM[1], estM[2]);
+      est = mins;
+      t = (t.slice(0, estM.index) + t.slice(estM.index + estM[0].length)).replace(/[\s,]+$/, "").trim();
+    }
+    if (est == null) {
+      const em3 = t.match(/\((\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hrs?|hours?)\s*\)\s*$/i);
+      if (em3) { est = toMins(em3[1], em3[2]); t = t.slice(0, em3.index).trim(); }
+    }
+    if (est == null) {
+      const em2 = t.match(/(?:^|\s)(\d+(?:\.\d+)?)\s*(min(?:ute)?s?)\b\s*$/i);
+      if (em2) {
+        const mins = toMins(em2[1], em2[2]);
+        if (mins <= 1440) { est = mins; t = t.slice(0, em2.index).replace(/\s+in$/i, "").trim(); }
+      }
+    }
+    if (/\b(urgent|asap|high[- ]priority|very\s+important|important|immediately)\b/i.test(t)) prio = 1;
+    else if (/\b(low[- ]priority|whenever|someday)\b/i.test(t)) prio = 3;
+    t = t.replace(PRIO_WORDS, " ").replace(/\s{2,}/g, " ").replace(/[\s,]+$/, "").trim();
+    return { text: t || String(s).trim(), due, prio: prio || 2, recur, note, tags, est };
   }
 
   function parseIntent(raw) {
@@ -405,9 +942,13 @@
       }
     }
 
-    // 1. greeting (whole utterance)
-    if (/^(?:hello|hi|hey|yo|howdy|good (?:morning|afternoon|evening|day))[!.?,]*$/.test(u))
+    // 1. greeting / briefing
+    if (/^(?:good )?(?:morning|afternoon|evening)\b[!.?,]*$/.test(u) || /^good day\b[!.?,]*$/.test(u))
+      return { intent: "brief" };
+    if (/^(?:hello|hi|hey|yo|howdy|good day)[!.?,]*$/.test(u))
       return { intent: "greet" };
+    if (/^(?:brief|brief me|briefing|give me a briefing|my day|what(?:'s| is) (?:my day|today|on today|on my plate|the plan)(?: look like)?|what does my day look like|what do i have (?:on|for) today)/.test(u))
+      return { intent: "brief" };
 
     // 2. help
     if (/^(?:help|commands|what can you do|what can i (?:say|do)|show commands|help me)[!.?,]*$/.test(u))
@@ -425,6 +966,33 @@
     if (/(?:how many (?:tasks|todos|todo|items|chores|things)|count (?:my )?(?:tasks|todos|items|list)|task count|tasks do i have)/.test(u))
       return { intent: "count" };
 
+    // 5b. stats
+    if (/^(?:stats|statistics|my stats|progress|my progress|show (?:me )?my progress|how am i doing|how am i going|how am i doing overall|how are my numbers|what have i (?:done|completed)|how did i do)$/.test(u))
+      return { intent: "stats" };
+
+    // 5c. reminders / notifications
+    if (/^(?:check|show|send)\s+(?:my\s+)?(?:due\s+)?(?:reminders|notifications)|^(?:remind me|notify me)\b/.test(u))
+      return { intent: "remind" };
+    if (/^(?:enable|turn on|allow)\s+(?:due\s+)?(?:reminders|notifications)/.test(u))
+      return { intent: "remindenable" };
+
+    // 5d. multi-list commands
+    if (/^(?:what|which|show(?: me)?|list)\s+(?:lists|all lists|my lists|categories)\b|^(?:what lists do i have|what categories do i have|my lists|which lists exist)$/.test(u))
+      return { intent: "lists" };
+    let lm;
+    if ((lm = u.match(/^(?:create|make|new|start)\s+(?:a\s+|the\s+)?(?:new\s+)?list\s+(?:called\s+|named\s+)?(.+)$/)))
+      return { intent: "listcreate", name: lm[1].trim() };
+    if ((lm = u.match(/^(?:create|make)\s+(?:a\s+)?(.+?)\s+list$/)))
+      return { intent: "listcreate", name: lm[1].trim() };
+    if ((lm = u.match(/^(?:switch|go|jump|open|view)\s+(?:to\s+|over\s+to\s+|into\s+)?(?:the\s+|my\s+)?(.+?)\s+list$/))) {
+      const nn = cleanListName(lm[1]);
+      if (nn && nn !== "my" && nn !== "the") return { intent: "listshow", name: lm[1].trim() };
+    }
+    if ((lm = u.match(/^(?:show|display|read)\s+(?:me\s+)?(?:the\s+|my\s+)?(.+?)\s+list$/))) {
+      const nn = cleanListName(lm[1]);
+      if (nn && nn !== "my" && nn !== "the") return { intent: "listshow", name: lm[1].trim() };
+    }
+
     // 6. list
     if (/^(?:list|my list|the list|tasks|todos|todo list|to do list|to-do list|task list|show list|read list)[!.?,]*$/.test(u)
         || /(?:read|show|recite|say|tell) (?:me )?(?:my |the )?(?:todo|task|to do|to-do)? ?list/.test(u)
@@ -438,8 +1006,22 @@
         || /get rid of (?:everything|all)/.test(u))
       return { intent: "clear" };
 
-    // 8. delete / remove / erase / get rid of / forget / undo
-    const delM = u.match(/^(?:delete|remove|erase|get rid of|forget|undo)\b\s*(.*)$/);
+    // 8. undo (before delete — "undo" used to mean "delete last")
+    if (/^(?:undo|undo that|undo that change|undo the last thing|revert|take that back|nevermind|never mind|scratch that|forget that|forget it)$/.test(u))
+      return { intent: "undo" };
+
+    // 8.5 delete a whole list
+    if ((lm = u.match(/^(?:delete|remove|get rid of|clear|wipe)\s+(?:the\s+|my\s+)?(.+?)\s+list$/)))
+      return { intent: "listdelete", name: lm[1].trim() };
+    if ((lm = u.match(/^(?:delete|remove|get rid of|clear|wipe)\s+list\s+(?:called\s+|named\s+)?(.+)$/)))
+      return { intent: "listdelete", name: lm[1].trim() };
+
+    // 8.75 remove an estimate from a task
+    if ((lm = u.match(/^(?:remove|clear|delete)\s+(?:the\s+)?(?:estimate|time|duration)\s+(?:for|on|from|of)?\s*(.+)$/)))
+      return { intent: "estimate", target: parseDeleteTarget(lm[1].trim()) || { kind: "fuzzy", text: lm[1].trim() }, minutes: null };
+
+    // 9. delete / remove / erase / get rid of / forget
+    const delM = u.match(/^(?:delete|remove|erase|get rid of|forget)\b\s*(.*)$/);
     if (delM) {
       const targetText = delM[1].trim();
       if (!targetText) return { intent: "delete", target: { kind: u === "undo" ? "last" : "none" } };
@@ -486,7 +1068,92 @@
       return { intent: "add", tasks: splitAdd(u) };
     }
 
-    // 10. add
+    // 10b. search
+    let qm;
+    if ((qm = u.match(/^(?:search|find|look for|look up|where(?:'s| is)|where's)\s+(?:for\s+|my\s+list\s+for\s+|my\s+list\s+)?(.+)$/)))
+      return { intent: "search", query: qm[1].trim() };
+
+    // 10c. notes on tasks
+    let nm;
+    if ((nm = u.match(/^(?:add|write|put|set)\s+(?:a\s+)?note\s+(?:to|on|for)\s+(.+?)\s*:\s*(.+)$/)))
+      return { intent: "note", target: parseDeleteTarget(nm[1].trim()) || { kind: "fuzzy", text: nm[1].trim() }, note: nm[2].trim() };
+    if ((nm = u.match(/^(?:add|write|put|set)\s+(?:a\s+)?note\s+(?:to|on|for)\s+(.+)$/)))
+      return { intent: "note", target: parseDeleteTarget(nm[1].trim()) || { kind: "fuzzy", text: nm[1].trim() }, note: null };
+    if ((nm = u.match(/^note\s+(.+?)\s+(?:on|to|for)\s+(.+)$/)))
+      return { intent: "note", target: parseDeleteTarget(nm[2].trim()) || { kind: "fuzzy", text: nm[2].trim() }, note: nm[1].trim() };
+
+    // 10d. what's due / when is X due
+    const dt = (t) => parseDeleteTarget(t.trim()) || { kind: "fuzzy", text: t.trim() };
+    if ((m = u.match(/^what(?:'s| is| are)\s+(?:my\s+)?(.+)$/))) {
+      const rest = m[1];
+      if (/^overdue\b/.test(rest)) return { intent: "due", scope: "overdue" };
+      if (/^due\b/.test(rest)) return { intent: "due", scope: parseDueScope(rest.replace(/^due\b/, "")) };
+      if (/^(?:the\s+)?(?:list|tasks|todos|to do list|todo list)$/.test(rest)) return { intent: "list" };
+      if (/^(?:in|on|under)\s+#?[a-zA-Z0-9_-]+$/.test(rest)) return { intent: "tags", tag: rest.replace(/^(?:in|on|under)\s+#?/, "").trim().toLowerCase() };
+      if (/^(?:the\s+)?(?:task|todo|item|#)\s*(\d+)/.test(rest)) return { intent: "read", target: { kind: "index", index: +rest.match(/\d+/)[0] } };
+      if (/^\d+(?:st|nd|rd|th)?$/.test(rest)) return { intent: "read", target: { kind: "index", index: +rest.match(/\d+/)[0] } };
+      const best = findBestTask(rest);
+      if (best) return { intent: "read", target: { kind: "index", index: best.index + 1 } };
+    }
+    if ((m = u.match(/^what(?:'s| is)\s+the\s+due\s+date\s+for\s+(.+)$/))) return { intent: "dueinfo", text: m[1].trim() };
+    if ((m = u.match(/^when(?:'s| is| was)?\s+(.+?)\s+due$/))) return { intent: "dueinfo", text: m[1].trim() };
+
+    // 10d1. estimates / time totals
+    if ((m = u.match(/^(?:add|put|set)\s+(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hrs?|hours?)\s+(?:to|on|for)\s+(.+)$/)))
+      return { intent: "estimate", target: dt(m[3].trim()), minutes: toMins(m[1], m[2]) };
+    if ((m = u.match(/^(?:set|put|add)\s+(?:a\s+|an\s+)?(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hrs?|hours?)\s+(?:estimate|time|duration)\s+(?:for|on|to|of)?\s*(.+)$/)))
+      return { intent: "estimate", target: dt(m[3].trim()), minutes: toMins(m[1], m[2]) };
+    if ((m = u.match(/^(?:estimate|set\s+(?:an?\s+)?(?:estimate|time|duration))\s+(?:for|on|to|of)?\s*(.+?)\s*(?:to|at|for|of)\s*(\d+(?:\.\d+)?)\s*(min(?:ute)?s?|hrs?|hours?)$/)))
+      return { intent: "estimate", target: dt(m[1].trim()), minutes: toMins(m[2], m[3]) };
+    if ((m = u.match(/^(?:remove|clear|delete)\s+(?:the\s+)?(?:estimate|time|duration)\s+(?:for|on|from|of)?\s*(.+)$/)))
+      return { intent: "estimate", target: dt(m[1].trim()), minutes: null };
+    if (/^(?:how long will|how long does|how long would|how much time|total time|what(?:'s| is) the total|how long is|how much time do|time to do|estimates? total)/.test(u)) {
+      let q = null;
+      const qm2 = u.match(/^how long (?:will|does|would)\s+(.+?)\s+take/);
+      if (qm2) { const cand = qm2[1].trim(); if (findBestTask(cand)) q = cand; }
+      return { intent: "timestotal", query: q };
+    }
+
+    // 10d2. move a task to another list
+    if ((m = u.match(/^(?:move|put|send)\s+(?:the\s+)?(?:task|item|todo)\s+(.+?)\s+(?:to|onto|into|on)\s+(?:the\s+|my\s+)?(.+?)\s+list$/i)))
+      return { intent: "listmove", target: dt(m[1].trim()), list: m[2].trim() };
+    if ((m = u.match(/^(?:move|put|send)\s+(.+?)\s+(?:to|onto|into)\s+(?:the\s+|my\s+)?(.+?)\s+list$/i)))
+      return { intent: "listmove", target: dt(m[1].trim()), list: m[2].trim() };
+
+    // 10e. snooze / defer / move
+    const ALL_TARGET = /^(?:everything|all|all\s+the\s+(?:tasks|items|todos|things)|the\s+(?:whole\s+)?list)$/;
+    let snm;
+    if ((snm = u.match(/^(?:snooze|defer|postpone)\s+(?:the\s+)?(?:task\s+|item\s+|todo\s+)?(.+?)\s+(?:to|until|till|for)\s+(.+)$/))) {
+      const when = parseDue(snm[2]);
+      if (when != null) return { intent: "snooze", target: ALL_TARGET.test(snm[1].trim()) ? { kind: "all" } : dt(snm[1]), when };
+    }
+    if ((snm = u.match(/^(?:snooze|defer|postpone)\s+(?:the\s+)?(?:task\s+|item\s+|todo\s+)?(.+)$/)))
+      return { intent: "snooze", target: ALL_TARGET.test(snm[1].trim()) ? { kind: "all" } : dt(snm[1]), when: null };
+    if ((snm = u.match(/^(?:move|push|shift)\s+(?:the\s+)?(?:task\s+|item\s+|todo\s+)?(.+?)\s+(?:to|until|till)\s+(.+)$/))) {
+      const when = parseDue(snm[2]);
+      if (when != null) return { intent: "snooze", target: ALL_TARGET.test(snm[1].trim()) ? { kind: "all" } : dt(snm[1]), when };
+    }
+
+    // 10f. read a single task aloud
+    if ((m = u.match(/^(?:read|say|repeat|tell me about)\s+(?:the\s+)?(?:task|todo|item|#)?\s*(\d+)(?:st|nd|rd|th)?$/)))
+      return { intent: "read", target: { kind: "index", index: +m[1] } };
+    if ((m = u.match(/^(?:read|say|repeat|tell me about)\s+(.+)$/))) {
+      const rt = m[1].replace(/^(?:the\s+|task\s+|todo\s+|item\s+)/, "").trim();
+      if (!/^(?:hello|hi|hey|thanks|thank you|good ?(?:morning|afternoon|evening)|goodbye|bye|please)\b/i.test(rt))
+        return { intent: "read", target: { kind: "fuzzy", text: rt } };
+    }
+    // 10g. export / copy list
+    if (/^(?:copy|export|share|give me|grab)\s+(?:my\s+)?(?:to[- ]do\s+list|todo list|task list|list|tasks|todos|items|all|everything)(?:\s+(?:to\s+)?(?:clipboard|text|a file))?[!.?,]*$/.test(u))
+      return { intent: "export" };
+
+    // 10h. show tasks by tag
+    const tagShow = u.match(/^(?:(?:show|view|display)\s+(?:me\s+)?|filter\s+(?:by|for)\s+|only\s+)(?:tasks?|items?|todos?)?\s*(?:with\s+(?:the\s+)?(?:tag|label|tags?)\s+)?(.+)$/);
+    if (tagShow) {
+      const tag = tagShow[1].replace(/^#/, "").trim().toLowerCase();
+      if (tag && !/(?:^|\s)(?:me|the|my|your|it|them|this|that)$/.test(tag)) return { intent: "tags", tag };
+    }
+
+    // 11. add
     if (/^put (?:out|away|back|up|down|off|aside|in|on)\b/.test(u)) return { intent: "add", tasks: [u] };
     if (/^get (?:out of|up|down|over|through)\b/.test(u)) return { intent: "add", tasks: [u] };
     m = u.match(/^(?:add|create|note|write down|put|jot down|jot|remember|remind me to|i need to|i need|do not forget|don't forget|dont forget|buy|get|pick up|grab|call|email)\b\s*(.*)$/);
@@ -498,12 +1165,22 @@
         .replace(/^to\s+/, "")
         .replace(/\s*(?:to|on) (?:my|the) (?:list|todo list|to do list|task list)\s*$/, "")
         .trim();
+      const lx = extractAddList(rest);
+      rest = lx.rest;
+      const addList = lx.list;
+      const metaWhole = parseTaskMeta(rest);
+      if (metaWhole.due || metaWhole.recur || metaWhole.prio !== 2 || metaWhole.note != null || metaWhole.est != null) return { intent: "add", tasks: [rest], list: addList };
       const tasks = splitAdd(rest);
-      return { intent: "add", tasks };
+      return { intent: "add", tasks, list: addList };
     }
 
-    // 11. fallback: bare phrase (not a question) → add as a task
-    if (u.length >= 2 && !/[?]$/.test(u)) return { intent: "add", tasks: [u] };
+    // 12. fallback: bare phrase (not a question) → add as a task, unless it
+    // looks conversational — then let the AI fallback handle it
+    if (u.length >= 2 && !/[?]$/.test(u)) {
+      if (/(how are you|tell me (?:a joke|about|the)|a joke|joke|what(?:'s| is) (?:the|your|my)|what about|who |when |where |why |can you|will you|do you|should i|weather|wake me)/.test(u))
+        return { intent: "unknown", question: true };
+      return { intent: "add", tasks: [u] };
+    }
     return { intent: "unknown", question: true };
   }
 
@@ -532,8 +1209,8 @@
 
   function helpReply() {
     return {
-      bubbles: ["Here's what I can do:\n• “add buy milk and eggs” — add tasks\n• “mark 2 done” / “mark all done” — check off\n• “change task 2 to buy oat milk” / “rename buy milk to 1% milk” — edit a task\n• “read my list” / “how many tasks” — review\n• “delete task 2” / “delete buy milk” — remove\n• “clear all” — wipe the list\n• “thanks”, “help”, “stop”"],
-      speak: "You can say add, mark done, edit, read my list, how many tasks, delete, clear all, or help."
+      bubbles: ["Here's what I can do:\n• “add buy milk and eggs” — add tasks\n• “add pay rent due friday” / “add fix roof, urgent” — with due dates & priority\n• “water plants every monday” — recurring tasks\n• “add buy milk tag work” / “#work” — tag a task\n• “show work” / “what's in work” — list tasks by tag\n• “note call bob on task 2” / “add buy milk note with 2% milk” — attach a note\n• “snooze task 2 to friday” / “move task 3 to tomorrow” — set/change due dates\n• “what's due” / “when is pay rent due” — due-date queries\n• “find milk” / “search my list for rent” — search tasks\n• “mark 2 done” / “mark all done” — check off\n• “change task 2 to buy oat milk” / “rename buy milk to 1% milk” — edit a task\n• “undo” — undo the last change\n• “read my list” / “how many tasks” — review\n• “read task 3” / “say buy milk” — read one task aloud\n• “how am i doing” / “stats” — your progress & streak\n• “copy my list” / “share my list” — copy the list to clipboard\n• “delete task 2” / “delete buy milk” — remove\n• “clear all” — wipe the list (asks you to confirm)\n• “create list work” / “switch to work list” — keep separate lists\n• “what lists” / “move task 2 to work list” — browse & move between lists\n• “add fix sink takes 30 minutes” — estimated time\n• “how long will this take” / “add 20 minutes to task 2” — time totals\n• “check reminders” / “enable reminders” — browser notifications for due tasks\n• “good morning” / “brief me” — daily briefing with weather, overdue & due-today\n• “thanks”, “help”, “stop” — and I can chat about anything else, too\n\nTip: open ⚙️ settings to pick your voice and speaking speed."],
+      speak: "You can say add, note, snooze, what's due, find, mark done, edit, undo, read my list, how many tasks, delete, clear all, good morning for a briefing, or help. Add tasks with due dates, priority, recurring like every monday, or notes. Check settings to choose your voice."
     };
   }
 
@@ -547,13 +1224,29 @@
 
   function listReply() {
     if (!todos.length) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
-    const lines = todos.map((t, i) => (i + 1) + ". " + t.text + (t.done ? " — done" : ""));
-    const speak = "Here's your list. " + todos.map((t, i) => (i + 1) + ": " + t.text + (t.done ? " — done" : "")).join(". ") + ".";
-    return { bubbles: ["Here's your list:\n" + lines.join("\n")], speak: speak };
+    const line = (t, i) => {
+      let s = (i + 1) + ". " + t.text;
+      if (t.prio === 1) s += " ⚡";
+      if (t.due) s += " (due " + fmtDate(t.due) + (dayDiff(t.due) < 0 ? " — overdue" : "") + ")";
+      if (t.est) s += " (~" + fmtEst(t.est) + ")";
+      if (t.note) s += " [note: " + t.note + "]";
+      if (Array.isArray(t.tags) && t.tags.length) s += " #" + t.tags.join(" #");
+      if (t.done) s += " — done";
+      return s;
+    };
+    const lines = todos.map((t, i) => line(t, i));
+    const header = currentList === "main" ? "Here's your list:" : "Here's your “" + currentList + "” list:";
+    const speak = "Here's your " + (currentList === "main" ? "list. " : currentList + " list. ") + todos.map((t, i) => (i + 1) + ": " + t.text + (t.due ? ", due " + fmtDate(t.due) : "") + (t.done ? ", done" : "")).join(". ") + ".";
+    return { bubbles: [header + "\n" + lines.join("\n")], speak: speak };
   }
 
-  function clearReply() {
+  function clearReply(confirmed) {
     if (!todos.length) return { bubbles: ["Your list is already empty."], speak: "Your list is already empty." };
+    if (!confirmed && (!pendingConfirm || pendingConfirm.type !== "clear")) {
+      pendingConfirm = { type: "clear" };
+      return { bubbles: ["Are you sure? That will remove all " + todos.length + " task" + (todos.length === 1 ? "" : "s") + ". Say “yes” to confirm or “no” to cancel."], speak: "Are you sure you want to clear everything? Say yes to confirm, or no to cancel." };
+    }
+    pendingConfirm = null;
     const n = todos.length;
     todos = [];
     saveTodos();
@@ -579,22 +1272,34 @@
     if (target.kind === "all") {
       const open = todos.filter(t => !t.done);
       if (!open.length) return { bubbles: ["All tasks are already done."], speak: "All tasks are already done." };
-      open.forEach(t => { t.done = true; });
+      let advanced = 0;
+      open.forEach(t => { if (t.recur) { t.due = nextOccurrence(t.recur, t.due || Date.now()); advanced++; } else { t.done = true; logDone(t.text); } });
       saveTodos();
       renderTodos();
-      return { bubbles: ["Marked all " + open.length + " task" + (open.length === 1 ? "" : "s") + " done."], speak: "Marked " + open.length + " tasks done." };
+      const doneN = open.length - advanced;
+      if (!doneN) return { bubbles: ["All recurring tasks reset for their next date."], speak: "All recurring tasks are reset for their next date." };
+      let msg = "Marked " + doneN + " task" + (doneN === 1 ? "" : "s") + " done.";
+      if (advanced) msg += " " + advanced + " recurring task" + (advanced === 1 ? "" : "s") + " reset for next time.";
+      return { bubbles: [msg], speak: msg };
     }
     if (target.kind === "bare") {
       const open = todos.filter(t => !t.done);
       if (!open.length) return { bubbles: ["Everything is already done."], speak: "Everything is already done." };
       if (open.length === 1) {
-        open[0].done = true;
+        const t = open[0];
+        if (t.recur) {
+          t.due = nextOccurrence(t.recur, t.due || Date.now());
+          saveTodos();
+          renderTodos();
+          return { bubbles: ["Good job! “" + t.text + "” is back on the list for " + fmtDate(t.due) + "."], speak: "Good job. " + t.text + " is back on the list for " + fmtDate(t.due) + "." };
+        }
+        t.done = true;
+        logDone(t.text);
         saveTodos();
         renderTodos();
-        return { bubbles: ["Marked “" + open[0].text + "” done."], speak: "Marked " + open[0].text + " done." };
+        return { bubbles: ["Marked “" + t.text + "” done."], speak: "Marked " + t.text + " done." };
       }
-      return { bubbles: ["Which one? You have " + open.length + " open tasks — say a number, like “mark 2 done”."], speak: "Which task? You have " + open.length + " open tasks." };
-    }
+      return { bubbles: ["Which one? You have " + open.length + " open tasks — say a number, like “mark 2 done”."], speak: "Which task? You have " + open.length + " open tasks." };    }
     if (!todos.length) return { bubbles: ["Your list is empty — nothing to mark done."], speak: "Your list is empty." };
     const idx = resolveTarget(target);
     if (idx === "none") return { bubbles: ["I didn't catch which task to mark done."], speak: "Which task should I mark done?" };
@@ -604,7 +1309,14 @@
       return { bubbles: ["I couldn't find that task. You have " + todos.length + " task" + (todos.length === 1 ? "" : "s") + "."], speak: "I couldn't find that task." };
     const t = todos[idx];
     if (t.done) return { bubbles: ["“" + t.text + "” was already done."], speak: t.text + " was already done." };
+    if (t.recur) {
+      t.due = nextOccurrence(t.recur, t.due || Date.now());
+      saveTodos();
+      renderTodos();
+      return { bubbles: ["Good job! “" + t.text + "” is back on the list for " + fmtDate(t.due) + "."], speak: "Good job. " + t.text + " is back on the list for " + fmtDate(t.due) + "." };
+    }
     t.done = true;
+    logDone(t.text);
     saveTodos();
     renderTodos();
     return { bubbles: ["Marked “" + t.text + "” done."], speak: "Marked " + t.text + " done." };
@@ -631,14 +1343,479 @@
     return { bubbles: ["Changed “" + old + "” to “" + newText + "”."], speak: "Changed " + old + " to " + newText + "." };
   }
 
-  function addReply(tasks) {
-    if (!tasks || !tasks.length) return { bubbles: ["What would you like to add? Try “add buy milk”."], speak: "What would you like to add?" };
-    for (const t of tasks) todos.push({ text: t, done: false, created: Date.now() });
+  function extractAddList(s) {
+    let m = s.match(/\s+(?:to|onto|into)\s+(?:the\s+|my\s+)?(.+?)\s+list\s*$/i) || s.match(/\s+on\s+(?:the\s+|my\s+)?(.+?)\s+list\s*$/i);
+    if (m) {
+      const name = cleanListName(m[1]);
+      if (name) return { list: name, rest: s.slice(0, m.index).replace(/[\s,]+$/, "").trim() };
+    }
+    return { list: null, rest: s };
+  }
+
+  function createTasks(rawTasks, force, listName) {
+    const target = (listName && lists[listName]) ? listName : currentList;
+    const pool = lists[target] || (lists[target] = []);
+    const metas = rawTasks.map(parseTaskMeta);
+    if (!force) {
+      const dups = metas.filter(mm => pool.some(t => !t.done && normalize(t.text) === normalize(mm.text)));
+      if (dups.length && (!pendingConfirm || pendingConfirm.type !== "dup")) {
+        pendingConfirm = { type: "dup", rawTasks, list: target };
+        return { dup: dups.map(mm => mm.text), list: target };
+      }
+    }
+    const created = [];
+    for (const meta of metas) {
+      const todo = { text: meta.text, done: false, created: Date.now(), due: meta.due || null, prio: meta.prio, recur: meta.recur || null, note: meta.note || null, tags: meta.tags || [], est: meta.est || null, list: target };
+      if (todo.recur && !todo.due) todo.due = nextOccurrence(todo.recur);
+      pool.push(todo);
+      created.push(todo);
+    }
     saveTodos();
     renderTodos();
-    if (tasks.length === 1) return { bubbles: ["Added “" + tasks[0] + "”."], speak: "Added " + tasks[0] + "." };
-    const speak = "Added " + tasks.join(" and ") + ".";
-    return { bubbles: ["Added " + tasks.length + " tasks: " + tasks.map(t => "“" + t + "”").join(", ") + "."], speak: speak };
+    return { created, list: target };
+  }
+
+  function addedMsg(created, listName) {
+    const inList = (listName && listName !== currentList) ? " to the “" + listName + "” list" : "";
+    if (created.length === 1) {
+      const t = created[0];
+      let extra = "";
+      if (t.prio === 1) extra += " (high priority)";
+      else if (t.prio === 3) extra += " (low priority)";
+      if (t.due) extra += " due " + fmtDate(t.due);
+      if (t.est) extra += " (~" + fmtEst(t.est) + ")";
+      if (t.note) extra += " — note: " + t.note;
+      if (Array.isArray(t.tags) && t.tags.length) extra += " — tag" + (t.tags.length > 1 ? "s" : "") + ": " + t.tags.join(", ");
+      return { bubbles: ["Added “" + t.text + "”" + extra + inList + "."], speak: "Added " + t.text + "." + (t.due ? " Due " + fmtDate(t.due) + "." : "") };
+    }
+    const speak = "Added " + created.map(t => t.text).join(" and ") + ".";
+    return { bubbles: ["Added " + created.length + " tasks: " + created.map(t => "“" + t.text + "”").join(", ") + inList + "."], speak: speak };
+  }
+
+  function addReply(tasks, listName) {
+    if (!tasks || !tasks.length) return { bubbles: ["What would you like to add? Try “add buy milk”."], speak: "What would you like to add?" };
+    const res = createTasks(tasks, false, listName);
+    if (res.dup) {
+      const names = res.dup.slice(0, 3).map(n => "“" + n + "”").join(", ");
+      return { bubbles: [names + " " + (res.dup.length === 1 ? "is" : "are") + " already on the " + res.list + " list. Say “add anyway” to add " + (res.dup.length === 1 ? "it" : "them") + ", or “no” to skip."], speak: res.dup[0] + " is already on your list. Say add anyway to add it." };
+    }
+    return addedMsg(res.created, res.list);
+  }
+
+  function undoReply() {
+    const last = undoStack.pop();
+    if (last === undefined) return { bubbles: ["Nothing to undo yet."], speak: "Nothing to undo yet." };
+    try {
+      const snap = JSON.parse(last);
+      if (snap && typeof snap === "object" && snap.lists) {
+        lists = {};
+        for (const k of Object.keys(snap.lists)) lists[k] = Array.isArray(snap.lists[k]) ? snap.lists[k].filter(t => t && typeof t.text === "string") : [];
+        if (!Object.keys(lists).length) lists.main = [];
+        currentList = (typeof snap.current === "string" && lists[snap.current]) ? snap.current : Object.keys(lists)[0];
+        todos = lists[currentList] || (lists[currentList] = []);
+      } else if (Array.isArray(snap)) {
+        lists = { main: snap.filter(t => t && typeof t.text === "string") };
+        currentList = "main";
+        todos = lists.main;
+      } else {
+        return { bubbles: ["Couldn't undo that."], speak: "Couldn't undo that." };
+      }
+    } catch (e) {
+      return { bubbles: ["Couldn't undo that."], speak: "Couldn't undo that." };
+    }
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Undid that — your list is restored."], speak: "Undone. Your list is back to how it was." };
+  }
+
+  function searchReply(query) {
+    if (!todos.length) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
+    const q = String(query || "").toLowerCase().replace(/^for\s+/, "").trim();
+    if (!q) return { bubbles: ["What should I search for?"], speak: "What should I search for?" };
+    const hits = [];
+    todos.forEach((t, i) => {
+      const hay = t.text.toLowerCase() + (t.note ? " " + t.note.toLowerCase() : "") + (Array.isArray(t.tags) ? " " + t.tags.join(" ") : "");
+      if (hay.includes(q)) hits.push(i);
+    });
+    if (!hits.length) return { bubbles: ["No tasks match “" + query + "”."], speak: "No tasks match " + query + "." };
+    const lines = hits.map(i => {
+      const t = todos[i];
+      return (i + 1) + ". " + t.text + (t.prio === 1 ? " ⚡" : "") + (t.due ? " (due " + fmtDate(t.due) + ")" : "") + (t.est ? " (~" + fmtEst(t.est) + ")" : "") + (t.note ? " — “" + t.note + "”" : "") + (Array.isArray(t.tags) && t.tags.length ? " #" + t.tags.join(" #") : "") + (t.done ? " — done" : "");
+    });
+    const speak = "Found " + hits.length + (hits.length === 1 ? " task. " : " tasks. ") + hits.map(i => todos[i].text).join(", ") + ".";
+    return { bubbles: ["Found " + hits.length + " match" + (hits.length === 1 ? "" : "es") + ":\n" + lines.join("\n")], speak: speak };
+  }
+
+  function noteReply(target, noteText) {
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to note on."], speak: "Your list is empty." };
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length) {
+      const label = target && target.text ? "“" + target.text + "”" : "that task";
+      return { bubbles: ["I couldn't find a task matching " + label + "."], speak: "I couldn't find that task." };
+    }
+    const t = todos[idx];
+    if (!noteText) {
+      pendingNote = { index: idx, oldNote: t.note || null };
+      statusEl.textContent = "say or type the note…";
+      return { bubbles: ["What should the note say?"], speak: "What should the note say?" };
+    }
+    t.note = noteText;
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Noted on “" + t.text + "”: “" + noteText + "”."], speak: "Note saved on " + t.text + "." };
+  }
+
+  function snoozeReply(target, when) {
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to move."], speak: "Your list is empty." };
+    if (!when) when = nextOccurrence({ type: "daily" });
+    if (target.kind === "all") {
+      const open = todos.filter(t => !t.done);
+      if (!open.length) return { bubbles: ["Nothing open to move."], speak: "Nothing open to move." };
+      open.forEach(t => { t.due = when; });
+      saveTodos();
+      renderTodos();
+      const msg = "Moved " + open.length + " open task" + (open.length === 1 ? "" : "s") + " to " + fmtDate(when) + ".";
+      return { bubbles: [msg], speak: msg };
+    }
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length) {
+      const label = target && target.text ? "“" + target.text + "”" : "that task";
+      return { bubbles: ["I couldn't find a task matching " + label + "."], speak: "I couldn't find that task." };
+    }
+    const t = todos[idx];
+    t.due = when;
+    saveTodos();
+    renderTodos();
+    const msg = "Moved “" + t.text + "” to " + fmtDate(when) + ".";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function parseDueScope(rest) {
+    rest = String(rest || "").toLowerCase();
+    if (/overdue|late|past due/.test(rest)) return "overdue";
+    if (/today/.test(rest)) return "today";
+    if (/this week|next 7|within a week|week/.test(rest)) return "week";
+    return "all";
+  }
+
+  function dueScopeReply(scope) {
+    const open = todos.filter(t => !t.done);
+    if (!open.length) return { bubbles: ["Your list is empty — nothing due."], speak: "Your list is empty." };
+    const byDiff = open.filter(t => t.due).map(t => ({ t, diff: dayDiff(t.due) })).sort((a, b) => a.diff - b.diff);
+    const overdue = byDiff.filter(x => x.diff < 0);
+    const today = byDiff.filter(x => x.diff === 0);
+    const week = byDiff.filter(x => x.diff > 0 && x.diff <= 7);
+    const line = (x) => (todos.indexOf(x.t) + 1) + ". " + x.t.text + (x.t.prio === 1 ? " ⚡" : "") + (x.diff === 0 ? " — today" : x.diff === 1 ? " — tomorrow" : x.diff < 0 ? " — " + (-x.diff) + " day" + (-x.diff === 1 ? "" : "s") + " overdue" : " — in " + x.diff + " days");
+    let title, list, count;
+    if (scope === "overdue") { title = "Overdue:"; list = overdue.map(line); count = overdue.length; }
+    else if (scope === "today") { title = "Due today:"; list = today.map(line); count = today.length; }
+    else if (scope === "week") { title = "Due in the next 7 days:"; list = week.map(line); count = week.length; }
+    else {
+      if (!overdue.length && !today.length && !week.length) return { bubbles: ["Nothing is overdue or due in the next week."], speak: "Nothing is overdue or due this week." };
+      const parts = [];
+      if (overdue.length) parts.push("Overdue (" + overdue.length + "):\n" + overdue.slice(0, 5).map(line).join("\n"));
+      if (today.length) parts.push("Due today (" + today.length + "):\n" + today.slice(0, 5).map(line).join("\n"));
+      if (week.length) parts.push("This week (" + week.length + "):\n" + week.slice(0, 5).map(line).join("\n"));
+      return { bubbles: [parts.join("\n\n")], speak: "You have " + overdue.length + " overdue, " + today.length + " due today, and " + week.length + " more this week." };
+    }
+    if (!list.length) return { bubbles: ["Nothing " + (scope === "overdue" ? "overdue" : scope === "today" ? "due today" : "due this week") + "."], speak: "Nothing " + (scope === "overdue" ? "overdue" : "due today") + "." };
+    return { bubbles: [title + "\n" + list.join("\n")], speak: (scope === "today" ? "Due today: " : "") + list.map(l => l.replace(/^\d+\.\s*/, "").replace(/\s*—.*$/, "")).join(", ") + "." };
+  }
+
+  function dueInfoReply(text) {
+    if (!todos.length) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
+    const best = findBestTask(String(text || ""));
+    if (!best) return { bubbles: ["I couldn't find a task matching “" + text + "”."], speak: "I couldn't find that task." };
+    const t = todos[best.index];
+    if (!t.due) return { bubbles: ["“" + t.text + "” has no due date."], speak: t.text + " has no due date." };
+    const diff = dayDiff(t.due);
+    let rel = diff === 0 ? "today" : diff === 1 ? "tomorrow" : diff === -1 ? "yesterday" : diff < 0 ? (-diff) + " days ago" : "in " + diff + " days";
+    const msg = "“" + t.text + "” is due " + fmtDate(t.due) + " — that's " + rel + ".";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function readReply(target) {
+    if (!todos.length) return { bubbles: ["Your list is empty."], speak: "Your list is empty." };
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length) {
+      const label = target && target.text ? "“" + target.text + "”" : "that task";
+      return { bubbles: ["I couldn't find a task matching " + label + "."], speak: "I couldn't find that task." };
+    }
+    const t = todos[idx];
+    let line = (idx + 1) + ". " + t.text;
+    if (t.done) line += " — done";
+    else {
+      if (t.prio === 1) line += " (high priority)";
+      else if (t.prio === 3) line += " (low priority)";
+    }
+    if (t.due) line += " — due " + fmtDate(t.due) + (dayDiff(t.due) < 0 ? " (overdue)" : dayDiff(t.due) === 0 ? " (today)" : "");
+    if (t.recur) {
+      const r = t.recur;
+      const lbl = r.type === "daily" ? "every day" : (r.type === "weekly" && r.dow == null) ? "every week" : (r.dow != null ? "every " + (Object.keys(DOW).find(k => DOW[k] === r.dow) || "week") : "weekly");
+      line += " — repeats " + lbl;
+    }
+    if (t.note) line += " — note: “" + t.note + "”";
+    if (Array.isArray(t.tags) && t.tags.length) line += " — tags: #" + t.tags.join(" #");
+    if (t.est) line += " — takes about " + fmtEst(t.est);
+    const speak = (t.done ? t.text + ", done." : (t.prio === 1 ? "High priority. " : "") + t.text + (t.due ? ". Due " + fmtDate(t.due) + "." : "") + (t.est ? " About " + fmtEst(t.est) + "." : "") + (t.note ? ". Note: " + t.note + "." : ""));
+    return { bubbles: [line], speak };
+  }
+
+  function statsReply() {
+    const open = todos.filter(t => !t.done).length;
+    const total = todos.length;
+    const done = total - open;
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const doneToday = doneLog.filter(e => e.ts >= startOfToday).length;
+    const weekAgo = startOfToday - 6 * 86400000;
+    const doneWeek = doneLog.filter(e => e.ts >= weekAgo).length;
+    let streak = 0;
+    const hasDay = (offset) => {
+      const d0 = startOfToday - offset * 86400000;
+      return doneLog.some(e => e.ts >= d0 && e.ts < d0 + 86400000);
+    };
+    if (hasDay(0) || hasDay(1)) {
+      let c = hasDay(0) ? 0 : 1;
+      while (hasDay(c)) { streak++; c++; }
+    }
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const lines = [];
+    lines.push("Open: " + open + " · Done: " + done + " · Total: " + total + " (" + pct + "% done)");
+    lines.push("Completed today: " + doneToday + " · this week: " + doneWeek);
+    lines.push("Current streak: " + (streak ? streak + " day" + (streak === 1 ? "" : "s") + " 🔥" : "no days yet"));
+    const speak = "You have " + open + " open and " + done + " done, " + doneToday + " completed today, and a streak of " + streak + " day" + (streak === 1 ? "" : "s") + ".";
+    return { bubbles: ["Here's how you're doing:\n" + lines.join("\n")], speak };
+  }
+
+  async function exportReply() {
+    if (!todos.length) return { bubbles: ["Your list is empty — nothing to export."], speak: "Your list is empty." };
+    const lines = todos.map((t, i) => {
+      let s = (i + 1) + ". " + (t.done ? "[x] " : "[ ] ") + t.text;
+      if (t.prio === 1) s += " (high priority)";
+      else if (t.prio === 3) s += " (low priority)";
+      if (t.due) s += " (due " + fmtDate(t.due) + ")";
+      if (t.est) s += " (~" + fmtEst(t.est) + ")";
+      if (t.note) s += " — " + t.note;
+      if (Array.isArray(t.tags) && t.tags.length) s += " #" + t.tags.join(" #");
+      if (t.recur) s += " (repeats)";
+      return s;
+    });
+    const txt = "My " + (currentList === "main" ? "to-do list" : currentList + " list") + ":\n" + lines.join("\n");
+    const legacyCopy = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = txt;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand("copy");
+        ta.remove();
+        return ok;
+      } catch (e) { return false; }
+    };
+    let copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(txt);
+        copied = true;
+      }
+    } catch (e) {}
+    if (!copied) copied = legacyCopy();
+    const msg = (copied ? "Copied your list to the clipboard — here it is:\n" : "Here's your list:\n") + txt;
+    return { bubbles: [msg], speak: copied ? "Copied your list to the clipboard." : "Here's your list." };
+  }
+
+  function tagsReply(tag) {
+    tag = String(tag || "").replace(/^#/, "").trim().toLowerCase();
+    if (!tag) return { bubbles: ["Which tag? Try “show work”."], speak: "Which tag?" };
+    const hits = todos.map((t, i) => ({ t, i })).filter(x => Array.isArray(x.t.tags) && x.t.tags.indexOf(tag) !== -1);
+    if (!hits.length) return { bubbles: ["Nothing is tagged #" + tag + "."], speak: "Nothing is tagged " + tag + "." };
+    const lines = hits.map(x => {
+      const t = x.t;
+      let s = (x.i + 1) + ". " + t.text;
+      if (t.prio === 1) s += " ⚡";
+      if (t.due) s += " (due " + fmtDate(t.due) + (dayDiff(t.due) < 0 ? " — overdue" : "") + ")";
+      if (t.done) s += " — done";
+      return s;
+    });
+    const speak = hits.length + " task" + (hits.length === 1 ? "" : "s") + " tagged " + tag + ": " + hits.map(x => x.t.text).join(", ") + ".";
+    return { bubbles: ["#" + tag + " (" + hits.length + "):\n" + lines.join("\n")], speak };
+  }
+
+  // ============ multi-list commands ============
+  function listcreateReply(name) {
+    name = cleanListName(name);
+    if (!name) return { bubbles: ["What should I call the new list? Try “create list work”."], speak: "What should I call the new list?" };
+    if (lists[name]) {
+      if (name !== currentList) {
+        currentList = name; todos = lists[name]; persistSnapshot(); renderTodos();
+        return { bubbles: ["“" + name + "” already exists — switched to it."], speak: "Switched to the " + name + " list." };
+      }
+      return { bubbles: ["“" + name + "” already exists."], speak: "That list already exists." };
+    }
+    lists[name] = [];
+    currentList = name;
+    todos = lists[name];
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Created a new “" + name + "” list and switched to it — it's empty."], speak: "Created the " + name + " list. It's empty." };
+  }
+
+  function listshowReply(name) {
+    name = cleanListName(name);
+    if (!name) return listReply();
+    const found = resolveList(name);
+    if (!found) return { bubbles: ["There's no list called “" + name + "”. Say “create list " + name + "” or “what lists” to see them."], speak: "No list named " + name + "." };
+    if (found !== currentList) {
+      currentList = found;
+      todos = lists[found];
+      persistSnapshot();
+      renderTodos();
+    }
+    if (!todos.length) return { bubbles: ["Switched to the “" + found + "” list — it's empty. Say “add buy milk” to start."], speak: "Switched to the " + found + " list. It's empty." };
+    return listReply();
+  }
+
+  function listsReply() {
+    const names = Object.keys(lists);
+    if (!names.length) return { bubbles: ["No lists yet."], speak: "No lists yet." };
+    const lines = names.map(n => {
+      const open = lists[n].filter(t => !t.done).length;
+      return (n === currentList ? "▸ " : "  ") + n + " (" + open + " open, " + lists[n].length + " total)";
+    });
+    const speak = "You have " + names.length + " list" + (names.length === 1 ? "" : "s") + ": " + names.join(", ") + ". You're on the " + currentList + " list.";
+    return { bubbles: ["Your lists:\n" + lines.join("\n") + "\n\nSay “switch to <name>” to change."], speak: speak };
+  }
+
+  function listmoveReply(target, listName) {
+    listName = cleanListName(listName);
+    if (!listName) return { bubbles: ["Which list should I move it to?"], speak: "Which list?" };
+    if (!lists[listName]) { lists[listName] = []; populateListSelect(); }
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length)
+      return { bubbles: ["I couldn't find that task."], speak: "I couldn't find that task." };
+    const t = todos[idx];
+    const from = currentList;
+    todos.splice(idx, 1);
+    t.list = listName;
+    lists[listName].push(t);
+    saveTodos();
+    renderTodos();
+    const msg = "Moved “" + t.text + "” to the " + listName + " list" + (from !== listName ? " (from " + from + ")" : "") + ".";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function listdeleteReply(name, confirmed) {
+    name = cleanListName(name);
+    if (!name) name = currentList;
+    if (name === "main") return { bubbles: ["You can't delete the main list."], speak: "You can't delete the main list." };
+    const found = resolveList(name);
+    if (!found) return { bubbles: ["There's no list called “" + name + "”."], speak: "No list named " + name + "." };
+    if (!confirmed && lists[found].length && (!pendingConfirm || pendingConfirm.type !== "listdelete")) {
+      pendingConfirm = { type: "listdelete", name: found };
+      return { bubbles: ["Delete the “" + found + "” list and its " + lists[found].length + " task" + (lists[found].length === 1 ? "" : "s") + "? Say “yes” to confirm, or “no” to cancel."], speak: "Delete the " + found + " list and its tasks? Say yes to confirm." };
+    }
+    pendingConfirm = null;
+    delete lists[found];
+    if (currentList === found) {
+      const rest = Object.keys(lists);
+      if (!rest.length) { lists.main = []; currentList = "main"; }
+      else currentList = rest[0];
+      todos = lists[currentList] || (lists[currentList] = []);
+    }
+    saveTodos();
+    renderTodos();
+    return { bubbles: ["Deleted the “" + found + "” list."], speak: "Deleted the " + found + " list." };
+  }
+
+  // ============ estimates ============
+  function estimateReply(target, minutes) {
+    const idx = resolveTarget(target);
+    if (idx === "none" || idx === null || idx < 0 || idx >= todos.length)
+      return { bubbles: ["I couldn't find that task."], speak: "I couldn't find that task." };
+    const t = todos[idx];
+    if (minutes == null) {
+      if (!t.est) return { bubbles: ["“" + t.text + "” has no estimate to remove."], speak: "That task has no estimate." };
+      t.est = null;
+      saveTodos(); renderTodos();
+      return { bubbles: ["Removed the estimate from “" + t.text + "”."], speak: "Estimate removed." };
+    }
+    t.est = minutes;
+    saveTodos(); renderTodos();
+    const msg = "“" + t.text + "” should take about " + fmtEst(minutes) + ".";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function timestotalReply(query) {
+    if (query) {
+      const best = findBestTask(query);
+      if (best) {
+        const t = todos[best.index];
+        if (t.est) { const msg = "“" + t.text + "” should take about " + fmtEst(t.est) + "."; return { bubbles: [msg], speak: msg }; }
+        return { bubbles: ["“" + t.text + "” has no estimated time yet. Say “set estimate task " + (best.index + 1) + " to 20 minutes”."], speak: "That task has no estimate yet." };
+      }
+    }
+    const open = todos.filter(t => !t.done);
+    if (!open.length) return { bubbles: ["No open tasks — nothing to estimate."], speak: "No open tasks." };
+    const withEst = open.filter(t => t.est);
+    const total = withEst.reduce((s, t) => s + t.est, 0);
+    if (!withEst.length) return { bubbles: ["None of your " + open.length + " open task" + (open.length === 1 ? "" : "s") + " have estimates yet. Add one like “add fix sink takes 30 minutes”."], speak: "No estimates yet. Add one, like add fix sink takes thirty minutes." };
+    const msg = "About " + fmtEst(total) + " of work across " + withEst.length + " of " + open.length + " open task" + (open.length === 1 ? "" : "s") + ".";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  // ============ reminders / notifications ============
+  function dueSummary() {
+    const open = todos.filter(t => !t.done && t.due);
+    const overdue = open.filter(t => dayDiff(t.due) < 0);
+    const dueToday = open.filter(t => dayDiff(t.due) === 0);
+    return { overdue, dueToday };
+  }
+
+  function remindReply() {
+    const { overdue, dueToday } = dueSummary();
+    if (!overdue.length && !dueToday.length) return { bubbles: ["Nothing is overdue or due today."], speak: "Nothing is overdue or due today." };
+    const parts = [];
+    if (overdue.length) parts.push(overdue.length + " overdue: " + overdue.slice(0, 3).map(t => t.text).join(", "));
+    if (dueToday.length) parts.push(dueToday.length + " due today: " + dueToday.slice(0, 3).map(t => t.text).join(", "));
+    const txt = "You have " + parts.join(". ") + ".";
+    let notif = false;
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try {
+        const n = new Notification("📅 Task reminder", { body: txt });
+        n.onclick = () => { try { window.focus(); } catch (e) {} };
+        notif = true;
+      } catch (e) {}
+    }
+    const bubbles = [txt + (notif ? " (sent a notification too)" : " Turn on “Due reminders” in ⚙️ settings to get notifications on load.")];
+    return { bubbles, speak: txt };
+  }
+
+  async function remindenableReply() {
+    try {
+      if (typeof Notification === "undefined") return { bubbles: ["This browser doesn't support notifications."], speak: "Notifications aren't supported here." };
+      if (Notification.permission === "granted") {
+        if (window.applyReminderSetting) window.applyReminderSetting(true);
+        return { bubbles: ["Notifications are on — I'll ping you about overdue and due-today tasks."], speak: "Notifications are on." };
+      }
+      const p = await Notification.requestPermission();
+      if (p === "granted") {
+        if (window.applyReminderSetting) window.applyReminderSetting(true);
+        const { overdue, dueToday } = dueSummary();
+        if (overdue.length || dueToday.length) {
+          try {
+            const n = new Notification("📅 Task reminder", { body: "You have " + (overdue.length ? overdue.length + " overdue" : "") + (overdue.length && dueToday.length ? " and " : "") + (dueToday.length ? dueToday.length + " due today" : "") + "." });
+            n.onclick = () => { try { window.focus(); } catch (e) {} };
+          } catch (e) {}
+        }
+        return { bubbles: ["Notifications are on — I'll ping you about overdue and due-today tasks."], speak: "Notifications are on." };
+      }
+      return { bubbles: ["Notification permission was denied, so I can't ping you. You can still ask me “what's overdue” anytime."], speak: "Notifications were blocked." };
+    } catch (e) {
+      return { bubbles: ["Couldn't enable notifications in this embed — try opening the generator on its own page."], speak: "Couldn't enable notifications here." };
+    }
   }
 
   function unknownReply(question) {
@@ -647,7 +1824,155 @@
     return { bubbles: ["I didn't quite catch that. Try “add buy milk”, “mark 2 done”, “read my list”, or “clear all”."], speak: "I didn't quite catch that." };
   }
 
-  function applyIntent(it) {
+  const WMO = { 0: "clear", 1: "mainly clear", 2: "partly cloudy", 3: "overcast", 45: "foggy", 48: "icy fog", 51: "light drizzle", 53: "drizzle", 55: "heavy drizzle", 56: "freezing drizzle", 57: "freezing drizzle", 61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain", 67: "freezing rain", 71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains", 80: "rain showers", 81: "rain showers", 82: "violent rain showers", 85: "snow showers", 86: "snow showers", 95: "a thunderstorm", 96: "a thunderstorm with hail", 99: "a severe thunderstorm" };
+  function wmoDesc(code) { return WMO[code] || "mixed conditions"; }
+
+  async function briefReply() {
+    const now = new Date();
+    const h = now.getHours();
+    const part = h < 5 ? "Good night" : h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+    const timeStr = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const open = todos.filter(t => !t.done);
+    let msg = part + "! It's " + timeStr + ". ";
+    if (!open.length) msg += "You have no open tasks — enjoy the clear deck.";
+    else {
+      const listed = open.slice(0, 5).map((t, i) => (i + 1) + ": " + t.text).join(", ");
+      msg += "You have " + open.length + " open task" + (open.length === 1 ? "" : "s") + ": " + listed + (open.length > 5 ? ", and " + (open.length - 5) + " more." : ".");
+      const overdue = open.filter(t => t.due && dayDiff(t.due) < 0);
+      const dueToday = open.filter(t => t.due && dayDiff(t.due) === 0);
+      if (overdue.length) msg += " Overdue: " + overdue.slice(0, 3).map(t => t.text).join(", ") + ".";
+      if (dueToday.length) msg += " Due today: " + dueToday.slice(0, 3).map(t => t.text).join(", ") + ".";
+      const high = open.filter(t => t.prio === 1);
+      if (high.length && high.length <= 2) msg += " High priority: " + high.map(t => t.text).join(", ") + ".";
+    }
+    let weather = "";
+    try {
+      const geo = await root.superFetch("https://ipwho.is/").then(r => r.json());
+      if (geo && geo.success && geo.latitude != null && geo.longitude != null && geo.city) {
+        const w = await root.superFetch("https://api.open-meteo.com/v1/forecast?latitude=" + geo.latitude + "&longitude=" + geo.longitude + "&current=temperature_2m,weather_code&timezone=auto").then(r => r.json());
+        if (w && w.current) {
+          const t = Math.round(w.current.temperature_2m);
+          weather = " In " + geo.city + " it's " + t + " degrees and " + wmoDesc(w.current.weather_code) + ".";
+        }
+      }
+    } catch (e) {}
+    msg += weather || " I can't fetch the weather right now.";
+    return { bubbles: [msg], speak: msg };
+  }
+
+  function parseAiJson(resp) {
+    const s = String(resp || "");
+    const a = s.indexOf("{"), b = s.lastIndexOf("}");
+    if (a === -1 || b <= a) return null;
+    try { return JSON.parse(s.slice(a, b + 1)); } catch (e) { return null; }
+  }
+
+  function resolveAiTarget(t) {
+    const s = String(t || "").trim();
+    if (/^\d+$/.test(s)) { const idx = parseInt(s, 10) - 1; return (idx >= 0 && idx < todos.length) ? idx : null; }
+    if (!s) return null;
+    const best = findBestTask(s);
+    return best ? best.index : null;
+  }
+
+  async function aiHandle(u) {
+    const think = addThinkingBubble();
+    statusEl.textContent = "thinking…";
+    let reply = "";
+    try {
+      const open = todos.filter(t => !t.done).map((t, i) => (i + 1) + ". " + t.text).join("\n");
+      const done = todos.filter(t => t.done).map((t, i) => (i + 1) + ". " + t.text).join("\n");
+      const prompt = "You are the backend brain of a voice-controlled to-do list assistant. The user just said something; decide what to do and output ONLY one compact JSON object (no commentary, no markdown, single line).\n\n"
+        + "Available actions — the \"reply\" field is ALWAYS required and is the short friendly spoken line to the user:\n"
+        + '{"action":"add","tasks":["task 1","task 2"],"reply":"..."} — create new tasks. Each task string may include hints like "due tomorrow", "every monday", "urgent", "note call bob first", or "tag work", which the app parses into due dates / recurring / priority / notes / tags.\n'
+        + '{"action":"delete","target":"<number or exact task text>","reply":"..."}\n'
+        + '{"action":"done","target":"<number or exact task text>","reply":"..."}\n'
+        + '{"action":"edit","target":"<number or exact task text>","newText":"<new wording>","reply":"..."}\n'
+        + '{"action":"snooze","target":"<number or exact task text>","when":"friday","reply":"..."} — change/set a task due date.\n'
+        + '{"action":"clear","reply":"..."}\n'
+        + '{"action":"count","reply":"..."}\n'
+        + '{"action":"list","reply":"..."}\n'
+        + '{"action":"reply","reply":"..."} — for small talk, questions, jokes and anything that is not a task command.\n\n'
+        + "For add/delete/done/edit, act on the tasks listed below. Keep every reply to ONE short sentence.\n\n"
+        + "Open tasks:\n" + (open || "(none)") + "\n\nDone tasks:\n" + (done || "(none)") + "\n\nUser said: \"" + u + "\"";
+      const res = await root.generateText({ instruction: prompt, startWith: '{"action"' });
+      const parsed = parseAiJson(res.text);
+      if (!parsed || !parsed.action) {
+        reply = "I didn't quite get that — could you rephrase? Try something like “add buy milk”.";
+      } else {
+        reply = String(parsed.reply || "").trim();
+        switch (parsed.action) {
+          case "add": {
+            const tasks = Array.isArray(parsed.tasks) ? parsed.tasks.filter(x => typeof x === "string" && x.trim()) : [];
+            if (tasks.length) {
+              const res = createTasks(tasks);
+              if (res.dup) reply = "“" + res.dup[0] + "” is already on the " + res.list + " list. Say “add anyway” to add it.";
+              else reply = String(parsed.reply || "").trim() || addedMsg(res.created, res.list).bubbles[0];
+            }
+            else reply = "What would you like me to add?";
+            break;
+          }
+          case "delete": {
+            const idx = resolveAiTarget(parsed.target);
+            if (idx == null) reply = "I couldn't find a task matching “" + String(parsed.target || "") + "”.";
+            else { const r = todos.splice(idx, 1)[0]; saveTodos(); renderTodos(); reply = "Removed " + r.text + "."; }
+            break;
+          }
+          case "done": {
+            const idx = resolveAiTarget(parsed.target);
+            if (idx == null) reply = "I couldn't find a task matching “" + String(parsed.target || "") + "”.";
+            else if (todos[idx].done) reply = todos[idx].text + " was already done.";
+            else if (todos[idx].recur) {
+              todos[idx].due = nextOccurrence(todos[idx].recur, todos[idx].due || Date.now());
+              saveTodos(); renderTodos();
+              reply = "Good job — " + todos[idx].text + " is back for " + fmtDate(todos[idx].due) + ".";
+            }
+            else { todos[idx].done = true; logDone(todos[idx].text); saveTodos(); renderTodos(); reply = "Marked " + todos[idx].text + " done."; }
+            break;
+          }
+          case "edit": {
+            const idx = resolveAiTarget(parsed.target);
+            const nt = String(parsed.newText || "").trim();
+            if (idx == null) reply = "I couldn't find a task matching “" + String(parsed.target || "") + "”.";
+            else if (!nt) reply = "What should I change " + todos[idx].text + " to?";
+            else { const old = todos[idx].text; todos[idx].text = nt; saveTodos(); renderTodos(); reply = "Changed " + old + " to " + nt + "."; }
+            break;
+          }
+          case "clear": {
+            const r = clearReply();
+            reply = r.bubbles[0];
+            break;
+          }
+          case "snooze": {
+            const idx = resolveAiTarget(parsed.target);
+            const when = parseDue(String(parsed.when || ""));
+            if (idx == null) reply = "I couldn't find a task matching “" + String(parsed.target || "") + "”.";
+            else if (!when) reply = "When should I move it to? Try “snooze task 2 to friday”.";
+            else { todos[idx].due = when; saveTodos(); renderTodos(); reply = "Moved " + todos[idx].text + " to " + fmtDate(when) + "."; }
+            break;
+          }
+          case "count": {
+            const o = todos.filter(t => !t.done).length;
+            reply = todos.length ? "You have " + o + " open and " + (todos.length - o) + " done — " + todos.length + " total." : "Your list is empty.";
+            break;
+          }
+          case "list":
+            reply = todos.length ? "Your list: " + todos.map((t, i) => (i + 1) + ". " + t.text + (t.done ? " — done" : "")).join("; ") + "." : "Your list is empty.";
+            break;
+        }
+        if (!reply) reply = "Done.";
+      }
+    } catch (e) {
+      console.warn("ai fallback error", e);
+      reply = "Sorry — the AI brain is unavailable right now. Try “add buy milk”, “mark 2 done”, or “read my list”.";
+    }
+    if (think && think.isConnected) think.remove();
+    addBubble("assistant", reply);
+    statusEl.textContent = "type below, or tap 🎤 to talk";
+    await speakReply(reply);
+  }
+
+  async function applyIntent(it) {
     switch (it.intent) {
       case "greet": return greetReply();
       case "help": return helpReply();
@@ -655,10 +1980,30 @@
       case "count": return countReply();
       case "list": return listReply();
       case "clear": return clearReply();
+      case "undo": return undoReply();
       case "delete": return deleteReply(it.target);
       case "done": return doneReply(it.target);
       case "edit": return editReply(it.target, it.newText);
-      case "add": return addReply(it.tasks);
+      case "brief": return briefReply();
+      case "add": return addReply(it.tasks, it.list);
+      case "search": return searchReply(it.query);
+      case "note": return noteReply(it.target, it.note);
+      case "snooze": return snoozeReply(it.target, it.when);
+      case "due": return dueScopeReply(it.scope);
+      case "dueinfo": return dueInfoReply(it.text);
+      case "stats": return statsReply();
+      case "read": return readReply(it.target);
+      case "export": return exportReply();
+      case "tags": return tagsReply(it.tag);
+      case "listcreate": return listcreateReply(it.name);
+      case "listshow": return listshowReply(it.name);
+      case "lists": return listsReply();
+      case "listmove": return listmoveReply(it.target, it.list);
+      case "listdelete": return listdeleteReply(it.name);
+      case "estimate": return estimateReply(it.target, it.minutes);
+      case "timestotal": return timestotalReply(it.query);
+      case "remind": return remindReply();
+      case "remindenable": return remindenableReply();
       default: return unknownReply(it.question);
     }
   }
@@ -686,13 +2031,68 @@
         return;
       }
     }
+    // pending confirmation (destructive actions / duplicate adds)
+    if (pendingConfirm) {
+      if (/^(?:yes|yeah|yep|yup|sure|confirm|ok|okay|go ahead|do it|affirmative|add anyway|add it anyway|force add|add it)[!.?,]*$/.test(u)) {
+        let res = null;
+        if (pendingConfirm.type === "clear") res = clearReply(true);
+        else if (pendingConfirm.type === "dup") {
+          const pc = pendingConfirm;
+          pendingConfirm = null;
+          const r2 = createTasks(pc.rawTasks, true, pc.list);
+          if (r2.created) res = addedMsg(r2.created, r2.list);
+        }
+        else if (pendingConfirm.type === "listdelete") {
+          const pc = pendingConfirm;
+          pendingConfirm = null;
+          res = listdeleteReply(pc.name, true);
+        }
+        if (res) {
+          for (const b of res.bubbles) addBubble("assistant", b);
+          if (res.speak) await speakReply(res.speak);
+        }
+        return;
+      }
+      if (/^(?:no|nope|nah|cancel|never mind|nevermind|forget it|forget that|quit|stop|abort|skip)[!.?,]*$/.test(u)) {
+        pendingConfirm = null;
+        addBubble("assistant", "Okay, cancelled.");
+        return;
+      }
+    }
+
+    // pending note capture
+    if (pendingNote) {
+      if (/^(?:cancel|never mind|nevermind|forget it|forget that|skip|quit)[!.?,]*$/.test(u)) {
+        pendingNote = null;
+        statusEl.textContent = "type below, or tap 🎤 to talk";
+        addBubble("assistant", "Cancelled — no note added.");
+        return;
+      }
+      const pn = pendingNote;
+      pendingNote = null;
+      statusEl.textContent = "type below, or tap 🎤 to talk";
+      if (pn.index >= 0 && pn.index < todos.length) {
+        todos[pn.index].note = u;
+        saveTodos();
+        renderTodos();
+        addBubble("assistant", "Note saved on “" + todos[pn.index].text + "”.");
+      } else {
+        addBubble("assistant", "That task is gone — note not saved.");
+      }
+      return;
+    }
+
     const intent = parseIntent(u);
     if (intent.intent === "stop") {
       stopEverything();
       addBubble("assistant", "Stopped — I'll be quiet now.");
       return;
     }
-    const res = applyIntent(intent);
+    if (intent.intent === "unknown") {
+      await aiHandle(u);
+      return;
+    }
+    const res = await applyIntent(intent);
     for (const b of res.bubbles) addBubble("assistant", b);
     if (res.speak) await speakReply(res.speak);
   }
@@ -771,9 +2171,16 @@
           continuous: true,
           interim: true,
           onStart: () => {},
-          onInterim: ({ text }) => { if (text) renderInterim(text); },
+          onInterim: ({ text }) => { if (text && !holdMode) renderInterim(text); },
           onFinal: ({ text }) => {
-            if (text && text.trim()) commitVoice(text.trim());
+            if (text && text.trim()) {
+              if (holdMode) {
+                holdBuffer = (holdBuffer ? holdBuffer + " " : "") + text.trim();
+                renderInterim(holdBuffer);
+              } else {
+                commitVoice(text.trim());
+              }
+            }
           },
           onEnd: () => {
             recognition = null;
@@ -796,13 +2203,9 @@
   }
 
   // ============ UI wiring ============
-  micBtn.addEventListener("click", () => {
+  function startMicMode() {
     if (!tts || !tts.sttSupported) {
       addBubble("assistant", "Voice input needs Chrome, Edge or Safari (this demo is in a browser without speech recognition). Type below instead — everything works by typing, and I'll still talk back.");
-      return;
-    }
-    if (micMode) {
-      stopConversation();
       return;
     }
     micMode = true;
@@ -810,7 +2213,59 @@
     micBtn.classList.add("listening");
     statusEl.textContent = "mic on — talk now";
     startListening();
+  }
+
+  function releaseHold() {
+    if (!holdMode || !micMode) { holdMode = false; return; }
+    holdMode = false;
+    stopRecognition();
+    const final = holdBuffer.trim();
+    holdBuffer = "";
+    micMode = false;
+    micBtn.textContent = "🎤 Talk";
+    micBtn.classList.remove("listening");
+    statusEl.textContent = "type below, or tap 🎤 to talk";
+    if (final) commitVoice(final);
+    else addBubble("assistant", "Didn't catch that — try again.");
+  }
+
+  micBtn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    pressStart = Date.now();
+    wasMicOn = micMode;
+    if (!micMode) startMicMode();
+    if (micMode) { holdMode = true; holdBuffer = ""; }
+    if (micBtn.setPointerCapture) { try { micBtn.setPointerCapture(e.pointerId); } catch (err) {} }
   });
+  micBtn.addEventListener("pointerup", (e) => {
+    e.preventDefault();
+    if (Date.now() - pressStart >= 350 && holdMode) { releaseHold(); return; }
+    holdMode = false;
+    holdBuffer = "";
+    if (wasMicOn) stopConversation();
+  });
+  micBtn.addEventListener("pointercancel", () => { if (holdMode) releaseHold(); });
+  micBtn.addEventListener("lostpointercapture", () => { if (holdMode) releaseHold(); });
+
+  // hold Space anywhere (except while typing) to talk
+  function isTypingTarget(t) {
+    return !(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable));
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== " " || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!isTypingTarget(e.target) || !tts || !tts.sttSupported) return;
+    e.preventDefault();
+    if (!micMode) startMicMode();
+    if (micMode) { holdMode = true; holdBuffer = ""; pressStart = Date.now(); wasMicOn = false; }
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.key !== " " || !holdMode) return;
+    if (Date.now() - pressStart >= 350) { releaseHold(); return; }
+    holdMode = false;
+    holdBuffer = "";
+    if (micMode && !wasMicOn) stopConversation();
+  });
+  window.addEventListener("blur", () => { if (holdMode) releaseHold(); });
 
   function submitTyped() {
     const v = textInput.value.trim();
@@ -827,10 +2282,27 @@
     todos = [];
     saveTodos();
     renderTodos();
-    addBubble("assistant", "Cleared your list.");
+    addBubble("assistant", "Cleared the “" + currentList + "” list.");
+    if (window.showToast) showToast("List cleared");
   });
 
-  const DEMO_CHIPS = ["Add buy milk and eggs", "Mark 2 done", "Change task 2 to buy oat milk", "Read my list", "Clear all"];
+  listSelect.addEventListener("change", () => {
+    const v = listSelect.value;
+    if (v && lists[v] && v !== currentList) {
+      currentList = v;
+      todos = lists[v];
+      persistSnapshot();
+      renderTodos();
+    }
+  });
+
+  newListBtn.addEventListener("click", () => {
+    textInput.value = "create list ";
+    textInput.focus();
+    addBubble("assistant", "Type the list name — or say “create list work”.");
+  });
+
+  const DEMO_CHIPS = ["Add pay rent due friday", "Water plants every monday", "Add buy milk tag work", "Add fix sink takes 30 minutes", "Create list work", "How long will this take", "Good morning"];
   DEMO_CHIPS.forEach(c => {
     const b = document.createElement("button");
     b.className = "chip";
@@ -843,15 +2315,245 @@
   });
 
   // expose parser internals for automated testing (harmless in production)
-  window.__vt = { parseIntent, normalize, splitAdd, findBestTask, parseDeleteTarget };
+  window.__vt = { parseIntent, normalize, splitAdd, findBestTask, parseDeleteTarget, parseTaskMeta, parseDue, parseRecur, nextOccurrence, fmtDate, dayDiff, parseDueScope, statsReply, tagsReply, fmtEst, toMins, cleanListName, resolveList, getLists: () => Object.keys(lists), getCurrentList: () => currentList };
 
   // ============ init ============
   loadTodos();
+  loadDoneLog();
+  prevState = JSON.stringify({ current: currentList, lists });
   renderTodos();
-  addBubble("assistant", "Welcome! I'm your voice assistant, powered by the voice-tools-plugin. Tap 🎤 Talk to speak commands, or type below — try a demo chip.");
-  if (tts) {
-    tts.setVoice(VOICE_NAME);
-    if (tts.sttSupported) statusEl.textContent = "tap 🎤 to talk, or type below";
+  (async function () {
+    if (tts) {
+      try { tts.setVoice(currentVoice()); } catch (e) {}
+      if (tts.sttSupported) statusEl.textContent = "tap 🎤 to talk, or type below";
+    }
+    const had = await loadChat();
+    if (!had) addBubble("assistant", "Welcome! I'm your voice assistant, powered by the voice-tools-plugin. Tap 🎤 Talk to speak commands, or type below — try a demo chip.");
+    try {
+      let greetOn = true;
+      const gs = JSON.parse(localStorage.getItem("aiVoiceAssistantSettings") || "{}");
+      if (typeof gs.greeting === "boolean") greetOn = gs.greeting;
+      const gd = new Date();
+      const dayKey = gd.getFullYear() + "-" + (gd.getMonth() + 1) + "-" + gd.getDate();
+      const h = gd.getHours();
+      const open = todos.filter(t => !t.done);
+      if (greetOn && h >= 5 && h < 12 && localStorage.getItem("vtAssistant_greeted") !== dayKey && todos.length) {
+        localStorage.setItem("vtAssistant_greeted", dayKey);
+        const overdue = open.filter(t => t.due && dayDiff(t.due) < 0);
+        const dueToday = open.filter(t => t.due && dayDiff(t.due) === 0);
+        let gm = "Good morning! You have " + open.length + " open task" + (open.length === 1 ? "" : "s") + ". ";
+        if (overdue.length) gm += overdue.length + " overdue: " + overdue.slice(0, 3).map(t => t.text).join(", ") + ". ";
+        if (dueToday.length) gm += "Due today: " + dueToday.slice(0, 3).map(t => t.text).join(", ") + ". ";
+        gm += "Say “good morning” for the full briefing, or just start talking.";
+        addBubble("assistant", gm);
+      }
+    } catch (e) {}
+    try {
+      const rms = JSON.parse(localStorage.getItem("aiVoiceAssistantSettings") || "{}");
+      if (rms.reminders !== false && typeof Notification !== "undefined" && Notification.permission === "granted" && todos.length) {
+        const rKey = "vtAssistant_notified_" + dayKey;
+        if (localStorage.getItem(rKey) !== "1") {
+          const overdue = todos.filter(t => !t.done && t.due && dayDiff(t.due) < 0);
+          const dueToday = todos.filter(t => !t.done && t.due && dayDiff(t.due) === 0);
+          if (overdue.length || dueToday.length) {
+            localStorage.setItem(rKey, "1");
+            const parts = [];
+            if (overdue.length) parts.push(overdue.length + " overdue: " + overdue.slice(0, 3).map(t => t.text).join(", "));
+            if (dueToday.length) parts.push(dueToday.length + " due today: " + dueToday.slice(0, 3).map(t => t.text).join(", "));
+            try {
+              const n = new Notification("📅 Task reminder", { body: parts.join(". ") });
+              n.onclick = () => { try { window.focus(); } catch (e) {} };
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (e) {}
+  })();
+  let badgeAccent = "#7c6cff";
+  try {
+    const s = JSON.parse(localStorage.getItem("aiVoiceAssistantSettings"));
+    if (s && s.accent) badgeAccent = s.accent;
+  } catch (e) {}
+  if (tagBadgeEl && rathjiTemplateFn) {
+    try { tagBadgeEl.innerHTML = rathjiTemplateFn("voice-controlled", { emoji: "🗣️", color: badgeAccent }); } catch (e) {}
   }
+  window.refreshBadge = function (accent) {
+    if (tagBadgeEl && rathjiTemplateFn) {
+      try { tagBadgeEl.innerHTML = rathjiTemplateFn("voice-controlled", { emoji: "🗣️", color: accent || badgeAccent }); } catch (e) {}
+    }
+  };
 })();
+</script>
+
+<script>
+  // ── Toasts ──
+  var toastCtn = document.getElementById("toasts");
+  function showToast(msg, ms) {
+    var t = document.createElement("div");
+    t.className = "toast";
+    t.textContent = msg;
+    toastCtn.appendChild(t);
+    setTimeout(function() { t.classList.add("out"); }, ms || 2000);
+    setTimeout(function() { t.remove(); }, (ms || 2000) + 320);
+  }
+
+  // ── Title bar: settings panel (rathji-template pattern) ──
+  var SETTINGS_KEY = "aiVoiceAssistantSettings";
+  var SETTINGS_DEFAULTS = { theme: "dark", accent: "#7c6cff", size: 16, motion: false, voice: "British Lady", speed: 1.05, greeting: true, reminders: true };
+  var settings = Object.assign({}, SETTINGS_DEFAULTS);
+  try {
+    var saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+    if (saved) settings = Object.assign({}, SETTINGS_DEFAULTS, saved);
+  } catch (e) {}
+
+  // ?theme=&accent=&size=&motion= overrides win over saved settings.
+  var qp = new URLSearchParams(location.search);
+  if (qp.get("theme") === "dark" || qp.get("theme") === "light") settings.theme = qp.get("theme");
+  if (qp.get("accent") && /^#[0-9a-fA-F]{6}$/.test(qp.get("accent"))) settings.accent = qp.get("accent");
+  var qSize = parseInt(qp.get("size"), 10);
+  if ([15, 16, 18].indexOf(qSize) !== -1) settings.size = qSize;
+  var qMotion = qp.get("motion");
+  if (qMotion !== null) settings.motion = (qMotion === "true" || qMotion === "1" || qMotion === "on");
+  saveSettings();
+
+  var settingsPanel = document.getElementById("settingsPanel");
+
+  function applySettings() {
+    var html = document.documentElement;
+    html.classList.toggle("light", settings.theme === "light");
+    html.classList.toggle("reduce-motion", settings.motion);
+    html.style.setProperty("--accent", settings.accent);
+    html.style.setProperty("--accent2", settings.accent);
+    html.style.fontSize = settings.size + "px";
+    var s1 = document.querySelector("#themeSeg button.on"); if (s1) s1.classList.remove("on");
+    document.querySelector('#themeSeg button[data-theme="' + settings.theme + '"]').classList.add("on");
+    var s2 = document.querySelector("#swatches button.on"); if (s2) s2.classList.remove("on");
+    document.querySelector('#swatches button[data-accent="' + settings.accent + '"]').classList.add("on");
+    var s3 = document.querySelector("#sizeSeg button.on"); if (s3) s3.classList.remove("on");
+    document.querySelector('#sizeSeg button[data-size="' + settings.size + '"]').classList.add("on");
+    document.getElementById("motionToggle").checked = settings.motion;
+    var gt = document.getElementById("greetingToggle");
+    if (gt) gt.checked = settings.greeting !== false;
+    var rt = document.getElementById("remindToggle");
+    if (rt) rt.checked = settings.reminders !== false;
+    // voice + speed
+    settings.voice = settings.voice || "British Lady";
+    settings.speed = (Number(settings.speed) >= 0.4 && Number(settings.speed) <= 3) ? Number(settings.speed) : 1.05;
+    if (window.vtVoicePrefs) {
+      window.vtVoicePrefs.voice = settings.voice;
+      window.vtVoicePrefs.rate = settings.speed;
+    }
+    var vs = document.getElementById("voiceSelect");
+    if (vs) vs.value = settings.voice;
+    var sr = document.getElementById("speedRange");
+    if (sr) sr.value = settings.speed;
+    var sv = document.getElementById("speedVal");
+    if (sv) sv.textContent = settings.speed + "×";
+    if (window.__vtTts) { try { window.__vtTts.setVoice(settings.voice); } catch (e) {} }
+  }
+  function populateVoiceSelect() {
+    var vs = document.getElementById("voiceSelect");
+    if (!vs) return;
+    var esc = function (s) { return String(s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); };
+    var fill = function (voices) {
+      voices = voices || [];
+      var cloud = [], native = [];
+      voices.forEach(function (v) {
+        if (v && v.source === "native") native.push(v); else if (v) cloud.push(v);
+      });
+      var html = "";
+      if (cloud.length) {
+        html += '<optgroup label="Cloud">' + cloud.map(function (v) {
+          return '<option value="' + esc(v.name) + '">' + esc(v.name) + (v.accent ? " (" + esc(v.accent) + ")" : "") + "</option>";
+        }).join("") + "</optgroup>";
+      }
+      if (native.length) {
+        html += '<optgroup label="Device">' + native.map(function (v) {
+          return '<option value="' + esc(v.name) + '">' + esc(v.name) + "</option>";
+        }).join("") + "</optgroup>";
+      }
+      vs.innerHTML = html;
+      vs.value = settings.voice;
+      if (!vs.value && voices.length) vs.value = voices[0].name;
+    };
+    if (window.__vtTts && typeof window.__vtTts.getVoices === "function") {
+      window.__vtTts.getVoices().then(fill).catch(function () { fill([]); });
+    }
+  }
+  function saveSettings() {
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {}
+  }
+
+  document.getElementById("settingsBtn").addEventListener("click", function(e) {
+    e.stopPropagation();
+    settingsPanel.hidden = !settingsPanel.hidden;
+    this.setAttribute("aria-expanded", settingsPanel.hidden ? "false" : "true");
+  });
+  document.addEventListener("click", function(e) {
+    if (!settingsPanel.hidden && !e.target.closest("#settingsPanel") && !e.target.closest("#settingsBtn")) {
+      settingsPanel.hidden = true;
+    }
+  });
+
+  document.getElementById("themeSeg").addEventListener("click", function(e) {
+    var b = e.target.closest("button"); if (!b) return;
+    settings.theme = b.dataset.theme; saveSettings(); applySettings();
+    showToast(b.dataset.theme === "light" ? "Light theme enabled" : "Dark theme enabled");
+  });
+  document.getElementById("swatches").addEventListener("click", function(e) {
+    var b = e.target.closest("button"); if (!b) return;
+    settings.accent = b.dataset.accent; saveSettings(); applySettings();
+    if (window.refreshBadge) window.refreshBadge(settings.accent);
+  });
+  document.getElementById("sizeSeg").addEventListener("click", function(e) {
+    var b = e.target.closest("button"); if (!b) return;
+    settings.size = parseInt(b.dataset.size, 10); saveSettings(); applySettings();
+  });
+  document.getElementById("motionToggle").addEventListener("change", function(e) {
+    settings.motion = e.target.checked; saveSettings(); applySettings();
+  });
+  var greetingToggle = document.getElementById("greetingToggle");
+  if (greetingToggle) greetingToggle.addEventListener("change", function(e) {
+    settings.greeting = e.target.checked; saveSettings();
+    showToast(settings.greeting ? "Morning greeting on" : "Morning greeting off");
+  });
+  var remindToggle = document.getElementById("remindToggle");
+  if (remindToggle) remindToggle.addEventListener("change", function(e) {
+    settings.reminders = e.target.checked;
+    saveSettings();
+    if (settings.reminders) {
+      if (typeof Notification !== "undefined" && Notification.permission !== "granted" && Notification.permission !== "denied") {
+        Notification.requestPermission().then(function(p) {
+          if (p === "granted") showToast("Due reminders on — I'll ping you about overdue tasks");
+          else { settings.reminders = false; saveSettings(); applySettings(); showToast("Notifications blocked by the browser"); }
+        }).catch(function() { settings.reminders = false; saveSettings(); applySettings(); showToast("Notifications unavailable here"); });
+      } else {
+        showToast(Notification.permission === "granted" ? "Due reminders on" : "Notifications are blocked — allow them in your browser");
+      }
+    } else {
+      showToast("Due reminders off");
+    }
+  });
+  window.applyReminderSetting = function(on) {
+    settings.reminders = !!on;
+    saveSettings();
+    applySettings();
+  };
+  document.getElementById("voiceSelect").addEventListener("change", function(e) {
+    settings.voice = e.target.value || "British Lady"; saveSettings(); applySettings();
+    showToast("Voice: " + settings.voice);
+  });
+  document.getElementById("speedRange").addEventListener("input", function(e) {
+    settings.speed = parseFloat(e.target.value) || 1.05; saveSettings(); applySettings();
+  });
+  document.getElementById("settingsReset").addEventListener("click", function() {
+    settings = Object.assign({}, SETTINGS_DEFAULTS);
+    saveSettings(); applySettings();
+    if (window.refreshBadge) window.refreshBadge(settings.accent);
+    populateVoiceSelect();
+    showToast("Settings reset to defaults");
+  });
+
+  applySettings();
+  populateVoiceSelect();
 </script>

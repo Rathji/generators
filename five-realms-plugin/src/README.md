@@ -4,7 +4,8 @@ A Perchance plugin (`five-realms-plugin`): an MTG-compatible card-game **rules
 engine** plus an **inline-SVG card renderer**, exposed behind one `$output` with a
 13-op dispatch. none of the ops throw.
 
-- `main.pjs` — everything: deterministic RNG, card database (12 fixture cards), mana
+- `main.pjs` — everything: deterministic RNG, card database (33 fixture cards incl.
+  five full-art basic lands), mana
   grammar, zones, game state, turn structure + priority, the never-mutating
   `applyAction` reducer, stack resolution, combat damage, and the 52-asset art
   payload + renderer. All top-level names are `fr`-prefixed so they can't clash
@@ -13,8 +14,9 @@ engine** plus an **inline-SVG card renderer**, exposed behind one `$output` with
 
 ## Stage history / status
 - **Phase 1 (done):** state model, zones, game objects, turn structure, priority,
-  mana, seeded shuffling, the `applyAction` reducer, 12-card fixture DB, 52-asset
-  renderer.
+  mana, seeded shuffling, the `applyAction` reducer, 33-card fixture DB (incl. five
+  full-art basic lands — crop pipeline from the user's strip image, uploaded via
+  `upload_file`), 52-asset renderer.
 - **Phase 2 (in progress / this bucket):** stack resolution now actually resolves each
   fixture spell/ability (ETB triggers, auras, buff/damage/destroy spells, the
   ember-core damage ability), spells/abilities take and validate targets, and combat
