@@ -1,0 +1,1625 @@
+// ============================================================================
+// WEBUNTU OS — a fictional Debian-based Linux fork ("Webuntu 12, Perch Mint")
+// A browser desktop-OS simulation on Perchance, styled with the Rathji palette.
+// Full roadmap history + appendices (game inventories, shortcut sources, design
+// tokens): see src/ROADMAP.md
+// ============================================================================
+
+// ============================================================================
+// PHASE 10 — CODING & AI (planned; post-close-out tranche)
+// The roadmap is complete through Task 76. This checklist is the next tranche:
+// making Webuntu an actual functional coding + AI OS. Full descriptions live in
+// src/ROADMAP.md ("Phase 10" section). Mark each [x] as it's done.
+//
+//   [x] 77. Webuntu Assistant   — Super+A AI chat app that ACTS on the OS:
+//                                 read/write virtual-FS files, launch apps,
+//                                 generate images, search the catalog.
+//                                 (via the ai-text-plugin generateText import)
+//   [x] 79. Voice everywhere    — voice-tools-plugin: tray mic dictation into
+//                                 any field (Win+H style) + TTS for Assistant
+//                                 replies; ai-voice-assistant as a menu app.
+//   [x] 80. AI Images app       — text-to-image-plugin: prompt → save to
+//                                 /home/user/Pictures → set as wallpaper.
+//   [x] 81. GitHub app          — github-data-plugin: search/browse repos,
+//                                 stars, issues; deep-link into the Browser.
+//   [x] 82. Upload & Share      — upload-plugin: File Manager right-click
+//                                 "Upload & get link" (URL → clipboard history),
+//                                 Terminal `upload`, an Easy Uploads app.
+//   [x] 83. Projects app        — project-master-style local-first project
+//                                 manager (kv-plugin): projects/tasks/kanban/
+//                                 pomodoro; backlogs in /home/user/Projects;
+//                                 Assistant proposes the single next task.
+//   [x] 84. Terminal AI verbs   — `ai "prompt"` (streams), `gh search`,
+//                                 `img "prompt"` (saves to Pictures).
+//   [x] 85. AI clipboard actions— "Polish / rewrite / summarize" in the Super+V
+//                                 picker (per-entry ✨) + right-click edit menu.
+//   [x] 86. Dev dashboard       — Control Center view: today's tasks, weather,
+//                                 upload quota, online count, system monitor,
+//                                 quick AI prompts.
+//   [x] 87. File Manager AI     — right-click folder → "Summarize contents" /
+//                                 "Generate README" / "Suggest file structure".
+//   [x] 88. Task Manager        — Ctrl+Shift+Esc (or System menu): live list of
+//                                 every open window with CPU/mem bars (shares
+//                                 SystemMonitor's stat model), PIDs, desktop +
+//                                 state chips, sortable columns, filter box;
+//                                 Switch to / Minimize / Restore / Maximize /
+//                                 End process (force-close, GNOME-style
+//                                 two-step confirm, bypasses close-confirm
+//                                 hooks). (src/taskmanager.js)
+//   [x] 78. Editor → Perch Edit — RE-SCOPED (was: replace the in-OS Text
+//                                 Editor with a perch-edit embed; PAUSED while
+//                                 perch-edit became a plugin). Now a first-class
+//                                 Perch Edit app (id perch-edit, Developer,
+//                                 singleton): the real perch-edit IDE embedded
+//                                 in a Browser-style window — null.perchance.org
+//                                 embed, loading overlay with a 12s ↗ new-tab
+//                                 fallback, Reload, and an on-close iframe blank
+//                                 to stop embedded work. The perch-edit-plugin
+//                                 wrapper was evaluated live and found
+//                                 redundant (its embed() is the same iframe
+//                                 Webuntu already uses for every generator), so
+//                                 we embed directly. PerchEdit keeps its own
+//                                 project tree in the embed's IndexedDB — it
+//                                 cannot open virtual-FS files, so the native
+//                                 Text Editor stays the .txt/code handler;
+//                                 Terminal `open perch-edit` routes here.
+//                                 (src/perchedit.js)
+// ============================================================================
+
+// ============================================================================
+// IMPLEMENTATION
+// ============================================================================
+
+$meta
+  title = Webuntu OS
+  description = Webuntu 12 "Perch Mint" — a prototype Debian-inspired OS that runs in your browser: full desktop shell with Start menu, window manager, virtual filesystem, login screen, and a Software Center of Perchance generators. Now with AI: a desktop Assistant that reads and writes files, launches apps and creates images, plus voice dictation, text-to-speech, an AI Images app, a GitHub browser, and realtime Perch Chat.
+  tags = os, desktop, linux, simulation, ai, assistant
+  image = https://user.uploads.dev/file/c447174e333be859e2ca11cab3bd77cc.png
+  header
+    mode = minimal
+
+// --- POST-52, Task 57: Online presence + chat (server-plugin) -----------------
+// Adds the realtime server used by the tray "N online" indicator and the
+// Perch Chat app (server code lives in index.html's text/x-server-plugin block).
+createServerSocket = {import:server-plugin}
+
+// --- PHASE 10, Task 77: Webuntu Assistant -------------------------------------
+// The AI layer: generateText powers the Assistant chat; generateImage lets the
+// Assistant create images on demand (save to Pictures / set as wallpaper).
+generateText = {import:ai-text-plugin}
+generateImage = {import:text-to-image-plugin}
+
+// --- PHASE 10, Task 79: Voice everywhere ---------------------------------------
+// The voice layer: voiceTools powers the tray-mic dictation (Win+H style) and the
+// Assistant reading replies aloud via TTS.
+voiceTools = {import:voice-tools-plugin}
+gh = {import:github-data-plugin}
+uploadPlugin = {import:upload-plugin}
+kv = {import:kv-plugin}
+
+// --- Phase 1, Task 1: Distro identity -----------------------------------------
+// Data object consumed by the About screen, boot screen, Terminal & Settings.
+// Access any field as root.distro.<field>.evaluateItem
+
+distro
+  name = Webuntu
+  codename = Perch Mint
+  version = 12
+  basedOn = Debian 12
+  desktopEnv = Perch Desktop
+  kernel = 6.8.0-perch-mint
+  shell = Perch Shell
+  tagline = A fictional Debian-based Linux fork, rendered in your browser.
+  fullName = [this.name] [this.version] "[this.codename]"
+
+// Convenience block for the About screen and the Terminal's `about-webuntu`
+// (neofetch-style) command. $output joins the lines with newlines.
+distroAboutText
+  OS: [distro.name] [distro.version] "[distro.codename]"
+  Based on: [distro.basedOn]
+  Desktop Environment: [distro.desktopEnv]
+  Kernel: [distro.kernel]
+  Default Shell: [distro.shell]
+  $output = [this.joinItems("\n")]
+
+// --- Phase 1, Task 2: Boot sequence ------------------------------------------
+// Pseudo-boot log lines cycled on the boot screen (index.html reads these via
+// root.bootLog.selectAll). Each line carries a `status` marker: ok|info|warn.
+
+bootLog
+  kernel
+    line = Loading kernel [distro.kernel]...
+    status = ok
+  mount
+    line = Mounting root filesystem...
+    status = ok
+  init
+    line = Starting Perch systemd...
+    status = info
+  hardware
+    line = Probing virtual hardware...
+    status = info
+  network
+    line = Bringing up network interfaces...
+    status = ok
+  desktop
+    line = Starting [distro.desktopEnv]...
+    status = ok
+  wm
+    line = Initializing window manager...
+    status = info
+  theme
+    line = Loading Rathji theme...
+    status = warn
+  session
+    line = Starting user session...
+    status = ok
+
+// --- Phase 1, Task 3: Desktop root -------------------------------------------
+// Default desktop icons. These mirror the future virtual-filesystem folders
+// (Task 19) + a couple of apps; when the FS exists, the desktop will read its
+// icons from there instead. Each item: id, name (label), icon (emoji glyph),
+// color (tile accent).
+
+desktopDefaults
+  boardGames
+    id = board-games
+    name = Board Games
+    icon = 🎲
+    color = #f59e0b
+    kind = folder
+    target = /home/user/Board Games
+  videoGames
+    id = video-games
+    name = Video Games
+    icon = 🕹️
+    color = #7c6cff
+    kind = folder
+    target = /home/user/Video Games
+  documents
+    id = documents
+    name = Documents
+    icon = 📄
+    color = #22d3ee
+    kind = folder
+    target = /home/user/Documents
+  pictures
+    id = pictures
+    name = Pictures
+    icon = 🖼️
+    color = #ec4899
+    kind = folder
+    target = /home/user/Pictures
+  music
+    id = music
+    name = Music
+    icon = 🎵
+    color = #22c55e
+    kind = folder
+    target = /home/user/Music
+  downloads
+    id = downloads
+    name = Downloads
+    icon = ⬇️
+    color = #f97316
+    kind = folder
+    target = /home/user/Downloads
+  software
+    id = software
+    name = Software
+    icon = 📦
+    color = #8b5cf6
+    kind = folder
+    target = /home/user/Software
+  softwareCenter
+    id = software-center
+    name = Software Center
+    icon = 🧩
+    color = #94a3b8
+    kind = app
+    singleton = true
+  trash
+    id = trash
+    name = Trash
+    icon = 🗑️
+    color = #64748b
+    kind = folder
+    target = /Trash
+  rathjisGenerators
+    id = rathjis-generators
+    name = Rathji's Generators
+    icon = 🧭
+    color = #8b5cf6
+    kind = link
+    target = rathjis-generators
+  rathjisPluginTutorials
+    id = rathjis-plugin-tutorials
+    name = Plugin Tutorials
+    icon = 📘
+    color = #f472b6
+    kind = link
+    target = rathjis-plugin-tutorials
+
+// --- Phase 1, Task 4: Lock / login screen ------------------------------------
+// User profile shown on the login screen (avatar, name, host) and used by apps.
+
+user
+  name = user
+  host = webuntu
+  displayName = Webuntu User
+
+// --- Phase 3, Task 14: Start menu app catalog ----------------------------------
+// The "installed" app set shown in the Start menu (and, later, the Software
+// Center "Installed" tab). Fields: id, name, icon, color, category, blurb.
+// Optional: type=link + target (external perchance slug -> new tab), singleton
+// (re-open focuses the existing window instead of spawning, via Task 13), stub
+// (planned but not yet built — Start menu shows a "Soon" badge and launching
+// opens a friendly Coming-soon window; flip to false when the app is built).
+
+appCatalog
+  fileManager
+    id = file-manager
+    name = File Manager
+    icon = 📁
+    color = #22d3ee
+    category = Accessories
+    blurb = Browse files and folders
+    singleton = true
+  textEditor
+    id = text-editor
+    name = Text Editor
+    icon = 📝
+    color = #f59e0b
+    category = Accessories
+    blurb = Edit plain-text files
+    singleton = false
+  calculator
+    id = calculator
+    name = Calculator
+    icon = 🧮
+    color = #22c55e
+    category = Accessories
+    blurb = Add, subtract, multiply, divide
+    singleton = true
+  imageViewer
+    id = image-viewer
+    name = Image Viewer
+    icon = 🖼️
+    color = #ec4899
+    category = Accessories
+    blurb = View and zoom images
+    singleton = false
+  musicPlayer
+    id = music-player
+    name = Music Player
+    icon = 🎵
+    color = #22c55e
+    category = Accessories
+    blurb = Synth loops and playlists
+    singleton = true
+  notes
+    id = notes
+    name = Notes
+    icon = 📓
+    color = #f59e0b
+    category = Accessories
+    blurb = Quick notes in Documents/Notes
+    singleton = true
+  browser
+    id = browser
+    name = Browser
+    icon = 🌐
+    color = #22d3ee
+    category = Internet
+    blurb = Browse Perchance generators
+    singleton = true
+  chat
+    id = chat
+    name = Perch Chat
+    icon = 💬
+    color = #22d3ee
+    category = Internet
+    blurb = Chat with people online
+    singleton = true
+  terminal
+    id = terminal
+    name = Terminal
+    icon = ⌨️
+    color = #8b5cf6
+    category = System
+    blurb = The Perch shell
+    singleton = true
+  assistant
+    id = assistant
+    name = Webuntu Assistant
+    icon = 🧠
+    color = #7c6cff
+    category = AI
+    blurb = AI chat that can act on the OS
+    singleton = true
+  aiVoiceAssistant
+    id = ai-voice-assistant
+    name = AI Voice Assistant
+    icon = 🗣️
+    color = #22d3ee
+    category = AI
+    blurb = Manage a todo list by voice (Perchance generator)
+    type = link
+    target = ai-voice-assistant
+  aiImages
+    id = ai-images
+    name = AI Images
+    icon = 🎨
+    color = #8b5cf6
+    category = AI
+    blurb = Generate images from a prompt
+    singleton = true
+  github
+    id = github
+    name = GitHub
+    icon = 🐙
+    color = #94a3b8
+    category = Developer
+    blurb = Search repos, stars and issues
+    singleton = true
+  easyUploads
+    id = easy-uploads
+    name = Easy Uploads
+    icon = 📤
+    color = #22d3ee
+    category = Internet
+    blurb = Host a file or text and get a share link
+    singleton = true
+  projects
+    id = projects
+    name = Projects
+    icon = 🗂️
+    color = #34d399
+    category = Developer
+    blurb = Projects, kanban tasks and a pomodoro timer
+    singleton = true
+  perchEdit
+    id = perch-edit
+    name = Perch Edit
+    icon = ⌨️
+    color = #7c6cff
+    category = Developer
+    blurb = Full browser-based code IDE
+    singleton = true
+  settings
+    id = settings
+    name = Settings
+    icon = ⚙️
+    color = #94a3b8
+    category = System
+    blurb = Customize Webuntu
+    singleton = true
+  softwareCenter
+    id = software-center
+    name = Software Center
+    icon = 🧩
+    color = #94a3b8
+    category = System
+    blurb = Install and browse apps
+    singleton = true
+  systemMonitor
+    id = system-monitor
+    name = System Monitor
+    icon = 📊
+    color = #8b5cf6
+    category = System
+    blurb = Watch CPU, RAM and uptime
+    singleton = true
+  taskManager
+    id = task-manager
+    name = Task Manager
+    icon = 🗂️
+    color = #f97316
+    category = System
+    blurb = Manage running apps and processes
+    singleton = true
+  boardGames
+    id = board-games
+    name = Board Games
+    icon = 🎲
+    color = #f59e0b
+    category = Games
+    blurb = The Boardgame Network collection
+    type = folder
+    target = /home/user/Board Games
+  videoGames
+    id = video-games
+    name = Video Games
+    icon = 🕹️
+    color = #7c6cff
+    category = Games
+    blurb = The Video Game Network collection
+    type = folder
+    target = /home/user/Video Games
+  devTemplateStudio
+    id = dev-template-studio
+    name = Game Template Studio
+    icon = 🧰
+    color = #f97316
+    category = Developer
+    blurb = Templates for building games
+    type = folder
+    target = /home/user/Software/Developer
+  devSdk
+    id = dev-sdk
+    name = Plugin SDK
+    icon = 🔌
+    color = #22d3ee
+    category = Developer
+    blurb = Perchance plugin development
+    stub = true
+  bgnHub
+    id = bgn-hub
+    name = The Boardgame Network
+    icon = ♟️
+    color = #f59e0b
+    category = Network Hubs
+    blurb = The BGN hub
+    type = link
+    target = bgn-boardgame-network
+  vgnHub
+    id = vgn-hub
+    name = The Video Game Network
+    icon = 🕹️
+    color = #7c6cff
+    category = Network Hubs
+    blurb = The VGN hub
+    type = link
+    target = vgn-video-game-network
+  rathjisGenerators
+    id = rathjis-generators
+    name = Rathji's Generators
+    icon = 🧭
+    color = #8b5cf6
+    category = Network Hubs
+    blurb = The primary shortcut source
+    type = link
+    target = rathjis-generators
+  weather
+    id = weather
+    name = Weather
+    icon = ⛅
+    color = #22d3ee
+    category = Accessories
+    blurb = Forecasts, radar and alerts
+    singleton = true
+  mail
+    id = mail
+    name = Mail
+    icon = ✉️
+    color = #ec4899
+    category = Accessories
+    blurb = Email client with folders & search
+    singleton = true
+  minesweeper
+    id = minesweeper
+    name = Minesweeper
+    icon = 💣
+    color = #f59e0b
+    category = Games
+    blurb = Classic grid-mine puzzle
+    singleton = true
+  pdfViewer
+    id = pdf-viewer
+    name = PDF Viewer
+    icon = 📕
+    color = #ef4444
+    category = Accessories
+    blurb = Read PDF documents
+    singleton = true
+
+// --- Phase 3, Task 15: Pinned apps for the system-bar launcher -----------------
+// App ids (from appCatalog above) shown as quick-launch icons in the taskbar.
+
+pinnedApps
+  assistant
+  file-manager
+  browser
+  terminal
+  notes
+  software-center
+  settings
+
+// --- Phase 6, Task 37: Boardgame Network genre folders + curated games -------
+// The Board Games folder (Task 37) groups the BGN hub's games into five genre
+// subfolders. `key` is the folder key referenced by each game's `genre` field;
+// `name`/`icon`/`color` drive the folder shortcut itself.
+
+bgnGenres
+  strategy
+    key = strategy
+    name = Strategy
+    icon = ♟️
+    color = #f59e0b
+  card
+    key = card
+    name = Card
+    icon = 🃏
+    color = #ec4899
+  wordPenPaper
+    key = wordPenPaper
+    name = Word & Pen & Paper
+    icon = ✏️
+    color = #22d3ee
+  rpg
+    key = rpg
+    name = RPG
+    icon = 🐉
+    color = #8b5cf6
+  referenceTools
+    key = referenceTools
+    name = Reference & Tools
+    icon = 📚
+    color = #22c55e
+
+// Curated BGN catalog (from the live hub's game list). Each game's `genre`
+// matches a bgnGenres `key`; `comingSoon = true` games show the "Soon" badge
+// and route to the coming-soon dialog (Tasks 38/40).
+bgnGames
+  bgnCheckers
+    slug = bgn-checkers
+    title = Checkers
+    icon = ⬤
+    color = #64748b
+    players = 2 players
+    genre = strategy
+  bgnChess
+    slug = bgn-chess
+    title = Chess
+    icon = ♞
+    color = #9aa5b1
+    players = 2 players
+    genre = strategy
+  bgnTicTacToe
+    slug = bgn-tic-tac-toe
+    title = Tic-Tac-Toe
+    icon = ✕
+    color = #d4af37
+    players = 2 players
+    genre = strategy
+  bgnSplendor
+    slug = bgn-splendor
+    title = Splendor
+    icon = ◆
+    color = #1fae8c
+    players = 2–4 players
+    genre = strategy
+  bgnCarcassonne
+    slug = bgn-carcassonne
+    title = Carcassonne
+    icon = ✠
+    color = #5d8a4e
+    players = 2–5 players
+    genre = strategy
+  bgnRisk
+    slug = bgn-risk
+    title = Risk
+    icon = ✚
+    color = #d0442e
+    players = 2–6 players
+    genre = strategy
+  bgnSupremacy
+    slug = bgn-supremacy
+    title = Supremacy
+    icon = ☢
+    color = #d8442e
+    players = 2–4 players
+    genre = strategy
+  bgnBattletech
+    slug = bgn-battletech
+    title = BattleMech 3025
+    icon = 🤖
+    color = #c96a2d
+    players = 2 players
+    genre = strategy
+  bgnCatan
+    slug = bgn-catan
+    title = Catan
+    icon = 🏠
+    color = #d4af37
+    players = 2 players
+    genre = strategy
+  bgnAllAboard
+    slug = bgn-all-aboard
+    title = All Aboard
+    icon = 🚂
+    color = #b0552e
+    players = 2–5 players
+    genre = strategy
+    comingSoon = true
+  bgnOutbreakProtocol
+    slug = bgn-outbreak-protocol
+    title = Outbreak Protocol
+    icon = 🦠
+    color = #2e9d5b
+    players = 2–4 players
+    genre = strategy
+    comingSoon = true
+  bgnCharterstone
+    slug = bgn-charterstone
+    title = Charterstone
+    icon = 🏗
+    color = #b98a2e
+    players = 2–6 players
+    genre = strategy
+    comingSoon = true
+  bgnFlux
+    slug = bgn-flux
+    title = Flux
+    icon = ♣
+    color = #b04fae
+    players = 2–6 players
+    genre = card
+  bgnSkullKing
+    slug = bgn-skull-king
+    title = Skull King
+    icon = ☠
+    color = #9c3d2e
+    players = 2–8 players
+    genre = card
+  bgnGolf
+    slug = bgn-golf
+    title = Golf
+    icon = ⛳
+    color = #3f9d6b
+    players = 2–4 players
+    genre = card
+  bgnHearts
+    slug = bgn-hearts
+    title = Hearts
+    icon = ♥
+    color = #e04f6e
+    players = 4 players
+    genre = card
+  bgnGoFish
+    slug = bgn-go-fish
+    title = Go Fish
+    icon = 🐟
+    color = #35b5c9
+    players = 2–4 players
+    genre = card
+  bgnDominion
+    slug = bgn-dominion
+    title = Dominion
+    icon = ♛
+    color = #c9a13d
+    players = 2–4 players
+    genre = card
+  bgnRummy
+    slug = bgn-rummy
+    title = Rummy
+    icon = ♠
+    color = #c9503f
+    players = 2 players
+    genre = card
+  bgnCoverYourAssets
+    slug = bgn-cover-your-assets
+    title = Cover Your Assets
+    icon = $
+    color = #2fa890
+    players = 2–6 players
+    genre = card
+  bgnAlphaTheGathering
+    slug = bgn-alpha-the-gathering
+    title = Alpha: The Gathering
+    icon = ⚡
+    color = #8a5fd0
+    players = 2 players
+    genre = card
+    comingSoon = true
+  bgnScrabble
+    slug = bgn-scrabble
+    title = Scrabble
+    icon = A
+    color = #c98a3d
+    players = 2–4 players
+    genre = wordPenPaper
+  bgnCrossword
+    slug = bgn-crossword
+    title = Crossword
+    icon = ▦
+    color = #4f86c6
+    players = 1–2 players
+    genre = wordPenPaper
+  bgnWordSearch
+    slug = bgn-word-search
+    title = Word Search
+    icon = ✎
+    color = #7a6fdf
+    players = 1–4 players
+    genre = wordPenPaper
+  bgnSudoku
+    slug = bng-sudoku
+    title = Sudoku
+    icon = 9
+    color = #3f9dd9
+    players = 1 player
+    genre = wordPenPaper
+  bgnDndCharacterManager
+    slug = bgn-dnd-character-manager
+    title = D&D Character Manager
+    icon = ⚔
+    color = #7a4bbf
+    players = 1–6 players
+    genre = rpg
+  bgnDndSourceReference
+    slug = bgn-dnd-source-reference
+    title = D&D 5E Rules & Stats
+    icon = 🎲
+    color = #c8332e
+    players = 1 player
+    genre = rpg
+  bgnBattleMapForge
+    slug = bgn-battle-map-forge
+    title = Battle Map Forge
+    icon = ✒
+    color = #b4632a
+    players = 1 player
+    genre = rpg
+  bgnGmBattleManager
+    slug = bgn-gm-battle-manager
+    title = GM Battle Manager
+    icon = ⚔
+    color = #c8332e
+    players = 1 player
+    genre = rpg
+  bgnDocumentationReference
+    slug = bgn-documentation-reference
+    title = Documentation & Reference
+    icon = 📖
+    color = #d4af37
+    genre = referenceTools
+  bgnStandardsChecker
+    slug = bgn-standards-checker
+    title = BGN Standards Checker
+    icon = ✓
+    color = #2fae8c
+    genre = referenceTools
+  bgnCoverStudio
+    slug = bgn-cover-studio
+    title = BGN Cover Studio
+    icon = 🎨
+    color = #b04fae
+    genre = referenceTools
+
+// --- Phase 8, Task 41: Video Game Network era folders + curated games --------
+// The Video Games folder groups the VGN hub's games into four era subfolders.
+// `key` is the folder key referenced by each game's `era` field; `name`/`icon`/
+// `color` drive the era folder itself. Era keys: network / arcade / 8bit / early3d.
+
+vgnEras
+  network
+    key = network
+    name = Network
+    icon = 🌐
+    color = #22d3ee
+  arcade
+    key = arcade
+    name = Arcade
+    icon = 🕹️
+    color = #f59e0b
+  8bit
+    key = 8bit
+    name = 8-Bit
+    icon = 👾
+    color = #ec4899
+  early3d
+    key = early3d
+    name = Early 3D
+    icon = 🧊
+    color = #8b5cf6
+
+// Curated VGN catalog (from the live hub's game list). Each game's `era`
+// matches a vgnEras `key`; `year`/`genre` power the arcade-styled chips and
+// window chrome (Task 42). comingSoon games show the "Soon" badge and route
+// to the coming-soon dialog (hubSlug/hubName drive "Visit the hub instead").
+vgnGames
+  vgnOregonTrail
+    slug = vgn-oregon-trail
+    title = Oregon Trail
+    icon = 🐂
+    color = #e0a44e
+    era = network
+    genre = Survival
+    year = TBD
+    players = 1 player
+  vgnScorchedEarth
+    slug = vgn-scorched-earth
+    title = Scorched Earth
+    icon = 🔥
+    color = #ff8c3c
+    era = network
+    genre = Artillery
+    year = TBD
+    players = 1–2 players
+  vgnLemonadeStand
+    slug = vgn-lemonade-stand
+    title = Lemonade Stand
+    icon = 🍋
+    color = #ffd319
+    era = network
+    genre = Tycoon
+    year = TBD
+    players = 1 player
+  vgnPong
+    slug = vgn-pong
+    title = Pong
+    icon = 🏓
+    color = #25d7fd
+    era = network
+    genre = Sports
+    year = TBD
+    players = 2 players
+  vgnPooyan
+    slug = vgn-pooyan
+    title = Pooyan
+    icon = 🐷
+    color = #ff7ad9
+    era = network
+    genre = Action
+    year = TBD
+    players = 1–2 players
+  vgnBreakout
+    slug = vgn-breakout
+    title = Breakout
+    icon = 🧱
+    color = #e8503c
+    era = network
+    genre = Arcade
+    year = TBD
+    players = 1–2 players
+    comingSoon = true
+  vgnArkanoid
+    slug = vgn-arkanoid
+    title = Arkanoid
+    icon = 🧱
+    color = #2f7fd9
+    era = network
+    genre = Arcade
+    year = TBD
+    players = 1–2 players
+  vgnBardsTale
+    slug = bards-tale
+    title = Bard's Tale
+    icon = 🎸
+    color = #c98a3d
+    era = network
+    genre = RPG
+    year = TBD
+    players = 1 player
+  vgnSuperMarioBros
+    slug = vgn-super-mario-brothers
+    title = Super Mario Bros.
+    icon = 🍄
+    color = #e84a2e
+    era = network
+    genre = Platformer
+    year = TBD
+    players = 1–2 players
+  vgnDuckHunt
+    slug = vgn-duck-hunt
+    title = Duck Hunt
+    icon = 🦆
+    color = #2fae7c
+    era = network
+    genre = Shooter
+    year = TBD
+    players = 1–2 players
+  vgnSpaceInvaders
+    slug = vgn-space-invaders
+    title = Space Invaders
+    icon = 👾
+    color = #35b54e
+    era = network
+    genre = Shooter
+    year = TBD
+    players = 1–2 players
+  vgnCharacterBuilder
+    slug = vgn-character-builder
+    title = Pixel Character Studio
+    icon = 🎨
+    color = #e0a44e
+    era = network
+    genre = Character Creator
+    year = TBD
+    players = 1 player
+  vgnLeisureSuitLarry
+    slug = vgn-leisure-suit-larry
+    title = Leisure Suit Larry
+    icon = 🌴
+    color = #ff7ad9
+    era = network
+    genre = Adventure
+    year = TBD
+    players = 1 player
+  vgnPacMan
+    slug = pac-man-1980
+    title = Pac-Man
+    icon = 🟡
+    color = #ffd319
+    era = arcade
+    genre = Maze
+    year = 1980
+    players = 1–2 players
+  vgnDonkeyKong
+    slug = donkey-kong
+    title = Donkey Kong
+    icon = 🦍
+    color = #f97316
+    era = arcade
+    genre = Platformer
+    year = 1981
+    players = 1 player
+    comingSoon = true
+  vgnCentipede
+    slug = centipede
+    title = Centipede
+    icon = 🐛
+    color = #22c55e
+    era = arcade
+    genre = Shooter
+    year = 1981
+    players = 1–2 players
+    comingSoon = true
+  vgnAsteroids
+    slug = asteroids
+    title = Asteroids
+    icon = ☄️
+    color = #22d3ee
+    era = arcade
+    genre = Shooter
+    year = 1979
+    players = 1–2 players
+    comingSoon = true
+  vgnZelda
+    slug = the-legend-of-zelda
+    title = The Legend of Zelda
+    icon = 🗡️
+    color = #22c55e
+    era = 8bit
+    genre = Adventure
+    year = 1986
+    players = 1 player
+    comingSoon = true
+  vgnTetris
+    slug = tetris
+    title = Tetris
+    icon = 🟦
+    color = #22d3ee
+    era = 8bit
+    genre = Puzzle
+    year = 1989
+    players = 1–2 players
+    comingSoon = true
+  vgnMegaMan2
+    slug = mega-man-2
+    title = Mega Man 2
+    icon = 🤖
+    color = #3b82f6
+    era = 8bit
+    genre = Platformer
+    year = 1988
+    players = 1 player
+    comingSoon = true
+  vgnCastlevania
+    slug = castlevania
+    title = Castlevania
+    icon = 🦇
+    color = #8b5cf6
+    era = 8bit
+    genre = Action
+    year = 1986
+    players = 1 player
+    comingSoon = true
+  vgnFinalFantasy
+    slug = final-fantasy
+    title = Final Fantasy
+    icon = ⚔️
+    color = #ef4444
+    era = 8bit
+    genre = RPG
+    year = 1987
+    players = 1 player
+    comingSoon = true
+  vgnMetroid
+    slug = metroid
+    title = Metroid
+    icon = 🚀
+    color = #ec4899
+    era = 8bit
+    genre = Adventure
+    year = 1986
+    players = 1 player
+    comingSoon = true
+  vgnDoom
+    slug = doom
+    title = Doom
+    icon = 😈
+    color = #f97316
+    era = early3d
+    genre = Shooter
+    year = 1993
+    players = 1 player
+    comingSoon = true
+  vgnHeroesOfMightAndMagic
+    slug = heroes-of-might-and-magic-a-strategic-quest
+    title = Heroes of Might and Magic
+    icon = 🏰
+    color = #8b5cf6
+    era = early3d
+    genre = Strategy
+    year = 1995
+    players = 1 player
+
+// --- Phase 8, Task 44: game-making templates (Software -> Developer) ---------
+// VGN and BGN template links for people making games. These are TOOLS, not
+// games — they live in a dedicated Developer folder and open as link shortcuts
+// to the top-level perchance pages. `source` drives the folder grouping.
+
+vgnTemplates
+  vgnGeneric
+    slug = vgn-generic-template
+    title = VGN — Generic Template
+    icon = 🧰
+    color = #7c6cff
+  vgnPhysics
+    slug = vgn-2d-physics-template
+    title = VGN — 2D Physics Template
+    icon = 🧲
+    color = #22d3ee
+  vgnPlatform
+    slug = vgn-platform-template
+    title = VGN — Platform Template
+    icon = 🕹️
+    color = #f59e0b
+  vgnText
+    slug = vgn-text-template
+    title = VGN — Text Template
+    icon = 📟
+    color = #94a3b8
+  vgnShooter
+    slug = vgn-shooter-template
+    title = VGN — Shooter Template
+    icon = 👾
+    color = #22c55e
+  vgnTurnBasedStrategy
+    slug = vgn-turn-based-strategy-template
+    title = VGN — Turn-Based Strategy Template
+    icon = 🏰
+    color = #8b5cf6
+  vgnAiChatRpg
+    slug = vgn-ai-chat-rpg-template
+    title = VGN — AI Chat RPG Template
+    icon = 💬
+    color = #ec4899
+  vgnTurnBasedJrpg
+    slug = vgn-turn-based-jrpg-template
+    title = VGN — Turn-Based JRPG Template
+    icon = ⚔️
+    color = #ef4444
+  vgnTextRpg
+    slug = vgn-text-rpg-template
+    title = VGN — Text RPG Template
+    icon = 📜
+    color = #f59e0b
+
+bgnTemplates
+  bgnManagementDashboard
+    slug = bgn-management-dashboard
+    title = BGN — Management Dashboard
+    icon = 📊
+    color = #22d3ee
+  bgnStandardsChecker
+    slug = bgn-standards-checker
+    title = BGN — Standards Checker
+    icon = ✓
+    color = #2fae8c
+  bgnDocumentationReference
+    slug = bgn-documentation-reference
+    title = BGN — Documentation Reference
+    icon = 📖
+    color = #d4af37
+  bgnCoverStudio
+    slug = bgn-cover-studio
+    title = BGN — Cover Studio
+    icon = 🎨
+    color = #b04fae
+  bgnBlank
+    slug = bgn-blank-template
+    title = BGN — Blank Template
+    icon = 📄
+    color = #f59e0b
+  bgnPenAndPaper
+    slug = bgn-pen-and-paper-template
+    title = BGN — Pen & Paper Template
+    icon = ✏️
+    color = #22c55e
+  bgnStrategy
+    slug = bgn-strategy-template
+    title = BGN — Strategy Template
+    icon = ♟️
+    color = #f59e0b
+  bgnNonStandardDeck
+    slug = bgn-non-standard-deck-template
+    title = BGN — Non-Standard Deck Template
+    icon = 🃏
+    color = #ec4899
+  bgnStandardDeck
+    slug = bgn-standard-deck-cards-template
+    title = BGN — Standard Deck Template
+    icon = 🃏
+    color = #c9503f
+  bgnHex
+    slug = bgn-hex-template
+    title = BGN — Hex Template
+    icon = ⬡
+    color = #7c6cff
+
+// --- Phase 9, Task 45: Software Center catalog ---------------------------------
+// The "Available" side of the Software Center: external Perchance generators
+// (Rathji's projects are the primary source, BGN/VGN/Community secondary),
+// grouped by the `swcCategories` keys. `source` shows as a tag on each card.
+// Every slug ships as an embed-with-new-tab-fallback (like the hubs).
+
+swcCategories
+  tools
+    key = tools
+    name = Tools
+    icon = 🧰
+  aiImages
+    key = aiImages
+    name = AI & Images
+    icon = 🎨
+  gamesRpg
+    key = gamesRpg
+    name = Games & RPG
+    icon = 🎮
+  audioMusic
+    key = audioMusic
+    name = Audio & Music
+    icon = 🎵
+  developer
+    key = developer
+    name = Developer
+    icon = ⚙️
+  communityHubs
+    key = communityHubs
+    name = Community Hubs
+    icon = 🕸️
+  planned
+    key = planned
+    name = In Development
+    icon = 🚧
+
+swcApps
+  queryArchive
+    slug = query-archive
+    title = Perchance Archive Search
+    icon = 🔎
+    color = #22d3ee
+    category = tools
+    source = Rathji
+    blurb = Full-text search across 110k+ generators
+  perchEdit
+    slug = perch-edit
+    title = Perch Edit
+    icon = ⌨️
+    color = #7c6cff
+    category = tools
+    source = Community
+    blurb = Code editor for Perchance projects
+  easyUploads
+    slug = easy-uploads
+    title = Easy Uploads
+    icon = 📤
+    color = #22c55e
+    category = tools
+    source = Rathji
+    blurb = Host files & images
+  fileFormatConverter
+    slug = file-format-converter
+    title = File Format Converter
+    icon = 🔁
+    color = #f59e0b
+    category = tools
+    source = Rathji
+    blurb = Convert anything between formats
+  atomicRoadmap
+    slug = atomic-roadmap
+    title = Atomic Roadmap
+    icon = 🗺️
+    color = #8b5cf6
+    category = tools
+    source = Rathji
+    blurb = Plan big builds one task at a time
+  mudMushReference
+    slug = mud-mush-reference
+    title = Mud-Mush Reference
+    icon = 📖
+    color = #94a3b8
+    category = tools
+    source = Rathji
+    blurb = Quick-reference docs
+  fnarkwaristChronjob
+    slug = fnarkwarist-chronjob
+    title = Fnarkwarist Chronjob
+    icon = ⏳
+    color = #7c6cff
+    category = tools
+    source = Rathji
+    blurb = Timey-wimey generator toy
+  genesis
+    slug = genesis-app
+    title = GENESIS
+    icon = 🧬
+    color = #22c55e
+    category = aiImages
+    source = Rathji
+    blurb = Procedural world generation
+  fluxReification
+    slug = flux-reification-engine
+    title = Flux Reification Engine
+    icon = ⚗️
+    color = #8b5cf6
+    category = aiImages
+    source = Rathji
+    blurb = Turn text into images
+  fluxPromptForge
+    slug = flux-prompt-forge
+    title = Flux Prompt Forge
+    icon = 🔨
+    color = #f59e0b
+    category = aiImages
+    source = Rathji
+    blurb = Forge better image prompts
+  voxelcraft
+    slug = voxelcraft
+    title = VoxelCraft
+    icon = 🧱
+    color = #ec4899
+    category = aiImages
+    source = Rathji
+    blurb = Voxel art & landscapes
+  imageMatrix
+    slug = image-matrix
+    title = Image Matrix
+    icon = 🎛️
+    color = #22d3ee
+    category = aiImages
+    source = Rathji
+    blurb = Matrix-style image effects
+  gotham
+    slug = batman-app
+    title = Gotham Generator
+    icon = 🦇
+    color = #7c6cff
+    category = aiImages
+    source = Rathji
+    blurb = Gotham City scene maker
+  miniatureMuseum
+    slug = miniature-museum-of-impossible-objects
+    title = Miniature Museum
+    icon = 🏛️
+    color = #f59e0b
+    category = aiImages
+    source = Rathji
+    blurb = Impossible object gallery
+  aiArtStudio
+    slug = ai-art-studio-blender
+    title = AI Art Studio Blender
+    icon = 🎨
+    color = #ec4899
+    category = aiImages
+    source = Rathji
+    blurb = Blend & refine AI art
+  gaussianDna
+    slug = gaussian-dna
+    title = Gaussian DNA
+    icon = 🧬
+    color = #22c55e
+    category = aiImages
+    source = Rathji
+    blurb = Procedural DNA art
+  theRealm
+    slug = the-realm
+    title = The Realm
+    icon = 🐉
+    color = #8b5cf6
+    category = gamesRpg
+    source = Rathji
+    blurb = Multiplayer RPG
+  kerbal
+    slug = kerbal-space-program
+    title = Kerbal Space Program
+    icon = 🚀
+    color = #f59e0b
+    category = gamesRpg
+    source = Rathji
+    blurb = Rockets, physics and green kerbals
+  autonomousEnterprise
+    slug = autonomous-enterprise
+    title = Autonomous Enterprise
+    icon = 🏢
+    color = #22d3ee
+    category = gamesRpg
+    source = Rathji
+    blurb = Idle business sim
+  leisureSuitLarry
+    slug = vgn-leisure-suit-larry
+    title = Leisure Suit Larry
+    icon = 🌴
+    color = #ec4899
+    category = gamesRpg
+    source = VGN
+    blurb = Text adventure · 18+
+  mightAndMagicFrameworks
+    slug = might-and-magic-game-frameworks
+    title = Might & Magic Frameworks
+    icon = ⚔️
+    color = #7c6cff
+    category = gamesRpg
+    source = Rathji
+    blurb = M&M-style game building blocks
+  heroesOfMightAndMagic
+    slug = heroes-of-might-and-magic-a-strategic-quest
+    title = Heroes of Might and Magic
+    icon = 🏰
+    color = #8b5cf6
+    category = gamesRpg
+    source = Rathji
+    blurb = Turn-based strategy quest
+  bardsTale
+    slug = bards-tale
+    title = Bard's Tale
+    icon = 🎸
+    color = #22c55e
+    category = gamesRpg
+    source = Rathji
+    blurb = Classic party-based RPG
+  pacMan
+    slug = pac-man-1980
+    title = Pac-Man
+    icon = 🟡
+    color = #f59e0b
+    category = gamesRpg
+    source = Rathji
+    blurb = The maze chase classic
+  dndCharacterManager
+    slug = bgn-dnd-character-manager
+    title = D&D Character Manager
+    icon = ⚔️
+    color = #7a4bbf
+    category = gamesRpg
+    source = BGN
+    blurb = Build and manage characters
+  dndSourceReference
+    slug = bgn-dnd-source-reference
+    title = D&D 5E Rules & Stats
+    icon = 🎲
+    color = #c8332e
+    category = gamesRpg
+    source = BGN
+    blurb = Rules and stats reference
+  battleMapForge
+    slug = bgn-battle-map-forge
+    title = Battle Map Forge
+    icon = ✒️
+    color = #b4632a
+    category = gamesRpg
+    source = BGN
+    blurb = Forge D&D battle maps
+  gmBattleManager
+    slug = bgn-gm-battle-manager
+    title = GM Battle Manager
+    icon = ⚔️
+    color = #c8332e
+    category = gamesRpg
+    source = BGN
+    blurb = Run encounters at the table
+  diceGenerator
+    slug = bgn-dice-generator
+    title = BGN Dice Generator
+    icon = 🎲
+    color = #d4af37
+    category = gamesRpg
+    source = BGN
+    blurb = Roll any dice pool
+  fallingNotesPiano
+    slug = experience-synthesia
+    title = Falling Notes Piano
+    icon = 🎹
+    color = #22d3ee
+    category = audioMusic
+    source = Rathji
+    blurb = Play along as notes fall
+  aiVoiceAssistant
+    slug = ai-voice-assistant
+    title = AI Voice Assistant
+    icon = 🎙️
+    color = #ec4899
+    category = audioMusic
+    source = Rathji
+    blurb = Talk to an AI assistant
+  gameMathPlugin
+    slug = game-math-plugin
+    title = Game Math Plugin
+    icon = ➗
+    color = #22d3ee
+    category = developer
+    source = Rathji
+    blurb = Math helpers for games
+  rathjiPluginTemplate
+    slug = rathji-plugin-template
+    title = Rathji Plugin Template
+    icon = 📦
+    color = #8b5cf6
+    category = developer
+    source = Rathji
+    blurb = Scaffold your own plugin
+  cardDeckPlugin
+    slug = card-deck-plugin
+    title = Card Deck Plugin
+    icon = 🃏
+    color = #ec4899
+    category = developer
+    source = Rathji
+    blurb = Decks, hands and shuffling
+  githubDataPlugin
+    slug = github-data-plugin
+    title = GitHub Data Plugin
+    icon = 🐙
+    color = #94a3b8
+    category = developer
+    source = Rathji
+    blurb = Pull GitHub data into generators
+  voiceToolsPlugin
+    slug = voice-tools-plugin
+    title = Voice Tools Plugin
+    icon = 🎙️
+    color = #22c55e
+    category = developer
+    source = Rathji
+    blurb = Speech synthesis & recognition
+  dataVizPlugin
+    slug = data-visualization-plugin
+    title = Data Visualization Plugin
+    icon = 📊
+    color = #7c6cff
+    category = developer
+    source = Rathji
+    blurb = Charts and graphs in Perchance
+  zeldaAudioPlugin
+    slug = zelda-audio-plugin
+    title = Zelda Audio Plugin
+    icon = 🎵
+    color = #f59e0b
+    category = developer
+    source = Rathji
+    blurb = Retro adventure audio
+  3dDicePlugin
+    slug = 3d-dice-plugin
+    title = 3D Dice Plugin
+    icon = 🎲
+    color = #22d3ee
+    category = developer
+    source = Rathji
+    blurb = 3D dice rolls
+  d20TabletopPlugin
+    slug = d20-tabletop-plugin
+    title = D20 Tabletop Plugin
+    icon = ⚔️
+    color = #c8332e
+    category = developer
+    source = Rathji
+    blurb = Tabletop RPG toolkit
+  aiTextPlugin
+    slug = ai-text-plugin
+    title = AI Text Plugin
+    icon = ✍️
+    color = #22d3ee
+    category = communityHubs
+    source = Community
+    blurb = Text generation for any generator
+  textToImagePlugin
+    slug = text-to-image-plugin
+    title = Text-to-Image Plugin
+    icon = 🖼️
+    color = #ec4899
+    category = communityHubs
+    source = Community
+    blurb = Image generation for any generator
+  pluginDirectory
+    slug = plugins
+    title = Perchance Plugin Directory
+    icon = 🧩
+    color = #8b5cf6
+    category = communityHubs
+    source = Community
+    blurb = The official plugin catalog
+  rathjisGenerators
+    slug = rathjis-generators
+    title = Rathji's Generators
+    icon = 🧭
+    color = #7c6cff
+    category = communityHubs
+    source = Community
+    blurb = The primary shortcut source
+  boardgameNetwork
+    slug = bgn-boardgame-network
+    title = The Boardgame Network
+    icon = 🎲
+    color = #f59e0b
+    category = communityHubs
+    source = Community
+    blurb = Hub for boardgame generators
+  videoGameNetwork
+    slug = vgn-video-game-network
+    title = The Video Game Network
+    icon = 🕹️
+    color = #7c6cff
+    category = communityHubs
+    source = Community
+    blurb = Hub for video game generators
+  diceRoller
+    slug = dice-roller
+    title = Dice Roller
+    icon = 🎲
+    color = #22c55e
+    category = gamesRpg
+    source = Community
+    blurb = Roll any dice pool
+  passwordGenerator
+    slug = password-generator
+    title = Password Generator
+    icon = 🔐
+    color = #f59e0b
+    category = tools
+    source = Community
+    blurb = Strong passwords in one click
+  markdownEditor
+    slug = markdown-editor
+    title = Markdown Editor
+    icon = 📝
+    color = #22d3ee
+    category = tools
+    source = Community
+    blurb = Write and preview Markdown
+  randomNameGenerator
+    slug = random-name-generator
+    title = Random Name Generator
+    icon = 🏷️
+    color = #ec4899
+    category = tools
+    source = Community
+    blurb = Names for characters & places
+  colorTools
+    slug = color-picker
+    title = Color Tools
+    icon = 🎨
+    color = #8b5cf6
+    category = tools
+    source = Community
+    blurb = Pick, tune and save colors
+  emojiPicker
+    slug = emoji-picker
+    title = Emoji Picker
+    icon = 😀
+    color = #f59e0b
+    category = tools
+    source = Community
+    blurb = Browse and copy emojis
+  qrCode
+    slug = qr-code
+    title = QR Code Generator
+    icon = ◼️
+    color = #94a3b8
+    category = tools
+    source = Community
+    blurb = Generate QR codes
+    comingSoon = true
+

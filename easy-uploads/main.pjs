@@ -1,0 +1,270 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// EASY-UPLOAD — upload files to a file host of your choice.
+//   * Host files for Perchance:  uploads.dev, GitHub, Neocities, Codeberg  (permanent direct URLs)
+//   * Quick shares:              tmpfiles.org, gofile.io, Litterbox  (temporary, no account)
+// ═══════════════════════════════════════════════════════════════════════════
+// uploads.dev uses Perchance's official upload-plugin (as in Rathji's
+// "Data Downloader / Host" generator). GitHub upload logic written fresh,
+// modeled on the API approach used by rathji's github-data-plugin
+// (Git Data API: blobs → tree → commit → ref). Codeberg uses Forgejo's
+// simpler contents API (one POST creates the file and advances the branch).
+// Based on the rathji-template (perchance.org/rathji-template).
+// More generators by Rathji: https://perchance.org/rathjis-generators
+// ═══════════════════════════════════════════════════════════════════════════
+
+superFetch = {import:super-fetch-plugin}
+uploadPlugin = {import:upload-plugin}
+
+$meta
+  title = easy-uploads
+  description = Upload any file to uploads.dev, GitHub, Neocities or Codeberg (permanent direct URLs — host files right in your Perchance generators), or grab a quick share link from tmpfiles.org, gofile.io or Litterbox. No account needed for the quick shares.
+  image = https://user.uploads.dev/file/af3b4214770d48bc7a1f077c5694d2a3.jpg
+  tags = upload, file share, uploads.dev, github, neocities, codeberg, tmpfiles, gofile, litterbox, rathji
+  header
+    mode = minimal
+
+// ── 1. LISTS (options + presets) ──────────────────────────────────────────
+
+// Service metadata — read by index.html to build the service selector.
+// One node per service; the `key` is what the page uses to pick the API.
+// `group` splits them: "host" = permanent direct URLs usable inside a
+// Perchance generator, "share" = temporary / share-page only.
+
+easyUploadServices
+  uploadsdev
+    key = uploadsdev
+    name = uploads.dev
+    group = host
+    tagline = Permanent · zero setup · Perchance's own host
+    hint = Uploads to Perchance's own file host and returns a permanent direct URL you can use in your generators as an image, script or data file. No account or API key needed — files just count against your upload allowance. Best for smaller files (anonymous uploads cap around 5 MB / ~30 MB a day per IP).
+    color = #34d399
+  github
+    key = github
+    name = GitHub
+    group = host
+    tagline = Permanent · free · host files for Perchance
+    hint = Pushes the file to your own repo and returns a stable raw.githubusercontent.com URL you can use in Perchance (images, scripts, data). Needs a fine-grained personal access token with “Contents: Read and write” on the repo. Files are capped at 100 MB.
+    color = #a5b4fc
+  neocities
+    key = neocities
+    name = Neocities
+    group = host
+    tagline = Permanent · free · host files for Perchance
+    hint = Uploads to your Neocities site and returns a direct https://yoursite.neocities.org/… URL for use in Perchance. Needs your Neocities API key (from your site dashboard → API). Free plan includes 1 GB of storage.
+    color = #fbbf24
+  codeberg
+    key = codeberg
+    name = Codeberg
+    group = host
+    tagline = Permanent · free · host files for Perchance
+    hint = Pushes the file to your own repo on Codeberg (the open-source-friendly Git forge) and returns a stable raw file URL you can use in Perchance. Needs an access token: codeberg.org → Settings → Applications → Generate new token with the “write:repository” scope. Git repo size limits apply.
+    color = #60a5fa
+  tmpfiles
+    key = tmpfiles
+    name = tmpfiles.org
+    group = share
+    tagline = Short-lived · auto-deleted after the retention you pick
+    hint = Files are deleted automatically after your chosen retention (60 min – 48 h). The site currently caps files at ~100 MB.
+    color = #7c6cff
+  gofile
+    key = gofile
+    name = gofile.io
+    group = share
+    tagline = Longer-term · kept ~10 days after last download
+    hint = Free guest uploads up to ~20 GB, no account needed. Kept for 10 days after the last download.
+    color = #22d3ee
+  litter
+    key = litter
+    name = Litterbox
+    group = share
+    tagline = Temporary · 1h–72h · up to 1 GB, no account
+    hint = By the catbox team. Files auto-delete after the retention you pick (1, 12, 24 or 72 hours). Up to 1 GB per file, no account needed.
+    color = #fb923c
+
+
+// ── 2. UPLOAD ENTRY POINTS ────────────────────────────────────────────────
+// Thin async functions — index.html calls these and renders the result.
+// They never throw for user-facing failures; they return { error } instead.
+
+async easyUploadTmpfiles(file, expireSeconds) =>
+  let fd = new FormData();
+  fd.append("file", file, file.name);
+  fd.append("expire", String(expireSeconds || 3600));
+  let resp = await root.superFetch("https://tmpfiles.org/api/v1/upload", { method: "POST", body: fd });
+  let json = await resp.json().catch(() => null);
+  if (!json || json.status !== "success" || !json.data || !json.data.url) {
+    return { error: (json && json.error && json.error.message) || "tmpfiles rejected the upload" };
+  }
+  let pageUrl = json.data.url;
+  return { pageUrl, dlUrl: pageUrl.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/") };
+
+async easyUploadGofile(file) =>
+  let fd = new FormData();
+  fd.append("file", file, file.name);
+  let resp = await root.superFetch("https://upload.gofile.io/uploadfile", { method: "POST", body: fd });
+  let json = await resp.json().catch(() => null);
+  if (!json || json.status !== "ok" || !json.data || !json.data.downloadPage) {
+    return { error: (json && json.error && json.error.message) || "gofile rejected the upload" };
+  }
+  return { shareUrl: json.data.downloadPage };
+
+// Litterbox — temporary file by the catbox team. Files auto-delete after the
+// chosen retention ("1h", "12h", "24h" or "72h"); max 1 GB, no account.
+// The response is a plain-text direct URL.
+async easyUploadLitter(file, time) =>
+  let fd = new FormData();
+  fd.append("reqtype", "fileupload");
+  fd.append("time", String(time || "24h"));
+  fd.append("fileToUpload", file, file.name);
+  let resp = await root.superFetch("https://litterbox.catbox.moe/resources/internals/api.php", { method: "POST", body: fd });
+  let text = String(await resp.text()).trim();
+  if (!/^https:\/\/litter\.catbox\.moe\//.test(text)) {
+    return { error: text || "Litterbox rejected the upload" };
+  }
+  return { shareUrl: text };
+
+
+// ── 3. PERMANENT HOSTS (files usable inside Perchance generators) ────────
+
+// uploads.dev — Perchance's own file host via the official upload-plugin
+// (the same approach Rathji's "Data Downloader / Host" uses). Permanent
+// direct URL, no account or key needed. Best for smaller files.
+async easyUploadUploadsDev(file) =>
+  let res = await root.uploadPlugin(file);
+  if (res.error || !res.url) {
+    return { error: res.message || res.error || "uploads.dev rejected the upload" };
+  }
+  return { fileUrl: res.url, deletionUrl: res.deletionUrl || "" };
+
+// GitHub — push the file to owner/repo via the Git Data API
+// (blobs → tree → commit → ref), the same approach as rathji's
+// github-data-plugin. Requires a fine-grained PAT with "Contents:
+// Read and write" on the target repo. Token is never stored in code —
+// the page keeps it in the user's own localStorage.
+async easyUploadGithub(file, repo, folderPath, token) =>
+  if (!token) return { error: "No GitHub token — paste a fine-grained personal access token with “Contents: Read and write” on the repo." };
+  repo = String(repo || "").trim().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "").replace(/\/+$/, "");
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) return { error: "Repo must be in the form owner/repo (e.g. octocat/Hello-World)" };
+  let dir = String(folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+  let path = dir ? dir + "/" + file.name : file.name;
+
+  const API = "https://api.github.com/repos/" + repo;
+  const H = { Accept: "application/vnd.github+json", Authorization: "Bearer " + token, "X-GitHub-Api-Version": "2022-11-28" };
+
+  async function gh(url, init) {
+    let res = await fetch(url, Object.assign({ headers: H }, init));
+    if (!res.ok) {
+      let msg = "HTTP " + res.status + " " + res.statusText;
+      try { let b = await res.clone().json(); if (b && b.message) msg += " — " + b.message; } catch (e) {}
+      throw new Error(msg);
+    }
+    return res;
+  }
+
+  // find the existing branch (main or master) and its head commit
+  let branch = null, head = null;
+  for (let b of ["main", "master"]) {
+    let res = await fetch(API + "/git/ref/heads/" + b, { headers: H });
+    if (res.ok) {
+      let ref = await res.json();
+      let commit = await (await gh(ref.object.url)).json();
+      branch = b;
+      head = { headSha: ref.object.sha, treeSha: commit.tree.sha };
+      break;
+    }
+    if (res.status !== 404) {
+      let msg = "HTTP " + res.status + " " + res.statusText;
+      try { let b2 = await res.clone().json(); if (b2 && b2.message) msg += " — " + b2.message; } catch (e) {}
+      throw new Error(msg);
+    }
+  }
+  if (!branch) throw new Error("Could not find a main or master branch in " + repo);
+
+  // base64 the file (works for text and binary)
+  let b64 = await new Promise((resolve, reject) => {
+    let r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1]);
+    r.onerror = () => reject(new Error("Could not read the file"));
+    r.readAsDataURL(file);
+  });
+
+  let blob = await (await gh(API + "/git/blobs", { method: "POST", body: JSON.stringify({ content: b64, encoding: "base64" }) })).json();
+  let tree = await (await gh(API + "/git/trees", { method: "POST", body: JSON.stringify({ base_tree: head.treeSha, tree: [{ path, mode: "100644", type: "blob", sha: blob.sha }] }) })).json();
+  let commit = await (await gh(API + "/git/commits", { method: "POST", body: JSON.stringify({ message: "Upload " + path + " via easy-uploads", tree: tree.sha, parents: [head.headSha] }) })).json();
+  await gh(API + "/git/refs/heads/" + branch, { method: "PATCH", body: JSON.stringify({ sha: commit.sha, force: false }) });
+
+  return {
+    fileUrl: "https://raw.githubusercontent.com/" + repo + "/" + branch + "/" + encodeURI(path),
+    commitUrl: "https://github.com/" + repo + "/commit/" + commit.sha,
+    branch, path
+  };
+
+// Neocities — upload to your site via POST /api/upload.
+// Requires an API key (anonymous uploads are not accepted). Returns the
+// direct https://yoursite.neocities.org/… file URL.
+async easyUploadNeocities(file, apiKey, folderPath) =>
+  if (!apiKey) return { error: "No Neocities API key — grab one from your site dashboard (Settings → API) and paste it above." };
+  let dir = String(folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+  let path = dir ? dir + "/" + file.name : file.name;
+  let fd = new FormData();
+  fd.append(path, file, file.name);
+  fd.append("api_key", apiKey);
+  let resp = await root.superFetch("https://neocities.org/api/upload", { method: "POST", body: fd });
+  let json = await resp.json().catch(() => null);
+  if (!json || json.result !== "success" || !json.files || !json.files.length) {
+    return { error: (json && json.message) || "Neocities rejected the upload" };
+  }
+  let f = json.files[0];
+  return { fileUrl: f.link || f.url || "https://neocities.org", filename: f.filename || path, path };
+
+// Codeberg — push the file to owner/repo via Forgejo's contents API.
+// A single POST creates the file (base64) and advances the default branch;
+// if the file already exists we PATCH it with its current blob sha.
+// Requires an access token (Settings → Applications → write:repository).
+async easyUploadCodeberg(file, repo, folderPath, token) =>
+  if (!token) return { error: "No Codeberg token — create one at codeberg.org → Settings → Applications (scope: write:repository) and paste it above." };
+  repo = String(repo || "").trim().replace(/^https?:\/\/codeberg\.org\//, "").replace(/\/+$/, "");
+  if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)) return { error: "Repo must be in the form owner/repo (e.g. octocat/Hello-World)" };
+  let dir = String(folderPath || "").trim().replace(/^\/+|\/+$/g, "");
+  let path = dir ? dir + "/" + file.name : file.name;
+
+  let b64 = await new Promise((resolve, reject) => {
+    let r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1]);
+    r.onerror = () => reject(new Error("Could not read the file"));
+    r.readAsDataURL(file);
+  });
+
+  let base = "https://codeberg.org/api/v1/repos/" + repo + "/contents/" + encodeURI(path);
+  let headers = { Authorization: "token " + token };
+
+  async function cb(url, method, body) {
+    let res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    if (!res.ok) {
+      let msg = "HTTP " + res.status + " " + res.statusText;
+      try { let b = await res.clone().json(); if (b && b.message) msg += " — " + b.message; } catch (e) {}
+      throw new Error(msg);
+    }
+    return res.json();
+  }
+
+  let payload = { content: b64, message: "Upload " + path + " via easy-uploads" };
+  let existing = await fetch(base, { headers });
+  if (existing.ok) {
+    let ex = await existing.json();
+    let sha = ex && ex.content && ex.content.sha;
+    payload.sha = sha;
+  } else if (existing.status !== 404) {
+    let msg = "HTTP " + existing.status + " " + existing.statusText;
+    try { let b = await existing.clone().json(); if (b && b.message) msg += " — " + b.message; } catch (e) {}
+    throw new Error(msg);
+  }
+
+  let json = await (existing.ok ? cb(base, "PATCH", payload) : cb(base, "POST", payload));
+  let content = json.content || {};
+  let commit = json.commit || {};
+  return {
+    fileUrl: content.download_url || ("https://codeberg.org/" + repo + "/raw/branch/main/" + encodeURI(path)),
+    commitUrl: commit.html_url || ("https://codeberg.org/" + repo + "/commit/" + commit.sha),
+    path
+  };

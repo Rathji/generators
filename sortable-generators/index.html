@@ -1,0 +1,157 @@
+<h1>Recently Sortable Generators</h1>
+<p class="subtitle">A self-contained clone of perchance.org/generators with built-in search &amp; sort.</p>
+
+<div id="toolbarCtn">
+  <input id="searchInput" type="text" placeholder="Filter by name or description..." autocomplete="off" />
+  <select id="sortSelect">
+    <option value="recent">Sort: Recently updated</option>
+    <option value="name-az">Sort: Name (A-Z)</option>
+    <option value="name-za">Sort: Name (Z-A)</option>
+    <option value="views-desc">Sort: Views (high → low)</option>
+    <option value="views-asc">Sort: Views (low → high)</option>
+  </select>
+  <span id="countEl" class="count"></span>
+</div>
+
+<div id="list"><div class="loading">Loading...</div></div>
+
+<style>
+  html { color-scheme: light dark; }
+  body { margin: 0; padding: 1rem; }
+  #toolbarCtn {
+    position: sticky; top: 0; z-index: 1000;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
+    gap: 0.5rem; padding: 0.6rem 0.75rem; margin: 0 auto 1rem; max-width: 1200px;
+    background: #f2f2f2; border: 1px solid #bbb; box-shadow: 0 1px 2px 0 #e3e3e3;
+    font-size: 90%;
+  }
+  #searchInput { width: min(280px, 60vw); }
+  #searchInput, #sortSelect { background: #fff; border: 1px solid #bbb; padding: 0.25rem 0.4rem; }
+  .count { opacity: 0.6; }
+  .loading { padding: 2rem; text-align: center; }
+  #list { display: flex; flex-wrap: wrap; justify-content: center; padding: 1rem; max-width: 1200px; margin: 0 auto; }
+  table.generator-card {
+    width: 270px; min-height: 180px; margin: 0.5rem;
+    box-shadow: 0 1px 2px 0 #e3e3e3; background: #f2f2f2;
+  }
+  table.generator-card td { border: 1px solid #bbb; padding: 0.5em; }
+  .subtitle { opacity: 0.4; margin: 0 0 0.75rem; font-size: 80%; }
+  @media (prefers-color-scheme: dark) {
+    body { background: black; color: #dfdfdf; }
+    #toolbarCtn { background: #1a1a1a; border-color: #292929; box-shadow: 0 1px 2px 0 #0e0e0e; color: #cbcbcb; }
+    #searchInput, #sortSelect { background: #252525; border-color: #292929; color: inherit; }
+    table.generator-card { box-shadow: 0 1px 2px 0 #0e0e0e; background: #1a1a1a; color: #cbcbcb; }
+    table.generator-card td { border: 1px solid #292929; }
+    table.generator-card img { filter: brightness(0.8); }
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: black; color: #dfdfdf; }
+  }
+</style>
+
+<script>
+(function () {
+  const listEl = document.querySelector("#list");
+  const searchInput = document.querySelector("#searchInput");
+  const sortSelect = document.querySelector("#sortSelect");
+  const countEl = document.querySelector("#countEl");
+  const SKIP = new Set(["generators", "welcome", "popular-generators"]);
+  const ULTRA_PINNED = ["multiplayer-minecraft-with-voice-chat", "hop-havoc", "browserquest-2", "openworld-destructible"];
+  let cards = [];
+
+  function sanitizeHtml(str) {
+    return String(str || "").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+  }
+
+  function formatViews(v) {
+    return v > 999999 ? (v / 1000000).toFixed(1) + "m" : v > 999 ? (v / 1000).toFixed(1) + "k" : v;
+  }
+
+  function formatAgo(ms) {
+    if (typeof ms !== "number" || !isFinite(ms)) return "...";
+    let s = Math.max(0, ms) / 1000;
+    const units = [[315576e5, "year"], [26298e5, "month"], [864e5, "day"], [36e5, "hour"], [6e4, "minute"], [1e3, "second"]];
+    for (const [div, name] of units) {
+      if (s > div) { const t = Math.round(s / div); return t + " " + name + (t === 1 ? "" : "s") + " ago"; }
+    }
+    return Math.round(s) + " second ago";
+  }
+
+  function cardHtml(g) {
+    const screenshot = "https://perchance.org/api/getGeneratorScreenshot?generatorName=" + encodeURIComponent(g.name);
+    const img = (g.metaData && g.metaData.image) || screenshot;
+    const desc = g.metaData && g.metaData.description ? (g.metaData.description.length > 113 ? g.metaData.description.slice(0, 113) + "…" : g.metaData.description) : "";
+    const ago = formatAgo(g.lastEditTime_ago != null ? g.lastEditTime_ago : (g.lastEditTime != null ? Date.now() - g.lastEditTime : undefined));
+    const agoParts = ago.split(" ");
+    const pinned = g.ultraPinned || g.pinned;
+    return (
+      '<table class="generator-card" data-name="' + sanitizeHtml(g.name) + '"><tr>' +
+      '<td style="width:200px; overflow-wrap:anywhere; position:relative;">' +
+      (pinned ? '<div style="position:absolute; left:0.125rem; top:0.125rem; font-size:80%;" title="Pinned">📌</div>' : "") +
+      '<a href="/' + encodeURIComponent(g.name) + '"><img loading="lazy" src="' + sanitizeHtml(img) + '" style="height:6rem; width:154px; object-fit:contain; display:block; margin:0 auto;" /></a>' +
+      '<a style="display:block;" href="/' + encodeURIComponent(g.name) + '">' + sanitizeHtml(g.name) + "</a>" +
+      '<div class="desc">' + sanitizeHtml(desc) + "</div>" +
+      "</td>" +
+      '<td style="font-size:90%;">' +
+      '<span class="views">' + formatViews(g.views || 0) + ' <span style="opacity:0.6;font-size:80%;">views</span></span><br>' +
+      '<span style="opacity:0.5;">' + agoParts[0] + " <span style=\"opacity:0.6;font-size:80%;\">" + agoParts.slice(1).join(" ") + "</span></span>" +
+      "</td></tr></table>"
+    );
+  }
+
+  function getSortKey(g) {
+    switch (sortSelect.value) {
+      case "name-az": return g.name.toLowerCase();
+      case "name-za": return -g.name.localeCompare("", undefined, { sensitivity: "base" });
+      case "views-desc": return -g.views;
+      case "views-asc": return g.views;
+      default: return -(g.lastEditTime != null ? g.lastEditTime : 0);
+    }
+  }
+
+  function matches(g) {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) return true;
+    const hay = (g.name + " " + ((g.metaData && g.metaData.description) || "")).toLowerCase();
+    return hay.includes(q);
+  }
+
+  function apply() {
+    const visible = cards.filter(matches);
+    visible.sort((a, b) => { const ka = getSortKey(a), kb = getSortKey(b); return ka < kb ? -1 : ka > kb ? 1 : 0; });
+    const order = new Map(visible.map((g, i) => [g, i]));
+    listEl.querySelectorAll("table.generator-card").forEach((el) => {
+      const g = el.__g;
+      if (!order.has(g)) { el.style.display = "none"; return; }
+      el.style.display = "";
+      el.style.order = order.get(g);
+    });
+    countEl.textContent = "Showing " + visible.length + " of " + cards.length;
+  }
+
+  (async function init() {
+    listEl.innerHTML = '<div class="loading">Loading...</div>';
+    try {
+      const res = await fetch("/api/getGeneratorList?max=2000").then((r) => r.json());
+      let gens = (res.generators || []).filter((g) => !SKIP.has(g.name));
+      const pinnedSet = new Set();
+      gens.forEach((g) => { if (ULTRA_PINNED.includes(g.name)) g.ultraPinned = true; });
+      gens = gens.filter((g) => !g.ultraPinned);
+      const now = Date.now();
+      cards = gens.map((g) => {
+        const lastEditTime = typeof g.lastEditTime === "number" ? g.lastEditTime : now;
+        return { name: g.name, views: g.views || 0, lastEditTime, metaData: g.metaData || {} };
+      });
+      listEl.innerHTML = cards.map(cardHtml).join("");
+      listEl.querySelectorAll("table.generator-card").forEach((el, i) => { el.__g = cards[i]; });
+      apply();
+    } catch (e) {
+      listEl.innerHTML = '<div class="loading">Failed to load generator list. Reload to retry.</div>';
+      console.error(e);
+    }
+  })();
+
+  searchInput.addEventListener("input", apply);
+  sortSelect.addEventListener("change", apply);
+})();
+</script>

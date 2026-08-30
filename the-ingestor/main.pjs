@@ -1,0 +1,213 @@
+// ══════════════════════════════════════════════════════════════════════════
+// THE INGESTOR — BUILD RECORD (COMPLETE — all 20 tasks, 2026-08-28/29)
+// ══════════════════════════════════════════════════════════════════════════
+// Architecture + validation notes live in src/README.md; per-task validation
+// suites are scratch/tests/task1..20.test.js (run via page_eval). The app:
+// ingest a source (Perchance / website / textarea / PDF) → monitor/chunk →
+// optionally recursive-summarize → pick a mode → Run Analysis streams the
+// markdown result → export .md/.json/.csv/.txt.
+//
+// PHASE 1 · UI & LAYOUT ........... done 2026-08-28
+//   1  Two-panel dark layout (rathji-template design system)
+//   2  Input source tabs (Perchance URL / Website URL / Textarea / PDF)
+//   3  Analysis mode selector (Featurize / Ingestify / Ask / Extract / Glossary)
+//   4  Output rendering engine (markdown → styled HTML, streaming-ready)
+//   5  Export suite (.markdown / .json / .csv / .txt)
+// PHASE 2 · DATA ACQUISITION ...... done 2026-08-29
+//   6  Perchance source resolver (getGeneratorsAndDependencies, recursive imports)
+//   7  Web content scraper (superFetch → DOMParser, boilerplate stripping)
+//   8  PDF text extractor (pdf.js, same-origin worker)
+//   9  Textarea input handler
+// PHASE 3 · CONTEXT & CHUNKING .... done 2026-08-29
+//  10  Context window monitor (chars/4 heuristic, 8000-token default)
+//  11  Content chunking engine (line-boundary, code-block-safe)
+//  12  Recursive summarization loop (chunks → notes → one digest)
+// PHASE 4 · ANALYSIS MODE LOGIC ... done 2026-08-29
+//  13  Featurize  14  Ingestify  15  Ask  16  Extract  17  Glossary
+// PHASE 5 · UX & POLISH ........... done 2026-08-29
+//  18  Progress visualization  19  Output streaming
+//  20  Final integration — Run Analysis pipeline (enabled)
+
+// THE INGESTOR — CORE
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = The Ingestor
+  description = Ingest diverse content sources (Perchance generators, websites, raw text, PDFs) and transform them into structured analysis — featurize, ingestify, ask, extract, or glossarize.
+  tags = ingestor, analysis, ai, research, markdown, rathji
+  header
+    mode = minimal
+
+superFetch = {import:super-fetch-plugin}
+generateText = {import:ai-text-plugin}
+
+// ── VENDORED FROM RATHJI-TEMPLATE (perchance.org/rathji-template) ──────────
+// Badge + card components, copied verbatim so this generator needs no import.
+// Call from a list:  [rathjiTemplate("hello")]  /  [rathjiCard(rathjiCardOpts)]
+// More generators by Rathji: https://perchance.org/rathjis-generators
+//RATHJI_CODE_STARTS_HERE
+
+// ── 1. LISTS (options + presets) ───────────────────────────────────────────
+
+// An options node is a list whose items are `key = value` pairs — pass it to
+// rathjiTemplate() and it reads each key.
+
+rathjiTemplateOpts
+  text = hello
+  emoji = 🌊
+  color = #22d3ee
+
+// A list of preset options nodes. Pass the whole list and rathjiTemplate()
+// picks a random item — a handy way to offer "themes".
+
+rathjiTemplatePresets
+  cosmic
+    text = Cosmic
+    emoji = 🌌
+    color = #8b5cf6
+  ocean
+    text = Ocean
+    emoji = 🌊
+    color = #22d3ee
+  ember
+    text = Ember
+    emoji = 🔥
+    color = #f97316
+
+
+// ── 2. HELPERS ─────────────────────────────────────────────────────────────
+
+// Read any value through .evaluateItem so Perchance lists work anywhere a
+// plain value would.
+rathjiTemplateResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem; // pjs node → its evaluated value
+  } catch(e) {}
+  return v; // raw JS value → as-is
+
+rathjiTemplateStamp(text, opts) =>
+  let emoji = opts.emoji || "✨";
+  let color = opts.color || "#7c6cff";
+  return '<span style="display:inline-block;background:' + color + '1a;color:' + color + ';border:1px solid ' + color + '66;border-radius:999px;padding:4px 14px;font-weight:600;font-family:system-ui,sans-serif;">' + emoji + " " + text + "</span>";
+
+
+// ── 3. ENTRY POINT ─────────────────────────────────────────────────────────
+// Accepts, all through ONE function:
+//   rathjiTemplate("hi")                       plain value
+//   rathjiTemplate("hi", {color:"#f00"})       value + options object
+//   rathjiTemplate({text:"hi", color:"#f00"})  options object alone
+//   rathjiTemplate(rathjiTemplateOpts)         options read from a list node
+//   rathjiTemplate(rathjiTemplatePresets)      a LIST of options → picks a random one
+//
+// Options are distinguished from plain values the way the text-to-image-plugin
+// does it: an options node has a known key (here: `text`), a plain value does
+// not. Every value — string, number, item — is read through .evaluateItem so
+// Perchance lists work anywhere a plain value would.
+//
+// Never throw — return a readable "(...)" placeholder on bad input.
+
+rathjiTemplate(input, opts) =>
+  // A LIST of preset options (rathjiTemplatePresets) has items but no `.text`
+  // key — pick a random item first. A single options node (rathjiTemplateOpts),
+  // an options object, or a plain value all keep their own `.text` (or none at
+  // all). A plain list of strings (items without `.text`) passes through
+  // untouched, so `rathjiTemplate(aPlainList)` evaluates to a random item —
+  // free list support.
+  if(input != null && input.text === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.text !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.text = rathjiTemplateResolve(input);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.text !== undefined) {
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.text !== "string" || !o.text.trim()) {
+    return "(rathjiTemplate: expected some text — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiTemplateStamp(o.text.trim(), o);
+
+
+// ── 4. BONUS COMPONENT: CARDS ──────────────────────────────────────────────
+// A second copyable component that works exactly like the badge: themed cards
+// with a title, description text, emoji and accent color. Same call patterns:
+//   rathjiCard("Hello")
+//   rathjiCard("Hello", { color:"#22c55e" })
+//   rathjiCard({ title:"Hi", text:"...", emoji:"🃏", color:"#7c6cff" })
+//   rathjiCard(rathjiCardOpts)          options read from a list node
+//   rathjiCard(rathjiCardPresets)       a LIST of options → picks a random one
+
+rathjiCardOpts
+  title = Hello
+  text = A generic card that holds a bit of description text.
+  emoji = 🃏
+  color = #7c6cff
+
+rathjiCardPresets
+  hero
+    title = Hero card
+    text = A bold opening card for a section of your page.
+    emoji = 🏆
+    color = #8b5cf6
+  story
+    title = Story time
+    text = A card to hold narrative text, quotes, or lore.
+    emoji = 📖
+    color = #22d3ee
+  tip
+    title = Pro tip
+    text = Cards make generic content blocks easy to reuse.
+    emoji = 💡
+    color = #f59e0b
+
+rathjiCardStamp(o) =>
+  let emoji = o.emoji || "🃏";
+  let color = o.color || "#7c6cff";
+  return '<div style="background:' + color + '14;border:1px solid ' + color + '44;border-left:4px solid ' + color + ';border-radius:14px;padding:16px 18px;text-align:left;">' +
+    '<div style="font-size:1.6rem;line-height:1;">' + emoji + '</div>' +
+    '<div style="font-weight:700;margin-top:8px;">' + o.title + '</div>' +
+    '<div style="margin-top:4px;font-size:.92rem;opacity:.75;">' + o.text + '</div></div>';
+
+rathjiCard(input, opts) =>
+  // Same input handling as rathjiTemplate (options node vs. list of presets).
+  if(input != null && input.title === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.title !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(opts.text);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.title !== undefined) {
+    o.title = rathjiTemplateResolve(input.title);
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.title !== "string" || !o.title.trim()) o.title = o.text;
+  if(typeof o.text !== "string" || !o.text.trim()) o.text = o.title;
+  if(typeof o.title !== "string" || !o.title.trim()) {
+    return "(rathjiCard: expected a title — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiCardStamp(o);

@@ -1,0 +1,597 @@
+<!-- ============ Interactive voice assistant — showcases the voice-tools-plugin ============ -->
+
+<style>
+  :root {
+    --bg: #f5f5f8;
+    --card: #ffffff;
+    --border: #e3e3ec;
+    --text: #191922;
+    --muted: #6f6f7d;
+    --accent: #5b6cff;
+    --accent-dark: #4452d6;
+    --accent-soft: #eef0ff;
+    --danger: #d64545;
+    --bubble-bot: #eef0f5;
+    --bubble-user: #5b6cff;
+    --radius: 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15151a;
+      --card: #1e1e26;
+      --border: #33333f;
+      --text: #efeff6;
+      --muted: #9898a6;
+      --accent: #7b8aff;
+      --accent-soft: #272b45;
+      --bubble-bot: #2a2a35;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    text-align: left;
+    line-height: 1.5;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 0 14px 36px; display: flex; flex-direction: column; min-height: 100vh; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 2px 12px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .logo { font-weight: 800; font-size: 16px; letter-spacing: 0.02em; }
+  .logo span { color: var(--accent); }
+  .hstatus { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
+  .hstatus b { color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #a0a0ad; flex: 0 0 auto; }
+  .dot.err { background: var(--danger); }
+  #app { display: flex; gap: 18px; align-items: flex-start; margin-top: 16px; flex: 1; }
+  #chatCtn { flex: 1; min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; height: calc(100vh - 200px); min-height: 440px; }
+  #chatEl { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
+  .msg { display: flex; gap: 8px; align-items: flex-start; max-width: 92%; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .msg .av { font-size: 18px; line-height: 1; margin-top: 7px; }
+  .bubble { background: var(--bubble-bot); border-radius: 14px; border-top-left-radius: 4px; padding: 9px 12px; font-size: 14.5px; line-height: 1.5; word-break: break-word; }
+  .msg.user .bubble { background: var(--bubble-user); color: #fff; border-radius: 14px; border-top-right-radius: 4px; }
+  .msg.user.live .bubble { font-style: italic; opacity: 0.8; }
+  .msg.user.live .bubble::after { content: "▌"; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  #inputRow { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); align-items: center; }
+  #micBtn {
+    width: 46px; height: 46px; border-radius: 50%; border: none; flex: 0 0 auto;
+    background: var(--accent); color: #fff; font-size: 19px; cursor: pointer;
+    transition: transform 0.08s;
+  }
+  #micBtn:active { transform: scale(0.94); }
+  #micBtn.on { background: var(--danger); animation: pulse 1.3s infinite; }
+  @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(214,69,69,0.45); } 50% { box-shadow: 0 0 0 9px rgba(214,69,69,0); } }
+  #textInput {
+    flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 12px;
+    padding: 11px 14px; font-size: 14.5px; background: var(--bg); color: var(--text); font-family: inherit;
+  }
+  #textInput:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #sendBtn {
+    border: none; background: var(--accent); color: #fff; border-radius: 12px; padding: 11px 18px;
+    font-size: 14.5px; font-weight: 600; cursor: pointer; font-family: inherit; flex: 0 0 auto;
+  }
+  #sendBtn:hover { background: var(--accent-dark); }
+  #chipsCtn { display: flex; flex-wrap: wrap; gap: 7px; padding: 0 12px 12px; }
+  .chip {
+    border: 1px solid var(--border); background: transparent; color: var(--text);
+    padding: 4px 11px; border-radius: 999px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+  }
+  .chip:hover { border-color: var(--accent); background: var(--accent-soft); }
+  #listCtn {
+    width: 330px; flex: 0 0 auto; background: var(--card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px;
+  }
+  .listhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .listhead h2 { font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); margin: 0; }
+  #countEl { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  #todoEl { display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 330px); min-height: 110px; overflow-y: auto; }
+  .task { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+  .task.done { opacity: 0.55; }
+  .task.done .lbl { text-decoration: line-through; }
+  .task .num { font-size: 11px; color: var(--muted); width: 16px; flex: 0 0 auto; text-align: right; }
+  .task .lbl { flex: 1; font-size: 14px; word-break: break-word; }
+  .task .x { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 6px; }
+  .task .x:hover { color: var(--danger); }
+  .task input[type="checkbox"] { accent-color: var(--accent); flex: 0 0 auto; }
+  .empty { color: var(--muted); font-size: 13.5px; line-height: 1.7; text-align: center; padding: 28px 8px; }
+  #clearBtn {
+    margin-top: 12px; width: 100%; border: 1px solid var(--border); background: transparent;
+    color: var(--muted); border-radius: 10px; padding: 8px; cursor: pointer; font-family: inherit; font-size: 13px;
+  }
+  #clearBtn:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  #clearBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .warn, .note { border-radius: 12px; padding: 11px 14px; font-size: 13px; margin-top: 14px; }
+  .warn { border: 1px solid var(--danger); color: var(--danger); }
+  .note { border: 1px solid var(--border); color: var(--muted); }
+  .foot { margin-top: auto; padding-top: 24px; text-align: center; color: var(--muted); font-size: 12.5px; }
+  .foot code { background: var(--accent-soft); color: var(--accent); border-radius: 5px; padding: 1px 6px; font-size: 11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  @media (max-width: 880px) {
+    #app { flex-direction: column; }
+    #listCtn { width: 100%; }
+    #chatCtn { height: 58vh; min-height: 340px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="logo">voice-assistant · <span>powered by voice-tools-plugin</span></div>
+    <div class="hstatus"><span class="dot" id="statusDot"></span><span id="statusEl">Starting…</span></div>
+  </header>
+
+  <div id="app">
+
+    <div id="chatCtn">
+      <div id="chatEl"></div>
+      <div id="chipsCtn">
+        <button class="chip" data-cmd="add buy milk">Add buy milk</button>
+        <button class="chip" data-cmd="add eggs and bread">Add eggs and bread</button>
+        <button class="chip" data-cmd="mark 2 done">Mark 2 done</button>
+        <button class="chip" data-cmd="read my list">Read my list</button>
+        <button class="chip" data-cmd="clear all">Clear all</button>
+      </div>
+      <div id="inputRow">
+        <button id="micBtn" title="Start voice input">🎤</button>
+        <input id="textInput" type="text" placeholder="Type a command… e.g. add buy milk" autocomplete="off">
+        <button id="sendBtn">Send</button>
+      </div>
+      <div id="sttNoteEl" class="note" hidden>Voice input needs Chrome, Edge or Safari — typing works in every browser.</div>
+    </div>
+
+    <aside id="listCtn">
+      <div class="listhead"><h2>My tasks</h2><span id="countEl"></span></div>
+      <div id="todoEl"></div>
+      <button id="clearBtn">🗑 Clear all</button>
+    </aside>
+
+  </div>
+
+  <div id="warnEl" class="warn" hidden>This browser doesn't support speech synthesis, so the assistant can't speak aloud here — but it will still take your typed commands.</div>
+
+  <div class="foot">Built entirely with the <code>\{import:voice-tools-plugin\}</code> — speech-to-text for dictation, text-to-speech for the replies. No servers, no API keys.</div>
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  function getApi() {
+    if (window.__voiceToolsPluginApi) return window.__voiceToolsPluginApi;
+    try {
+      if (typeof root !== "undefined" && root && root.$output) { root.$output; }
+    } catch (e) {}
+    return window.__voiceToolsPluginApi || null;
+  }
+  const tts = getApi();
+
+  const chatEl = $("chatEl"), micBtn = $("micBtn"), textInput = $("textInput"), sendBtn = $("sendBtn");
+  const todoEl = $("todoEl"), countEl = $("countEl"), clearBtn = $("clearBtn");
+  const statusEl = $("statusEl"), statusDot = $("statusDot"), warnEl = $("warnEl"), sttNoteEl = $("sttNoteEl");
+
+  // ---- todo state (persists between visits) ----
+  let todos = [];
+  try { todos = JSON.parse(localStorage.getItem("vtAssistant_todos") || "[]") || []; } catch (e) { todos = []; }
+  todos = todos.filter((t) => t && typeof t.text === "string");
+  const save = () => { try { localStorage.setItem("vtAssistant_todos", JSON.stringify(todos)); } catch (e) {} };
+
+  // ---- speech setup ----
+  const setStatus = (msg, err) => { statusEl.textContent = msg; statusDot.className = "dot" + (err ? " err" : ""); };
+  const plural = (w, n) => (n === 1 ? w : w + "s");
+  const joinAnd = (arr) => (arr.length === 1 ? arr[0] : arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1]);
+
+  if (tts && tts.supported) {
+    (async () => {
+      const voices = await tts.voices;
+      const cloud = voices.find((v) => v.source === "cloud" && /british/i.test(v.name));
+      const native = voices.find((v) => v.lang && v.lang.toLowerCase().indexOf("en") === 0 && /british/i.test(v.name))
+                  || voices.find((v) => v.lang && v.lang.toLowerCase().indexOf("en") === 0);
+      const sel = cloud || native || voices[0];
+      if (sel) tts.setVoice(sel.name);
+      tts.settings.rate = 1.05;
+      setStatus(sel ? "Voice: " + sel.name : "Ready", false);
+    })().catch(() => setStatus("Ready", false));
+  } else {
+    if (warnEl) warnEl.hidden = false;
+    setStatus("Speech synthesis unavailable", true);
+  }
+  if (tts && !tts.sttSupported && sttNoteEl) sttNoteEl.hidden = false;
+
+  const say = (text) => {
+    addBubble(text, "bot");
+    if (tts && tts.supported) return tts.speak(text, { onError: () => {} }).catch(() => {});
+    return Promise.resolve();
+  };
+
+  // ---- chat bubbles ----
+  let liveBubble = null;
+  function addBubble(text, who) {
+    const row = document.createElement("div");
+    row.className = "msg " + who;
+    const av = document.createElement("span");
+    av.className = "av";
+    av.textContent = who === "bot" ? "🤖" : "🧑";
+    const b = document.createElement("div");
+    b.className = "bubble";
+    b.textContent = text;
+    row.append(av, b);
+    chatEl.appendChild(row);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return b;
+  }
+  function removeLive() {
+    if (liveBubble) {
+      const p = liveBubble.parentElement;
+      if (p) p.remove();
+      liveBubble = null;
+    }
+  }
+  function newLiveBubble() {
+    removeLive();
+    const row = document.createElement("div");
+    row.className = "msg user live";
+    const av = document.createElement("span");
+    av.className = "av";
+    av.textContent = "🧑";
+    const b = document.createElement("div");
+    b.className = "bubble";
+    b.textContent = "…";
+    row.append(av, b);
+    chatEl.appendChild(row);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    liveBubble = b;
+  }
+  function commitLive(text) {
+    if (liveBubble) {
+      liveBubble.textContent = text;
+      liveBubble.parentElement.classList.remove("live");
+      liveBubble = null;
+    }
+  }
+
+  // ---- microphone / recognition ----
+  let micActive = false, listening = false, listenHandle = null;
+  function stopRecognition() {
+    listening = false;
+    if (listenHandle) { try { listenHandle.stop(); } catch (e) {} listenHandle = null; }
+  }
+  function startRecognition() {
+    if (!tts || !tts.sttSupported || !micActive) return;
+    if (listenHandle) return;
+    const bubbleBody = newLiveBubble();
+    try {
+      listenHandle = tts.listen({
+        onInterim: ({ fullText }) => { bubbleBody.textContent = fullText; },
+        onFinal: async ({ text }) => {
+          commitLive(text);
+          stopRecognition();
+          await handleUtterance(text, "voice");
+          if (micActive) startRecognition();
+        },
+        onError: (e) => {
+          setStatus("Mic error: " + e.message, true);
+          removeLive();
+          stopRecognition();
+          micActive = false;
+          setMicUI();
+        },
+        onEnd: () => {
+          listening = false;
+          listenHandle = null;
+          removeLive();
+          if (micActive) setTimeout(() => { if (micActive) startRecognition(); }, 450);
+        },
+      });
+      listening = true;
+    } catch (e) {
+      setStatus("Couldn't start the mic: " + e.message, true);
+      removeLive();
+      stopRecognition();
+      micActive = false;
+      setMicUI();
+    }
+  }
+  function setMicUI() {
+    micBtn.classList.toggle("on", micActive);
+    micBtn.textContent = micActive ? "■" : "🎤";
+    micBtn.title = micActive ? "Stop listening" : "Start voice input";
+  }
+  function toggleMic() {
+    if (!tts || !tts.sttSupported) {
+      setStatus("Voice input needs Chrome, Edge or Safari.", true);
+      return;
+    }
+    micActive = !micActive;
+    if (micActive) {
+      setStatus("Listening… speak now.", false);
+      startRecognition();
+    } else {
+      stopRecognition();
+      removeLive();
+      setStatus("Mic off. Type below to keep going.", false);
+    }
+    setMicUI();
+  }
+
+  // ---- intent parsing (works for voice and typed text) ----
+  const V_MARK = "mark|check off|check|cross off|cross out|tick off|tick|complete|finish|done|completed";
+  const V_DEL  = "delete|remove|drop|erase|get rid of|bin|trash|forget|undo";
+  const V_ADD  = "add|create|new|make|note|write down|write|put down|put|jot down|jot|set|remember|remind me to|remind me about|remind me|i need to|i need|don'?t forget|dont forget|buy|get|pick up|grab|find|try|call|email|check";
+
+  const ORD = { zero: 0, first: 1, one: 1, second: 2, two: 2, third: 3, three: 3, fourth: 4, four: 4, fifth: 5, five: 5, sixth: 6, six: 6, seventh: 7, seven: 7, eighth: 8, eight: 8, ninth: 9, nine: 9, tenth: 10, ten: 10 };
+
+  function parseOrdinal(phrase) {
+    const m = String(phrase).toLowerCase().match(/(\d+)|(last|zero|first|one|second|two|third|three|fourth|four|fifth|five|sixth|six|seventh|seven|eighth|eight|ninth|nine|tenth|ten)/);
+    if (!m) return null;
+    if (m[1] !== undefined) return parseInt(m[1], 10);
+    if (m[2] === "last") return "last";
+    return ORD[m[2]];
+  }
+
+  function cleanTask(s) {
+    return String(s || "")
+      .replace(/[!.,;:?]+$/g, "")
+      .replace(/\s*(on|to) (my|the|your|a) (list|todo list|to-do list|todos?|tasks?)\s*$/i, "")
+      .replace(/\s+(please|pls|for me)\s*$/i, "")
+      .replace(/^[\s,;:&]+|[\s,;:&]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  function splitItems(rest) {
+    return String(rest || "")
+      .replace(/^[\s,;:&]+|[\s,;:&]+$/g, "")
+      .split(/\s*,\s*|\s+and\s+|\s*&\s*/)
+      .map((s) => s.replace(/^[\s,;:&]+|[\s,;:&]+$/g, ""))
+      .filter(Boolean);
+  }
+  function findTask(q) {
+    const lq = String(q || "").toLowerCase().trim();
+    if (!lq) return -1;
+    const qw = lq.split(/\s+/).filter((w) => w.length > 1);
+    let best = -1, bestScore = 0;
+    todos.forEach((t, i) => {
+      const lt = t.text.toLowerCase();
+      let score = 0;
+      if (lt === lq) score = 5;
+      else if (lt.includes(lq) || lq.includes(lt)) score = 4;
+      else if (qw.length) {
+        const ltWords = lt.split(/\s+/);
+        score = qw.filter((w) => ltWords.includes(w)).length / qw.length;
+      }
+      if (score > bestScore) { bestScore = score; best = i; }
+    });
+    return bestScore >= 0.6 ? best : -1;
+  }
+
+  function parseUtterance(raw) {
+    let s = String(raw || "").toLowerCase().replace(/[?!.,;:]+$/g, "").replace(/\s+/g, " ").trim();
+    if (!s) return null;
+    const has = (re) => re.test(s);
+
+    if (has(/^(hello|hi|hey|howdy|yo|good (morning|afternoon|evening))\b/)) return { type: "greeting" };
+    if (has(/\b(help|what can you do|how do i use|commands?)\b/)) return { type: "help" };
+    if (has(/^(stop|cancel|never ?mind|shut up|be quiet|stop listening)\b/)) return { type: "stop" };
+    if (has(/\b(thank(s| you)|cheers)\b/)) return { type: "thanks" };
+    if (has(/\bhow many (tasks|items|things|chores)\b|\bhow long is (my|the) list\b/)) return { type: "count" };
+
+    if (has(/^list$/i) || has(/\b(?:read|show) (?:me )?(?:my |the )?(?:list|tasks|to-dos|todos)\b/) || has(/what'?s on (?:my|the|your) list/) || has(/(?:my tasks|what do i (?:have|need)|remind me what|what did i (?:write|add))/)) return { type: "list" };
+
+    if (has(/^(clear|empty|wipe|reset|remove|delete|trash) (?:the )?(?:list|tasks|todos|everything|all)\b/)) return { type: "clear" };
+
+    if (has(new RegExp("^(" + V_DEL + ")\\b"))) {
+      let rest = s.replace(new RegExp("^(" + V_DEL + ")\\b"), "").replace(/^[\s,;:&]+/, "").trim();
+      const items = splitItems(rest);
+      if (items.length && !/^(all|everything)$/.test(rest)) return { type: "delete", items };
+      if (/^(all|everything)$/.test(rest)) return { type: "clear" };
+    }
+
+    if (has(new RegExp("^(" + V_MARK + ")\\b"))) {
+      let rest = s.replace(new RegExp("^(" + V_MARK + ")\\b"), "").replace(/^[\s,;:&]+/, "").trim();
+      rest = rest.replace(/\s+(as|off) done$/, "").replace(/\s+(done|completed|complete)$/, "").trim();
+      const items = splitItems(rest);
+      if (items.length) return { type: "done", items };
+      const openIdx = todos.findIndex((t) => !t.done);
+      const openCount = todos.filter((t) => !t.done).length;
+      if (openCount === 1) return { type: "done", items: [String(openIdx + 1)] };
+      return null;
+    }
+
+    if (has(new RegExp("^(" + V_ADD + ")\\b"))) {
+      let rest = s.replace(new RegExp("^(" + V_ADD + ")\\b"), "").trim();
+      rest = rest.replace(/^(?:to|on) (?:my|the|your|a) (?:list|todos?|to-dos?)\s*/i, "");
+      rest = rest.replace(/^(?:a|an|one|some|new|another) (?:task|item|todo|thing)s?\s*/i, "");
+      const items = splitItems(rest);
+      if (items.length) return { type: "add", items };
+      return { type: "ask" };
+    }
+
+    const m = s.match(/^(?:task|item|number)?\s*(?:the\s+)?(?:number\s+)?(\d+|first|second|third|fourth|fifth|one|two|three|four|five|last)\s+(?:one\s+)?(?:is\s+)?(?:done|completed|complete)$/);
+    if (m) return { type: "done", items: [m[1]] };
+
+    if (s.length < 2 || /[?]/.test(raw)) return null;
+    return { type: "add", items: [s] };
+  }
+
+  // ---- actions ----
+  function actAdd(items) {
+    const clean = items.map(cleanTask).filter(Boolean);
+    if (!clean.length) return "What should I add? Just say add buy milk.";
+    todos.push(...clean.map((t) => ({ text: t, done: false })));
+    save();
+    if (clean.length === 1) return "Added " + clean[0] + " to your list. You now have " + todos.length + " " + plural("task", todos.length) + ".";
+    return "Added " + clean.length + " items: " + joinAnd(clean) + ". You now have " + todos.length + " " + plural("task", todos.length) + ".";
+  }
+  function actDone(items) {
+    const all = items.some((i) => /^(all|everything|everyone)$/.test(cleanTask(i)));
+    const targets = [];
+    if (all) {
+      todos.forEach((t, i) => { if (!t.done) targets.push(i); });
+    } else {
+      for (const it of items) {
+        const c = cleanTask(it);
+        const ord = parseOrdinal(c);
+        let idx = ord !== null ? (ord === "last" ? todos.length - 1 : ord - 1) : findTask(c);
+        if (idx >= 0 && idx < todos.length && !targets.includes(idx)) targets.push(idx);
+      }
+    }
+    if (!targets.length) return "I couldn't find that task. Say mark 1 done, or mark buy milk done.";
+    const names = targets.map((i) => todos[i].text);
+    targets.forEach((i) => { todos[i].done = true; });
+    save();
+    const open = todos.filter((t) => !t.done).length;
+    if (names.length === 1) {
+      if (open === 0) return "Done! " + names[0] + " is crossed off — and that was the last one. Your list is empty!";
+      return "Done! " + names[0] + " is crossed off. " + open + " " + plural("task", open) + " left.";
+    }
+    return "Done! " + joinAnd(names) + " are crossed off. " + (open ? open + " " + plural("task", open) + " left." : "Your list is empty now.");
+  }
+  function actDelete(items) {
+    const all = items.some((i) => /^(all|everything)$/.test(cleanTask(i)));
+    const targets = [];
+    if (all) targets.push(...todos.map((_, i) => i));
+    else {
+      for (const it of items) {
+        const c = cleanTask(it);
+        const ord = parseOrdinal(c);
+        let idx = ord !== null ? (ord === "last" ? todos.length - 1 : ord - 1) : findTask(c);
+        if (idx >= 0 && idx < todos.length && !targets.includes(idx)) targets.push(idx);
+      }
+    }
+    if (!targets.length) return "I couldn't find that task. Say delete task 2, or remove buy milk.";
+    const names = targets.map((i) => todos[i].text);
+    targets.sort((a, b) => b - a).forEach((i) => todos.splice(i, 1));
+    save();
+    if (!todos.length) return "Removed " + (names.length === 1 ? names[0] : "those tasks") + ". Your list is empty now.";
+    return "Removed " + (names.length === 1 ? names[0] : names.length + " tasks") + ". " + todos.length + " " + plural("task", todos.length) + " left.";
+  }
+  function actList() {
+    if (!todos.length) return "Your list is empty. Say add buy milk, and I'll write it down.";
+    const parts = todos.map((t, i) => (i + 1) + ": " + t.text + (t.done ? " — done" : "")).join(". ");
+    const open = todos.filter((t) => !t.done).length;
+    const done = todos.length - open;
+    if (done) return parts + ". " + open + " open " + plural("task", open) + ", " + done + " done.";
+    return parts + ". That's " + open + " " + plural("task", open) + ".";
+  }
+  function actCount() {
+    if (!todos.length) return "Nothing on the list yet.";
+    const open = todos.filter((t) => !t.done).length;
+    const done = todos.length - open;
+    return "You have " + todos.length + " " + plural("task", todos.length) + " — " + open + " open and " + done + " done.";
+  }
+  function actClear() {
+    if (!todos.length) return "Your list is already empty.";
+    const n = todos.length;
+    todos = [];
+    save();
+    return "Cleared the list — removed " + n + " " + plural("task", n) + ".";
+  }
+
+  const replyGreeting = () => "Hello! I'm your voice assistant. Say add buy milk to make a task, mark 2 done to finish one, or read my list. What shall we do?";
+  const replyHelp = () => "Here's what I understand: add buy milk — adds a task. add eggs and bread — adds a few. mark 2 done, or mark buy milk done. delete task 1, or delete the last one. read my list. clear all. And you can type any of these too.";
+  const replyThanks = () => "You're welcome! Anything else for the list?";
+  const replyAsk = () => "I didn't quite catch that. Try: add buy milk, mark 2 done, or read my list.";
+  const replyStop = () => "Stopped. Say something or type below to keep going.";
+
+  async function handleUtterance(raw, source) {
+    const text = String(raw || "").replace(/\s+/g, " ").trim();
+    if (!text) return;
+    if (source === "text") addBubble(text, "user");
+    else commitLive(text);
+
+    const parsed = parseUtterance(text);
+    let resp;
+    if (!parsed) resp = replyAsk();
+    else {
+      switch (parsed.type) {
+        case "add": resp = actAdd(parsed.items); break;
+        case "done": resp = actDone(parsed.items); break;
+        case "delete": resp = actDelete(parsed.items); break;
+        case "list": resp = actList(); break;
+        case "clear": resp = actClear(); break;
+        case "count": resp = actCount(); break;
+        case "greeting": resp = replyGreeting(); break;
+        case "help": resp = replyHelp(); break;
+        case "thanks": resp = replyThanks(); break;
+        case "stop":
+          resp = replyStop();
+          if (tts) tts.stop();
+          micActive = false;
+          stopRecognition();
+          removeLive();
+          setMicUI();
+          break;
+        default: resp = replyAsk();
+      }
+    }
+    renderList();
+    await say(resp);
+  }
+
+  function renderList() {
+    todoEl.innerHTML = "";
+    if (!todos.length) {
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.innerHTML = "Nothing here yet.<br>Say or type: <b>add buy milk</b>";
+      todoEl.appendChild(e);
+      countEl.textContent = "";
+      clearBtn.disabled = true;
+      return;
+    }
+    todos.forEach((t, i) => {
+      const row = document.createElement("div");
+      row.className = "task" + (t.done ? " done" : "");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = t.done;
+      cb.addEventListener("change", () => { t.done = cb.checked; save(); renderList(); });
+      const num = document.createElement("span");
+      num.className = "num";
+      num.textContent = i + 1;
+      const lbl = document.createElement("span");
+      lbl.className = "lbl";
+      lbl.textContent = t.text;
+      const x = document.createElement("button");
+      x.className = "x";
+      x.textContent = "✕";
+      x.title = "Delete task " + (i + 1);
+      x.addEventListener("click", () => { todos.splice(i, 1); save(); renderList(); });
+      row.append(cb, num, lbl, x);
+      todoEl.appendChild(row);
+    });
+    const open = todos.filter((t) => !t.done).length;
+    countEl.textContent = open + " open · " + todos.length + " total";
+    clearBtn.disabled = false;
+  }
+
+  // ---- wire up ----
+  function sendText() {
+    const v = textInput.value.trim();
+    if (!v) return;
+    textInput.value = "";
+    handleUtterance(v, "text");
+  }
+  sendBtn.addEventListener("click", sendText);
+  textInput.addEventListener("keydown", (e) => { if (e.key === "Enter") sendText(); });
+  micBtn.addEventListener("click", toggleMic);
+  clearBtn.addEventListener("click", () => {
+    if (!todos.length) return;
+    const r = actClear();
+    renderList();
+    say(r);
+  });
+  document.querySelectorAll(".chip").forEach((c) => {
+    c.addEventListener("click", () => { textInput.value = c.dataset.cmd; sendText(); });
+  });
+
+  renderList();
+  setMicUI();
+  addBubble("Welcome! I'm your voice assistant. Say or type things like “add buy milk”, “mark 2 done”, or “read my list” — then tap the mic 🎤 to talk, or just type. Try the example buttons above.", "bot");
+
+  window.vtAssistant = { handleUtterance, parseUtterance, say, toggleMic, todos: () => todos };
+})();
+</script>

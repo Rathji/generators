@@ -1,0 +1,154 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATOR ANALYST — analyze any Perchance generator
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A live workbench for dissecting Perchance generators:
+//   • fetch a generator's full source (main.pjs + index.html + all imports)
+//   • snapshot versions to kv and diff them (textual + structural + summary)
+//   • query the implementation with AI (chunk-scored, code-cited answers)
+//   • run a general analysis (feature inventory, dependency tree, AI overview)
+//   • export reports as .md / .txt / .json
+//
+// Built on rathji-template (perchance.org/rathji-template) as its theme and
+// feature base: the same badge + card components, settings panel, toasts,
+// and shareable-state pattern.
+//
+// More generators by Rathji: https://perchance.org/rathjis-generators
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── PLUGIN IMPORTS ────────────────────────────────────────────────────────
+kv = {import:kv-plugin}                  // snapshot storage
+superFetch = {import:super-fetch-plugin} // CORS-free fetch of the Perchance APIs
+generateText = {import:ai-text-plugin}   // AI querying / analysis
+
+$meta
+  title = Generator Analyst
+  description = Analyze any Perchance generator: fetch its full source, snapshot and diff versions, query the implementation with AI, and export reports — in a two-panel workbench built on rathji-template.
+  image = https://user.uploads.dev/file/358b43412b976b9f56b9bc18f7a54180.jpg
+  tags = generator-analyst, analyze, diff, snapshot, query, ai, rathji
+  header
+    mode = minimal
+
+
+// ── 1. RATHJI COMPONENTS (badge + card) ────────────────────────────────────
+// Copied from rathji-template — the theme/feature base. Call rathjiTemplate()
+// or rathjiCard() from a list or script; never throws on bad input.
+
+rathjiTemplateOpts
+  text = hello
+  emoji = 🌊
+  color = #22d3ee
+
+rathjiTemplatePresets
+  cosmic
+    text = Cosmic
+    emoji = 🌌
+    color = #8b5cf6
+  ocean
+    text = Ocean
+    emoji = 🌊
+    color = #22d3ee
+  ember
+    text = Ember
+    emoji = 🔥
+    color = #f97316
+
+rathjiTemplateResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem; // pjs node → its evaluated value
+  } catch(e) {}
+  return v; // raw JS value → as-is
+
+rathjiTemplateStamp(text, opts) =>
+  let emoji = opts.emoji || "✨";
+  let color = opts.color || "#7c6cff";
+  return '<span style="display:inline-block;background:' + color + '1a;color:' + color + ';border:1px solid ' + color + '66;border-radius:999px;padding:4px 14px;font-weight:600;font-family:system-ui,sans-serif;">' + emoji + " " + text + "</span>";
+
+rathjiTemplate(input, opts) =>
+  if(input != null && input.text === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.text !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.text = rathjiTemplateResolve(input);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.text !== undefined) {
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.text !== "string" || !o.text.trim()) {
+    return "(rathjiTemplate: expected some text — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiTemplateStamp(o.text.trim(), o);
+
+rathjiCardOpts
+  title = Hello
+  text = A generic card that holds a bit of description text.
+  emoji = 🃏
+  color = #7c6cff
+
+rathjiCardPresets
+  hero
+    title = Hero card
+    text = A bold opening card for a section of your page.
+    emoji = 🏆
+    color = #8b5cf6
+  story
+    title = Story time
+    text = A card to hold narrative text, quotes, or lore.
+    emoji = 📖
+    color = #22d3ee
+  tip
+    title = Pro tip
+    text = Cards make generic content blocks easy to reuse.
+    emoji = 💡
+    color = #f59e0b
+
+rathjiCardStamp(o) =>
+  let emoji = o.emoji || "🃏";
+  let color = o.color || "#7c6cff";
+  return '<div style="background:' + color + '14;border:1px solid ' + color + '44;border-left:4px solid ' + color + ';border-radius:14px;padding:16px 18px;text-align:left;">' +
+    '<div style="font-size:1.6rem;line-height:1;">' + emoji + '</div>' +
+    '<div style="font-weight:700;margin-top:8px;">' + o.title + '</div>' +
+    '<div style="margin-top:4px;font-size:.92rem;opacity:.75;">' + o.text + '</div></div>';
+
+rathjiCard(input, opts) =>
+  if(input != null && input.title === undefined && input.selectOne != null) {
+    let item = null;
+    try { item = input.selectOne; } catch(e) {}
+    if(item != null && item !== input && item.title !== undefined) input = item;
+  }
+
+  let o = {};
+  if(opts != null) {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(opts.text);
+    o.emoji = rathjiTemplateResolve(opts.emoji);
+    o.color = rathjiTemplateResolve(opts.color);
+  } else if(input != null && input.title !== undefined) {
+    o.title = rathjiTemplateResolve(input.title);
+    o.text = rathjiTemplateResolve(input.text);
+    o.emoji = rathjiTemplateResolve(input.emoji);
+    o.color = rathjiTemplateResolve(input.color);
+  } else {
+    o.title = rathjiTemplateResolve(input);
+    o.text = rathjiTemplateResolve(input);
+  }
+
+  if(typeof o.title !== "string" || !o.title.trim()) o.title = o.text;
+  if(typeof o.text !== "string" || !o.text.trim()) o.text = o.title;
+  if(typeof o.title !== "string" || !o.title.trim()) {
+    return "(rathjiCard: expected a title — got " + JSON.stringify(rathjiTemplateResolve(input)) + ")";
+  }
+
+  return rathjiCardStamp(o);

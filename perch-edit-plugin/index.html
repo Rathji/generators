@@ -1,0 +1,103 @@
+<style>
+  body { background: #0a0a1a; color: #e0e0ff; font-family: system-ui, sans-serif; margin: 0; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 2rem 1rem; box-sizing: border-box; }
+  * { box-sizing: border-box; }
+  .wrap { max-width: 1000px; width: 100%; }
+  .hero { text-align: center; padding: 1rem 0 2rem; }
+  .hero h1 { margin: 0; font-size: 2.4rem; color: #00f2ff; text-shadow: 0 0 18px rgba(0,242,255,.45); letter-spacing: .5px; }
+  .hero .sub { color: #b0b0d0; margin-top: .5rem; font-size: 1.05rem; }
+  .badge { display: inline-block; background: #16163a; border: 1px solid #4a4ae0; color: #00f2ff; border-radius: 999px; padding: .25rem .8rem; font-size: .8rem; margin-top: .8rem; letter-spacing: 1px; }
+  #status { margin-top: 1rem; font-size: .95rem; }
+  #status.ok { color: #7dffa0; }
+  #status.err { color: #ff6b6b; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+  .card { background: #16163a; border: 1px solid #4a4ae0; border-radius: 10px; padding: 1.4rem; cursor: pointer; transition: transform .2s, border-color .2s, box-shadow .2s; text-align: left; }
+  .card:hover { transform: translateY(-5px); border-color: #00f2ff; box-shadow: 0 0 18px rgba(0,242,255,.3); }
+  .card h3 { margin: 0 0 .5rem; color: #00f2ff; font-size: 1.1rem; }
+  .card p { margin: 0 0 1rem; font-size: .88rem; color: #b0b0d0; line-height: 1.45; }
+  .card .open { font-size: .8rem; color: #fff; background: #4a4ae0; padding: .35rem .8rem; border-radius: 5px; font-weight: 600; display: inline-block; }
+  .card:hover .open { background: #5a5af0; }
+  .preview-box { margin-top: 1.5rem; }
+  .embed-box { border: 2px solid #4a4ae0; border-radius: 10px; overflow: hidden; background: #000; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .8rem; }
+  .bar h2 { margin: 0; font-size: 1.2rem; color: #00f2ff; }
+  .btn { background: #4a4ae0; color: #fff; border: none; padding: .55rem 1.1rem; border-radius: 6px; cursor: pointer; font-weight: 700; transition: background .2s; }
+  .btn:hover { background: #5a5af0; }
+  .codebox { margin-top: 2.5rem; background: #10102a; border: 1px solid #3a3a7a; border-radius: 10px; padding: 1.4rem; }
+  .codebox h3 { margin: 0 0 .8rem; color: #bc8cff; font-size: 1rem; }
+  pre { margin: 0; background: #0c0c20; border: 1px solid #2a2a5a; border-radius: 8px; padding: 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.5; color: #d0d0f0; }
+  .k { color: #00f2ff; } .s { color: #7dffa0; } .c { color: #666; }
+</style>
+
+<div class="wrap">
+  <div class="hero">
+    <h1>PerchEdit</h1>
+    <div class="badge">PLUGIN · DATA/EMBED</div>
+    <p class="sub">A full-featured browser-based IDE — file tree, terminal, and AI assistance — as a reusable Perchance plugin.</p>
+    <div id="status">Loading API…</div>
+  </div>
+
+  <div id="grid" class="grid"></div>
+
+  <div id="preview-area" class="preview-box" style="display:none">
+    <div class="bar">
+      <h2 id="preview-title">Preview</h2>
+      <button class="btn" onclick="closePreview()">← Back to Catalog</button>
+    </div>
+    <div class="embed-box" id="frame-container"></div>
+  </div>
+
+  <div class="codebox">
+    <h3>Use it in your own generator</h3>
+    <pre><span class="c">// main.pjs</span>
+<span class="k">perchEdit</span> = \{import:perch-edit\}
+
+<span class="c">// anywhere in your code</span>
+<span class="k">let</span> api = root.perchEdit;
+api.all();                            <span class="c">// \[\{slug, title, description, url\}, …\]</span>
+api.find(<span class="s">'editor'</span>);                   <span class="c">// one catalog item</span>
+container.innerHTML = api.embed(<span class="s">'editor'</span>, \{ height: 600 \});  <span class="c">// iframe</span></pre>
+  </div>
+</div>
+
+<script>
+  const api = window.PERCH_EDIT_API || (typeof perchEditMakeApi === 'function' ? perchEditMakeApi() : null);
+  const statusEl = document.getElementById('status');
+  const gridEl = document.getElementById('grid');
+  const previewArea = document.getElementById('preview-area');
+  const frameContainer = document.getElementById('frame-container');
+  const previewTitle = document.getElementById('preview-title');
+
+  function init() {
+    if (!api || !api.all) {
+      statusEl.className = 'err';
+      statusEl.textContent = '❌ Plugin API not found. Is main.pjs loaded?';
+      return;
+    }
+    const items = api.all();
+    statusEl.className = 'ok';
+    statusEl.textContent = `✅ API connected — cataloging ${items.length} toolset variant${items.length === 1 ? '' : 's'}.`;
+    items.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `<h3>${item.title}</h3><p>${item.description}</p><span class="open">Open →</span>`;
+      card.onclick = () => openPreview(item);
+      gridEl.appendChild(card);
+    });
+  }
+
+  function openPreview(item) {
+    gridEl.style.display = 'none';
+    previewTitle.textContent = item.title;
+    previewArea.style.display = 'block';
+    frameContainer.innerHTML = api.embed(item.slug, { height: 600 });
+    previewArea.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function closePreview() {
+    gridEl.style.display = 'grid';
+    previewArea.style.display = 'none';
+    frameContainer.innerHTML = '';
+  }
+
+  init();
+</script>
