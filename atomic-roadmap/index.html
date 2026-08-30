@@ -191,7 +191,7 @@
     <div class="nav-actions">
       <button class="bgn-nav-projects" id="shareBtn" title="Copy a shareable link to this roadmap" aria-label="Share roadmap">
         <span class="rb-badge">AR</span>
-        <span class="rb-label">Share Roadmap</span>
+        <span class="rb-label">Share</span>
       </button>
       <button class="icon-btn" id="settingsBtn" title="Settings" aria-label="Settings" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -240,13 +240,14 @@
 
 <div class="wrap" id="top">
   <h1>⚛️ <span class="grad">Atomic Roadmap</span></h1>
-  <p class="tagline">Decompose any high-level project concept into granular, atomic task backlogs for AI coding agents — gated behind a strict planning-first hold.</p>
+  <p class="tagline">Decompose any high-level project concept into granular, atomic task backlogs for AI coding agents — gated behind a strict planning-first hold. Then generate a ready-to-use <em>starter prompt</em> that bundles the roadmap with your chosen template for the build.</p>
 
   <main class="layout">
     <section class="panel">
       <div class="seg wide" id="modeSeg">
         <button data-mode="kickoff" class="on">New Project</button>
         <button data-mode="expand">Expand Backlog</button>
+        <button data-mode="starter">Starter Prompt</button>
       </div>
 
       <label>Project concept <span class="opt">or expansion request</span></label>
@@ -265,6 +266,37 @@
         <input id="lastNumInput" type="number" min="0" placeholder="e.g. 12">
       </div>
 
+      <div id="starterFields" hidden>
+        <label>Prompt type</label>
+        <div class="seg wide" id="promptTypeSeg">
+          <button data-ptype="build" class="on">Build prompt</button>
+          <button data-ptype="roadmap">Roadmap request</button>
+        </div>
+        <label>Generator name</label>
+        <input id="genNameInput" type="text" placeholder="e.g. Random Quest Generator">
+        <label>Stub <span class="opt">auto-filled from the name — spaces become dashes</span></label>
+        <input id="genStubInput" type="text" placeholder="random-quest-generator">
+        <div id="buildOnlyFields">
+          <label>Page template</label>
+          <select id="templateSelect">
+            <option value="minimal">Minimal starter (blank)</option>
+            <option value="rathji">Rathji template</option>
+            <option value="simple">Simple text generator</option>
+            <option value="plain">Plain HTML/CSS/JS (no template)</option>
+            <option value="custom">Custom template (paste instructions)</option>
+          </select>
+          <div id="customTplFields" hidden>
+            <label>Custom template instructions</label>
+            <textarea id="customTplInput" rows="4" placeholder="e.g. Use the layout from perchance.org/foo — dark theme, left nav, modal dialogs, etc."></textarea>
+          </div>
+          <label>Atomic roadmap <span class="opt">to embed in the prompt</span></label>
+          <textarea id="starterRoadmapInput" rows="8" placeholder="Generate a roadmap first (New Project mode), or paste one here. The roadmap gets embedded in the starter prompt."></textarea>
+          <div class="chips">
+            <button class="chip" id="useRoadmapChip" type="button">↺ Use current roadmap</button>
+          </div>
+        </div>
+      </div>
+
       <label>Target AI coding agent</label>
       <select id="agentSelect">
         <option value="AI coding agent">Generic AI coding agent</option>
@@ -277,7 +309,7 @@
       </select>
 
       <button id="generateBtn" class="primary-btn">Generate Roadmap</button>
-      <p class="note" style="margin-top:12px;">The generated kickoff prompt tells your agent to write the <code>.pjs</code> checklist and stay completely idle until you approve the backlog. Press <b>R</b> or <b>Ctrl/⌘+Enter</b> to regenerate.</p>
+      <p class="note" style="margin-top:12px;">The generated kickoff prompt tells your agent to write the <code>.pjs</code> checklist and stay completely idle until you approve the backlog. <b>Starter Prompt</b> mode turns a roadmap into a ready-to-paste build prompt for your chosen template. Press <b>R</b> or <b>Ctrl/⌘+Enter</b> to regenerate.</p>
     </section>
 
     <section class="panel outpanel" id="outPanel">
@@ -287,6 +319,7 @@
           <div class="codebar-btns">
             <button id="copyBtn" class="copyBtn" disabled>Copy</button>
             <button id="mdBtn" class="copyBtn" disabled>⬇ .markdown</button>
+            <button id="txtBtn" class="copyBtn" disabled>⬇ .txt</button>
             <button id="jsonBtn" class="copyBtn" disabled>⬇ .json</button>
           </div>
         </div>
@@ -414,6 +447,20 @@
       var agent = document.getElementById("agentSelect").value;
       if (agent && agent !== "AI coding agent") u.searchParams.set("agent", agent);
       else u.searchParams.delete("agent");
+      if (m === "starter") {
+        var nm = document.getElementById("genNameInput").value.trim();
+        var sb = document.getElementById("genStubInput").value.trim();
+        var tp = document.getElementById("templateSelect").value;
+        if (nm && nm.length <= 200) u.searchParams.set("name", nm); else u.searchParams.delete("name");
+        if (sb && sb.length <= 100) u.searchParams.set("stub", sb); else u.searchParams.delete("stub");
+        u.searchParams.set("template", tp);
+        u.searchParams.set("ptype", promptType);
+      } else {
+        u.searchParams.delete("name");
+        u.searchParams.delete("stub");
+        u.searchParams.delete("template");
+        u.searchParams.delete("ptype");
+      }
       history.replaceState(null, "", u);
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(u.href).then(function () { showToast("Link copied to clipboard"); }, function () { showToast("URL updated in the address bar"); });
@@ -435,11 +482,48 @@
     const fnameEl = document.getElementById("fnameEl");
     const expandFields = document.getElementById("expandFields");
     const agentSelect = document.getElementById("agentSelect");
+    const starterFields = document.getElementById("starterFields");
+    const genNameInput = document.getElementById("genNameInput");
+    const genStubInput = document.getElementById("genStubInput");
+    const templateSelect = document.getElementById("templateSelect");
+    const customTplFields = document.getElementById("customTplFields");
+    const customTplInput = document.getElementById("customTplInput");
+    const starterRoadmapInput = document.getElementById("starterRoadmapInput");
+    const useRoadmapChip = document.getElementById("useRoadmapChip");
+    const txtBtn = document.getElementById("txtBtn");
+    const promptTypeSeg = document.getElementById("promptTypeSeg");
+    const buildOnlyFields = document.getElementById("buildOnlyFields");
 
     let mode = "kickoff";
     let activeGen = null;
     let fullOutput = "";
     let currentFileBase = "";
+    let lastRoadmap = "";
+    let stubManual = false;
+    let promptType = "build";
+
+    const TEMPLATES = {
+      minimal: {
+        label: "Minimal starter (blank)",
+        instruction: "Use the minimal starter template (perchance.org/minimal) as the base: a clean, minimal single-page layout with no heavy chrome — just the essential structure the app needs."
+      },
+      rathji: {
+        label: "Rathji template",
+        instruction: "Use the rathji-template (perchance.org/rathji-template) as the base — adopt its theme system (dark/light, accent swatches, text size), settings panel, toast notifications, codeblock-style output area, and shareable URL state wherever they fit this generator."
+      },
+      simple: {
+        label: "Simple text generator",
+        instruction: "Use a classic simple text-generator layout (like the basic Perchance 'minimal'-style generators): a big centered output area with a prominent action/randomize button, clean typography, and simple styling."
+      },
+      plain: {
+        label: "Plain HTML/CSS/JS (no template)",
+        instruction: "Build the page from scratch with plain HTML/CSS/JS — no external template. Keep the code tidy and self-contained, with responsive styling and a polished, modern look."
+      },
+      custom: {
+        label: "Custom template (paste instructions)",
+        instruction: ""
+      }
+    };
 
     // Restore shared inputs from the URL (?concept=&mode=&agent=).
     (function () {
@@ -447,13 +531,26 @@
       const c = qp.get("concept");
       if (c) conceptInput.value = c;
       const m = qp.get("mode");
-      if (m === "expand" || m === "kickoff") {
+      if (m === "expand" || m === "kickoff" || m === "starter") {
         mode = m;
         document.querySelectorAll("#modeSeg button").forEach(b => b.classList.toggle("on", b.dataset.mode === m));
         expandFields.hidden = m !== "expand";
+        starterFields.hidden = m !== "starter";
       }
       const a = qp.get("agent");
       if (a) agentSelect.value = a;
+      const gn = qp.get("name");
+      if (gn) genNameInput.value = gn;
+      const gs = qp.get("stub");
+      if (gs) { genStubInput.value = gs; stubManual = true; }
+      const gt = qp.get("template");
+      if (gt && TEMPLATES[gt]) templateSelect.value = gt;
+      const pt = qp.get("ptype");
+      if (pt === "build" || pt === "roadmap") {
+        promptType = pt;
+        document.querySelectorAll("#promptTypeSeg button").forEach(b => b.classList.toggle("on", b.dataset.ptype === pt));
+        buildOnlyFields.hidden = pt !== "build";
+      }
     })();
 
     document.querySelectorAll("#modeSeg button").forEach(btn => {
@@ -461,11 +558,40 @@
         mode = btn.dataset.mode;
         document.querySelectorAll("#modeSeg button").forEach(b => b.classList.toggle("on", b === btn));
         expandFields.hidden = mode !== "expand";
+        starterFields.hidden = mode !== "starter";
       });
     });
 
-    document.querySelectorAll(".chip").forEach(chip => {
+    document.querySelectorAll(".chip[data-concept]").forEach(chip => {
       chip.addEventListener("click", () => { conceptInput.value = chip.dataset.concept; conceptInput.focus(); });
+    });
+
+    function applyTemplateVisibility() {
+      customTplFields.hidden = templateSelect.value !== "custom";
+    }
+    applyTemplateVisibility();
+
+    genNameInput.addEventListener("input", () => {
+      if (stubManual) return;
+      const n = genNameInput.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      genStubInput.value = n;
+    });
+    genStubInput.addEventListener("input", () => { stubManual = true; });
+    templateSelect.addEventListener("change", applyTemplateVisibility);
+    useRoadmapChip.addEventListener("click", () => {
+      if (lastRoadmap) { starterRoadmapInput.value = lastRoadmap; showToast("Current roadmap inserted"); }
+      else showToast("Generate a roadmap first (New Project mode)");
+    });
+    genNameInput.addEventListener("keydown", e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); generate(); }
+    });
+
+    promptTypeSeg.addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      promptType = b.dataset.ptype;
+      document.querySelectorAll("#promptTypeSeg button").forEach(x => x.classList.toggle("on", x === b));
+      buildOnlyFields.hidden = promptType !== "build";
     });
 
     generateBtn.addEventListener("click", generate);
@@ -494,15 +620,34 @@
       showToast("Downloaded " + currentFileBase + ".markdown");
     });
 
+    txtBtn.addEventListener("click", () => {
+      if (!fullOutput) return;
+      download(fullOutput, currentFileBase + ".txt", "text/plain");
+      showToast("Downloaded " + currentFileBase + ".txt");
+    });
+
     jsonBtn.addEventListener("click", () => {
       if (!fullOutput) return;
-      const phases = extractPhases(fullOutput);
-      const json = JSON.stringify({
-        project: slugifyProject(conceptInput.value),
-        generator: "atomic-roadmap",
-        phaseRange: phaseRangeString(phases),
-        phases: phases
-      }, null, 2);
+      let json;
+      if (mode === "starter") {
+        json = JSON.stringify({
+          mode: "starter",
+          promptType: promptType,
+          generator: "atomic-roadmap",
+          name: genNameInput.value.trim(),
+          stub: genStubInput.value.trim(),
+          template: templateSelect.value,
+          prompt: fullOutput
+        }, null, 2);
+      } else {
+        const phases = extractPhases(fullOutput);
+        json = JSON.stringify({
+          project: slugifyProject(conceptInput.value),
+          generator: "atomic-roadmap",
+          phaseRange: phaseRangeString(phases),
+          phases: phases
+        }, null, 2);
+      }
       download(json, currentFileBase + ".json", "application/json");
       showToast("Downloaded " + currentFileBase + ".json");
     });
@@ -523,6 +668,7 @@
 
     async function generate() {
       if (activeGen) { try { activeGen.stop(); } catch (e) {} activeGen = null; }
+      if (mode === "starter") { generateStarter(); return; }
       const concept = conceptInput.value.trim();
       if (!concept) { statusEl.textContent = "Enter a project concept first."; showToast("Enter a project concept first."); return; }
       const backlog = backlogInput.value.trim();
@@ -550,6 +696,7 @@
       generateBtn.disabled = true;
       copyBtn.disabled = true;
       mdBtn.disabled = true;
+      txtBtn.disabled = true;
       jsonBtn.disabled = true;
 
       const p = root.generateText({
@@ -569,9 +716,95 @@
        });
     }
 
+    function generateStarter() {
+      if (activeGen) { try { activeGen.stop(); } catch (e) {} activeGen = null; }
+      const name = genNameInput.value.trim();
+      let stub = (genStubInput.value.trim() || genNameInput.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")).toLowerCase();
+      if (!name) {
+        statusEl.textContent = "Enter the generator name first.";
+        showToast("Enter the generator name first.");
+        return;
+      }
+      if (promptType === "roadmap") {
+        fullOutput = buildRoadmapRequest({ name: name, stub: stub });
+        outputEl.textContent = fullOutput;
+        currentFileBase = "roadmap-request-" + (stub || "generator");
+        fnameEl.textContent = currentFileBase + ".markdown";
+        statusEl.textContent = "Roadmap request ready — paste it, then describe the generator and hand it to your agent.";
+        generateBtn.disabled = false;
+        copyBtn.disabled = false;
+        mdBtn.disabled = false;
+        txtBtn.disabled = false;
+        jsonBtn.disabled = false;
+        return;
+      }
+      const roadmap = starterRoadmapInput.value.trim() || lastRoadmap;
+      if (!roadmap) {
+        statusEl.textContent = "No roadmap yet — generate one in New Project mode, or paste one into the roadmap box.";
+        showToast("Add a roadmap first (generate one, then switch to Starter Prompt).");
+        return;
+      }
+      const tpl = TEMPLATES[templateSelect.value] || TEMPLATES.minimal;
+      const tplInstr = templateSelect.value === "custom"
+        ? (customTplInput.value.trim() || "(paste your custom template instructions here)")
+        : tpl.instruction;
+      fullOutput = buildStarterPrompt({ name: name, stub: stub, templateLabel: tpl.label, templateInstructions: tplInstr, roadmap: roadmap });
+      outputEl.textContent = fullOutput;
+      currentFileBase = "starter-prompt-" + (stub || "generator");
+      fnameEl.textContent = currentFileBase + ".markdown";
+      statusEl.textContent = "Starter prompt ready — copy it, or download as .markdown / .txt / .json.";
+      generateBtn.disabled = false;
+      copyBtn.disabled = false;
+      mdBtn.disabled = false;
+      txtBtn.disabled = false;
+      jsonBtn.disabled = false;
+    }
+
+    function buildStarterPrompt(o) {
+      return [
+        "You are a Perchance coding agent. Your job: build the generator \"" + o.name + "\" (stub: " + o.stub + ") by working through the atomic roadmap attached at the end of this prompt.",
+        "",
+        "## Step 1 — Persist the roadmap",
+        "Using the atomic roadmap that I have attached (see \"THE ROADMAP\" below), add the roadmap to the main.pjs file so that it is durable — keep it as a structured checklist in the code (e.g. a commented TODO list) so the plan and its progress survive across sessions.",
+        "",
+        "## Step 2 — Generator identity",
+        "- This generator's name is: " + o.name,
+        "- The stub should be: " + o.stub + " — use this stub for the main.pjs file reference, ids, slugs, and anything else that needs a stable identifier.",
+        "- After the roadmap is stored, set the generator's title / $meta.title to \"" + o.name + "\".",
+        "",
+        "## Step 3 — Set up the page with the selected template",
+        "After the roadmap is stored and the title of the generator is set, set this page up using the " + o.templateLabel + " template:",
+        o.templateInstructions,
+        "",
+        "## Step 4 — Work through the roadmap",
+        "Work through the roadmap one task at a time, in order:",
+        "1. Read the next uncompleted task from the roadmap in main.pjs.",
+        "2. Implement it, keeping the code clean, modular, and consistent with the template and the generator's identity.",
+        "3. Update the roadmap in main.pjs to mark that task complete.",
+        "4. Stop and await review before moving on to the next task.",
+        "Continue this loop until every roadmap item is marked complete.",
+        "",
+        "## Step 5 — Final cleanup & polish",
+        "Once all roadmap items are done, perform this final step:",
+        "- Get rid of the atomic roadmap in the main.pjs file — remove the checklist entirely so the shipped generator is clean.",
+        "- Provide a final polish pass on the generator: check it at phone and desktop sizes, confirm the console is error-free, smooth out any rough edges, and make sure it feels finished.",
+        "",
+        "---",
+        "",
+        "## THE ROADMAP",
+        "",
+        o.roadmap
+      ].join("\n");
+    }
+
+    function buildRoadmapRequest(o) {
+      return "Let's use the process that this generator uses to build the atomic roadmap for this described generator: Name " + o.name + " Slug " + o.stub + ".\n";
+    }
+
     function finish(text) {
       activeGen = null;
       fullOutput = text;
+      lastRoadmap = text;
       outputEl.textContent = text;
       const phases = extractPhases(text);
       const tasks = phases.reduce((n, p) => n + p.tasks.length, 0);
@@ -584,6 +817,7 @@
       generateBtn.disabled = false;
       copyBtn.disabled = false;
       mdBtn.disabled = false;
+      txtBtn.disabled = false;
       jsonBtn.disabled = false;
     }
 

@@ -17,7 +17,11 @@ Minimalist Excalidraw-style diagramming for IT professionals (architecture, netw
 - Settings (gear): theme mode, theme preset (from pjs), accent + ink colors, text size, stroke width, canvas background (Theme/White/Paper/Graph), grid + snap toggles, and a live Roadmap tab.
 
 ## Roadmap (in `diagramIt.roadmap` in main.pjs)
-Phases: 1) draw.io XML import/export + element mapping/coordinate validation · 2) IT shape libraries (cloud, K8s, network, UML/ERD) · 3) smart anchors, grouping/nesting, auto-layout · 4) template gallery, XML import/export triggers, library search. All tasks currently `todo`.
+Source of truth: `scratch`-attached roadmap `diagramit-missing-features-roadmap.md` (t1–t15, renumbered from the original t-ids — remap comment is in main.pjs). Three phases:
+1) **Interoperability & Data Exchange** (t1–t5): draw.io XML parser, element mapper, coordinate validator, XML exporter, import/export triggers.
+2) **IT Component Ecosystem** (t6–t11): library framework + SVG shape element type, cloud / K8s / network / UML-ERD asset packs, library search & filter.
+3) **Advanced Diagramming Logic** (t12–t15): smart connection anchors, grouping & nesting, automated layout engine, template gallery.
+All feature tasks currently `todo`; f0 (foundation) `done`.
 
 ## Notes for a future agent
 - Scene coordinates: elements store `{x, y, w, h}` (rect/ellipse/text) or `{x, y, x2, y2}` (arrow) in scene units; the view transform is `view = {ox, oy, scale}` (`screen = scene*scale + o`). Draw = translate+scale ctx, then draw elements in scene space; screen-space overlays (grid, selection, marquee) drawn separately.
