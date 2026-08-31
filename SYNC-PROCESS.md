@@ -44,7 +44,7 @@ on 2026-08-14:
 3. **Two stale directory counts are corrected to 32** (previously misstated as 41 and 33).
 4. **The attribution note is recast as historical** — the disclaimer it quotes belongs to
    `html.txt` / `lists.txt` / `src/main.js`, not the live panels, which no longer carry it.
-5. **A newly-found Windows crash in `fleet-backup.mjs`** is documented under "1. Capture" below.
+5. **A Windows crash in `fleet-backup.mjs`** is documented under "1. Capture" below. It was **fixed 2026-08-31**; the entry is kept because older logs still show it.
 6. The claim that `q8tgpbvj6l`'s `main.pjs` and `lists.txt` were "identical apart from a
    trailing newline" was checked and found false (409 bytes vs. 1,253 bytes — different
    generations of different generators) and has been removed.
@@ -82,19 +82,34 @@ node <path-to-perchance-manager>/tools/perchance-fetch.mjs <slug> \
 manifest declares. That host is public, unauthenticated, and CORS-open, confirmed across five
 keys in three generators. A mismatch or non-200 is reported per file rather than aborting the run.
 
-**Known crash on Windows, reproduced twice (2026-08-14), tracked in `perchance-manager`:**
-`fleet-backup.mjs` can crash with
+**A Windows crash used to make this step untrustworthy. FIXED 2026-08-31 — the manual
+`git status` check below is no longer owed.** Kept here because the failure mode is instructive and
+because anyone reading an older run's logs will still meet it.
+
+`fleet-backup.mjs` could crash with
 
 ```
 Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\win\async.c, line 94
 ```
 
-This happens *after* the capture itself has already succeeded and written correct files to disk.
-The tool then prints `No changes to commit (the target repo already matches perchance).`, marks
-the slug `failed` in its run summary (e.g. `0/1 ok, 1 failed`), and exits **1** — even on a run
-where the files on disk genuinely changed. Do not trust either signal: after any capture, check
-`git status` yourself and commit manually. A `failed` summary or a nonzero exit does not mean the
-capture didn't happen; it may mean the capture succeeded and only the tool's own exit crashed.
+*after* the capture had already succeeded and written correct files to disk. The tool then printed
+`No changes to commit (the target repo already matches perchance).`, marked the slug `failed`
+(e.g. `0/1 ok, 1 failed`), and exited **1** — on a run whose files on disk genuinely had changed.
+
+**Root cause**, found 2026-08-31: `process.exit()` was being called while Node's global `fetch`
+still held its keep-alive sockets, which aborts libuv's handle teardown. It had nothing to do with
+git or child processes, which is what everyone assumed. Two things changed in `perchance-manager`:
+`perchance-fetch.mjs` now lets the process exit naturally, and — the part that matters here —
+`fleet-backup.mjs` no longer decides a slug's fate from an exit code at all. It checks that the
+capture's `meta.json`, `main.pjs` and `index.html` are present **and were written during that run**,
+and commits on that basis. A crashed-but-correct capture is now committed rather than discarded.
+
+Checking `git status` yourself after a capture remains a perfectly good habit, and this document
+used to require it. It no longer does. The reason is worth stating precisely: not that the exit code
+became trustworthy, but that nothing consults it any more.
+
+**If you are reading an older log:** the crash appears as exit **3221226505** (`0xC0000409`) when
+the tool was run by another process, and as **127** from a shell. They are the same fault.
 
 Commit and push after capturing.
 
@@ -145,14 +160,18 @@ Identical files confirm the live generator matches what is committed here. With 
 covers `src/*` too. Expect a one-byte trailing-newline difference, which perchance does not
 store (see the note in step 1).
 
-**The old method — `fleet-backup.mjs <slug>` then `git diff <slug>/` — cannot be trusted, and not
-only because of the crash in step 1.** `git diff` is the wrong probe either way:
+**The old method — `fleet-backup.mjs <slug>` then `git diff <slug>/` — still cannot be trusted,
+and the reason that survives has nothing to do with the step-1 crash.** `git diff` is simply the
+wrong probe:
 
 - On a run that works, the tool **commits** what it captured, so `git diff` is empty whether or
-  not live matched. The empty diff proves nothing.
-- On a crashed run it does not commit, so `git diff` shows the real drift — while the tool's own
-  summary says the slug `failed`. The reader is invited to distrust the one signal that was
-  actually correct.
+  not live matched. The empty diff proves nothing. This was always the real objection and it is
+  unaffected by any fix.
+- Historically, a crashed run did not commit, so `git diff` showed the real drift while the
+  tool's summary called the slug `failed` — inviting the reader to distrust the one signal that
+  was actually correct. **That half is obsolete as of 2026-08-31** (see step 1): a crashed run
+  whose capture verified on disk is now committed like any other, so it lands in the first case
+  above rather than this one.
 
 If you do run it against the repo anyway, verify with `git status --porcelain <slug>/` (is there
 uncommitted drift?) and `git --no-pager log -1 --stat` (did it commit, and what?) — never with
@@ -343,8 +362,9 @@ The disclaimer survives only inside this repo's relics of that earlier build —
   - **T-15** — **closed 2026-08-30.** The *deploy* half closed 2026-08-14; the layout migration,
     deferred since 2026-08-10, was executed 2026-08-30. All 135 directories here are on
     `main.pjs`/`index.html`, `q8tgpbvj6l` excepted on purpose — see "One naming layout" above.
-  - **M-4** — the `fleet-backup.mjs` crash-and-misreport documented under step 1. Read it before
-    trusting any capture run's summary.
+  - **M-4** — CLOSED 2026-08-31. The `fleet-backup.mjs` crash-and-misreport documented under
+    step 1. Worth reading anyway: the fix was to stop trusting the exit code and verify the
+    captured tree on disk instead, which is the same principle the rest of this document runs on.
 - **`Rathji/perchance-reference`** — a corpus of captured third-party generators and the
   DSL/architecture documentation mined from it. Nothing in this repo depends on it. (Formerly
   `nstsp-mp/perchance-generator-reference`; transferred and renamed 2026-08-11.)
