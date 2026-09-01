@@ -1,7 +1,11 @@
-# BrowserQuest 2 — project layout
+# Borrowed Quest — project layout
 
 A multiplayer browser-based ARPG, ported from Mozilla's BrowserQuest (2012) and running
 on the Perchance platform with an authoritative `server-plugin` backend.
+
+> **Disclaimer:** this is a fan-made remake, not the original game and not affiliated
+> with Mozilla. Players should find and play the real BrowserQuest to support its
+> creators.
 
 ## Layout
 

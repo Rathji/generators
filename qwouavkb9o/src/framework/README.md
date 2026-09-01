@@ -1,6 +1,6 @@
 # src/framework — reusable game framework
 
-This folder holds the game-agnostic core of the BrowserQuest-2 project: a top-down,
+This folder holds the game-agnostic core of the Borrowed Quest project: a top-down,
 tile-based, authoritative-server multiplayer ARPG client engine. Everything here was
 ported from Mozilla's classic BrowserQuest (2012) and cleaned into vanilla ES modules.
 It is intentionally decoupled from the game's theme — reskinning means replacing the

@@ -1,4 +1,4 @@
-// BrowserQuest client engine - ported from client/js/*.js to vanilla ES6
+// Borrowed Quest client engine - ported from Mozilla's BrowserQuest client/js/*.js to vanilla ES6
 // Original uses RequireJS/AMD + jQuery + Class.js; this is a consolidated rewrite.
 import { Types, MobSpeeds } from '../types.js';
 import { Pathfinder } from './pathfinder.js';

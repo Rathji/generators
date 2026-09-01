@@ -1,4 +1,4 @@
-// BrowserQuest Game - the main game loop, renderer, networking, and input handling.
+// Borrowed Quest Game - the main game loop, renderer, networking, and input handling.
 // Ported from client/js/game.js, renderer.js, gameclient.js and related files.
 import { Types, MobSpeeds, Properties } from './types.js';
 import {
@@ -673,7 +673,7 @@ export class Game {
     this.started = true;
     this.setupPlayerCallbacks();
     if (this.started_callback) this.started_callback();
-    this.showNotification("Welcome to BrowserQuest!");
+    this.showNotification("Welcome to Borrowed Quest!");
     try { this.tryUnlockingAchievement("STILL_ALIVE"); } catch(e){}
   }
 
@@ -1164,10 +1164,10 @@ export class Game {
       forestnpc: ["lorem ipsum dolor sit amet", "consectetur adipisicing elit, sed do eiusmod tempor"],
       desertnpc: ["One does not simply walk into these mountains...", "An ancient undead lord is said to dwell here.", "Nobody knows exactly what he looks like...", "...for none has lived to tell the tale.", "It's not too late to turn around and go home, kid."],
       lavanpc: ["lorem ipsum dolor sit amet", "consectetur adipisicing elit, sed do eiusmod tempor"],
-      priest: ["Oh, hello, young man.", "Wisdom is everything, so I'll share a few guidelines with you.", "You are free to go wherever you like in this world", "but beware of the many foes that await you.", "You can find many weapons and armors by killing enemies.", "The tougher the enemy, the higher the potential rewards.", "You can also unlock achievements by exploring and hunting.", "Click on the small cup icon to see a list of all the achievements.", "Please stay a while and enjoy the many surprises of BrowserQuest", "Farewell, young friend."],
+      priest: ["Oh, hello, young man.", "Wisdom is everything, so I'll share a few guidelines with you.", "You are free to go wherever you like in this world", "but beware of the many foes that await you.", "You can find many weapons and armors by killing enemies.", "The tougher the enemy, the higher the potential rewards.", "You can also unlock achievements by exploring and hunting.", "Click on the small cup icon to see a list of all the achievements.", "Please stay a while and enjoy the many surprises of Borrowed Quest", "Farewell, young friend."],
       sorcerer: ["Ah... I had foreseen you would come to see me.", "Well? How do you like my new staff?", "Pretty cool, eh?", "Where did I get it, you ask?", "I understand. It's easy to get envious.", "I actually crafted it myself, using my mad wizard skills.", "But let me tell you one thing...", "There are lots of items in this game.", "Some more powerful than others.", "In order to find them, exploration is key.", "Good luck."],
-      octocat: ["Welcome to BrowserQuest 2!", "Want to see the source code?", "Check out the repository on GitHub"],
-      coder: ["Hi! Do you know that you can also play BrowserQuest on your tablet or mobile?", "That's the beauty of HTML5!", "Give it a try..."],
+      octocat: ["Welcome to Borrowed Quest!", "Want to see the source code?", "Check out the repository on GitHub"],
+      coder: ["Hi! Do you know that you can also play Borrowed Quest on your tablet or mobile?", "That's the beauty of HTML5!", "Give it a try..."],
     };
     const name = Types.getKindAsString(npc.kind);
     const messages = npcTalk[name] || ["Hello there!"];
