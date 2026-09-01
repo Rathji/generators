@@ -345,6 +345,32 @@
   .slicer-chip.active { color: #fff; border-color: transparent; background: var(--accent2); }
   .slicer-select { font-size: 0.75rem; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; font-family: inherit; }
   .slicer-count { font-size: 0.72rem; color: var(--muted); margin-left: auto; }
+  .slicer-wrap { position: relative; }
+  #blockBtn { display: inline-flex; align-items: center; gap: 5px; }
+  #blockBtn.has-blocks { color: #f87171; border-color: #f8717166; background: #f8717114; }
+  .block-panel {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+    width: min(300px, calc(100vw - 32px)); max-height: 60vh; overflow: auto;
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: 0 16px 40px rgba(0,0,0,0.45); padding: 10px;
+  }
+  .block-panel-head { font-size: 0.72rem; color: var(--muted); margin: 0 2px 8px; line-height: 1.45; }
+  .block-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px;
+    font-size: 0.8rem; cursor: pointer; user-select: none;
+  }
+  .block-row:hover { background: var(--bg2); }
+  .block-row .b-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .block-row .b-toggle { flex: none; font-size: 0.68rem; font-weight: 800; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; color: var(--muted); }
+  .block-row.on { background: rgba(248,113,113,0.09); }
+  .block-row.on .b-label { color: #f87171; text-decoration: line-through; }
+  .block-row.on .b-toggle { color: #fff; background: #f87171; border-color: #f87171; }
+  .slicer-chip.blocked, .cat-btn.blocked {
+    opacity: 0.6; filter: saturate(0.4); text-decoration: line-through;
+    border-style: dashed; border-color: #f8717166 !important; color: #f87171 !important;
+    background: #f871710f !important; cursor: not-allowed;
+  }
+  .slicer-chip.blocked:hover { border-color: #f8717166 !important; color: #f87171 !important; }
   .trends-empty { display: flex; align-items: center; gap: 8px; padding: 14px 0; font-size: 0.8rem; color: var(--muted); }
   .chart-lb { position: fixed; inset: 0; z-index: 500; display: flex; align-items: center; justify-content: center; padding: 24px; }
   .chart-lb-backdrop { position: absolute; inset: 0; background: rgba(3,7,18,0.78); backdrop-filter: blur(4px); }
@@ -890,6 +916,10 @@
       <option value="explicit">Adult: explicit only</option>
       <option value="mature">Adult: mature only</option>
     </select>
+    <span class="slicer-wrap" id="blockWrap">
+      <button type="button" id="blockBtn" class="slicer-select" title="Block whole categories — their generators are hidden from the stats, charts and table">🚫 Blocked <span id="blockCountEl"></span></button>
+      <div class="block-panel" id="blockPanel" hidden></div>
+    </span>
     <span class="slicer-count" id="slicerCount"></span>
   </div>
 
@@ -1937,6 +1967,7 @@
   var chartSlicer = { cats: [], adult: "" };
   function slicedGens() {
     return state.gens.filter(function (g) {
+      if (isBlockedGen(g)) return false;
       if (chartSlicer.cats.length) {
         var gc = (g.cats || []).concat(effCat(g));
         var hit = false;
@@ -1955,7 +1986,8 @@
     var chips = "<button class='slicer-chip" + (chartSlicer.cats.length ? "" : " active") + "' data-slicer-cat='' title='Show all categories'>All</button>";
     list.forEach(function (c) {
       var on = chartSlicer.cats.indexOf(c.id) >= 0;
-      chips += "<button class='slicer-chip" + (on ? " active" : "") + "' data-slicer-cat='" + esc(c.id) + "' title='" + esc(c.label) + "'>" + c.emoji + " " + c.label + "</button>";
+      var blocked = !!blockedCats[c.id];
+      chips += "<button class='slicer-chip" + (on ? " active" : "") + (blocked ? " blocked" : "") + "' data-slicer-cat='" + esc(c.id) + "' title='" + (blocked ? "🚫 Blocked — unblock it in the Blocked menu" : esc(c.label)) + "'>" + c.emoji + " " + c.label + (blocked ? " 🚫" : "") + "</button>";
     });
     ctn.innerHTML = chips;
     var sel = document.getElementById("slicerAdult");
@@ -2506,6 +2538,67 @@
   }
   function effCat(g) { return catOverrides[g.name] || g.category || "other"; }
 
+  // ── blocked categories ──
+  // Blocking a category hides every generator that belongs to it from the stat
+  // cards, the chart slicer/grid, the table and the AI digest. Blocks persist
+  // in kv; the trend charts stay as raw history of the whole list over time.
+  var BLOCK_KEY = "blocked-cats-v1";
+  var blockedCats = {};
+  async function loadBlocked() {
+    try {
+      var b = await root.kv.dash.get(BLOCK_KEY);
+      if (b && typeof b === "object" && !Array.isArray(b)) blockedCats = b;
+    } catch (e) {}
+  }
+  function saveBlocked() {
+    try { root.kv.dash.set(BLOCK_KEY, blockedCats).catch(function () {}); } catch (e) {}
+  }
+  function isBlockedGen(g) {
+    if (!Object.keys(blockedCats).length) return false;
+    var gc = (g.cats || []).concat(effCat(g));
+    for (var i = 0; i < gc.length; i++) if (blockedCats[gc[i]]) return true;
+    return false;
+  }
+  function unblockedGens() {
+    return state.gens.filter(function (g) { return !isBlockedGen(g); });
+  }
+  function blockedLabel(id) {
+    var c = CAT_BY_ID[id];
+    if (c) return c.label;
+    var cc = customCats.filter(function (x) { return x.id === id; })[0];
+    return cc ? cc.label : id;
+  }
+  function toggleBlockCat(id) {
+    if (blockedCats[id]) delete blockedCats[id]; else blockedCats[id] = true;
+    saveBlocked();
+    if (catFilter && blockedCats[catFilter]) catFilter = "";
+    chartSlicer.cats = chartSlicer.cats.filter(function (c) { return !blockedCats[c]; });
+    renderBlockPanel();
+    renderCatButtons();
+    renderChartSlicer();
+    renderStats();
+    renderCharts();
+    renderTable();
+    showToast(blockedCats[id] ? "🚫 Blocked: " + blockedLabel(id) : "✓ Unblocked: " + blockedLabel(id));
+  }
+  function renderBlockPanel() {
+    var el = document.getElementById("blockPanel");
+    if (!el) return;
+    var btn = document.getElementById("blockBtn");
+    var cnt = document.getElementById("blockCountEl");
+    var n = Object.keys(blockedCats).length;
+    if (cnt) cnt.textContent = n ? String(n) : "";
+    if (btn) btn.classList.toggle("has-blocks", n > 0);
+    var list = CATS.concat(customCats);
+    el.innerHTML = "<div class='block-panel-head'>Click a category to block or unblock it — its generators disappear from the stats, charts and table.</div>" +
+      list.map(function (c) {
+        var on = !!blockedCats[c.id];
+        return "<div class='block-row" + (on ? " on" : "") + "' data-block-cat='" + esc(c.id) + "'>" +
+          "<span class='b-label'>" + c.emoji + " " + esc(c.label) + "</span>" +
+          "<span class='b-toggle'>" + (on ? "✓ unblock" : "🚫 block") + "</span></div>";
+      }).join("");
+  }
+
   function aiCategoriesList() {
     var L = [];
     CATS.forEach(function (c) { L.push(c.id + " (" + c.label + ")"); });
@@ -2520,7 +2613,7 @@
 
   // ── digest ──
   function digestData() {
-    var gens = state.gens;
+    var gens = unblockedGens();
     var gainers = gens.filter(function (g) { return g.gained > 0; }).sort(function (a, b) { return b.gained - a.gained; }).slice(0, 8);
     var risers = gens.filter(function (g) { return g.rankDelta != null && g.rankDelta > 0; }).sort(function (a, b) { return b.rankDelta - a.rankDelta; }).slice(0, 5);
     var fallers = gens.filter(function (g) { return g.rankDelta != null && g.rankDelta < 0; }).sort(function (a, b) { return a.rankDelta - b.rankDelta; }).slice(0, 5);
@@ -3082,6 +3175,7 @@
       });
     } else {
       rows = state.gens.filter(function (g) {
+        if (isBlockedGen(g)) return false;
         if (cf) {
           if (cf === "__watched") {
             if (!watchNames.has(g.name)) return false;
@@ -3323,7 +3417,7 @@
   }
 
   function renderStats() {
-    var gens = state.gens;
+    var gens = unblockedGens();
     var totalViews = 0, busiest = null, counts = {};
     gens.forEach(function (g) {
       totalViews += g.views;
@@ -3665,39 +3759,40 @@
   function renderCatButtons() {
     var ctn = document.getElementById("catBtns");
     if (!ctn) return;
-    function mk(label, id, emoji, color, count) {
+    var gens = unblockedGens();
+    function mk(label, id, emoji, color, count, blocked) {
       var b = document.createElement("button");
       b.type = "button";
-      b.className = "cat-btn" + (catFilter === id ? " active" : "");
+      b.className = "cat-btn" + (catFilter === id ? " active" : "") + (blocked ? " blocked" : "");
       b.dataset.cat = id;
-      b.title = label;
+      b.title = blocked ? "🚫 Blocked — unblock it in the Slicer row" : label;
       if (color) {
         b.style.color = color;
         b.style.borderColor = color + "66";
         b.style.background = color + "1a";
-        b.textContent = (emoji ? emoji + " " : "") + label + (count != null ? " " + count : "");
+        b.textContent = (emoji ? emoji + " " : "") + label + (count != null ? " " + count : "") + (blocked ? " 🚫" : "");
       } else {
         b.style.color = "var(--muted)";
         b.style.borderColor = "var(--border)";
-        b.textContent = "All" + (count != null ? " " + count : "");
+        b.textContent = "All" + (count != null ? " " + count : "") + (blocked ? " 🚫" : "");
       }
       return b;
     }
     var frag = document.createDocumentFragment();
-    frag.appendChild(mk("All categories", "", null, null, state.gens.length));
+    frag.appendChild(mk("All categories", "", null, null, gens.length, Object.keys(blockedCats).length > 0));
     frag.appendChild(mk("Watched", "__watched", "⭐", "#fbbf24", watchNames.size));
     frag.appendChild(mk("Movers", "__movers", "📈", "#34d399", watchActive.size));
     frag.appendChild(mk("Departed", "__departed", "🚫", "#f87171", Object.keys(removedMap).length));
     CATS.forEach(function (c) {
-      var n = state.gens.filter(function (g) { return (g.cats || []).concat(effCat(g)).indexOf(c.id) >= 0; }).length;
-      frag.appendChild(mk(c.label, c.id, c.emoji, c.color, n));
+      var n = gens.filter(function (g) { return (g.cats || []).concat(effCat(g)).indexOf(c.id) >= 0; }).length;
+      frag.appendChild(mk(c.label, c.id, c.emoji, c.color, n, !!blockedCats[c.id]));
     });
     customCats.forEach(function (c) {
-      var n = state.gens.filter(function (g) { return hasGenCat(g.name, c.id); }).length;
-      frag.appendChild(mk(c.label, c.id, "⭐", "#e879f9", n));
+      var n = gens.filter(function (g) { return hasGenCat(g.name, c.id); }).length;
+      frag.appendChild(mk(c.label, c.id, "⭐", "#e879f9", n, !!blockedCats[c.id]));
     });
-    var expN = state.gens.filter(function (g) { return genAdultLevel(g) === "explicit"; }).length;
-    var matN = state.gens.filter(function (g) { return genAdultLevel(g) === "mature"; }).length;
+    var expN = gens.filter(function (g) { return genAdultLevel(g) === "explicit"; }).length;
+    var matN = gens.filter(function (g) { return genAdultLevel(g) === "mature"; }).length;
     frag.appendChild(mk("Explicit", "__adult_explicit", "🔞", "#fb7185", expN));
     frag.appendChild(mk("Mature", "__adult_mature", "🌶️", "#fbbf24", matN));
     ctn.innerHTML = "";
@@ -3723,11 +3818,37 @@
   document.getElementById("catBtns").addEventListener("click", function (e) {
     var btn = e.target.closest(".cat-btn");
     if (!btn) return;
-    catFilter = btn.dataset.cat || "";
+    var id = btn.dataset.cat || "";
+    if (id && blockedCats[id]) { showToast("🚫 This category is blocked — unblock it in the Slicer row"); return; }
+    catFilter = id;
     renderCatButtons();
     renderTable();
     syncUrl();
     saveView();
+  });
+
+  var blockBtn = document.getElementById("blockBtn");
+  if (blockBtn) blockBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    var p = document.getElementById("blockPanel");
+    if (!p) return;
+    p.hidden = !p.hidden;
+    if (!p.hidden) {
+      p.style.left = "0";
+      var pr = p.getBoundingClientRect();
+      var over = pr.right - (window.innerWidth - 12);
+      if (over > 0) p.style.left = (-over) + "px";
+    }
+  });
+  document.getElementById("blockPanel").addEventListener("click", function (e) {
+    var row = e.target.closest("[data-block-cat]");
+    if (!row) return;
+    toggleBlockCat(row.getAttribute("data-block-cat"));
+  });
+  document.addEventListener("click", function (e) {
+    var p = document.getElementById("blockPanel");
+    if (!p || p.hidden) return;
+    if (!e.target.closest(".slicer-wrap")) p.hidden = true;
   });
 
   document.getElementById("mdFilteredBtn").addEventListener("click", function () {
@@ -3797,6 +3918,7 @@
     var b = e.target.closest(".slicer-chip");
     if (!b) return;
     var id = b.getAttribute("data-slicer-cat");
+    if (id && blockedCats[id]) { showToast("🚫 This category is blocked — unblock it in the Blocked menu"); return; }
     if (!id) chartSlicer.cats = [];
     else {
       var i = chartSlicer.cats.indexOf(id);
@@ -4103,7 +4225,7 @@
   var resetAllBtn = document.getElementById("resetAllBtn");
   if (resetAllBtn) resetAllBtn.addEventListener("click", resetAllData);
 
-  window.__dashExports = { buildMarkdown: buildMarkdown, buildTableExport: buildTableExport, exportAllCharts: exportAllCharts, chartCardCanvas: chartCardCanvas, saveView: saveView, getRemoved: function () { return removedMap; }, getState: function () { return state; }, getHistory: function () { return historyData; }, getFilteredRows: getFilteredRows, setCatFilter: function (c) { catFilter = c; renderCatButtons(); renderTable(); }, getSpotlight: function () { return spotlightData; } };
+  window.__dashExports = { buildMarkdown: buildMarkdown, buildTableExport: buildTableExport, exportAllCharts: exportAllCharts, chartCardCanvas: chartCardCanvas, saveView: saveView, getRemoved: function () { return removedMap; }, getState: function () { return state; }, getHistory: function () { return historyData; }, getFilteredRows: getFilteredRows, setCatFilter: function (c) { catFilter = c; renderCatButtons(); renderTable(); }, getSpotlight: function () { return spotlightData; }, getBlocked: function () { return blockedCats; } };
   document.querySelectorAll("thead th").forEach(function (th) {
     th.addEventListener("click", function () {
       var k = th.dataset.key;
@@ -4126,10 +4248,12 @@
     await loadCustomCats();
     await loadAdultOverrides();
     await loadCatOverrides();
+    await loadBlocked();
     await loadHistory();
     await loadRemoved();
     await loadSpotlight();
     try { deepScanData = await root.kv.dash.get(DEEP_SCAN_KEY); } catch (e) {}
+    renderBlockPanel();
     renderAdultOverrides();
     renderCatList();
     analyze();
@@ -4171,6 +4295,7 @@ Key controls:
 - "↻ Refresh data" (top-left nav): re-scans the list. Refreshing is incremental — brand-new generators are classified, generators whose lastEditTime changed are re-classified, generators that only gained views just get their view count updated, and everything else is left untouched, so repeated refreshes are fast and cheap.
 - The table (bottom): search box filters by name/title/tags/description; category chips filter by category; click any column header to sort; the ▦ Table / ▤ Grid toggle switches to a gallery of thumbnails; clicking a thumbnail opens a lightbox with stats and a link.
 - Charts: hover any bar/slice/point for exact values; click a slice/bar to filter the table to that category; click the ⬇ on a chart card to download it as PNG; clicking the chart itself opens it full-size in a lightbox.
+- 🚫 Blocked (Slicer row): block whole categories so their generators disappear from the stat cards, the charts, the slicer and the table. The Blocked menu lists every category with a block/unblock toggle; blocks persist per-browser.
 - Export menu (⬇ button in the nav): download the current filtered view or everything as Markdown, CSV or JSON, download all charts as one PNG, or copy a shareable link that re-opens the exact filtered/sorted view (via ?cat=&q=&adult=&sort= URL params).
 - Settings (gear icon): theme (dark/light/midnight/cream), accent colour, text size, reduce motion, custom categories, the adult-content "deep scan" (auto-detects explicit/mature generators by scanning main.pjs code), and data admin (export/import all your data as JSON, re-scan all, reset all).
 - Watchlist (bell icon / ☆ buttons): pin any generator to be alerted (toast + nav badge + highlighted row) whenever it is edited or jumps in views.
