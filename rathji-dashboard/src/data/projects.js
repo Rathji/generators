@@ -53,6 +53,20 @@ window.RATHJI_PROJECTS = {
         "business",
         "ai"
       ]
+    },
+    {
+      "icon": "🏙️",
+      "title": "Gotham City Builder",
+      "desc": "Build and manage your own Gotham City. Zone the streets, lay down power and water, fight crime with GCPD and the Bat, and keep the money flowing.",
+      "url": "https://perchance.org/sim-gotham",
+      "tags": [
+        "gotham",
+        "simcity",
+        "city-builder",
+        "batman",
+        "tycoon",
+        "simulation"
+      ]
     }
   ],
   "recreations": [
@@ -674,6 +688,19 @@ window.RATHJI_PROJECTS = {
         "fantasy",
         "template"
       ]
+    },
+    {
+      "icon": "🌿",
+      "title": "Template Jungle",
+      "desc": "A living collection of Perchance templates — board games, video games, apps, art tools, frameworks and plugins. Browse, fork, and build.",
+      "url": "https://perchance.org/template-jungle",
+      "tags": [
+        "templates",
+        "hub",
+        "directory",
+        "perchance"
+      ],
+      "badge": "hub"
     }
   ],
   "plugins": [
