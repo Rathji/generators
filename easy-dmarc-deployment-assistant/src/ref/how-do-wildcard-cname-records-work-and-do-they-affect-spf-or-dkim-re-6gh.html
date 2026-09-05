@@ -1,0 +1,65 @@
+<p>When setting up email authentication records like <strong>SPF</strong> and <strong>DKIM</strong>, DNS configuration plays a crucial role. One often overlooked aspect is the use of <strong>wildcard CNAME records</strong> (e.g., *.example.com) and how they might interact with email authentication mechanisms.</p>
+<p>In this article, we will explain what wildcard CNAME records are, how they work, and whether they impact SPF or DKIM validation.&nbsp;</p>
+<p><strong>What Is a Wildcard CNAME Record?</strong></p>
+<p>A <strong>wildcard CNAME record</strong> is a DNS record that automatically maps any subdomain that hasn’t been explicitly created to a specified target domain.</p>
+<p>For example:</p>
+<p>*.example.com&nbsp; &nbsp; CNAME&nbsp; &nbsp; anotherdomain.com</p>
+<br>
+<p>With this configuration:</p>
+<ul>
+<li aria-level="1">random.example.com → points to anotherdomain.com<br><br></li>
+<li aria-level="1">mail.example.com → points to anotherdomain.com (only if you don’t have an explicit mail.example.com record)<br><br></li>
+<li aria-level="1"><strong>Any undefined subdomain</strong> (including _domainkey DKIM selectors) will also resolve to anotherdomain.com<br><br></li>
+</ul>
+<p>So, if you haven’t explicitly set records for:</p>
+<ul>
+<li aria-level="1">kl._domainkey.example.com<br><br></li>
+<li aria-level="1">s1._domainkey.example.com<br><br></li>
+</ul>
+<p>They will <strong>inherit the wildcard</strong> and also point to anotherdomain.com.</p>
+<h4><strong>Do Wildcard CNAME Records Affect SPF?</strong></h4>
+<h3><strong>How SPF Works</strong></h3>
+<p>SPF (Sender Policy Framework) uses a TXT record published on the domain or subdomain to specify which mail servers are allowed to send emails on behalf of your domain.<br>For example:</p>
+<p>example.com &nbsp; &nbsp; &nbsp; TXT&nbsp; &nbsp; &nbsp; "v=spf1 include:_spf.google.com ~all"</p>
+<br>
+<p>SPF lookups for a domain query <strong>only that specific domain</strong> and not other subdomains unless explicitly used.</p>
+<h3><strong>Impact of a Wildcard CNAME</strong></h3>
+<ul>
+<li aria-level="1">SPF validation happens on the envelope domain used in the email’s "MAIL FROM" or "Return-Path."<br><br></li>
+<li aria-level="1">If the SPF check is for example.com, the wildcard *.example.com has no effect.<br><br></li>
+<li aria-level="1">However, if your SPF includes a <strong>subdomain</strong> and that subdomain does not have its own SPF record, <strong>a wildcard CNAME can misdirect the SPF lookup</strong> to the wrong domain.<br><br></li>
+</ul>
+<h4><strong>✅ SPF Example with a CNAME</strong></h4>
+<p>If you create:</p>
+<p>spf.example.com&nbsp; &nbsp; &nbsp; CNAME &nbsp; &nbsp; spf.externalprovider.com</p>
+<br>
+<p>And in your SPF record:</p>
+<p>example.com&nbsp; &nbsp; &nbsp; &nbsp; &nbsp; TXT&nbsp; &nbsp; &nbsp; "v=spf1 include:spf.example.com ~all"</p>
+<br>
+<p>The receiving mail server will follow the CNAME and resolve spf.externalprovider.com for SPF validation.</p>
+<h4><strong>⚠️ Problem with Wildcard CNAME</strong></h4>
+<p>If you have a wildcard:</p>
+<p>*.example.com&nbsp; &nbsp; &nbsp; &nbsp; CNAME &nbsp; &nbsp; anotherdomain.com</p>
+<br>
+<p>And you <strong>don’t</strong> explicitly create spf.example.com, then SPF lookups for spf.example.com will resolve to anotherdomain.com.<br>If anotherdomain.com does not have a valid SPF, this may lead to SPF failures.</p>
+<h4><strong>Do Wildcard CNAME Records Affect DKIM?</strong></h4>
+<h3><strong>How DKIM Works</strong></h3>
+<p>DKIM uses a TXT record stored under a selector subdomain in the _domainkey namespace:</p>
+<p>For example:</p>
+<p>s1._domainkey.example.com&nbsp; &nbsp; &nbsp; TXT&nbsp; &nbsp; &nbsp; "v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GN..."</p>
+<br>
+<p>The receiving mail server retrieves this public key via DNS to validate the DKIM signature.</p>
+<h3><strong>Impact of a Wildcard CNAME</strong></h3>
+<p>If you have a wildcard CNAME such as:</p>
+<p>*.example.com &nbsp; &nbsp; &nbsp; CNAME&nbsp; &nbsp; &nbsp; anotherdomain.com</p>
+<br>
+<p>and you forget to explicitly create s1._domainkey.example.com, DNS will automatically redirect that query to anotherdomain.com.</p>
+<p>If anotherdomain.com does not have a corresponding DKIM key for that selector, <strong>DKIM validation will fail</strong>.</p>
+<h4><strong>✅ Correct DKIM CNAME Example</strong></h4>
+<p>Some email service providers ask you to create CNAMEs for DKIM, like:</p>
+<p>s1._domainkey.example.com&nbsp; &nbsp; CNAME&nbsp; &nbsp; s1._domainkey.provider.com</p>
+<p>s2._domainkey.example.com&nbsp; &nbsp; CNAME&nbsp; &nbsp; s2._domainkey.provider.com</p>
+<br>
+<p>In this case, the DKIM lookup will correctly follow the CNAME to the provider’s DKIM record.</p>
+<h4><strong>⚠️ Risk with Wildcard CNAME</strong></h4>
+<p>If you rely on a wildcard instead of explicitly creating the DKIM selector records, you risk misdirecting the DKIM query to an unrelated domain, causing DKIM failures.<br><br>Wildcard CNAME records (*.example.com) are useful for web services but can unintentionally interfere with email authentication if not carefully managed.</p>

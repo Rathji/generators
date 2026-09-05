@@ -1,0 +1,1796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EasyDMARC Deployment Navigator</title>
+<style>
+  :root{
+    --bg0:#040a1e; --bg1:#0a1330; --bg2:#0e1a3f; --bg3:#132348;
+    --line:rgba(150,178,255,.16); --line2:rgba(150,178,255,.30);
+    --txt:#e9eeff; --mut:#9aa6cf; --dim:#6f7ca6;
+    --acc:#3d7bff; --acc2:#5ec8ff; --good:#2fd08c; --warn:#ffc24b; --bad:#ff6b81;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --shadow:0 18px 44px rgba(0,0,0,.35);
+  }
+  *{box-sizing:border-box}
+  html{color-scheme:dark}
+  body{
+    margin:0; background:var(--bg0); color:var(--txt);
+    font:15px/1.55 ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    text-align:left;
+    background-image:radial-gradient(1100px 500px at 85% -10%, rgba(61,123,255,.16), transparent 60%),
+                     radial-gradient(900px 420px at -10% 0%, rgba(94,200,255,.10), transparent 55%);
+    background-attachment:fixed;
+  }
+  button{font:inherit; color:inherit}
+  a{color:#7fb0ff; text-decoration:none}
+  a:hover{text-decoration:underline}
+  #app{min-height:100vh}
+
+  /* ---------- top bar ---------- */
+  .topbar{
+    position:sticky; top:0; z-index:40;
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+    padding:10px 18px; background:rgba(6,13,34,.86); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex; align-items:center; gap:10px; font-weight:800; font-size:18px; letter-spacing:.2px}
+  .brand .sub{font-weight:600; font-size:12.5px; color:var(--mut); display:block; margin-top:-2px; letter-spacing:1.6px; text-transform:uppercase}
+  .brand svg{flex:none; filter:drop-shadow(0 4px 10px rgba(61,123,255,.55))}
+  .top-right{margin-left:auto; display:flex; align-items:center; gap:14px}
+  .topmeter{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--mut)}
+  .topmeter b{color:var(--txt); font-size:14px; min-width:38px}
+  .tbar{width:110px; height:6px; border-radius:4px; background:var(--bg3); overflow:hidden}
+  .tbar i{display:block; height:100%; width:0%; border-radius:4px; background:linear-gradient(90deg,var(--acc),var(--acc2)); transition:width .4s}
+  .btn{
+    border:1px solid var(--line2); background:var(--bg3); color:var(--txt); border-radius:10px;
+    padding:8px 14px; cursor:pointer; font-weight:600; font-size:13.5px; display:inline-flex; align-items:center; gap:8px;
+    transition:.15s;
+  }
+  .btn:hover{border-color:var(--acc); background:#16285a}
+  .btn:disabled{opacity:.5; cursor:default}
+  .btn.primary{background:linear-gradient(135deg,var(--acc),#2b5cd9); border-color:transparent; box-shadow:0 6px 18px rgba(61,123,255,.35)}
+  .btn.primary:hover{filter:brightness(1.12); background:linear-gradient(135deg,var(--acc),#2b5cd9)}
+  .btn.good{background:linear-gradient(135deg,#17a86b,#12b981); border-color:transparent}
+  .btn.good:hover{filter:brightness(1.1)}
+  .btn svg{flex:none}
+
+  /* ---------- resource strip ---------- */
+  .resstrip{
+    display:flex; gap:8px; flex-wrap:wrap; align-items:center; padding:10px 18px 0;
+  }
+  .resstrip .cap{font-size:11.5px; color:var(--dim); text-transform:uppercase; letter-spacing:1.4px; margin-right:4px}
+  .pill{
+    display:inline-flex; align-items:center; gap:7px; border:1px solid var(--line); background:var(--bg2);
+    border-radius:999px; padding:5px 13px; font-size:13px; color:var(--txt); transition:.15s;
+  }
+  .pill:hover{border-color:var(--acc); background:var(--bg3); text-decoration:none; transform:translateY(-1px)}
+  .pill .dot{width:7px; height:7px; border-radius:50%}
+  .pill.kb .dot{background:#7fb0ff}.pill.ac .dot{background:#c084fc}.pill.bl .dot{background:#ffc24b}.pill.tk .dot{background:#ff6b81}.pill.ap .dot{background:#2fd08c}
+
+  /* ---------- workspace bar ---------- */
+  .workspace{
+    display:grid; grid-template-columns:1.4fr 1fr 1fr auto; gap:10px; align-items:end;
+    margin:14px 18px 0; padding:14px 16px; background:linear-gradient(180deg,var(--bg2),#0c1738);
+    border:1px solid var(--line); border-radius:16px;
+  }
+  .field label{display:block; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; color:var(--mut); margin-bottom:6px}
+  .field input,.field select{
+    width:100%; background:var(--bg0); border:1px solid var(--line2); color:var(--txt);
+    border-radius:9px; padding:8px 10px; font-size:14px; outline:none; transition:.15s;
+  }
+  .field input:focus,.field select:focus{border-color:var(--acc); box-shadow:0 0 0 3px rgba(61,123,255,.18)}
+  .field input::placeholder{color:var(--dim)}
+  .cfgmeta{grid-column:1/-1; display:flex; align-items:center; gap:10px; flex-wrap:wrap; color:var(--dim); font-size:12px}
+  .cfgmeta .hint{color:var(--dim)}
+  #resetCfg,#resetAll{background:none; border:none; color:var(--dim); cursor:pointer; font-size:12px; padding:0; text-decoration:underline; text-underline-offset:3px}
+  #resetCfg:hover,#resetAll:hover{color:var(--bad)}
+
+  /* ---------- layout ---------- */
+  .layout{display:grid; grid-template-columns:272px minmax(0,1fr); gap:18px; padding:16px 18px 60px; align-items:start}
+
+  .rail{
+    position:sticky; top:78px; background:var(--bg1); border:1px solid var(--line); border-radius:16px;
+    padding:14px 12px; overflow:auto; max-height:calc(100vh - 100px);
+  }
+  .rail h3{font-size:11px; text-transform:uppercase; letter-spacing:1.6px; color:var(--dim); margin:2px 6px 10px}
+  #phaseList{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px}
+  .pitem{
+    width:100%; display:flex; align-items:center; gap:10px; text-align:left; cursor:pointer;
+    background:none; border:1px solid transparent; border-radius:11px; padding:8px 9px; transition:.15s; color:var(--txt);
+  }
+  .pitem:hover{background:var(--bg2)}
+  .pitem.cur{background:linear-gradient(135deg,rgba(61,123,255,.18),rgba(94,200,255,.07)); border-color:rgba(61,123,255,.4)}
+  .pitem .pnum{
+    flex:none; width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
+    font-size:12.5px; font-weight:700; background:var(--bg3); border:1px solid var(--line2); color:var(--mut);
+  }
+  .pitem.done .pnum{background:linear-gradient(135deg,#17a86b,#12b981); border-color:transparent; color:#fff}
+  .pitem.cur .pnum{background:linear-gradient(135deg,var(--acc),#2b5cd9); border-color:transparent; color:#fff}
+  .ptext{flex:1; min-width:0}
+  .ptext b{display:block; font-size:13.5px; font-weight:650; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .ptext i{font-style:normal; font-size:11px; color:var(--dim)}
+  .pmeta{flex:none; text-align:right}
+  .pmeta .pc{font-size:10.5px; color:var(--dim)}
+  .pmeta .tick{color:var(--good); font-weight:800}
+  .railfoot{padding:10px 8px 2px; border-top:1px solid var(--line); margin-top:10px; display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--dim)}
+
+  /* ---------- phase content ---------- */
+  .content{min-width:0}
+  .phasehead{
+    background:linear-gradient(135deg,#0d1a44,#0b1c57 60%,#0a2a5e);
+    border:1px solid var(--line); border-radius:18px; padding:22px 24px; margin-bottom:16px; position:relative; overflow:hidden;
+  }
+  .phasehead:after{content:""; position:absolute; right:-40px; top:-60px; width:220px; height:220px; border-radius:50%;
+    background:radial-gradient(circle,rgba(94,200,255,.22),transparent 70%)}
+  .phasehead .ph{display:flex; align-items:center; gap:10px; font-size:12px; color:var(--acc2); text-transform:uppercase; letter-spacing:2px; font-weight:700}
+  .phasehead h1{margin:8px 0 6px; font-size:26px; line-height:1.2}
+  .phasehead .time{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:var(--mut); background:rgba(0,0,0,.25); border:1px solid var(--line); padding:3px 10px; border-radius:999px}
+  .phasehead .sum{color:#c9d6ff; font-size:14.5px; max-width:760px; margin:10px 0 0}
+  .phasehead .goal{
+    margin-top:14px; display:flex; gap:8px; align-items:flex-start; background:rgba(47,208,140,.10);
+    border:1px solid rgba(47,208,140,.3); padding:10px 13px; border-radius:11px; font-size:13.5px; color:#bfeede;
+  }
+  .phasehead .goal svg{flex:none; margin-top:2px}
+
+  .steps{display:flex; flex-direction:column; gap:12px}
+  .stepcard{
+    background:var(--bg1); border:1px solid var(--line); border-radius:15px; padding:16px 18px;
+    transition:border-color .2s, opacity .3s;
+  }
+  .stepcard.done{border-color:rgba(47,208,140,.4); opacity:.82}
+  .steph{display:flex; align-items:flex-start; gap:12px; cursor:pointer}
+  .chk{
+    flex:none; width:23px; height:23px; margin-top:1px; border-radius:8px; border:2px solid var(--line2);
+    display:flex; align-items:center; justify-content:center; background:var(--bg0); transition:.15s; color:transparent;
+  }
+  .stepcard.done .chk{background:linear-gradient(135deg,#17a86b,#12b981); border-color:transparent; color:#fff}
+  .steph b{font-size:15.5px; font-weight:650; display:block}
+  .steph .when{font-size:11px; color:var(--dim); display:block; margin-top:1px}
+  .steph .num{flex:none; font-size:11px; color:var(--dim); margin-top:2px; width:20px; text-align:right}
+  .steph .stitle{flex:1}
+  .stepbody{margin:11px 0 2px 47px; color:#c6d2f5; font-size:14px}
+  .stepbody p{margin:0 0 9px}
+  .stepbody ul,.stepbody ol{margin:4px 0 10px; padding-left:22px}
+  .stepbody li{margin-bottom:5px}
+  .stepbody b{color:var(--txt)}
+  .tip{
+    background:rgba(255,194,75,.08); border:1px solid rgba(255,194,75,.28); color:#ffe3ad;
+    border-radius:10px; padding:9px 12px; font-size:13px; margin-top:10px; display:flex; gap:9px;
+  }
+  .tip.warn{border-color:rgba(255,107,129,.35); background:rgba(255,107,129,.07); color:#ffc9d2}
+  .tip.info{border-color:rgba(94,200,255,.3); background:rgba(94,200,255,.07); color:#d3f0ff}
+  .tip svg{flex:none; margin-top:1px}
+  .reflinks{margin-top:11px; display:flex; flex-wrap:wrap; gap:6px}
+  .ref{font-size:12px; color:#8fb4ff; border:1px dashed rgba(143,180,255,.35); padding:3px 9px; border-radius:999px; background:rgba(61,123,255,.05)}
+  .ref:hover{border-color:var(--acc); background:rgba(61,123,255,.12); text-decoration:none}
+
+  .recrow{
+    display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:7px 0;
+    background:var(--bg0); border:1px solid var(--line); border-radius:10px; padding:8px 10px;
+  }
+  .rtype{
+    flex:none; font-size:10.5px; font-weight:800; letter-spacing:1px; border-radius:6px; padding:3px 7px;
+  }
+  .rtype.TXT{background:rgba(94,200,255,.15); color:#7fd8ff}
+  .rtype.CNAME{background:rgba(192,132,252,.15); color:#d3a6ff}
+  .rtype.NS{background:rgba(255,194,75,.14); color:#ffd98a}
+  .rhost{font-family:var(--mono); font-size:13px; color:#bfe0ff}
+  .rval{flex:1; min-width:180px; font-family:var(--mono); font-size:12.3px; color:#c9d6f5; word-break:break-all; line-height:1.45}
+  .copyb{
+    flex:none; background:var(--bg3); border:1px solid var(--line2); border-radius:8px; cursor:pointer;
+    padding:5px 9px; font-size:12px; display:inline-flex; align-items:center; gap:5px; color:#cfdaff;
+  }
+  .copyb:hover{border-color:var(--acc)}
+  .copyb.ok{border-color:var(--good); color:var(--good)}
+
+  /* choice cards */
+  .choices{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; margin:6px 0}
+  .choice{
+    background:var(--bg0); border:1px solid var(--line2); border-radius:12px; padding:12px 13px; cursor:pointer; transition:.15s; text-align:left;
+  }
+  .choice:hover{border-color:var(--acc)}
+  .choice.sel{border-color:var(--acc); background:rgba(61,123,255,.10); box-shadow:0 0 0 3px rgba(61,123,255,.13)}
+  .choice b{display:block; font-size:14px; margin-bottom:3px; display:flex; align-items:center; gap:8px}
+  .choice span{font-size:12.5px; color:var(--mut); line-height:1.45; display:block}
+  .choice .rec{font-size:11px; color:var(--acc2)}
+  .choice .radio{flex:none; width:16px; height:16px; border-radius:50%; border:2px solid var(--line2); display:inline-block; position:relative}
+  .choice.sel .radio{border-color:var(--acc)}
+  .choice.sel .radio:after{content:""; position:absolute; inset:2px; border-radius:50%; background:var(--acc)}
+
+  .phasefoot{display:flex; justify-content:space-between; align-items:center; margin-top:22px; gap:10px; flex-wrap:wrap}
+  .phasefoot .status{font-size:13px; color:var(--mut)}
+  .phasefoot .status b{color:var(--good)}
+  .phasefoot .navbtns{display:flex; gap:10px}
+  .bigrefs{
+    margin-top:14px; background:var(--bg1); border:1px dashed var(--line2); border-radius:14px; padding:13px 16px;
+  }
+  .bigrefs h4{margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:1.5px; color:var(--dim)}
+  .bigrefs .row{display:flex; flex-wrap:wrap; gap:6px 18px; font-size:13px}
+  .bigrefs .row a{color:#8fb4ff}
+
+  /* builder */
+  .builder{
+    background:linear-gradient(180deg,#0c1738,var(--bg1)); border:1px solid rgba(94,200,255,.28); border-radius:14px; padding:15px 17px; margin-top:12px;
+  }
+  .builder h4{margin:0 0 12px; display:flex; align-items:center; gap:8px; font-size:13px; text-transform:uppercase; letter-spacing:1.4px; color:var(--acc2)}
+  .bgrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:10px}
+  .bgrid .field{margin:0}
+  .bout{display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:var(--bg0); border:1px solid var(--line); border-radius:10px; padding:9px 11px}
+  .bout code{font-family:var(--mono); font-size:12.5px; color:#a9ecff; word-break:break-all; flex:1; min-width:200px; line-height:1.5}
+
+  /* ---------- chat ---------- */
+  #chatBackdrop{position:fixed; inset:0; background:rgba(2,6,18,.55); backdrop-filter:blur(2px); z-index:60; opacity:0; pointer-events:none; transition:.25s}
+  #chatBackdrop.show{opacity:1; pointer-events:auto}
+  #chatPanel{
+    position:fixed; top:0; right:0; bottom:0; width:min(430px,100vw); z-index:70;
+    background:var(--bg1); border-left:1px solid var(--line2); box-shadow:var(--shadow);
+    transform:translateX(105%); transition:transform .28s cubic-bezier(.2,.8,.2,1);
+    display:flex; flex-direction:column;
+  }
+  #chatPanel.open{transform:none}
+  .chattop{
+    padding:14px 16px; border-bottom:1px solid var(--line); background:linear-gradient(135deg,#0d1a44,#0a2a5e);
+    display:flex; align-items:center; gap:10px;
+  }
+  .chattop .bot{flex:none; width:36px; height:36px; border-radius:11px; background:linear-gradient(135deg,var(--acc),#2b5cd9); display:flex; align-items:center; justify-content:center}
+  .chattop .tt{flex:1; min-width:0}
+  .chattop .tt b{display:block; font-size:14.5px}
+  .chattop .tt i{font-style:normal; font-size:11px; color:var(--mut); display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .chattop .x{background:none; border:none; color:var(--mut); cursor:pointer; font-size:20px; line-height:1; padding:4px}
+  .chattop .x:hover{color:var(--txt)}
+  #chatMsgs{flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px}
+  .msg{max-width:92%; padding:10px 13px; border-radius:14px; font-size:13.8px; white-space:pre-wrap; word-wrap:break-word; line-height:1.5}
+  .msg.user{align-self:flex-end; background:linear-gradient(135deg,var(--acc),#2b5cd9); color:#fff; border-bottom-right-radius:4px}
+  .msg.bot{align-self:flex-start; background:var(--bg3); border:1px solid var(--line); border-bottom-left-radius:4px}
+  .msg.bot a{word-break:break-all}
+  .msg.bot code{background:#0a1029; border:1px solid var(--line); padding:1px 5px; border-radius:5px; font-family:var(--mono); font-size:12px; color:#a9ecff}
+  .msg.bot pre{background:#0a1029; border:1px solid var(--line); padding:9px 11px; border-radius:9px; overflow-x:auto; font-size:12px}
+  .msg.bot pre code{background:none; border:none; padding:0}
+  .msg .pulse{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--acc2); margin-right:3px; animation:pl 1s infinite}
+  @keyframes pl{0%,100%{opacity:.25; transform:translateY(0)}50%{opacity:1; transform:translateY(-3px)}}
+  .ctxline{margin:0 14px 6px; font-size:11px; color:var(--dim); text-align:center}
+  #suggestWrap{padding:0 14px 8px; display:flex; flex-direction:column; gap:8px}
+  #suggestWrap .lab{font-size:10.5px; text-transform:uppercase; letter-spacing:1.3px; color:var(--dim)}
+  #sugg{display:flex; flex-direction:column; gap:6px}
+  .sg{border:1px solid var(--line2); background:var(--bg0); color:#bcd0ff; border-radius:999px; padding:6px 12px; font-size:12.5px; cursor:pointer; text-align:left; transition:.15s}
+  .sg:hover{border-color:var(--acc); color:var(--txt)}
+  #chatForm{display:flex; gap:8px; padding:10px 14px 14px; border-top:1px solid var(--line)}
+  #chatInput{
+    flex:1; resize:none; background:var(--bg0); border:1px solid var(--line2); color:var(--txt); border-radius:11px;
+    padding:9px 12px; font:inherit; font-size:13.5px; outline:none; max-height:110px; min-height:42px;
+  }
+  #chatInput:focus{border-color:var(--acc)}
+  #chatForm button{flex:none}
+  #chatFab{
+    position:fixed; right:18px; bottom:18px; z-index:55; width:54px; height:54px; border-radius:50%;
+    background:linear-gradient(135deg,var(--acc),#2b5cd9); border:none; cursor:pointer;
+    box-shadow:0 10px 28px rgba(61,123,255,.5); display:flex; align-items:center; justify-content:center;
+  }
+  #chatFab:hover{filter:brightness(1.12)}
+  .greet{padding:16px; text-align:center; color:var(--mut); font-size:13px}
+  .hidden{display:none!important}
+  .ctxstrip{
+    display:flex; flex-direction:column; gap:7px; margin:0 0 14px; padding:9px 14px;
+    background:var(--bg1); border:1px solid var(--line); border-radius:12px; font-size:12.5px; color:var(--mut);
+  }
+  .ctxstrip .bits{display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center}
+  .ctxnote{font-size:11px; color:var(--dim); text-align:right; border-top:1px dashed var(--line); padding-top:6px}
+  .ctxstrip b{color:var(--txt); font-weight:600}
+  .ctxstrip .lab{text-transform:uppercase; letter-spacing:1.3px; font-size:10.5px; color:var(--dim)}
+  .thinking{display:inline-flex; gap:4px; align-items:center; padding:2px 0}
+  .thinking i{width:6px;height:6px;border-radius:50%;background:var(--acc2);animation:pl 1s infinite}
+  .thinking i:nth-child(2){animation-delay:.15s}
+  .thinking i:nth-child(3){animation-delay:.3s}
+
+  /* ---------- reference library ---------- */
+  .libwrap{position:fixed; inset:0; z-index:80; pointer-events:none; display:flex; justify-content:center; padding:22px 14px}
+  .libback{position:absolute; inset:0; background:rgba(2,6,18,.62); backdrop-filter:blur(3px); pointer-events:auto}
+  .libcard{
+    position:relative; z-index:1; pointer-events:auto; align-self:stretch; width:min(1180px,100%); background:var(--bg1);
+    border:1px solid var(--line2); border-radius:18px; box-shadow:var(--shadow); overflow:hidden;
+    display:flex; flex-direction:column; min-height:0;
+  }
+  .libtop{flex:none; display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line); background:linear-gradient(135deg,#0d1a44,#0a2a5e)}
+  .libtop .bk{flex:none; width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--acc),#2b5cd9); display:flex; align-items:center; justify-content:center}
+  .libtop .tt{flex:1; min-width:0}
+  .libtop .tt b{display:block; font-size:15.5px}
+  .libtop .tt i{font-style:normal; font-size:11.5px; color:var(--mut); display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .libtabs{display:flex; gap:5px; background:var(--bg0); border:1px solid var(--line); padding:3px; border-radius:11px}
+  .libtab{border:none; background:none; color:var(--mut); padding:6px 13px; border-radius:8px; cursor:pointer; font-size:13px; font-weight:650}
+  .libtab.on{background:linear-gradient(135deg,var(--acc),#2b5cd9); color:#fff}
+  .libtop .x{background:none; border:none; color:var(--mut); cursor:pointer; font-size:22px; line-height:1; padding:4px 6px; border-radius:8px}
+  .libtop .x:hover{color:var(--txt); background:var(--bg2)}
+  .libgrid{flex:1; display:grid; grid-template-columns:324px minmax(0,1fr); min-height:0}
+  .libside{display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--line); background:var(--bg1)}
+  .libsearch{padding:10px 12px 4px}
+  .libsearch input{
+    width:100%; background:var(--bg0); border:1px solid var(--line2); color:var(--txt); border-radius:10px;
+    padding:8px 11px; font-size:13.5px; outline:none;
+  }
+  .libsearch input:focus{border-color:var(--acc); box-shadow:0 0 0 3px rgba(61,123,255,.16)}
+  .libcats{display:flex; flex-wrap:wrap; gap:5px; padding:9px 12px; border-bottom:1px solid var(--line); max-height:86px; overflow-y:auto}
+  .cat{
+    border:1px solid var(--line); background:var(--bg2); color:var(--mut); border-radius:999px;
+    padding:3px 10px; font-size:11.5px; cursor:pointer; transition:.15s; flex:none;
+  }
+  .cat:hover{border-color:var(--acc); color:var(--txt)}
+  .cat.on{background:rgba(61,123,255,.18); border-color:rgba(61,123,255,.55); color:#cfe0ff}
+  .cat .n{opacity:.65; font-size:10px; margin-left:3px}
+  #libList{flex:1; overflow-y:auto; padding:8px; min-height:0}
+  .libitem{
+    width:100%; text-align:left; background:none; border:1px solid transparent; color:var(--txt);
+    padding:8px 10px; border-radius:10px; cursor:pointer; display:flex; gap:9px; align-items:flex-start; margin-bottom:2px;
+  }
+  .libitem:hover{background:var(--bg2)}
+  .libitem.sel{background:rgba(61,123,255,.12); border-color:rgba(61,123,255,.45)}
+  .libitem .lt{flex:1; font-size:13px; line-height:1.38; min-width:0}
+  .libitem .kd{flex:none; font-size:9px; letter-spacing:.7px; text-transform:uppercase; color:var(--dim); background:var(--bg2); border:1px solid var(--line); border-radius:5px; padding:2px 5px; margin-top:2px}
+  .libitem.sel .kd{color:#8fb4ff; border-color:rgba(143,180,255,.4)}
+  #libEmpty{padding:22px 14px; color:var(--dim); font-size:13px; text-align:center}
+  .libread{min-width:0; display:flex; flex-direction:column; min-height:0; background:var(--bg0)}
+  .libreadhead{flex:none; display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--bg1); min-height:52px}
+  .libreadhead .ht{flex:1; min-width:0}
+  .libreadhead .ht b{display:block; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .libreadhead .ht i{font-style:normal; font-size:11px; color:var(--dim); display:block}
+  .libreadhead .acts{display:flex; gap:8px; flex:none}
+  #libReader{flex:1; overflow-y:auto; padding:18px 26px 50px; min-height:0}
+  .libintro{max-width:640px; margin:8vh auto 0; text-align:center; color:var(--mut)}
+  .libintro h2{color:var(--txt); font-size:22px; margin:0 0 8px}
+  .libintro p{font-size:13.5px; line-height:1.6}
+  .libintro .big{font-size:42px; font-weight:800; background:linear-gradient(135deg,var(--acc),var(--acc2)); -webkit-background-clip:text; background-clip:text; color:transparent; margin-bottom:4px}
+  .arttitle{margin:2px 0 10px; font-size:21px; line-height:1.3}
+  .artmeta{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px}
+  .artmeta .tag{font-size:10.5px; font-weight:700; letter-spacing:.8px; text-transform:uppercase; border-radius:6px; padding:3px 8px}
+  .tag.kb{background:rgba(127,176,255,.13); color:#9cc2ff}
+  .tag.bl{background:rgba(255,194,75,.13); color:#ffd98a}
+  .tag.off{background:rgba(47,208,140,.12); color:#7fe6bc}
+  .article{font-size:14.5px; line-height:1.66; color:#dbe4ff; word-wrap:break-word}
+  .article p{margin:0 0 11px}
+  .article b,.article strong{color:#fff; font-weight:650}
+  .article h2{font-size:19px; color:var(--acc2); margin:26px 0 10px; line-height:1.3}
+  .article h3{font-size:16px; color:#cfe0ff; margin:20px 0 8px}
+  .article ul,.article ol{margin:4px 0 12px; padding-left:22px}
+  .article li{margin-bottom:5px}
+  .article a{color:#7fb0ff}
+  .article img{max-width:100%; height:auto; border-radius:9px; border:1px solid var(--line); margin:9px 0; display:block; background:rgba(255,255,255,.03)}
+  .article code{background:#0a1029; border:1px solid var(--line); padding:1px 6px; border-radius:6px; font-family:var(--mono); font-size:12.5px; color:#a9ecff; word-break:break-all}
+  .article table{border-collapse:collapse; width:100%; margin:10px 0 14px; font-size:13px}
+  .article th,.article td{border:1px solid var(--line2); padding:6px 10px; text-align:left; vertical-align:top}
+  .article th{background:var(--bg2); color:#cfe0ff; font-weight:650}
+  .article tr:nth-child(odd) td{background:rgba(255,255,255,.015)}
+  .article blockquote{border-left:3px solid var(--acc); margin:10px 0; padding:2px 14px; color:#b9c6ea; background:rgba(61,123,255,.06); border-radius:0 8px 8px 0}
+  .article hr{border:none; border-top:1px solid var(--line); margin:16px 0}
+  .libleg{margin-top:26px; padding-top:12px; border-top:1px dashed var(--line); font-size:11px; color:var(--dim)}
+  .libload{display:flex; flex-direction:column; align-items:center; gap:12px; justify-content:center; padding:60px; color:var(--mut); font-size:13px}
+  .spin{width:26px; height:26px; border-radius:50%; border:3px solid var(--line2); border-top-color:var(--acc2); animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .acwrap{flex:1; overflow-y:auto; padding:18px 24px 46px; background:var(--bg0); min-height:0}
+  .achead{max-width:820px; margin:0 auto 6px; text-align:center; color:var(--mut)}
+  .achead h2{color:var(--txt); margin:4px 0}
+  .course{max-width:820px; margin:16px auto 0; background:var(--bg1); border:1px solid var(--line); border-radius:15px; overflow:hidden}
+  .course .courset{display:flex; align-items:center; gap:12px; padding:13px 17px; background:linear-gradient(135deg,#0d1a44,#0a2a5e)}
+  .course .courset svg{flex:none}
+  .course .courset b{font-size:15.5px; display:block}
+  .course .courset i{font-style:normal; font-size:11.5px; color:var(--mut); display:block; margin-top:1px}
+  .lesson{display:flex; align-items:center; gap:11px; padding:9px 17px; border-top:1px solid var(--line); color:var(--txt); font-size:13.5px; text-decoration:none}
+  .lesson:hover{background:var(--bg2)}
+  .lesson .ln{flex:none; width:21px; height:21px; border-radius:50%; background:var(--bg3); border:1px solid var(--line2); color:var(--mut); font-size:10.5px; display:flex; align-items:center; justify-content:center; font-weight:700}
+  .lesson .lt2{flex:1}
+  .lesson .du{flex:none; font-size:11px; color:var(--dim)}
+  .lesson:hover .ln{border-color:var(--acc); color:#fff; background:var(--acc)}
+  .pill.rf .dot{background:#ff8ac4}
+  .libwrap .hidden{display:none!important}
+
+  /* responsive */
+  @media (max-width:1100px){
+    .layout{grid-template-columns:minmax(0,1fr)}
+    .rail{position:static; max-height:none; order:-1}
+    #phaseList{flex-direction:row; overflow-x:auto; padding-bottom:4px}
+    .pitem{width:auto; min-width:150px; flex:none; border:1px solid var(--line); background:var(--bg2)}
+    .rail h3{display:none}
+    .railfoot{display:none}
+  }
+  @media (max-width:760px){
+    .workspace{grid-template-columns:1fr 1fr}
+    .workspace .field:first-child{grid-column:1/-1}
+    .topmeter{display:none}
+    .resstrip .cap{display:none}
+    .phasehead h1{font-size:21px}
+    .stepbody{margin-left:0}
+    .libgrid{grid-template-columns:1fr; grid-template-rows:minmax(150px,33%) minmax(0,1fr)}
+    .libside{border-right:none; border-bottom:1px solid var(--line)}
+    #libReader{padding:14px 16px 40px}
+    .libreadhead .ht i{display:none}
+  }
+  @media (max-width:470px){
+    .workspace{grid-template-columns:1fr}
+    .workspace .field:first-child{grid-column:auto}
+    body{font-size:14px}
+    .libwrap{padding:6px}
+    .libcard{border-radius:12px}
+    .libtop{padding:10px 10px}
+    .libtop .tt i{display:none}
+    .libtab{padding:6px 9px; font-size:12px}
+    .libreadhead{padding:8px 10px}
+    .arttitle{font-size:18px}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+        <path d="M24 3 6 10v13c0 12.4 7.8 19.7 18 22 10.2-2.3 18-9.6 18-22V10L24 3Z" fill="url(#g1)" stroke="#5ec8ff" stroke-width="1.6"/>
+        <path d="m15.5 23.5 6 6 11-12" stroke="#fff" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <defs><linearGradient id="g1" x1="6" y1="3" x2="42" y2="45"><stop stop-color="#3d7bff"/><stop offset="1" stop-color="#1746b8"/></linearGradient></defs>
+      </svg>
+      <span>EasyDMARC<span class="sub">Deployment Navigator</span></span>
+    </div>
+    <div class="top-right">
+      <div class="topmeter"><b id="overallPct">0%</b><span>deployed</span><div class="tbar"><i id="overallBar"></i></div></div>
+      <button class="btn primary" id="chatOpenBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+        Ask the AI Assistant
+      </button>
+    </div>
+  </header>
+
+  <div class="resstrip">
+    <span class="cap">Official resources</span>
+    <a class="pill kb" href="https://support.easydmarc.com/knowledge-base" target="_blank" rel="noopener"><span class="dot"></span>Knowledge Base</a>
+    <a class="pill ac" href="https://academy.easydmarc.com/" target="_blank" rel="noopener"><span class="dot"></span>Academy</a>
+    <a class="pill bl" href="https://easydmarc.com/blog/" target="_blank" rel="noopener"><span class="dot"></span>Blog</a>
+    <a class="pill tk" href="https://support.easydmarc.com/knowledge-base/kb-tickets/new" target="_blank" rel="noopener"><span class="dot"></span>Open Support Ticket</a>
+    <a class="pill ap" href="https://app.easydmarc.com" target="_blank" rel="noopener"><span class="dot"></span>EasyDMARC Dashboard</a>
+    <a class="pill rf" id="libOpenBtn" role="button" tabindex="0" title="Browse the 460+ guides bundled into this app"><span class="dot"></span>Reference Library</a>
+  </div>
+
+  <div class="workspace">
+    <div class="field">
+      <label for="domInput">Your domain</label>
+      <input id="domInput" placeholder="e.g. yourcompany.com" spellcheck="false" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="provSel">DNS provider</label>
+      <select id="provSel"></select>
+    </div>
+    <div class="field">
+      <label for="srcSel">Main sending platform (ESP)</label>
+      <select id="srcSel"></select>
+    </div>
+    <div class="cfgmeta">
+      <span class="hint">Progress, checklist ticks and setup are saved automatically in this browser.</span>
+      <button id="resetCfg" type="button">clear setup</button>
+      <button id="resetAll" type="button">reset all progress</button>
+    </div>
+  </div>
+
+  <div class="layout">
+    <aside class="rail">
+      <h3>Deployment phases</h3>
+      <ol id="phaseList"></ol>
+      <div class="railfoot"><span id="phaseCount"></span><button id="resetProgress" type="button" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:11px;text-decoration:underline">reset</button></div>
+    </aside>
+    <main class="content" id="content"></main>
+  </div>
+</div>
+
+<button id="chatFab" title="Open AI assistant" aria-label="Open AI assistant">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+</button>
+
+<div id="chatBackdrop"></div>
+<aside id="chatPanel" role="dialog" aria-label="AI deployment assistant">
+  <div class="chattop">
+    <div class="bot">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M12 8V4H8"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg>
+    </div>
+    <div class="tt"><b>Deployment Assistant</b><i id="chatCtx">EasyDMARC &middot; SPF &middot; DKIM &middot; DMARC</i></div>
+    <button class="x" id="chatClearBtn" title="Clear conversation" aria-label="Clear conversation">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+    </button>
+    <button class="x" id="chatCloseBtn" aria-label="Close" style="font-size:24px">&times;</button>
+  </div>
+  <div id="chatMsgs"></div>
+  <div id="suggestWrap" hidden>
+    <div class="lab">Try asking about this phase</div>
+    <div id="sugg"></div>
+  </div>
+  <form id="chatForm">
+    <textarea id="chatInput" rows="1" placeholder="Ask anything about deploying EasyDMARC…"></textarea>
+    <button class="btn primary" id="sendBtn" type="submit" aria-label="Send">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+    </button>
+  </form>
+</aside>
+
+<div class="libwrap" id="libWrap" hidden>
+  <div class="libback" id="libBack"></div>
+  <div class="libcard">
+    <div class="libtop">
+      <div class="bk">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      </div>
+      <div class="tt"><b>Reference Library</b><i id="libMeta">Offline copies of official EasyDMARC guides</i></div>
+      <div class="libtabs">
+        <button type="button" class="libtab on" data-libtab="guides">Guides</button>
+        <button type="button" class="libtab" data-libtab="academy">Academy</button>
+      </div>
+      <button class="x" id="libCloseBtn" aria-label="Close" style="font-size:24px">&times;</button>
+    </div>
+    <div class="libgrid" id="libGrid">
+      <aside class="libside">
+        <div class="libsearch"><input id="libQ" placeholder="Search all guides&hellip;" spellcheck="false"></div>
+        <div class="libcats" id="libCats"></div>
+        <div id="libList"></div>
+      </aside>
+      <main class="libread">
+        <div class="libreadhead" id="libReadHead" hidden></div>
+        <div class="libreader" id="libReader"></div>
+      </main>
+    </div>
+    <div class="acwrap" id="libAcademy" hidden></div>
+  </div>
+</div>
+
+<script id="guideData">
+window.GD = (() => {
+  const KB = "https://support.easydmarc.com/knowledge-base/";
+  const providers = [
+    {id:"cloudflare", n:"Cloudflare", u:"https://easydmarc.com/blog/how-to-add-dmarc-record-to-cloudflare/"},
+    {id:"godaddy", n:"GoDaddy", u:"https://support.easydmarc.com/knowledge-base/setup-dns-godaddy"},
+    {id:"namecheap", n:"Namecheap", u:"https://support.easydmarc.com/knowledge-base/setup-dns-namecheap"},
+    {id:"route53", n:"Amazon Route 53", u:"https://support.easydmarc.com/knowledge-base/setup-dns-amazon-route-53"},
+    {id:"google", n:"Google Domains / Squarespace", u:"https://support.easydmarc.com/knowledge-base/setup-dns-google-domains"},
+    {id:"bluehost", n:"Bluehost", u:"https://support.easydmarc.com/knowledge-base/setup-dns-bluehost"},
+    {id:"siteground", n:"SiteGround", u:"https://support.easydmarc.com/knowledge-base/setup-dns-siteground"},
+    {id:"digitalocean", n:"DigitalOcean", u:"https://support.easydmarc.com/knowledge-base/setup-dns-digitalocean"},
+    {id:"porkbun", n:"Porkbun", u:"https://support.easydmarc.com/knowledge-base/setup-dns-porkbun"},
+    {id:"hetzner", n:"Hetzner", u:"https://support.easydmarc.com/knowledge-base/setup-dns-hetzner"},
+    {id:"gandi", n:"Gandi", u:"https://support.easydmarc.com/knowledge-base/setup-dns-gandi"},
+    {id:"transip", n:"TransIP", u:"https://support.easydmarc.com/knowledge-base/setup-dns-transip"},
+    {id:"dynadot", n:"Dynadot", u:"https://support.easydmarc.com/knowledge-base/setup-dns-dynadot"},
+    {id:"dnsmadeeasy", n:"DNS Made Easy", u:"https://support.easydmarc.com/knowledge-base/setup-dns-made-easy"},
+    {id:"openprovider", n:"OpenProvider", u:"https://support.easydmarc.com/knowledge-base/setup-dns-openprovider"},
+    {id:"networksolutions", n:"Network Solutions", u:"https://support.easydmarc.com/knowledge-base/how-to-publish-a-dmarc-record-with-network-solutions-cname-or-txt"},
+    {id:"azure", n:"Microsoft Azure DNS", u:"https://easydmarc.com/blog/how-to-add-dmarc-record-to-azure-dns/"},
+    {id:"other", n:"Something else", u:"https://support.easydmarc.com/knowledge-base/how-to-configure-the-host/name-field-for-spf-dkim-and-dmarc-records-across-different-dns-providers"}
+  ];
+  const sources = [
+    {id:"gws", n:"Google Workspace", u:"https://easydmarc.com/blog/setup-guide-to-google-workspace-dkim-dmarc-spf-in-2026-for-business/"},
+    {id:"m365", n:"Microsoft 365 / Exchange Online", u:"https://easydmarc.com/blog/microsoft-365-spf-and-dkim-configuration-step-by-step/"},
+    {id:"ses", n:"Amazon SES", u:"https://easydmarc.com/blog/amazon-ses-spf-and-dkim-configuration/"},
+    {id:"sendgrid", n:"SendGrid", u:"https://easydmarc.com/blog/how-to-set-up-spf-and-dkim-for-sendgrid/"},
+    {id:"mailchimp", n:"Mailchimp", u:"https://easydmarc.com/blog/mailchimp-authentication-setup-step-by-step/"},
+    {id:"mailgun", n:"Mailgun", u:"https://easydmarc.com/blog/mailgun-dkim-and-spf-setup-step-by-step/"},
+    {id:"mailjet", n:"Mailjet", u:"https://easydmarc.com/blog/setup-dkim-and-spf-for-mailjet/"},
+    {id:"hubspot", n:"HubSpot", u:"https://easydmarc.com/blog/hubspot-spf-and-dkim-configuration/"},
+    {id:"salesforce", n:"Salesforce", u:"https://easydmarc.com/blog/salesforce-spf-dkim-authentication/"},
+    {id:"zendesk", n:"Zendesk", u:"https://easydmarc.com/blog/step-by-step-guide-zendesk-spf-and-dkim-configuration/"},
+    {id:"klaviyo", n:"Klaviyo", u:"https://easydmarc.com/blog/klaviyo-spf-record-and-dkim-setup-step-by-step/"},
+    {id:"marketo", n:"Adobe Marketo Engage", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-adobe-marketo/"},
+    {id:"shopify", n:"Shopify", u:"https://easydmarc.com/blog/shopify-spf-dkim-configuration/"},
+    {id:"activecampaign", n:"ActiveCampaign", u:"https://support.easydmarc.com/knowledge-base/activecampaign-spf-and-dkim-setup"},
+    {id:"mandrill", n:"Mandrill (Mailchimp Transactional)", u:"https://easydmarc.com/blog/mandrill-dkim-and-spf-setup-step-by-step/"},
+    {id:"postmark", n:"Postmark", u:"https://easydmarc.com/blog/postmark-spf-and-dkim-setup-step-by-step/"},
+    {id:"sparkpost", n:"Sparkpost", u:"https://easydmarc.com/blog/sparkpost-spf-and-dkim-setup-step-by-step/"},
+    {id:"helpscout", n:"Help Scout", u:"https://easydmarc.com/blog/spf-and-dkim-setup-for-helpscout/"},
+    {id:"freshdesk", n:"Freshdesk", u:"https://easydmarc.com/blog/freshdesk-spf-and-dkim-setup-step-by-step/"},
+    {id:"cpanel", n:"cPanel / WHM email", u:"https://easydmarc.com/blog/enabling-spf-and-dkim-in-cpanel/"},
+    {id:"atlassian", n:"Atlassian (Jira / Confluence)", u:"https://easydmarc.com/blog/atlassian-spf-and-dkim-setup-step-by-step/"},
+    {id:"bigcommerce", n:"BigCommerce", u:"https://easydmarc.com/blog/how-to-set-up-spf-and-dkim-for-bigcommerce/"},
+    {id:"other", n:"Something else / multiple platforms", u:"https://support.easydmarc.com/knowledge-base/source-configuration-spf-dkim"}
+  ];
+  const more = [
+    {id:"34sp-spf-and-dkim-setup", n:"34SP", u:"https://easydmarc.com/blog/34sp-spf-and-dkim-configuration/"},
+    {id:"academicworks-now-part-of-blackbaud-spf-and-dkim-setup", n:"AcademicWorks (now Blackbaud)", u:"https://easydmarc.com/blog/academicworks/"},
+    {id:"activetrail-spf-and-dkim-setup", n:"ActiveTrail", u:"https://easydmarc.com/blog/activetrail-spf-and-dkim-configuration/"},
+    {id:"adestra-spf-and-dkim-setup", n:"Adestra", u:"https://easydmarc.com/blog/adestra-spf-and-dkim-configuration/"},
+    {id:"afas-online-spf-and-dkim-setup", n:"AFAS Online", u:"https://easydmarc.com/blog/afas-online-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-setup-for-agile-crm", n:"Agile CRM", u:"https://easydmarc.com/blog/agile-crm-spf-dkim-setup/"},
+    {id:"arlo-spf-and-dkim-setup", n:"Arlo", u:"https://easydmarc.com/blog/arlo-spf-and-dkim-configuration/"},
+    {id:"audienceview-spf-and-dkim-setup", n:"AudienceView", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-audienceview/"},
+    {id:"authsmtp-spf-and-dkim-setup", n:"AuthSMTP", u:"https://easydmarc.com/blog/authsmtp-spf-and-dkim-configuration/"},
+    {id:"autopilot-now-ortto-spf-and-dkim-setup", n:"Autopilot (now Ortto)", u:"https://support.easydmarc.com/knowledge-base/autopilot-now-ortto-spf-and-dkim-setup"},
+    {id:"autotask-spf-and-dkim-setup", n:"Autotask", u:"https://easydmarc.com/blog/autotask-spf-record-and-dkim-configuration/"},
+    {id:"avanan-spf-and-dkim-configuration", n:"Avanan", u:"https://easydmarc.com/blog/avanan-spf-record-and-dkim-configuration-step-by-step-guideline/"},
+    {id:"aweber-spf-and-dkim-setup", n:"AWeber", u:"https://support.easydmarc.com/knowledge-base/aweber-spf-and-dkim-setup"},
+    {id:"barracuda-spf-and-dkim-setup", n:"Barracuda", u:"https://easydmarc.com/blog/barracuda-spf-and-dkim-configuration-step-by-step/"},
+    {id:"benchmark-spf-and-dkim-setup", n:"Benchmark", u:"https://easydmarc.com/blog/benchmark-spf-and-dkim-configuration/"},
+    {id:"blackbaud-spf-and-dkim-setup", n:"Blackbaud", u:"https://support.easydmarc.com/knowledge-base/blackbaud-spf-and-dkim-setup"},
+    {id:"blackboard-spf-and-dkim-setup", n:"Blackboard", u:"https://support.easydmarc.com/knowledge-base/blackboard-spf-and-dkim-setup"},
+    {id:"spf-and-dkim-for-brevo", n:"Brevo (formerly Sendinblue)", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-brevo"},
+    {id:"cakemail-spf-and-dkim-setup", n:"CakeMail", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-cakemail/"},
+    {id:"campaign-monitor-spf-and-dkim-setup", n:"Campaign Monitor", u:"https://support.easydmarc.com/knowledge-base/campaign-monitor-spf-and-dkim-setup"},
+    {id:"spf-and-dkim-for-campaigner", n:"Campaigner", u:"https://easydmarc.com/blog/campaigner-spf-dkim-setup/"},
+    {id:"centercode-spf-and-dkim-setup", n:"Centercode", u:"https://easydmarc.com/blog/centercode-spf-and-dkim-configuration/"},
+    {id:"chargebee-spf-and-dkim-setup", n:"Chargebee", u:"https://easydmarc.com/blog/chargebee-spf-and-dkim-configuration/"},
+    {id:"chargeover-spf-and-dkim-setup", n:"ChargeOver", u:"https://easydmarc.com/blog/chargeover-spf-and-dkim-configuration/"},
+    {id:"clever-elements-spf-and-dkim-setup", n:"Clever Elements", u:"https://easydmarc.com/blog/clever-elements-spf-and-dkim-configuration/"},
+    {id:"cleverreach-spf-and-dkim-setup", n:"CleverReach", u:"https://easydmarc.com/blog/cleverreach-spf-and-dkim/"},
+    {id:"clickdimension-spf-and-dkim-setup", n:"ClickDimensions", u:"https://easydmarc.com/blog/setting-up-spf-and-dkim-for-clickdimension/"},
+    {id:"constant-contact-spf-and-dkim-setup", n:"Constant Contact", u:"https://support.easydmarc.com/knowledge-base/constant-contact-spf-and-dkim-setup"},
+    {id:"convertkit-spf-and-dkim-setup", n:"ConvertKit", u:"https://support.easydmarc.com/knowledge-base/convertkit-spf-and-dkim-setup"},
+    {id:"cornerstone-ondemand-spf-and-dkim-setup", n:"Cornerstone OnDemand", u:"https://easydmarc.com/blog/cornerstone-ondemand-spf-and-dkim-configuration/"},
+    {id:"cvent-spf-and-dkim-setup", n:"Cvent", u:"https://support.easydmarc.com/knowledge-base/cvent-spf-and-dkim-setup"},
+    {id:"docebo-spf-and-dkim-setup", n:"Docebo", u:"https://easydmarc.com/blog/docebo-spf-and-dkim-configuration/"},
+    {id:"dreamhost-authentication", n:"DreamHost", u:"https://easydmarc.com/blog/dreamhost-dmarc-record-setup-guide/"},
+    {id:"duocircle-spf-and-dkim-setup", n:"DuoCircle", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-duocircle/"},
+    {id:"e-goi-spf-and-dkim-setup", n:"E-goi", u:"https://easydmarc.com/blog/e-goi-spf-and-dkim-configuration/"},
+    {id:"e-zorg-spf-and-dkim-setup", n:"E-Zorg", u:"https://easydmarc.com/blog/e-zorg-spf-and-dkim-configuration/"},
+    {id:"elastic-email-spf-and-dkim-setup", n:"Elastic Email", u:"https://easydmarc.com/blog/elastic-email-spf-and-dkim-configuration/"},
+    {id:"emarsys-spf-and-dkim-setup", n:"Emarsys", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-emarsys/"},
+    {id:"esputnik-spf-and-dkim-setup", n:"eSputnik", u:"https://easydmarc.com/blog/configuration-of-spf-and-dkim-for-esputnik/"},
+    {id:"etrigue-spf-and-dkim-setup", n:"eTrigue", u:"https://easydmarc.com/blog/configuration-of-spf-for-etrigue/"},
+    {id:"everlytic-spf-and-dkim-setup", n:"Everlytic", u:"https://easydmarc.com/blog/everlytic-spf-and-dkim-configuration/"},
+    {id:"exchange", n:"Exchange Server (self-hosted)", u:"https://easydmarc.com/blog/setting-up-dkim-for-exchange-server/"},
+    {id:"exclaimer-spf-and-dkim-setup", n:"Exclaimer", u:"https://easydmarc.com/blog/exclaimer-spf-record-and-dkim-configuration/"},
+    {id:"expresspigeon-spf-and-dkim-setup", n:"ExpressPigeon", u:"https://easydmarc.com/blog/configuration-of-spf-for-expresspigeon/"},
+    {id:"flodesk-spf-and-dkim-setup", n:"Flodesk", u:"https://easydmarc.com/blog/flodesk-spf-and-dkim-configuration/"},
+    {id:"forcepoint-spf-and-dkim-setup", n:"Forcepoint", u:"https://easydmarc.com/blog/forcepoint-spf-and-dkim-configuration/"},
+    {id:"forpsi-spf-and-dkim-setup", n:"Forpsi", u:"https://easydmarc.com/blog/forpsi-spf-and-dkim-configuration/"},
+    {id:"funnelmaker-spf-and-dkim-setup", n:"Funnelmaker", u:"https://easydmarc.com/blog/funnelmaker-spf-and-dkim-configuration/"},
+    {id:"getresponse-spf-and-dkim-setup", n:"GetResponse", u:"https://support.easydmarc.com/knowledge-base/getresponse-spf-and-dkim-setup"},
+    {id:"granicus-spf-and-dkim-setup", n:"Granicus", u:"https://easydmarc.com/blog/granicus-spf-and-dkim-configuration/"},
+    {id:"greenhouse-spf-and-dkim-setup", n:"Greenhouse", u:"https://support.easydmarc.com/knowledge-base/greenhouse-spf-and-dkim-setup"},
+    {id:"groove-spf-and-dkim-setup", n:"Groove", u:"https://easydmarc.com/blog/groove-spf-and-dkim/"},
+    {id:"happyfox-spf-and-dkim-setup", n:"HappyFox", u:"https://easydmarc.com/blog/happyfox-spf-and-dkim-configuration-step-by-step/"},
+    {id:"hellodialog-spf-and-dkim-setup", n:"HelloDialog", u:"https://easydmarc.com/blog/hellodialog-spf-and-dkim-configuration/"},
+    {id:"hostgator-authentication", n:"HostGator", u:"https://easydmarc.com/blog/dmarc-spf-dkim-implementation-guide-for-hostgator/"},
+    {id:"hostinger-email-spf-and-dkim-configuration", n:"Hostinger Email", u:"https://easydmarc.com/blog/hostinger-email-spf-and-dkim-configuration-step-by-step-guideline/"},
+    {id:"spf-and-dkim-setup-for-ionos", n:"IONOS", u:"https://easydmarc.com/blog/spf-and-dkim-setup-for-ionos/"},
+    {id:"kashflow-spf-and-dkim-setup", n:"KashFlow", u:"https://easydmarc.com/blog/kashflow-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-for-keap", n:"Keap (formerly Infusionsoft)", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-keap"},
+    {id:"spf-and-dkim-setup-for-knowbe4", n:"KnowBe4", u:"https://easydmarc.com/blog/knowbe4-spf-dkim-setup/"},
+    {id:"kreativmedia-spf-and-dkim-setup", n:"Kreativmedia", u:"https://easydmarc.com/blog/kreativmedia-spf-and-dkim-configuration/"},
+    {id:"listrak-spf-and-dkim-setup", n:"Listrak", u:"https://easydmarc.com/blog/listrak-spf-and-dkim-configuration/"},
+    {id:"mailcamp-spf-and-dkim-setup", n:"MailCamp", u:"https://easydmarc.com/blog/mailcamp-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-for-mailerlite", n:"MailerLite", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-mailerlite"},
+    {id:"mailigen-spf-and-dkim-setup", n:"Mailigen", u:"https://easydmarc.com/blog/mailigen-spf-and-dkim-configuration/"},
+    {id:"mailrelay-spf-and-dkim-setup", n:"Mailrelay", u:"https://easydmarc.com/blog/mailrelay-spf-dkim-setup/"},
+    {id:"mailup-spf-and-dkim-setup", n:"MailUp", u:"https://easydmarc.com/blog/mailup-spf-and-dkim-cofngiuration/"},
+    {id:"microsoft-azure-spf-and-dkim-setup", n:"Microsoft Azure", u:"https://easydmarc.com/blog/microsoft-azure-spf-and-dkim-configuration/"},
+    {id:"mimecast-spf-and-dkim-setup", n:"Mimecast", u:"https://easydmarc.com/blog/mimecast-spf-and-dkim-configuration/"},
+    {id:"moosend-spf-and-dkim-setup", n:"Moosend", u:"https://easydmarc.com/blog/moosend-spf-dkim-setup/"},
+    {id:"mynewsdesk-spf-and-dkim-setup", n:"Mynewsdesk", u:"https://easydmarc.com/blog/mynewsdesk-spf-and-dkim-configuration/"},
+    {id:"namecheap-dkim-setup", n:"Namecheap Email (DKIM)", u:"https://easydmarc.com/blog/namecheap-dkim-setup/"},
+    {id:"neostrada-spf-and-dkim-setup", n:"Neostrada", u:"https://easydmarc.com/blog/neostrada-spf-and-dkim-configuration/"},
+    {id:"bronto-now-part-of-netsuite-spf-and-dkim-setup", n:"NetSuite (formerly Bronto)", u:"https://easydmarc.com/blog/netsuite-spf-and-dkim-configuration/"},
+    {id:"nospamproxy-spf-and-dkim-setup", n:"NoSpamProxy", u:"https://easydmarc.com/blog/nospamproxy-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-for-nutshell", n:"Nutshell", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-nutshell"},
+    {id:"odoo-spf-and-dkim-setup", n:"Odoo", u:"https://easydmarc.com/blog/odoo-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-for-omnisend", n:"Omnisend", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-omnisend"},
+    {id:"episerver-spf-and-dkim-setup", n:"Optimizely", u:"https://easydmarc.com/blog/optimizely-spf-and-dkim-configuration/"},
+    {id:"oracle-rightnow-spf-and-dkim-setup", n:"Oracle RightNow", u:"https://easydmarc.com/blog/oracle-rightnow-spf-and-dkim-configuration/"},
+    {id:"ovhcloud-spf-and-dkim-setup", n:"OVHcloud", u:"https://easydmarc.com/blog/ovhcloud-spf-and-dkim-configuration/"},
+    {id:"postfix-authentication", n:"Postfix / OpenDKIM (self-hosted)", u:"https://easydmarc.com/blog/how-to-configure-dkim-opendkim-with-postfix/"},
+    {id:"proofpoint-essential-spf-and-dkim-setup", n:"Proofpoint Essentials", u:"https://easydmarc.com/blog/proofpoint-essential-spf-and-dkim-configuration/"},
+    {id:"protonmail-spf-and-dkim-setup", n:"Proton Mail", u:"https://support.easydmarc.com/knowledge-base/protonmail-spf-and-dkim-setup"},
+    {id:"pure360-spf-and-dkim-setup", n:"Pure360", u:"https://easydmarc.com/blog/pure360-spf-and-dkim-configuration/"},
+    {id:"rackspace-spf-and-dkim-setup", n:"Rackspace", u:"https://easydmarc.com/blog/rackspace-spf-and-dkim-configuration/"},
+    {id:"resdiary-spf-and-dkim-setup", n:"ResDiary", u:"https://easydmarc.com/blog/resdiary-spf-and-dkim-configuration/"},
+    {id:"rocketseed-spf-and-dkim-setup", n:"Rocketseed", u:"https://easydmarc.com/blog/rocketseed-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-for-sailthru", n:"Sailthru", u:"https://easydmarc.com/blog/spf-and-dkim-setup-for-sailthru/"},
+    {id:"salesforce-instance-authentication", n:"Salesforce (instances & sandboxes)", u:"https://easydmarc.com/blog/salesforce-instances-and-sandboxes/"},
+    {id:"salsa-labs-spf-and-dkim-setup", n:"Salsa Labs", u:"https://easydmarc.com/blog/salsa-labs-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-setup-for-selzy", n:"Selzy", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-setup-for-selzy"},
+    {id:"sendpulse-spf-and-dkim-setup", n:"SendPulse", u:"https://support.easydmarc.com/knowledge-base/sendpulse-spf-and-dkim-setup"},
+    {id:"sharpspring-spf-and-dkim-setup", n:"SharpSpring", u:"https://easydmarc.com/blog/sharpspring-spf-and-dkim-configuration/"},
+    {id:"showpad-spf-and-dkim-setup", n:"Showpad", u:"https://easydmarc.com/blog/showpad-spf-and-dkim-configuration/"},
+    {id:"simply-spf-and-dkim-setup", n:"Simply", u:"https://easydmarc.com/blog/simply-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-setup-for-smartsurvey", n:"SmartSurvey", u:"https://easydmarc.com/blog/smartsurvey-spf-dkim-setup/"},
+    {id:"smtp2go-spf-and-dkim-setup", n:"SMTP2GO", u:"https://easydmarc.com/blog/smtp2go-setup/"},
+    {id:"socketlabs-spf-and-dkim-setup", n:"SocketLabs", u:"https://support.easydmarc.com/knowledge-base/socketlabs-spf-and-dkim-setup"},
+    {id:"solarwinds-service-desk-spf-and-dkim-setup", n:"SolarWinds Service Desk", u:"https://easydmarc.com/blog/solarwinds-service-desk-spf-and-dkim-configuration/"},
+    {id:"spf-and-dkim-setup-for-sophos", n:"Sophos", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-setup-for-sophos"},
+    {id:"spamhero-spf-and-dkim-setup", n:"SpamHero", u:"https://easydmarc.com/blog/spamhero-spf-and-dkim-configuration/"},
+    {id:"squarespace-dkim-and-domain-authentication", n:"Squarespace", u:"https://support.easydmarc.com/knowledge-base/squarespace-dkim-and-domain-authentication"},
+    {id:"survalyzer-spf-and-dkim-setup", n:"Survalyzer", u:"https://easydmarc.com/blog/survalyzer-spf-and-dkim-configuration/"},
+    {id:"taguchi-spf-and-dkim-setup", n:"Taguchi", u:"https://easydmarc.com/blog/taguchi-spf-and-dkim-configuration/"},
+    {id:"vendasta-spf-and-dkim-setup", n:"Vendasta", u:"https://easydmarc.com/blog/vendasta-spf-dkim-setup/"},
+    {id:"vtiger-spf-and-dkim-setup", n:"Vtiger", u:"https://easydmarc.com/blog/vtiger-spf-dkim-setup/"},
+    {id:"wefact-spf-and-dkim-setup", n:"WeFact", u:"https://easydmarc.com/blog/wefact-spf-dkim-setup/"},
+    {id:"configuring-the-wp-mail-smtp-plugin-to-send-authenticated-emails-from-wordpress", n:"WordPress (WP Mail SMTP plugin)", u:"https://easydmarc.com/blog/configuring-the-wp-mail-smtp-plugin-to-send-authenticated-emails-from-wordpress/"},
+    {id:"zeptomail-spf-and-dkim-setup", n:"ZeptoMail", u:"https://support.easydmarc.com/knowledge-base/zeptomail-spf-and-dkim-setup"},
+    {id:"zoho-campaigns-spf-and-dkim-setup", n:"Zoho Campaigns", u:"https://easydmarc.com/blog/zoho-campaigns-spf-and-dkim/"},
+    {id:"zoho-crm-spf-and-dkim-setup", n:"Zoho CRM", u:"https://support.easydmarc.com/knowledge-base/zoho-crm-spf-and-dkim-setup"},
+    {id:"spf-and-dkim-for-zoho-desk", n:"Zoho Desk", u:"https://support.easydmarc.com/knowledge-base/spf-and-dkim-for-zoho-desk"},
+    {id:"zoho-mail-spf-and-dkim-setup", n:"Zoho Mail", u:"https://easydmarc.com/blog/zoho-mail-spf-and-dkim-setup/"},
+    {id:"spf-and-dkim-setup-for-zuora", n:"Zuora", u:"https://easydmarc.com/blog/zuora-spf-dkim-setup/"}
+  ];
+  const phases = [
+    {
+      id:"plan", t:"Plan the rollout", time:"~15 min",
+      sum:"Understand what you are about to deploy, agree the journey and timelines with your team, and gather the DNS access you will need. Everything in this guide follows EasyDMARC's recommended path: verify the domain in monitoring mode (p=none), fix SPF and DKIM, watch the reports, then enforce quarantine and finally reject.",
+      goal:"You can explain the SPF / DKIM / DMARC rollout plan and have the access and account needed to add your first domain.",
+      steps:[
+        {t:"Know what you are deploying",
+         d:`<p>EasyDMARC is an email security platform that helps you deploy, monitor and enforce three DNS-based email authentication standards, then watches the reports for you:</p>
+         <ul><li><b>SPF</b> &mdash; a TXT record listing the servers allowed to send email for your domain.</li>
+         <li><b>DKIM</b> &mdash; each sending service signs mail with its own private key; you publish the public key at a per-source selector so receivers can verify the signature.</li>
+         <li><b>DMARC</b> &mdash; a policy record (<code>_dmarc</code>) that tells receivers what to do with unauthenticated mail and where to send reports: <b>p=none</b> (monitor only), <b>p=quarantine</b> (spam folder) or <b>p=reject</b> (blocked).</li></ul>
+         <p>DMARC only works when legitimate mail passes <b>SPF or DKIM</b> <i>and</i> aligns with your From domain &mdash; which is why SPF and DKIM are fixed first, while DMARC starts in monitoring mode.</p>`},
+        {t:"Learn the recommended journey and its timelines",
+         d:`<ol><li>Add your domain and publish a DMARC record that includes EasyDMARC's report addresses (rua/ruf) &mdash; this is how EasyDMARC receives reports. First aggregate reports can take up to <b>72 hours</b>; after that, data updates roughly every 24 hours.</li>
+         <li>Fix SPF (EasyDMARC recommends its dynamic <b>EasySPF</b> solution) and set up <b>DKIM</b> for every legitimate sending source.</li>
+         <li>Monitor DMARC reports at <b>p=none</b> until legitimate traffic is nearly 100% aligned &mdash; typically <b>1&ndash;2 weeks</b>.</li>
+         <li>Move to <b>p=quarantine</b>, stay there for another <b>1&ndash;2 weeks</b>.</li>
+         <li>Escalate to <b>p=reject</b>, gradually &mdash; using the pct tag (25 &rarr; 100%).</li></ol>
+         <p>Most of the calendar time is deliberate monitoring, not technical work.</p>`},
+        {t:"Confirm who has what access",
+         d:`<p>You will need:</p>
+         <ul><li><b>DNS admin access</b> at your DNS host &mdash; to add, edit and delete TXT records (and, if you choose EasyDMARC's managed solutions, CNAME or NS records).</li>
+         <li><b>An EasyDMARC account</b> with the domains you own (admin or team role with domain permissions &mdash; see EasyDMARC's permission management docs if you use teams / MSP workspaces).</li>
+         <li><b>Admin access to each sending platform</b> (Google Workspace, Microsoft 365, your marketing tools&hellip;) to enable DKIM signing and grab public keys.</li>
+         <li>A <b>deployment lead</b> who owns the task list and the go/no-go decision for enforcement.</li></ul>`},
+        {t:"Create your EasyDMARC account",
+         d:`<p>Register at the <a href="https://app.easydmarc.com" target="_blank" rel="noopener">EasyDMARC dashboard</a> (a trial is available). During signup you will be walked through adding your first domain and DMARC record &mdash; the next phases cover that flow in detail, including the recommended managed-solution options.</p>
+         <p>Tip: bookmark the <a href="https://support.easydmarc.com/knowledge-base" target="_blank" rel="noopener">Knowledge Base</a> &mdash; it has step-by-step articles for DNS providers and 100+ sending platforms, and a <a href="https://support.easydmarc.com/knowledge-base/kb-tickets/new" target="_blank" rel="noopener">support ticketing page</a> if you get stuck.</p>`}
+      ],
+      refs:[
+        {l:"How do I get started with EasyDMARC after registering?", u:KB+"how-do-i-get-started-with-easydmarc-after-registering"},
+        {l:"How long does it take to set up EasyDMARC?", u:KB+"how-long-does-it-take-to-set-up-easydmarc-for-my-domain"},
+        {l:"What is the value of EasyDMARC for my email infrastructure?", u:KB+"what-is-the-value-of-easydmarc-for-my-email-infrastructure"},
+        {l:"Academy (free DMARC/SPF/DKIM courses)", u:"https://academy.easydmarc.com/"}
+      ],
+      pool:[
+        "What exactly does EasyDMARC do, in simple terms?",
+        "Why must I fix SPF and DKIM before enforcing DMARC?",
+        "What is the difference between p=none, p=quarantine and p=reject?",
+        "How long does a full EasyDMARC deployment take?",
+        "I manage many customer domains as an MSP &mdash; how do teams and permissions work?"
+      ]
+    },
+    {
+      id:"domain", t:"Add your domain(s)", time:"~10 min",
+      sum:"Add every domain you send from (and ideally parked domains too) to EasyDMARC. The platform will guide you to verify each one &mdash; verification is covered in the next phase.",
+      goal:"All of your domains appear in EasyDMARC, each with a Sending or Parked type, ready for verification.",
+      steps:[
+        {t:"Add your domain during signup &mdash; or later via Domains &amp; Groups",
+         d:`<p>If you already have an account: log in to <a href="https://app.easydmarc.com" target="_blank" rel="noopener">app.easydmarc.com</a>, open <b>Domains and Groups</b>, click <b>Add domain</b>, and enter the domain.</p>
+         <ul><li>Optionally assign it to a <b>group</b> (useful for multi-brand / multi-client setups).</li>
+         <li>Set the type: <b>Sending</b> (you send mail from it) or <b>Parked</b> (you don't, but you still want to block spoofing &mdash; EasyDMARC supports SPF/DKIM/DMARC hardening for inactive domains too).</li>
+         <li>There is a bulk upload option if you need to add many domains at once.</li></ul>`},
+        {t:"Repeat for every domain you own",
+         d:`<p>EasyDMARC supports multiple domains. Add the apex domains you send from. Subdomains are handled separately &mdash; see the <b>managed solutions for subdomains</b> article in the references when you are ready.</p>`},
+        {t:"Get your DNS host ready",
+         d:`<p>To verify a domain you will publish one DMARC-related DNS record. Before starting:</p>
+         <ul><li>Confirm you can log in to your DNS control panel and add <b>TXT</b> records (plus <b>CNAME</b>/<b>NS</b> if you plan to use EasyDMARC's managed solutions).</li>
+         <li>If a CDN proxy (e.g. Cloudflare's orange cloud) sits in front of the record, make sure you can <b>disable the proxy</b> for the new record &mdash; DMARC/SPF/DKIM records must be served as plain DNS.</li>
+         <li>Check whether a DMARC record already exists (an EasyDMARC lookup or <a href="https://easydmarc.com/tools/dmarc-record-checker" target="_blank" rel="noopener">free checker</a> works) &mdash; you will need to remove it before adding EasyDMARC's record in the next phase.</li></ul>`}
+      ],
+      refs:[
+        {l:"How can I add and verify a domain?", u:KB+"how-can-i-add-a-domain"},
+        {l:"Does EasyDMARC support multiple domains?", u:KB+"does-easydmarc-support-multiple-domains"},
+        {l:"SPF, DKIM and DMARC for inactive/parked domains", u:KB+"secure-your-inactive-parked-domains-with-easydmarc"},
+        {l:"Setting up EasyDMARC managed solutions for subdomains", u:KB+"managed-solutions-for-subdomains"},
+        {l:"Permission management (teams & MSP workspaces)", u:KB+"permission-management"}
+      ],
+      pool:[
+        "What counts as a Sending domain vs a Parked domain?",
+        "Should I add my subdomains too?",
+        "Can I add many domains at once?",
+        "What is a domain group for?"
+      ]
+    },
+    {
+      id:"verify", t:"Verify domain & start DMARC reporting", time:"20&ndash;30 min + propagation",
+      sum:"Publishing a DMARC record that contains EasyDMARC's reporting (rua/ruf) addresses is what lets EasyDMARC receive and decode your DMARC reports. You choose between EasyDMARC's Managed DMARC (a CNAME &mdash; recommended) or a classic TXT record you manage in your DNS.",
+      goal:"Your domain is verified (green in EasyDMARC), DMARC is in monitoring mode (p=none), and aggregate reports start flowing within ~72 hours.",
+      steps:[
+        {t:"Remove any existing DMARC record",
+         d:`<p>Only one DMARC record can exist per domain. Before adding EasyDMARC's record, delete the old one &mdash; typically a TXT record named <code>_dmarc</code> whose value starts with <code>v=DMARC1</code>.</p>
+         <p>Not sure if one exists? Run a lookup first.</p>`},
+        {t:"Choose how your DMARC record will be managed", kind:"choice", choice:"dmarcMode",
+         choices:[
+           {id:"managed", b:"Managed DMARC (CNAME)", s:"Recommended. A one-time CNAME change; afterwards you change policy (none/quarantine/reject) and pct from inside EasyDMARC instead of editing DNS.", r:"Type CNAME &middot; host _dmarc"},
+           {id:"txt", b:"Classic TXT record", s:"The record lives in your DNS. Policy changes later (e.g. p=quarantine) must be done manually in the DNS zone with the value from EasyDMARC's portal.", r:"Type TXT &middot; host _dmarc"}
+         ]},
+        {t:"Add the DMARC record EasyDMARC generates for you",
+         d:`<p>In EasyDMARC's verify flow, copy the exact record it shows you (the values are generated per-account &mdash; do not invent them). If an old DMARC record exists, remove it first.</p>
+         <div class="chips" data-mode="managed">
+          <div class="recrow"><span class="rtype CNAME">CNAME</span><span class="rhost">_dmarc</span><span class="rval">[target shown in EasyDMARC &mdash; per-account CNAME, e.g. _dmarc.&hellip;.easydmarc.net]</span></div>
+          <div class="tip info"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>Managed DMARC = a CNAME at <b>_dmarc</b>. If your host sits behind a CDN proxy, turn the proxy <b>off</b> for this record (Cloudflare example in the KB).</span></div>
+         </div>
+         <div class="chips" data-mode="txt">
+          <div class="recrow"><span class="rtype TXT">TXT</span><span class="rhost">_dmarc</span><span class="rval">v=DMARC1; p=none; rua=mailto:[address from EasyDMARC]; ruf=mailto:[address from EasyDMARC]</span></div>
+          <div class="tip info"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>Copy the exact TXT value from your EasyDMARC portal &mdash; the rua/ruf addresses are unique to your account. Keep the policy at <b>p=none</b> for now.</span></div>
+         </div>
+         <p>Some DNS panels need the full name (<code>_dmarc.{{d}}</code>) instead of <code>_dmarc</code> &mdash; follow the convention your provider uses.</p>`, modeGroups:["managed","txt"]},
+        {t:"Click Verify and wait for green",
+         d:`<p>Back in EasyDMARC, click the verify button for the domain. DNS propagation can take minutes to a couple of hours (TTL-dependent). Once EasyDMARC sees the record you get green success statuses; if verification fails, check the <b>External Verification Failure</b> article in the references.</p>`},
+        {t:"Keep DMARC in monitoring mode (p=none)",
+         d:`<p>While you are still configuring SPF and DKIM you must stay at <b>p=none</b> so no legitimate mail is quarantined or rejected. With Managed DMARC, set the policy to <b>None</b> in the Managed DMARC dashboard. With a TXT record, make sure the value says <code>p=none</code>. You will move the policy later, in the enforcement phase.</p>
+         <p>You are done when: the domain shows as verified, first aggregate reports begin arriving (up to 72h after verification), and policy is p=none.</p>`}
+      ],
+      refs:[
+        {l:"Update an existing DMARC TXT record to EasyDMARC's TXT record", u:KB+"update-existing-txt-record-with-easydmarc-txt"},
+        {l:"Move an existing DMARC record to Managed DMARC", u:KB+"update-your-existing-dmarc-txt-record-to-easydmarcs-managed-dmarc"},
+        {l:"External Verification Failure &mdash; troubleshooting", u:KB+"fix-external-verification-failure-in-easydmarc"},
+        {l:"DMARC Record Checker (free lookup)", u:KB+"dmarc-record-checker"},
+        {l:"What DNS records do I need for EasyDMARC?", u:KB+"what-dns-records-do-i-need-to-configure-for-easydmarc"},
+        {l:"Host/name field conventions across DNS providers", u:KB+"how-to-configure-the-host/name-field-for-spf-dkim-and-dmarc-records-across-different-dns-providers"}
+      ],
+      pool:[
+        "What is the difference between Managed DMARC and publishing a TXT record myself?",
+        "I already have a DMARC record &mdash; what do I do?",
+        "How long does DNS propagation take for the _dmarc record?",
+        "Why does my DMARC record need EasyDMARC's rua address?",
+        "What does p=none mean and why start there?"
+      ]
+    },
+    {
+      id:"spf", t:"Fix SPF with EasySPF", time:"30&ndash;60 min",
+      sum:"SPF lists every server allowed to send for your domain, and it breaks the moment you exceed 10 DNS lookups or forget a source. EasyDMARC's EasySPF replaces your SPF record with one flat, dynamic record it keeps updated for you &mdash; and its source list shows exactly who is sending on your behalf.",
+      goal:"EasySPF is ACTIVE: one valid SPF record covers every legitimate sender, and future changes are made in the EasySPF dashboard instead of DNS.",
+      steps:[
+        {t:"Check the current state of your SPF record",
+         d:`<p>Run an SPF lookup for {{d}}. Typical problems EasyDMARC detects:</p>
+         <ul><li><b>No SPF record</b> at all &mdash; nothing authorizes your senders.</li>
+         <li><b>More than one SPF record</b> &mdash; only one is allowed; receivers may fail the whole check.</li>
+         <li><b>Too many DNS lookups</b> (the classic &ldquo;10 lookup&rdquo; limit) &mdash; SPF then returns permerror and fails.</li>
+         <li>Syntax errors or mechanisms pointing at retired providers.</li></ul>
+         <p>EasyDMARC shows these as a <b>&ldquo;Fix SPF record&rdquo;</b> pending action on the domain, with a lookup icon that explains the failure.</p>`},
+        {t:"Review the sending sources EasyDMARC detected",
+         d:`<p>Open the pending action (or the <b>EasySPF</b> section of the domain). EasyDMARC identifies sources from your DMARC aggregate reports &mdash; each source shows volume and its SPF part (e.g. Google uses <code>include:_spf.google.com</code>).</p>
+         <p>The <b>capability</b> column tells you whether a source must appear in your SPF record:</p>
+         <ul><li><b>Capable</b> &mdash; the source lets you use your own domain in the Return-Path, so its include must stay in your SPF record. Keep it checked.</li>
+         <li><b>Non-Capable</b> &mdash; the source always uses its own domain in the Return-Path, so SPF is checked against their domain, not yours. Uncheck it.</li>
+         <li><b>Subdomain-capable</b> &mdash; belongs in the SPF record of a subdomain you designate, not the root record. Uncheck it here.</li></ul>
+         <p>EasyDMARC knows how 1,400+ email sources behave &mdash; trust its defaults unless you have a reason not to.</p>`},
+        {t:"Add anything missing, then save your source list",
+         d:`<p>New tool or provider missing from the list? Click <b>Add Source</b> and enter the source name plus its SPF part &mdash; e.g. type <code>include:</code> with value <code>spf.protection.outlook.com</code>, or type <code>ip4:</code> with a dedicated IP like <code>85.86.55.131</code>. You can edit or delete sources from the three-dot menu. Then click <b>Save record</b>.</p>
+         <div class="tip warn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg><span>The <code>exists:</code> mechanism cannot be flattened, so EasySPF won't accept it &mdash; if you truly need it, you add it to the final record in DNS after activation.</span></div>`},
+        {t:"Activate EasySPF and swap the SPF record in DNS",
+         d:`<p>Click <b>Activate</b>. EasyDMARC gives you a single flattened, dynamic SPF record. In your DNS:</p>
+         <ol><li>Find your current SPF TXT record (host <code>@</code> / blank / your apex domain, value starting with <code>v=spf1</code>).</li>
+         <li><b>Delete it</b>, then add the new value EasySPF provided as the one and only SPF TXT record. (A domain must never have two SPF records.)</li></ol>
+         <div class="chips">
+          <div class="recrow"><span class="rtype TXT">TXT</span><span class="rhost">@ {{d}}</span><span class="rval">v=spf1 [flattened EasySPF value &mdash; copy from dashboard]</span></div>
+         </div>`, },
+        {t:"Verify and confirm EasySPF is ACTIVE",
+         d:`<p>Back in the EasySPF dashboard click <b>Verify</b>. Propagation usually takes around 3&ndash;5 minutes; once confirmed the status shows <b>ACTIVE</b>.</p>
+         <p>From now on EasySPF watches your includes for IP changes and re-flattens automatically, so lookups never creep past 10 again &mdash; and you add new senders in the EasySPF dashboard, not DNS.</p>
+         <p>Prefer to manage SPF manually instead? EasyDMARC's SPF generator tool produces a valid record to publish yourself &mdash; see the references.</p>`}
+      ],
+      refs:[
+        {l:"Setting up EasySPF (full guide)", u:KB+"setup-easyspf"},
+        {l:"SPF Record Checker (free lookup)", u:KB+"spf-record-checker"},
+        {l:"Setting up SPF directly from your DNS host", u:KB+"setting-up-spf-directly-from-your-dns-host"},
+        {l:"SPF for subdomains when EasySPF is active on the root domain", u:KB+"how-to-set-up-spf-for-subdomains-and-subdomain-capable-sources-when-easyspf-is-active-on-your-root-domain"},
+        {l:"Understanding SPF capability &amp; alignment (blog)", u:"https://easydmarc.com/blog/how-esps-get-spf-wrong/"},
+        {l:"Do EasySPF / managed solutions keep working if my subscription lapses?", u:KB+"will-managed-dmarc-and-easyspf-stop-working-when-my-subscription-expires"}
+      ],
+      pool:[
+        "What does the &ldquo;10 DNS lookup limit&rdquo; mean and why is it a problem?",
+        "How does EasySPF differ from a normal SPF record?",
+        "What are Capable, Non-Capable and Subdomain-Capable sources?",
+        "My SPF record has too many includes &mdash; what should I do?",
+        "Can I keep managing SPF manually instead of using EasySPF?"
+      ]
+    },
+    {
+      id:"dkim", t:"Set up DKIM for every source", time:"30&ndash;60 min per platform",
+      sum:"DKIM is per-sending-platform: each service signs with its own key pair and you publish the public key under a selector. Every source that sends as your domain needs a valid, signing-enabled DKIM setup &mdash; otherwise those messages can never pass DMARC.",
+      goal:"Every legitimate sending source passes DKIM (checkable via the DKIM checker), optionally consolidated into EasyDMARC's Managed DKIM dashboard.",
+      steps:[
+        {t:"Identify all of your DKIM-signing sources",
+         d:`<p>Your sending sources show up in EasyDMARC's aggregate reports and the <b>domain scanner</b>. Common ones: Google Workspace, Microsoft 365, your marketing/transactional platforms (HubSpot, Mailchimp, SendGrid, Amazon SES, Salesforce&hellip;). If you selected your main platform in the setup bar above, this guide links you straight to its official article.</p>
+         <p>You'll configure <b>each</b> platform &mdash; DKIM is per-source, and a source whose DKIM fails can still pass SPF (so DMARC is OK), but the safer target is: every source aligned on both.</p>`},
+        {t:"Decide: configure in DNS yourself, or activate Managed DKIM",
+         d:`<p>Two ways to host DKIM records:</p>
+         <ul><li><b>In your own DNS</b> &mdash; per source, enable signing inside the platform, then publish its public key as a TXT record at <code>&lt;selector&gt;._domainkey.{{d}}</code>.</li>
+         <li><b>Managed DKIM</b> (EasyDMARC solution) &mdash; one-time NS-type DNS change delegates DKIM management to EasyDMARC; afterwards you see all selectors on one page and can add records without touching DNS. Recommended if you have several sources.</li></ul>`},
+        {t:"Enable DKIM in each sending platform and publish its key",
+         d:`<p>For each platform (repeat per source):</p>
+         <ol><li>Log in to the platform and turn on DKIM signing for your domain (each platform has its own toggle and selector, e.g. <code>google</code>, <code>selector1</code>/<code>selector2</code> for Microsoft 365, <code>s1</code>/<code>s2</code> for SendGrid&hellip;).</li>
+         <li>Copy the public key the platform gives you (a long base64 TXT value) and publish it as a TXT record at the selector hostname.</li>
+         <li>Wait for propagation (minutes to hours), then go back to the platform and click its verify button where available.</li></ol>
+         <div class="chips">
+          <div class="recrow"><span class="rtype TXT">TXT</span><span class="rhost">&lt;selector&gt;._domainkey.{{d}}</span><span class="rval">v=DKIM1; k=rsa; p=[public key from your platform]</span></div>
+         </div>
+         <p>Your exact selector and key come from the platform itself &mdash; this row is just the shape of the record.</p>`, },
+        {t:"(Optional but recommended) Activate Managed DKIM",
+         d:`<p>Open the domain's <b>&ldquo;Fix DKIM record&rdquo;</b> pending action (or the Managed DKIM page) and click <b>View DKIM Selectors</b>. EasyDMARC detects selectors from its 1,400+ source database and your traffic &mdash; double-check the list, adjust if needed, then activate by publishing the NS-type record EasyDMARC provides. After that, manage all DKIM records from the dashboard.</p>`},
+        {t:"Validate every selector with the DKIM checker",
+         d:`<p>For each selector, run the DKIM checker with {{d}} and the selector name to confirm the record is published and valid. A selector that fails validation (typo, missing key, wrong host format) means that source's mail still fails DKIM.</p>
+         <p>Finally, send a real test email from each platform and confirm it lands in reports as passing SPF/DKIM aligned &mdash; EasyDMARC's email investigation tool shows per-message authentication results.</p>`}
+      ],
+      refs:[
+        {l:"Source configuration guides (SPF & DKIM) &mdash; 100+ platforms", u:KB+"source-configuration-spf-dkim"},
+        {l:"DKIM Record Checker (free lookup)", u:KB+"dkim-record-checker"},
+        {l:"DKIM setup for Google Workspace", u:KB+"google-workspace-authentication"},
+        {l:"DKIM setup for Microsoft 365", u:KB+"microsoft365-spf"},
+        {l:"DKIM setup for SendGrid", u:KB+"sendgrid-authentication"},
+        {l:"Source configuration via EasySPF &amp; Managed DKIM", u:KB+"source-configuration-with-easyspf-managed-dkim"},
+        {l:"Analyzing email headers for DMARC issues", u:KB+"analyzing-email-headers-for-dmarc-issues"}
+      ],
+      pool:[
+        "Why do I need DKIM on top of SPF?",
+        "What is a DKIM selector and where do I find mine?",
+        "How do I enable DKIM in Google Workspace / Microsoft 365?",
+        "What is Managed DKIM and the NS record it asks for?",
+        "I have several marketing platforms &mdash; do I need DKIM on all of them?"
+      ]
+    },
+    {
+      id:"monitor", t:"Monitor reports & clear pending actions", time:"~2 weeks of observation",
+      sum:"This is the most important waiting period. You watch EasyDMARC's parsed aggregate reports, fix anything that fails, and only enforce a strict policy once legitimate mail is consistently aligned.",
+      goal:"You can explain every failure in your reports, legitimate mail is near-100% aligned, and you are confident enough to enforce quarantine &mdash; then reject.",
+      steps:[
+        {t:"Understand the two report types",
+         d:`<ul><li><b>Aggregate reports</b> &mdash; generated daily (every 24h) by receivers, summarising how much of your mail passed/failed DMARC, delivery status, sending IPs, and SPF/DKIM alignment. EasyDMARC parses the raw XML into readable dashboards.</li>
+         <li><b>Failure (forensic) reports</b> &mdash; sent instantly for individual failed messages with headers. Most ISPs don't send them for privacy reasons, so base your monitoring mainly on aggregate reports.</li></ul>`},
+        {t:"Read the compliance dashboard for your domain",
+         d:`<p>On the domain overview watch: <b>DMARC compliance rate</b>, DKIM and SPF pass rates, email volume by compliance, DNS record statuses, and the domain scanner results. The <b>pending actions</b> panel tells you exactly what EasyDMARC wants fixed, with severity levels &mdash; work through anything critical.</p>`},
+        {t:"Investigate every unexplained failure",
+         d:`<p>For a failing message, ask: which source sent it, and which check (SPF or DKIM) failed?</p>
+         <ul><li>A <b>legitimate source failing SPF</b> &rarr; add its include to EasySPF (Add Source &rarr; Save).</li>
+         <li>A <b>legitimate source failing DKIM</b> &rarr; enable signing / fix its selector record in the platform or Managed DKIM.</li>
+         <li>An <b>unrecognised source</b> you don't send from &rarr; this is likely spoofing &mdash; leave it failing; it's exactly what DMARC is for. EasyDMARC's failure-report views help you spot these.</li></ul>`},
+        {t:"Set up alerts so you don't have to stare at dashboards",
+         d:`<p>Configure alerts for unusual failure spikes, record validation problems and new sending sources. EasyDMARC's alerting (plus the pending-actions list) turns monitoring into an exception-driven routine rather than a daily chore.</p>`},
+        {t:"Decide when monitoring is done",
+         d:`<p>You are ready to enforce quarantine when <b>all</b> are true:</p>
+         <ul><li>You have observed at least <b>1&ndash;2 weeks</b> of reports (longer for low-volume domains) so most legitimate sources have appeared.</li>
+         <li>Legitimate mail is consistently <b>~100% aligned</b> (SPF or DKIM + DMARC pass).</li>
+         <li>You can explain <b>every</b> remaining failure &mdash; ideally they are all spoofing attempts.</li>
+         <li>No new service is about to start sending without configuration.</li></ul>`}
+      ],
+      refs:[
+        {l:"Understanding DMARC failure reports for unrecognised sources", u:KB+"dmarc-failure-reports-for-unrecognized-sending-sources"},
+        {l:"Does EasyDMARC provide detailed email authentication reports?", u:KB+"does-easydmarc-provide-detailed-email-authentication-reports"},
+        {l:"Analyzing email headers for DMARC issues", u:KB+"analyzing-email-headers-for-dmarc-issues"},
+        {l:"EasyDMARC features guideline (reports, scanner, alerts)", u:KB+"easydmarc-features-guideline"},
+        {l:"What are the key features of EasyDMARC?", u:KB+"what-are-the-key-features-of-easydmarc"}
+      ],
+      pool:[
+        "How do I read the aggregate reports in EasyDMARC?",
+        "What does it mean when my compliance rate is under 100%?",
+        "A legitimate sender is failing DMARC &mdash; how do I fix it?",
+        "How do I know when I'm ready to leave p=none?",
+        "What is a forensic (failure) report vs an aggregate report?"
+      ]
+    },
+    {
+      id:"enforce", t:"Enforce: quarantine, then reject", time:"2&ndash;3 weeks",
+      sum:"Enforcement is deliberately gradual: move from p=none to p=quarantine, watch for 1&ndash;2 weeks, then escalate to p=reject using the pct tag (25 &rarr; 100%) so any overlooked source only affects a slice of mail at a time.",
+      goal:"Your domain publishes p=reject (pct=100) and spoofed mail is blocked outright &mdash; while every legitimate message still lands in inboxes.",
+      steps:[
+        {t:"Confirm you passed the readiness check",
+         d:`<p>Only start this phase if the monitoring phase is complete: &ge;1&ndash;2 weeks of reports, legitimate sources aligned, no unexplained failures. Enforcement with unresolved legitimate failures will lose you real email.</p>
+         <p>When you change policy, keep the reporting addresses (rua) intact &mdash; you still need the reports.</p>`},
+        {t:"Move the policy to p=quarantine",
+         d:`<p>Pick where you manage the record:</p>
+         <ul><li><b>Managed DMARC</b> &mdash; open the Managed DMARC dashboard and switch the policy to <b>Quarantine</b>, then apply.</li>
+         <li><b>TXT record</b> &mdash; use the DMARC generator in the EasyDMARC portal to produce the new value (policy <code>quarantine</code>), then update the <code>_dmarc</code> TXT record in your DNS and wait for propagation.</li></ul>
+         <p>For reference, a manual TXT record looks like this (your rua address comes from your portal):</p>
+         <div class="chips">
+          <div class="recrow"><span class="rtype TXT">TXT</span><span class="rhost">_dmarc</span><span class="rval">v=DMARC1; p=quarantine; pct=100; rua=mailto:[your EasyDMARC reporting address]</span></div>
+         </div>`, },
+        {t:"Observe quarantine for 1&ndash;2 weeks",
+         d:`<p>At quarantine, messages that fail DMARC go to spam instead of being blocked &mdash; recipients can still recover them, and you can still see the failures in reports. During this window:</p>
+         <ul><li>Confirm no legitimate source is being quarantined at meaningful volume.</li>
+         <li>Fix any corner cases you find.</li>
+         <li>Use the window to onboard any new service that's about to start sending.</li></ul>`},
+        {t:"Escalate to p=reject gradually with the pct tag",
+         d:`<p>Move the policy to <code>reject</code> but start with a percentage: e.g. <code>p=reject; pct=25</code>, then raise to 50, 75 and finally 100 over several days, checking reports between steps. If something unexpected appears, drop pct back down &mdash; it's a dial, not a cliff.</p>
+         <p>With Managed DMARC, set the policy to Reject and use the pct control in the dashboard. With a TXT record, regenerate the value in the portal each step. Keep <code>rua</code> in the record so monitoring continues.</p>
+         <div class="chips">
+          <div class="recrow"><span class="rtype TXT">TXT</span><span class="rhost">_dmarc</span><span class="rval">v=DMARC1; p=reject; pct=100; rua=mailto:[your EasyDMARC reporting address]</span></div>
+         </div>`, },
+        {t:"Extend coverage to subdomains (optional)",
+         d:`<p>DMARC on the root domain does not protect subdomains unless you add the <code>sp=</code> tag or manage subdomains separately. EasyDMARC's managed solutions cover subdomains &mdash; see the references. Many teams do this after the apex domain has been stable at reject for a while.</p>`}
+      ],
+      refs:[
+        {l:"DMARC Record Setup articles (migration & updates)", u:KB+"dmarc-record-setup"},
+        {l:"Update your DMARC TXT record to EasyDMARC's record", u:KB+"update-existing-txt-record-with-easydmarc-txt"},
+        {l:"Update to Managed DMARC (CNAME)", u:KB+"update-your-existing-dmarc-txt-record-to-easydmarcs-managed-dmarc"},
+        {l:"DMARC Record Checker (see what you publish today)", u:KB+"dmarc-record-checker"},
+        {l:"Managed solutions for subdomains", u:KB+"managed-solutions-for-subdomains"},
+        {l:"How do I know I'm ready for p=reject? (blog)", u:"https://easydmarc.com/blog/"}
+      ],
+      pool:[
+        "What does the pct tag do and why should I ramp it?",
+        "How long should I stay in quarantine before reject?",
+        "Can I switch my policy without breaking legitimate mail?",
+        "What happens to mail that fails under p=reject?",
+        "Do I need sp= (subdomain policy) too?"
+      ]
+    },
+    {
+      id:"maintain", t:"Stay healthy after p=reject", time:"Ongoing &mdash; ~15 min/week",
+      sum:"Reaching p=reject is a milestone, not the finish line. New services appear, old ones change behaviour, and mistakes still happen &mdash; the routine below keeps your domain protected and your deliverability intact.",
+      goal:"You have a lightweight weekly routine plus a repeatable runbook for adding new senders, and you know which optional hardening (MTA-STS, BIMI, subdomains&hellip;) to add next.",
+      steps:[
+        {t:"Keep a weekly 10-minute review habit",
+         d:`<ul><li>Scan the compliance trend and any new sources in the last week's reports.</li>
+         <li>Act on alerts (spikes, validation failures, policy changes).</li>
+         <li>Confirm pending actions is empty or understood.</li></ul>`},
+        {t:"Turn &ldquo;add a new sender&rdquo; into a runbook",
+         d:`<p>When a team starts using a new platform: (1) add the source in EasySPF and save, (2) publish/enable its DKIM key (via the platform or Managed DKIM), (3) send test mail and confirm it appears aligned in reports, and only then let them ramp volume. This prevents the classic &ldquo;new marketing tool breaks DMARC&rdquo; incident.</p>`},
+        {t:"Keep your subscription and records healthy",
+         d:`<p>EasySPF and the managed solutions are tied to your EasyDMARC subscription &mdash; if it lapses, the records stop being maintained (see the KB article on what happens when a subscription expires). Keep billing current, and keep the account admin contact reachable.</p>`},
+        {t:"Explore optional hardening &mdash; at your own pace",
+         d:`<ul><li><b>MTA-STS + TLS-RPT</b> &mdash; force TLS for inbound mail and receive TLS failure reports (EasyDMARC's managed MTA-STS).</li>
+         <li><b>BIMI</b> &mdash; display your brand logo next to authenticated mail (needs p=reject or p=quarantine first).</li>
+         <li><b>Parked / inactive domains</b> &mdash; publish DMARC with p=reject so they can't be spoofed.</li>
+         <li><b>Reputation monitoring</b> &mdash; blacklist watch alerts.</li>
+         <li><b>EasySENDER</b> &mdash; if your company also runs outbound campaigns, this complements the protective side.</li>
+         <li><b>Team &amp; integrations</b> &mdash; SSO/SAML, role-based permissions, SIEM/webhook/API integrations for the security stack.</li>
+         <li><b>Academy</b> &mdash; free courses to certify your team on DMARC/SPF/DKIM/BIMI.</li></ul>`}
+      ],
+      refs:[
+        {l:"Managed MTA-STS and TLS reporting", u:KB+"managed-mta-sts-and-tls-reporting"},
+        {l:"Getting started with Managed BIMI", u:KB+"getting-started-with-managed-bimi"},
+        {l:"EasyDMARC features guideline (all solutions)", u:KB+"easydmarc-features-guideline"},
+        {l:"EasyDMARC integrations (API, SIEM, webhooks&hellip;)", u:KB+"easydmarc-integrations"},
+        {l:"EasyDMARC Academy &mdash; free courses", u:"https://academy.easydmarc.com/"},
+        {l:"EasyDMARC Blog", u:"https://easydmarc.com/blog/"},
+        {l:"Open a support ticket", u:"https://support.easydmarc.com/knowledge-base/kb-tickets/new"}
+      ],
+      pool:[
+        "What should my ongoing monitoring routine look like?",
+        "A new marketing platform will start sending &mdash; what do I do first?",
+        "What is MTA-STS and do I need it?",
+        "What is BIMI and when can I enable it?",
+        "What happens if my EasyDMARC subscription expires?"
+      ]
+    }
+  ];
+  return {KB, providers, sources, more, phases};
+})();
+</script>
+<script type="module">
+(() => {
+  const KB = window.GD.KB;
+  const PHASES = window.GD.phases;
+  const PROVIDERS = window.GD.providers;
+  const SOURCES = window.GD.sources;
+  const MORE = window.GD.more;
+  const root = window.root;
+
+  const $ = (id) => document.getElementById(id);
+  const contentEl = $("content");
+  const phaseListEl = $("phaseList");
+  const domInput = $("domInput");
+  const provSel = $("provSel");
+  const srcSel = $("srcSel");
+
+  const DEFAULTS = { domain:"", provider:"", source:"", phase:0, checked:{}, dmarcMode:"", chat:[], aiSummary:"" };
+  let state = Object.assign({}, DEFAULTS);
+  let saved = false;
+  let busy = false;
+  let lastGen = null;
+  let saveTimer = null;
+
+  function providerName(){ const p = PROVIDERS.find(x=>x.id===state.provider); return p ? p.n : ""; }
+  function providerUrl(){ const p = PROVIDERS.find(x=>x.id===state.provider); return p ? p.u : ""; }
+  function sourceName(){ const s = SOURCES.find(x=>x.id===state.source); return s ? s.n : ""; }
+  function sourceUrl(){ const s = SOURCES.find(x=>x.id===state.source); return s ? s.u : ""; }
+  function curPhase(){ return PHASES[state.phase] || PHASES[0]; }
+  function domainShown(){ return state.domain.trim() || "yourdomain.com"; }
+  function replaceD(s){ if (s == null) return ""; return String(s).split("{{d}}").join(domainShown()); }
+  function stepCounts(){
+    let total = 0, done = 0;
+    for (const p of PHASES){ for (let i=0;i<p.steps.length;i++){ total++; if (state.checked[p.id] && state.checked[p.id][i]) done++; } }
+    return {total, done};
+  }
+
+  function save(){
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      try { await root.kv.deployNav.set("state", state); } catch(e){}
+    }, 250);
+  }
+  async function load(){
+    try {
+      const s = await root.kv.deployNav.get("state");
+      if (s && typeof s === "object") state = Object.assign({}, DEFAULTS, s);
+    } catch(e){}
+    saved = true;
+    fillSelects();
+    domInput.value = state.domain;
+    renderAll();
+    initChatUI();
+  }
+
+  function fillSelects(){
+    provSel.innerHTML = '<option value="">DNS host &mdash; choose one&hellip;</option>' + PROVIDERS.map(p=>`<option value="${p.id}">${p.n}</option>`).join("");
+    const pop = SOURCES.filter(s => s.id !== "other");
+    srcSel.innerHTML = '<option value="">Sending platform &mdash; choose one&hellip;</option>'
+      + `<optgroup label="Popular sending platforms">${pop.map(p=>`<option value="${p.id}">${p.n}</option>`).join("")}</optgroup>`
+      + `<optgroup label="More platforms (guides built into this app)">${MORE.map(p=>`<option value="${p.id}">${p.n}</option>`).join("")}</optgroup>`
+      + (SOURCES.find(s=>s.id==="other") ? `<option value="other">Something else / multiple platforms</option>` : "");
+    provSel.value = state.provider || "";
+    srcSel.value = state.source || "";
+  }
+
+  function renderMeter(){
+    const {total, done} = stepCounts();
+    const pct = total ? Math.round(done/total*100) : 0;
+    $("overallPct").textContent = pct + "%";
+    $("overallBar").style.width = pct + "%";
+    $("phaseCount").textContent = `${done}/${total} steps`;
+    return pct;
+  }
+
+  function renderNav(){
+    phaseListEl.innerHTML = PHASES.map((p, i) => {
+      const n = p.steps.length;
+      let c = 0;
+      for (let j=0;j<n;j++) if (state.checked[p.id] && state.checked[p.id][j]) c++;
+      const allDone = c === n;
+      const cls = ["pitem"];
+      if (i === state.phase) cls.push("cur");
+      if (allDone) cls.push("done");
+      return `<li><button class="${cls.join(" ")}" data-p="${i}">
+        <span class="pnum">${allDone ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>' : i+1}</span>
+        <span class="ptext"><b>${p.t}</b><i>${p.time}</i></span>
+        <span class="pmeta"><span class="pc">${allDone ? '<span class="tick">done</span>' : `${c}/${n}`}</span></span>
+      </button></li>`;
+    }).join("");
+    renderMeter();
+  }
+
+  function refChips(refs){
+    if (!refs || !refs.length) return "";
+    return `<div class="reflinks">${refs.map(r=>`<a class="ref" href="${r.u}" target="_blank" rel="noopener">${r.l}</a>`).join("")}</div>`;
+  }
+
+  function cfgContext(){
+    const bits = [];
+    if (state.domain.trim()) bits.push(`<span><span class="lab">Domain</span> <b>${state.domain.trim()}</b></span>`);
+    if (providerName()) bits.push(`<span><span class="lab">DNS host</span> <b>${providerName()}</b>${providerUrl()?` &middot; <a href="${providerUrl()}" target="_blank" rel="noopener">provider guide</a>`:""}</span>`);
+    if (sourceName()) bits.push(`<span><span class="lab">ESP</span> <b>${sourceName()}</b>${sourceUrl()?` &middot; <a href="${sourceUrl()}" target="_blank" rel="noopener">its SPF/DKIM guide</a>`:""}</span>`);
+    if (state.dmarcMode) bits.push(`<span><span class="lab">DMARC mode</span> <b>${state.dmarcMode === "managed" ? "Managed DMARC (CNAME)" : "TXT in DNS"}</b></span>`);
+    if (bits.length) return `<div class="ctxstrip"><div class="bits">${bits.join("")}</div><div class="ctxnote">Records you copy must come from your EasyDMARC portal &mdash; per-account values</div></div>`;
+    return "";
+  }
+
+  function phaseHTML(p, idx){
+    const total = PHASES.length;
+    let done = 0;
+    for (let j=0;j<p.steps.length;j++) if (state.checked[p.id] && state.checked[p.id][j]) done++;
+    const stepsHTML = p.steps.map((st, i) => {
+      const isDone = !!(state.checked[p.id] && state.checked[p.id][i]);
+      const body = replaceD(st.d);
+      let inner = "";
+      if (st.kind === "choice") {
+        const sel = (state.dmarcMode || "managed");
+        inner = `<div class="choices">${st.choices.map(c=>`<button type="button" class="choice ${c.id===sel?"sel":""}" data-choice="${c.id}">
+          <b><span class="radio"></span>${c.b}</b><span>${c.s}</span><span class="rec">${c.r}</span></button>`).join("")}</div>`;
+      }
+      const recs = "";
+      return `<div class="stepcard ${isDone?"done":""}" data-step="${i}">
+        <div class="steph" data-chk="${i}" role="button" tabindex="0">
+          <span class="chk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
+          <span class="num">${i+1}</span>
+          <span class="stitle"><b>${st.t}</b></span>
+        </div>
+        <div class="stepbody">${body}${inner}${recs}${refChips(st.refs)}</div>
+      </div>`;
+    }).join("");
+    const extraRefs = [];
+    if ((p.id === "verify" || p.id === "spf" || p.id === "dkim") && providerUrl()) extraRefs.push({l:`DNS guide for ${providerName()}`, u:providerUrl()});
+    if (p.id === "dkim" && sourceUrl()) extraRefs.push({l:`SPF/DKIM guide for ${sourceName()}`, u:sourceUrl()});
+    const allRefs = [...extraRefs, ...(p.refs||[])];
+    const isComplete = done === p.steps.length;
+    const pct = Math.round(done/p.steps.length*100);
+    return `
+      <div class="phasehead">
+        <div class="ph">Phase ${idx+1} of ${total}</div>
+        <h1>${p.t}</h1>
+        <span class="time">Estimated: ${p.time}</span>
+        <p class="sum">${p.sum}</p>
+        <div class="goal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2fd08c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg><span><b>Done when:</b> ${p.goal}</span></div>
+      </div>
+      ${cfgContext()}
+      <div class="steps">${stepsHTML}</div>
+      <div class="phasefoot">
+        <div class="status">${isComplete ? '<b>&#10003; Phase complete &mdash; all steps done.</b>' : `${done} of ${p.steps.length} steps done (${pct}%) &mdash; tick each step as you finish it.`}</div>
+        <div class="navbtns">
+          <button class="btn" data-nav="${idx-1}" ${idx===0?'disabled':""}>&larr; Previous</button>
+          <button class="btn primary" data-nav="${idx+1}" ${idx===total-1?'disabled':""}>Next phase &rarr;</button>
+        </div>
+      </div>
+      ${allRefs.length?`<div class="bigrefs"><h4>Official references for this phase</h4><div class="row">${allRefs.map(r=>`<a href="${r.u}" target="_blank" rel="noopener">${r.l}</a>`).join("")}</div></div>`:""}
+    `;
+  }
+
+  function applyChips(){
+    const mode = state.dmarcMode || "managed";
+    contentEl.querySelectorAll(".chips").forEach(ch => {
+      const m = ch.dataset.mode;
+      ch.classList.toggle("hidden", !!m && m !== mode);
+    });
+  }
+
+  function renderContent(){
+    const p = curPhase();
+    const idx = state.phase;
+    contentEl.innerHTML = phaseHTML(p, idx);
+    applyChoiceUI(state.dmarcMode || "managed");
+    applyChips();
+    updateCtxLine();
+    window.scrollTo({top:0, behavior:"smooth"});
+  }
+
+  function applyChoiceUI(mode){
+    contentEl.querySelectorAll(".choice").forEach(c => c.classList.toggle("sel", c.dataset.choice === mode));
+  }
+
+  function toggleStep(i){
+    const p = curPhase();
+    if (!state.checked[p.id]) state.checked[p.id] = {};
+    state.checked[p.id][i] = !state.checked[p.id][i];
+    save();
+    const card = contentEl.querySelector(`[data-step="${i}"]`);
+    if (card) card.classList.toggle("done", !!state.checked[p.id][i]);
+    renderNav();
+    const p2 = curPhase();
+    let done = 0;
+    for (let j=0;j<p2.steps.length;j++) if (state.checked[p2.id] && state.checked[p2.id][j]) done++;
+    const isComplete = done === p2.steps.length;
+    const st = contentEl.querySelector(".phasefoot .status");
+    if (st) st.innerHTML = isComplete ? '<b>&#10003; Phase complete &mdash; all steps done.</b>' : `${done} of ${p2.steps.length} steps done (${Math.round(done/p2.steps.length*100)}%) &mdash; tick each step as you finish it.`;
+  }
+
+  function gotoPhase(i){
+    if (i < 0 || i >= PHASES.length) return;
+    state.phase = i;
+    save();
+    renderNav();
+    renderContent();
+    refreshSuggestions();
+  }
+
+  function updateCtxLine(){
+    const p = curPhase();
+    $("chatCtx").textContent = `Phase ${state.phase+1}/${PHASES.length}: ${p.t}`;
+  }
+
+  contentEl.addEventListener("click", (e) => {
+    const chk = e.target.closest("[data-chk]");
+    if (chk) { toggleStep(+chk.dataset.chk); return; }
+    const choice = e.target.closest("[data-choice]");
+    if (choice) {
+      state.dmarcMode = choice.dataset.choice;
+      save();
+      applyChoiceUI(state.dmarcMode);
+      const chips = contentEl.querySelectorAll(".chips");
+      chips.forEach(ch => {
+        const m = ch.dataset.mode;
+        ch.classList.toggle("hidden", !!m && m !== state.dmarcMode);
+      });
+      const st = contentEl.querySelector(".ctxstrip");
+      if (st) renderContent();
+      return;
+    }
+    const nav = e.target.closest("[data-nav]");
+    if (nav && !nav.disabled) gotoPhase(+nav.dataset.nav);
+  });
+  contentEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      const chk = e.target.closest("[data-chk]");
+      if (chk) { e.preventDefault(); toggleStep(+chk.dataset.chk); }
+    }
+  });
+  phaseListEl.addEventListener("click", (e) => {
+    const it = e.target.closest("[data-p]");
+    if (it) gotoPhase(+it.dataset.p);
+  });
+
+  function renderAll(){
+    renderNav();
+    renderContent();
+    refreshSuggestions();
+  }
+
+  domInput.addEventListener("change", () => { state.domain = domInput.value.trim(); save(); renderContent(); });
+  domInput.addEventListener("keydown", (e) => { if (e.key === "Enter") domInput.blur(); });
+  provSel.addEventListener("change", () => { state.provider = provSel.value; save(); renderContent(); });
+  srcSel.addEventListener("change", () => { state.source = srcSel.value; save(); renderContent(); });
+  $("resetCfg").addEventListener("click", () => { state.domain=""; state.provider=""; state.source=""; state.dmarcMode=""; domInput.value=""; provSel.value=""; srcSel.value=""; save(); renderContent(); });
+  $("resetAll").addEventListener("click", async () => {
+    if (!window.confirm("Reset ALL progress, setup and chat history for this guide?")) return;
+    state = Object.assign({}, DEFAULTS);
+    try { await root.kv.deployNav.delete("state"); } catch(e){}
+    domInput.value = ""; provSel.value = ""; srcSel.value = "";
+    save();
+    renderAll();
+    renderChat(true);
+  });
+  $("resetProgress").addEventListener("click", () => { state.checked = {}; save(); renderNav(); renderContent(); });
+
+  const chatOpenBtn = $("chatOpenBtn");
+  const chatFab = $("chatFab");
+  const chatBackdrop = $("chatBackdrop");
+  const chatPanel = $("chatPanel");
+  let animDead = false;
+  let chatAnimT = null;
+  function openChat(){
+    chatPanel.classList.add("open"); chatBackdrop.classList.add("show"); chatInput.focus();
+    clearTimeout(chatAnimT);
+    chatAnimT = setTimeout(() => {
+      if (!chatPanel.classList.contains("open")) return;
+      const tr = getComputedStyle(chatPanel).transform;
+      const x = (!tr || tr === "none") ? 0 : new DOMMatrixReadOnly(tr).m41;
+      if (x > 2) {
+        animDead = true;
+        chatPanel.style.transition = "none"; chatPanel.style.transform = "none";
+        chatBackdrop.style.transition = "none"; chatBackdrop.style.opacity = "1";
+      }
+    }, 420);
+  }
+  function closeChat(){
+    clearTimeout(chatAnimT);
+    if (animDead) {
+      chatPanel.style.transition = "none"; chatBackdrop.style.transition = "none";
+      chatPanel.classList.remove("open"); chatBackdrop.classList.remove("show");
+      chatPanel.style.transform = ""; chatBackdrop.style.opacity = ""; void chatPanel.offsetWidth;
+      chatPanel.style.transition = ""; chatBackdrop.style.transition = "";
+    } else {
+      chatPanel.classList.remove("open"); chatBackdrop.classList.remove("show");
+    }
+    chatAnimT = setTimeout(() => {
+      if (chatPanel.classList.contains("open")) return;
+      const tr = getComputedStyle(chatPanel).transform;
+      const x = (!tr || tr === "none") ? 0 : new DOMMatrixReadOnly(tr).m41;
+      if (x < innerWidth - 5) {
+        animDead = true;
+        chatPanel.style.transition = "none"; void chatPanel.offsetWidth;
+        chatPanel.style.transition = "";
+      }
+    }, 380);
+  }
+  chatOpenBtn.addEventListener("click", openChat);
+  chatFab.addEventListener("click", openChat);
+  $("chatCloseBtn").addEventListener("click", closeChat);
+  chatBackdrop.addEventListener("click", closeChat);
+
+  const chatMsgs = $("chatMsgs");
+  const chatInput = $("chatInput");
+  const sendBtn = $("sendBtn");
+  const suggEl = $("sugg");
+  let suggOffset = 0;
+
+  function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+  function md2html(raw){
+    let s = escHtml(raw);
+    s = s.replace(/```([\s\S]*?)```/g, (m, code) => `<pre><code>${code.replace(/\n$/, "")}</code></pre>`);
+    s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (m, t, u) => `<a href="${u}" target="_blank" rel="noopener">${t}</a>`);
+    s = s.replace(/(^|[\s(>])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    return s;
+  }
+
+  const GREETING = `<b>Hi &mdash; I'm your EasyDMARC deployment assistant.</b>\n\nI can help you with anything in this guide, for example:\n\n- Explain what to do in the phase you're on\n- Compare Managed DMARC vs a TXT record, EasySPF, Managed DKIM\n- Give exact DNS record shapes for your setup\n- Recommend whether you're ready for p=quarantine / p=reject\n\nAnswers are generated by AI &mdash; always confirm critical details against the official <b>Knowledge Base</b> before changing DNS, and open a <b>support ticket</b> when you need EasyDMARC's team directly.`;
+
+  function scrollMsgs(){ chatMsgs.scrollTop = chatMsgs.scrollHeight; }
+  function addMsgEl(r, html){
+    const el = document.createElement("div");
+    el.className = "msg " + r;
+    if (r === "bot") el.innerHTML = html; else el.textContent = html;
+    chatMsgs.appendChild(el);
+    scrollMsgs();
+    return el;
+  }
+  function renderChat(forceGreeting){
+    chatMsgs.innerHTML = "";
+    if (!state.chat.length) {
+      addMsgEl("bot", GREETING);
+    } else {
+      for (const m of state.chat.slice(-30)) addMsgEl(m.r, m.r === "bot" ? md2html(m.t) : m.t);
+    }
+  }
+
+  function suggestPool(){
+    const p = curPhase();
+    const pool = (p && p.pool && p.pool.length) ? p.pool : ["What should I do in this phase?"];
+    return pool;
+  }
+  function refreshSuggestions(){
+    const pool = suggestPool();
+    const off = (suggOffset++) % pool.length;
+    const items = [0,1,2].map(k => pool[(off + k) % pool.length]);
+    suggEl.innerHTML = items.map(s => `<button type="button" class="sg">${s}</button>`).join("");
+  }
+  suggEl.addEventListener("click", (e) => {
+    const sg = e.target.closest(".sg");
+    if (sg && !busy) ask(sg.textContent);
+  });
+  $("chatClearBtn").addEventListener("click", async () => {
+    state.chat = []; state.aiSummary = "";
+    save();
+    renderChat(true);
+    refreshSuggestions();
+  });
+
+  const ASSIST_HEAD = `You are a friendly, precise deployment assistant built into the "EasyDMARC Deployment Navigator", an interactive guide that walks IT teams through deploying EasyDMARC email authentication. Your job: answer the user's deployment questions ONLY about EasyDMARC, DMARC, SPF, DKIM and related email security topics (MTA-STS, TLS-RPT, BIMI, deliverability, DNS records), based on the facts below and general email-security knowledge. Keep answers concise and structured (short paragraphs or small numbered lists). Where an official page is relevant, cite it as a URL so the user can click through. If asked something clearly outside this scope (pricing negotiations, unrelated software, coding, etc.), politely steer back to email authentication/DMARC or suggest opening an EasyDMARC support ticket: https://support.easydmarc.com/knowledge-base/kb-tickets/new
+
+FACTS ABOUT EASYDMARC DEPLOYMENT (from the official documentation):
+- EasyDMARC protects domains with SPF, DKIM and DMARC, parses incoming DMARC aggregate (daily XML summaries) and forensic/failure reports, and shows compliance dashboards, sending sources and pending actions per domain.
+- Recommended journey: (1) add the domain in EasyDMARC (Domains and Groups; type Sending or Parked; groups supported; bulk add supported), (2) publish a DMARC record that includes EasyDMARC's report addresses (rua=aggregate, ruf=forensic) so it can receive reports - first aggregate reports arrive within up to 72 hours, then roughly every 24h, (3) fix SPF (EasyDMARC recommends its dynamic "EasySPF" solution), (4) configure DKIM for every sending source, (5) monitor at p=none for 1-2+ weeks, (6) enforce p=quarantine for 1-2 weeks, (7) escalate to p=reject gradually with the pct tag (25, 50, 75, 100).
+- DMARC record: TXT record named _dmarc (some DNS panels need the full _dmarc.<domain>). Only one DMARC record per domain; if one exists it must be removed/replaced. Records must start with v=DMARC1.
+- EasyDMARC offers "Managed DMARC": instead of a TXT you publish a CNAME at _dmarc (one-time change, proxy/CDN must be OFF for it), then change policy (none/quarantine/reject) and pct from inside EasyDMARC instead of DNS. There is also a legacy Managed DMARC via NS record, and KB articles for migrating from other DMARC providers.
+- SPF: exactly ONE SPF TXT record at the apex (@/blank/<domain>), starting v=spf1, listing authorized senders via include:/ip4:/a:/mx: mechanisms, usually ending in -all or ~all. Max 10 DNS lookups. EasySPF "flattens" includes into a single dynamic record EasyDMARC keeps updated (checks IP rotations every few minutes), so lookups never exceed 10; you then add/edit sources in the EasySPF dashboard rather than DNS. Capability columns: "Capable" (include stays in your SPF), "Non-Capable" (provider uses its own Return-Path domain - not needed in your SPF), "Subdomain-capable" (belongs in a subdomain SPF record, not root). The exists: mechanism cannot be added via EasySPF (can't be flattened) - it must go directly into the DNS record. After replacing the record, verify in EasySPF; propagation ~3-5 minutes; status shows ACTIVE.
+- DKIM: per sending platform. Each source signs with its own key pair; you publish the public key as TXT at <selector>._domainkey.<domain> (value like v=DKIM1; k=rsa; p=...). You must enable DKIM signing inside each platform too. EasyDMARC has "Managed DKIM": a one-time NS-type DNS change, then you manage all selectors from one EasyDMARC page; it can auto-detect sources/selectors from its database of 1400+ sources. EasyDMARC's DKIM checker validates selectors (e.g. Google uses selector "google"; Microsoft 365 uses selector1/selector2).
+- Monitoring: aggregate reports = high-level daily summary (pass/fail counts, sending IPs, SPF/DKIM results, alignment, delivery). Failure/forensic reports = instant, per-message, most ISPs don't send them for privacy reasons. Keep p=none while fixing SPF/DKIM so legitimate mail is never quarantined/rejected. Enforcement must be gradual: p=none -> p=quarantine (1-2 weeks) -> p=reject with pct ramp. Keep rua= in the record at every policy stage or you lose reports.
+- The domain overview lists pending actions (verify domain, fix SPF, fix DKIM, fix DMARC, reputation monitoring, activate EasySPF/Managed DMARC/Managed DKIM/Managed MTA-STS). External verification failure troubleshooting exists in the KB. Alerts exist for spikes/failures/record changes. A domain scanner shows sending sources. Reputation monitoring checks blacklists.
+- Optional extras after enforcement: Managed MTA-STS (TLS for inbound + TLS-RPT reports), Managed BIMI (logo on authenticated mail - requires quarantine or reject policy), protecting parked/inactive domains (publish DMARC with p=reject since no legit mail exists), EasySENDER (separate product for senders/campaigns), SAML SSO, permission management for teams/MSPs, integrations (webhooks/API/SIEM), subdomain management.
+- Official URLs to cite when relevant:
+  Knowledge Base home: https://support.easydmarc.com/knowledge-base
+  Get started after registering: https://support.easydmarc.com/knowledge-base/how-do-i-get-started-with-easydmarc-after-registering
+  Add & verify a domain: https://support.easydmarc.com/knowledge-base/how-can-i-add-a-domain
+  Setting up EasySPF: https://support.easydmarc.com/knowledge-base/setup-easyspf
+  Source configuration (SPF & DKIM) guides for 100+ platforms: https://support.easydmarc.com/knowledge-base/source-configuration-spf-dkim
+  DNS provider guides: https://support.easydmarc.com/knowledge-base/dns-providers
+  DMARC record setup / updates: https://support.easydmarc.com/knowledge-base/dmarc-record-setup
+  Free record checkers: SPF https://support.easydmarc.com/knowledge-base/spf-record-checker | DKIM https://support.easydmarc.com/knowledge-base/dkim-record-checker | DMARC https://support.easydmarc.com/knowledge-base/dmarc-record-checker
+  Academy (courses): https://academy.easydmarc.com/
+  Blog: https://easydmarc.com/blog/
+  Support ticket: https://support.easydmarc.com/knowledge-base/kb-tickets/new
+- Be honest about uncertainty; for account-specific steps say "in your EasyDMARC portal/dashboard".`;
+
+  function envBlock(){
+    const bits = [];
+    bits.push(`- Domain: ${state.domain.trim() || "(not set yet)"}`);
+    bits.push(`- DNS host: ${providerName() || "(not set yet)"}`);
+    bits.push(`- Main sending platform: ${sourceName() || "(not set yet)"}`);
+    bits.push(`- DMARC record mode: ${state.dmarcMode === "txt" ? "Classic TXT record managed in DNS" : state.dmarcMode === "managed" ? "Managed DMARC (CNAME)" : "(not chosen yet)"}`);
+    const {done, total} = stepCounts();
+    bits.push(`- Overall guide progress: ${done}/${total} steps ticked`);
+    return bits.join("\n");
+  }
+  function phaseBlock(){
+    const p = curPhase();
+    const lines = [`Phase ${state.phase+1} of ${PHASES.length} - "${p.t}" (${p.time}). Goal: ${p.goal}`];
+    p.steps.forEach((st, i) => {
+      const d = !!(state.checked[p.id] && state.checked[p.id][i]);
+      lines.push(`  ${d ? "[done]" : "[todo]"} ${st.t}`);
+    });
+    return lines.join("\n");
+  }
+  function transcriptParts(){
+    const parts = [];
+    if (state.aiSummary) parts.push(`[Summary of the earlier part of this conversation:\n${state.aiSummary}]`);
+    const max = state.aiSummary ? 8 : 16;
+    for (const m of state.chat.slice(-max)) parts.push((m.r === "u" ? "User" : "Assistant") + ": " + m.t);
+    return parts;
+  }
+  function buildInstruction(refs){
+    const log = transcriptParts().join("\n\n");
+    const refText = (refs && refs.length)
+      ? "\n\n<OFFICIAL REFERENCE MATERIAL>\nBelow are excerpts from official EasyDMARC guides that are relevant to the user's question. Prefer their concrete steps, record names and values when they apply; they are authoritative for the platform they describe. If an excerpt does not answer the question, ignore it rather than forcing it in. Cite guide URLs when you use them.\n" + refs.map(r => "[Guide: " + r.t + "]\nURL: " + r.u + "\n" + r.x).join("\n\n") + "\n</OFFICIAL REFERENCE MATERIAL>"
+      : "";
+    return ASSIST_HEAD + "\n\n<CURRENT SITUATION OF THE USER>\n" + envBlock() + "\n" + phaseBlock() + "\n</CURRENT SITUATION>" + refText + "\n\n<CONVERSATION LOG>\n" + log + "\n</CONVERSATION LOG>\n\nTASK: Write the assistant's reply to the most recent User message in the conversation log. Be concise and concrete; use numbered steps when the user is doing something hands-on in DNS or the EasyDMARC dashboard. Cite official URLs when they are relevant. Do not invent account-specific values (rua/ruf addresses, DKIM keys, CNAME targets) - tell the user where to copy them from instead. End your reply cleanly without a sign-off line.";
+  }
+  let meta = null;
+  function getMeta(){
+    if (!meta) { try { meta = root.generateText({getMetaObject:true}); } catch(e){ meta = null; } }
+    return meta;
+  }
+  async function maybeCompact(){
+    try {
+      const m = getMeta();
+      if (!m) return;
+      const headTokens = m.countTokens(ASSIST_HEAD + envBlock() + phaseBlock());
+      const logTokens = m.countTokens(transcriptParts().join("\n\n"));
+      if (state.chat.length < 16) return;
+      if (headTokens + logTokens < m.idealMaxContextTokens * 0.9) return;
+      const n = state.chat.length - 6;
+      const full = state.chat.map(x => (x.r === "u" ? "User" : "Assistant") + ": " + x.t).join("\n\n");
+      const res = await root.generateText({
+        instruction: ASSIST_HEAD + "\n\n<CONVERSATION LOG>\n" + full + "\n\nTASK: This conversation is getting long. Summarize the first " + n + " messages (the OLDEST part) in terse bullets for use as a memory summary. Keep all concrete facts: the user's domain/DNS/platform choices, decisions, values already explained, and any unresolved threads. Output only the summary, no preamble."
+      });
+      state.aiSummary = res.text.trim();
+      state.chat = state.chat.slice(n);
+      save();
+    } catch(e){}
+  }
+
+  async function ask(question, cite){
+    question = String(question || chatInput.value).trim();
+    if (!question || busy) return;
+    if (typeof root.generateText !== "function") {
+      state.chat.push({r:"u", t:question}); renderChat();
+      addMsgEl("bot", "The AI text plugin isn't available in this preview, so I can't generate answers right now. Everything else (phases, checklists, DNS record shapes and official references) still works fine.");
+      return;
+    }
+    chatInput.value = "";
+    autosize();
+    state.chat.push({r:"u", t:question});
+    if (state.chat.length > 40) state.chat = state.chat.slice(-40);
+    save();
+    renderChat();
+    setBusy(true);
+    const bubble = addMsgEl("bot", '<span class="thinking"><i></i><i></i><i></i></span>');
+    let refs = [];
+    try {
+      if (cite && cite.x) refs = [{t:cite.t, u:cite.u, x:cite.x.slice(0,2400)}];
+      else if (!cite) refs = await groundRefs(question);
+    } catch(e){ refs = []; }
+    let acc = "";
+    let done = false;
+    const onChunk = (d) => {
+      acc += d.textChunk || "";
+      bubble.innerHTML = md2html(acc) + (acc ? "" : '<span class="thinking"><i></i><i></i><i></i></span>');
+      if (Math.abs(chatMsgs.scrollHeight - chatMsgs.scrollTop - chatMsgs.clientHeight) < 140) scrollMsgs();
+    };
+    try {
+      lastGen = root.generateText({
+        instruction: buildInstruction(refs),
+        onChunk
+      });
+      await lastGen;
+    } catch(e){
+      if (!acc) bubble.innerHTML = "Sorry &mdash; generation was interrupted or failed. Please try again.";
+    } finally {
+      if (acc && acc.trim()) { state.chat.push({r:"a", t:acc.trim()}); save(); renderChat(); }
+      else if (state.chat[state.chat.length-1] && state.chat[state.chat.length-1].r === "a") { state.chat.pop(); renderChat(); }
+      setBusy(false);
+      maybeCompact();
+    }
+  }
+
+  function setBusy(b){
+    busy = b;
+    sendBtn.disabled = b;
+    chatInput.disabled = b;
+    suggEl.querySelectorAll(".sg").forEach(x => x.disabled = b);
+    $("chatClearBtn").disabled = b;
+  }
+
+  function autosize(){
+    chatInput.style.height = "auto";
+    chatInput.style.height = Math.min(chatInput.scrollHeight, 110) + "px";
+  }
+  chatInput.addEventListener("input", autosize);
+  $("chatForm").addEventListener("submit", (e) => { e.preventDefault(); if (!busy) ask(); });
+
+  function initChatUI(){
+    renderChat(true);
+    chatInput.placeholder = typeof root.generateText === "function"
+      ? "Ask anything about deploying EasyDMARC…"
+      : "AI generation unavailable in this preview (plugin not loaded)";
+  }
+
+  /* ---------------- reference library ---------------- */
+  const libWrapEl = $("libWrap");
+  const libBackEl = $("libBack");
+  const libListEl = $("libList");
+  const libCatsEl = $("libCats");
+  const libQEl = $("libQ");
+  const libReaderEl = $("libReader");
+  const libReadHeadEl = $("libReadHead");
+  const libAcademyEl = $("libAcademy");
+  const libGridEl = $("libGrid");
+  const libMetaEl = $("libMeta");
+  let catData = null;
+  let acData = null;
+  let libArts = [];
+  let libSelCat = "";
+  let curArt = null;
+  const bodyCache = new Map();
+
+  async function fetchJSON(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+  async function ensureCat(){
+    if (catData) return catData;
+    const j = await fetchJSON("src/data/kb-catalog.json");
+    catData = j;
+    libArts = [];
+    for (const c of j.categories) for (const a of c.articles) libArts.push(Object.assign({}, a, {catId: c.id, catLabel: c.label}));
+    libMetaEl.innerHTML = libArts.length + " guides bundled &middot; offline copies";
+    return j;
+  }
+  async function ensureAc(){
+    if (acData) return acData;
+    acData = await fetchJSON("src/data/academy.json");
+    return acData;
+  }
+  function renderCats(){
+    let chips = '<button type="button" class="cat ' + (libSelCat === "" ? "on" : "") + '" data-cat="">All <span class="n">' + libArts.length + '</span></button>';
+    chips += catData.categories.map(c => '<button type="button" class="cat ' + (libSelCat === c.id ? "on" : "") + '" data-cat="' + escHtml(c.id) + '">' + escHtml(c.label) + ' <span class="n">' + c.articles.length + '</span></button>').join("");
+    libCatsEl.innerHTML = chips;
+  }
+  function visibleArts(){
+    const q = libQEl.value.trim().toLowerCase();
+    let list = libArts;
+    if (libSelCat) list = list.filter(a => a.catId === libSelCat);
+    if (q) list = list.filter(a => (a.title || "").toLowerCase().includes(q) || (a.id || "").includes(q) || (a.catLabel || "").toLowerCase().includes(q));
+    return list;
+  }
+  function renderList(){
+    const list = visibleArts();
+    const selId = curArt ? curArt.id : "";
+    if (!list.length) { libListEl.innerHTML = '<div id="libEmpty">No guides match your search.</div>'; return; }
+    libListEl.innerHTML = list.map(a => '<button type="button" class="libitem ' + (a.id === selId ? "sel" : "") + '" data-art="' + escHtml(a.id) + '"><span class="lt">' + escHtml(a.title) + '</span><span class="kd">' + (a.kind === "blog" ? "Blog" : "KB") + '</span></button>').join("");
+  }
+  function htmlToText(html){
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html;
+    tmp.querySelectorAll("script,style,noscript,iframe").forEach(n => n.remove());
+    return (tmp.textContent || "").replace(/\s+/g, " ").trim();
+  }
+  function sanitizeBody(html){
+    const doc = document.createElement("div");
+    doc.innerHTML = html;
+    doc.querySelectorAll("script,style,noscript,iframe,object,embed,link,meta,svg,form,button,input,select,textarea,audio,video").forEach(n => n.remove());
+    const walk = (el) => {
+      for (const n of [...el.children]) {
+        for (const at of [...n.attributes]) {
+          const nm = at.name.toLowerCase();
+          if (nm.startsWith("on") || nm === "style" || nm === "class" || nm === "id" || nm === "width" || nm === "height" || nm === "cellpadding" || nm === "cellspacing" || nm === "border" || nm === "bgcolor" || nm === "align") n.removeAttribute(at.name);
+        }
+        if (n.tagName === "A") { const href = n.getAttribute("href"); if (href && !href.startsWith("#")) { n.target = "_blank"; n.rel = "noopener"; } }
+        if (n.tagName === "IMG") { n.loading = "lazy"; n.decoding = "async"; n.referrerPolicy = "no-referrer"; n.addEventListener("error", () => { n.style.display = "none"; }, {once:true}); try { const q = new URL(n.getAttribute("src") || "", location.href).searchParams; const w = parseInt(q.get("width") || "", 10), h = parseInt(q.get("height") || "", 10); if (w > 20 && w < 2400 && h > 20 && h < 2400) { n.setAttribute("width", w); n.setAttribute("height", h); } } catch(e){} }
+        walk(n);
+      }
+    };
+    walk(doc);
+    return doc;
+  }
+  function renderIntro(){
+    libReadHeadEl.hidden = true;
+    libReaderEl.innerHTML = '<div class="libintro"><div class="big">' + libArts.length + '</div><h2>offline EasyDMARC reference guides</h2><p>Official Knowledge Base articles and blog guides for DNS providers, sending platforms (SPF &amp; DKIM), DMARC record setup, EasySPF, Managed DKIM, MTA-STS, BIMI, SAML SSO and more &mdash; bundled into this app and readable without an internet connection.</p><p>Search above or pick a category, then open any guide. When you open one you can ask the AI assistant to walk you through it for your exact setup.</p><p class="libleg">The guides are cleaned offline copies of the official EasyDMARC documentation (support.easydmarc.com and easydmarc.com/blog). DNS record examples in them are illustrative &mdash; in your account, always copy the exact values EasyDMARC generates for you.</p></div>';
+  }
+  async function openArt(id){
+    const a = libArts.find(x => x.id === id);
+    if (!a) return;
+    curArt = a;
+    renderList();
+    libReadHeadEl.hidden = false;
+    libReadHeadEl.innerHTML = '<div class="ht"><b>' + escHtml(a.title) + '</b><i>' + escHtml(a.catLabel) + ' &middot; ' + (a.kind === "blog" ? "blog guide" : "Knowledge Base article") + '</i></div><div class="acts"><button type="button" class="btn" id="artAskBtn">Ask AI about this guide</button><a class="btn" href="' + escHtml(a.url || KB) + '" target="_blank" rel="noopener">Open original &nearr;</a></div>';
+    const askBtn = $("artAskBtn");
+    if (askBtn) askBtn.addEventListener("click", askAboutCur);
+    libReaderEl.innerHTML = '<div class="libload"><div class="spin"></div><div>Loading guide&hellip;</div></div>';
+    try {
+      let entry = bodyCache.get(a.id);
+      if (!entry) {
+        const r = await fetch("src/" + a.src);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const html = await r.text();
+        entry = {html, text: htmlToText(html)};
+        bodyCache.set(a.id, entry);
+      }
+      const doc = sanitizeBody(entry.html);
+      const meta = '<div class="artmeta"><span class="tag ' + (a.kind === "blog" ? "bl" : "kb") + '">' + (a.kind === "blog" ? "Blog guide" : "Knowledge Base") + '</span><span class="tag off">offline copy in this app</span>' + (a.url ? '<a class="tag kb" href="' + escHtml(a.url) + '" target="_blank" rel="noopener">View original &nearr;</a>' : "") + (a.kbUrl && a.kind === "blog" ? '<a class="tag bl" href="' + escHtml(a.kbUrl) + '" target="_blank" rel="noopener">KB stub &nearr;</a>' : "") + '</div>';
+      libReaderEl.innerHTML = meta + '<div class="article"></div>';
+      const artEl = libReaderEl.querySelector(".article");
+      while (doc.firstChild) artEl.appendChild(doc.firstChild);
+      const leg = document.createElement("div");
+      leg.className = "libleg";
+      leg.textContent = "Archived offline copy of the official " + (a.kind === "blog" ? "EasyDMARC blog guide" : "EasyDMARC Knowledge Base article") + " (" + (a.url || "support.easydmarc.com") + "). Record examples are illustrative - copy the exact per-account values EasyDMARC shows you.";
+      artEl.appendChild(leg);
+    } catch(err) {
+      libReaderEl.innerHTML = '<div class="libintro" style="margin-top:6vh"><h2>Couldn\'t load this guide offline</h2><p>' + escHtml(String((err && err.message) || err)) + '</p><p><a class="btn" href="' + escHtml(a.url || KB) + '" target="_blank" rel="noopener">Open it on the official site &nearr;</a></p></div>';
+    }
+  }
+  function askAboutCur(){
+    const a = curArt;
+    if (!a || busy) return;
+    const entry = bodyCache.get(a.id);
+    const x = entry ? entry.text.slice(0, 2600) : "";
+    closeLib();
+    openChat();
+    ask('Explain this official guide step by step and tell me exactly what I need to do for my setup: "' + a.title + '"', {t: a.title, u: a.url || KB, x: x});
+  }
+  const STOP = new Set("a an and are as at be but by can could did do does for from get has have how i if in into is it its me my no not of on or our should so that the their them then there these they this to us want was we what when where which who why will with you your about out am been being over under more most".split(" "));
+  function qTokens(q){
+    return q.toLowerCase().replace(/[\u2019']/g, "").replace(/[^a-z0-9+#.\s]/g, " ").split(/\s+/).filter(t => t.length > 2 && !STOP.has(t));
+  }
+  async function groundRefs(question){
+    try {
+      await ensureCat();
+      const toks = qTokens(question);
+      if (!toks.length) return [];
+      const scored = [];
+      for (const a of libArts) {
+        const tl = (a.title || "").toLowerCase();
+        let sc = 0;
+        for (const t of toks) {
+          if (tl.includes(t)) sc += t.length >= 6 ? 2.4 : 1.3;
+          else if ((a.id || "").includes(t)) sc += t.length >= 6 ? 1.5 : 0.7;
+        }
+        if (sc > 0) scored.push({a, sc});
+      }
+      scored.sort((x, y) => (y.sc - x.sc) || (y.a.title.length - x.a.title.length));
+      const top = scored.filter(s => s.sc >= 2.3).slice(0, 2);
+      if (!top.length) return [];
+      const out = [];
+      for (const {a} of top) {
+        let entry = bodyCache.get(a.id);
+        if (!entry) {
+          try {
+            const r = await fetch("src/" + a.src);
+            if (!r.ok) continue;
+            const html = await r.text();
+            entry = {html, text: htmlToText(html)};
+            bodyCache.set(a.id, entry);
+          } catch(e){ continue; }
+        }
+        if (entry) out.push({t: a.title, u: a.url || KB, x: entry.text.slice(0, 2400)});
+      }
+      return out;
+    } catch(e){ return []; }
+  }
+  function showLibTab(t){
+    document.querySelectorAll(".libtab").forEach(b => b.classList.toggle("on", b.dataset.libtab === t));
+    const ac = t === "academy";
+    libGridEl.hidden = ac;
+    libAcademyEl.hidden = !ac;
+    if (ac) renderAcademy();
+  }
+  async function renderAcademy(){
+    if (libAcademyEl.dataset.done) return;
+    libAcademyEl.innerHTML = '<div class="libload"><div class="spin"></div><div>Loading academy courses&hellip;</div></div>';
+    try {
+      const j = await ensureAc();
+      libAcademyEl.dataset.done = "1";
+      const head = '<div class="achead"><h2>EasyDMARC Academy</h2><p>Free, structured, expert-led courses on DMARC, SPF, DKIM and email authentication &mdash; with certification. Episodes play on the official academy site.</p></div>';
+      const courses = (j.courses || []).map(c => {
+        const secs = (c.sections || []).map(s => '<div style="border-top:1px solid var(--line)"><div style="padding:9px 17px;font-size:11px;text-transform:uppercase;letter-spacing:1.3px;color:var(--acc2);font-weight:800">' + escHtml(s.title) + '</div>' + (s.parts || []).map((p, i) => '<a class="lesson" href="' + escHtml(p.url) + '" target="_blank" rel="noopener"><span class="ln">' + (i + 1) + '</span><span class="lt2">' + escHtml(p.title) + '</span><span class="du">' + escHtml(p.dur || "") + '</span></a>').join("") + '</div>').join("");
+        const desc = escHtml(c.desc || "");
+        return '<div class="course"><div class="courset"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#5ec8ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg><div style="flex:1;min-width:0"><b>' + escHtml(c.title) + '</b><i>' + desc.slice(0, 150) + (desc.length > 150 ? "&hellip;" : "") + '</i></div><a class="btn" href="' + escHtml(c.url) + '" target="_blank" rel="noopener">Open course &nearr;</a></div>' + secs + '</div>';
+      }).join("");
+      libAcademyEl.innerHTML = head + courses;
+    } catch(e){
+      libAcademyEl.innerHTML = '<div class="libintro" style="margin-top:6vh"><h2>Couldn\'t load the academy overview</h2><p><a class="btn" href="https://academy.easydmarc.com/" target="_blank" rel="noopener">Open the Academy &nearr;</a></p></div>';
+    }
+  }
+  async function openLib(){
+    libWrapEl.hidden = false;
+    if (!catData) {
+      libMetaEl.textContent = "Loading catalog&hellip;";
+      libListEl.innerHTML = '<div class="libload"><div class="spin"></div></div>';
+    }
+    try {
+      await ensureCat();
+      renderCats();
+      renderList();
+      if (!curArt) renderIntro();
+    } catch(e){
+      libMetaEl.textContent = "Library unavailable offline";
+      libListEl.innerHTML = "";
+      libReaderEl.innerHTML = '<div class="libintro" style="margin-top:6vh"><h2>Couldn\'t load the guide catalog</h2><p>' + escHtml(String((e && e.message) || e)) + '</p><p><a class="btn" href="https://support.easydmarc.com/knowledge-base" target="_blank" rel="noopener">Open the official Knowledge Base &nearr;</a></p></div>';
+    }
+  }
+  function closeLib(){ libWrapEl.hidden = true; }
+  libCloseBtn.addEventListener("click", closeLib);
+  libBackEl.addEventListener("click", closeLib);
+  libOpenBtn.addEventListener("click", openLib);
+  libOpenBtn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openLib(); } });
+  libCatsEl.addEventListener("click", (e) => {
+    const c = e.target.closest(".cat");
+    if (!c) return;
+    libSelCat = c.dataset.cat;
+    renderCats();
+    renderList();
+  });
+  libListEl.addEventListener("click", (e) => {
+    const it = e.target.closest(".libitem");
+    if (it) openArt(it.dataset.art);
+  });
+  let libQTimer = null;
+  libQEl.addEventListener("input", () => { clearTimeout(libQTimer); libQTimer = setTimeout(() => { renderList(); if (!curArt) renderIntro(); }, 160); });
+  document.querySelectorAll(".libtab").forEach(b => b.addEventListener("click", () => showLibTab(b.dataset.libtab)));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !libWrapEl.hidden) closeLib();
+  });
+  ensureCat().catch(() => {});
+
+  load();
+})();
+</script>
+</body>
+</html>
