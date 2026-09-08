@@ -1,0 +1,586 @@
+// ============================================================================
+// WEBUNTU BUSINESS — a fictional Debian-based business OS ("Webuntu 12, Iron
+// Ledger") that runs in your browser on Perchance, styled with the Rathji
+// palette. It is the business edition of the Webuntu desktop: the gaming /
+// hobby content is replaced by a suite of 11 embedded Perchance generators —
+// The Ledger (bookkeeping), sys-plan (system boards), Chance Code (IDE),
+// Diagram It (IT diagrams), Atomic Roadmap (AI backlogs), Perch Edit (code
+// editor), Project Master (PM suite), AI Voice Assistant, File Format
+// Converter, Todo Checklist and Voice Assistant — plus native business apps
+// (Mail, Notes, File Manager, Finance folder, AI Assistant, Browser, ...).
+// Prior roadmap history (v1 gaming era) lives on in src/ROADMAP.md.
+// ============================================================================
+
+$meta
+  title = Webuntu Business OS
+  description = Webuntu Business 12 "Iron Ledger" — a fictional Debian-inspired business desktop that runs in your browser: full shell with Start menu, window manager, virtual filesystem, login screen, and a pre-installed suite of Perchance productivity apps (The Ledger, Project Master, Atomic Roadmap, sys-plan, Diagram It, Chance Code, Perch Edit, Todo Checklist, File Format Converter + AI/voice assistants). Includes AI desktop Assistant, voice dictation, AI Images, Mail, Software Center, and realtime Perch Chat.
+  tags = os, desktop, business, productivity, finance, ai
+  image = https://user.uploads.dev/file/1f7aa97804ff60d12a0d8a6fef74f075.png
+  header
+    mode = minimal
+
+// --- POST-52, Task 57: Online presence + chat (server-plugin) -----------------
+// Adds the realtime server used by the tray "N online" indicator and the
+// Perch Chat app (server code lives in index.html's text/x-server-plugin block).
+createServerSocket = {import:server-plugin}
+
+// --- PHASE 10, Task 77: Webuntu Assistant -------------------------------------
+// The AI layer: generateText powers the Assistant chat; generateImage lets the
+// Assistant create images on demand (save to Pictures / set as wallpaper).
+generateText = {import:ai-text-plugin}
+generateImage = {import:text-to-image-plugin}
+
+// --- PHASE 10, Task 79: Voice everywhere ---------------------------------------
+// The voice layer: voiceTools powers the tray-mic dictation (Win+H style) and
+// the Assistant reading replies aloud via TTS. gh = GitHub data, uploadPlugin
+// hosts files, kv backs the (legacy) native Projects module + settings.
+voiceTools = {import:voice-tools-plugin}
+gh = {import:github-data-plugin}
+uploadPlugin = {import:upload-plugin}
+kv = {import:kv-plugin}
+
+// --- Phase 1, Task 1: Distro identity -----------------------------------------
+// Data object consumed by the About screen, boot screen, Terminal & Settings.
+// Access any field as root.distro.<field>.evaluateItem
+
+distro
+  name = Webuntu Business
+  codename = Iron Ledger
+  version = 12
+  edition = Business
+  basedOn = Debian 12
+  desktopEnv = Perch Desktop
+  kernel = 6.8.0-perch-mint
+  shell = Perch Shell
+  tagline = The browser desktop for your business — books, plans, boards and code on Perchance.
+  fullName = [this.name] [this.version] "[this.codename]"
+
+// Convenience block for the About screen and the Terminal's `about-webuntu`
+// (neofetch-style) command. $output joins the lines with newlines.
+distroAboutText
+  OS: [distro.name] [distro.version] "[distro.codename]"
+  Edition: [distro.edition]
+  Based on: [distro.basedOn]
+  Desktop Environment: [distro.desktopEnv]
+  Kernel: [distro.kernel]
+  Default Shell: [distro.shell]
+  $output = [this.joinItems("\n")]
+
+// --- Phase 1, Task 2: Boot sequence ------------------------------------------
+// Pseudo-boot log lines cycled on the boot screen (index.html reads these via
+// root.bootLog.selectAll). Each line carries a `status` marker: ok|info|warn.
+
+bootLog
+  kernel
+    line = Loading kernel [distro.kernel]...
+    status = ok
+  mount
+    line = Mounting root filesystem...
+    status = ok
+  init
+    line = Starting Perch systemd...
+    status = info
+  hardware
+    line = Probing virtual hardware...
+    status = info
+  network
+    line = Bringing up network interfaces...
+    status = ok
+  ledger
+    line = Opening the ledger...
+    status = ok
+  wm
+    line = Initializing window manager...
+    status = info
+  theme
+    line = Loading Rathji theme...
+    status = warn
+  session
+    line = Starting user session...
+    status = ok
+
+// --- Phase 1, Task 3: Desktop root -------------------------------------------
+// Default desktop icons. These mirror the virtual-filesystem folders + the
+// flagship business suite; when the FS exists, the desktop reads its icons
+// from there instead. Each item: id, name (label), icon (emoji glyph),
+// color (tile accent), kind (app|folder|link), target (folder path / slug).
+
+desktopDefaults
+  ledger
+    id = the-ledger
+    name = The Ledger
+    icon = 🧾
+    color = #22c55e
+    kind = app
+  projectMaster
+    id = project-master
+    name = Project Master
+    icon = 📋
+    color = #34d399
+    kind = app
+  atomicRoadmap
+    id = atomic-roadmap
+    name = Atomic Roadmap
+    icon = 🗺️
+    color = #8b5cf6
+    kind = app
+  documents
+    id = documents
+    name = Documents
+    icon = 📄
+    color = #22d3ee
+    kind = folder
+    target = /home/user/Documents
+  finance
+    id = finance
+    name = Finance
+    icon = 💰
+    color = #22c55e
+    kind = folder
+    target = /home/user/Finance
+  projects
+    id = projects
+    name = Projects
+    icon = 🗂️
+    color = #8b5cf6
+    kind = folder
+    target = /home/user/Projects
+  softwareCenter
+    id = software-center
+    name = Software Center
+    icon = 🧩
+    color = #94a3b8
+    kind = app
+    singleton = true
+  trash
+    id = trash
+    name = Trash
+    icon = 🗑️
+    color = #64748b
+    kind = folder
+    target = /Trash
+
+// --- Phase 1, Task 4: Lock / login screen ------------------------------------
+// User profile shown on the login screen (avatar, name, host) and used by apps.
+
+user
+  name = user
+  host = webuntu
+  displayName = Business User
+
+// --- Phase 3, Task 14: Start menu app catalog ----------------------------------
+// The "installed" app set shown in the Start menu (and Software Center's
+// "Installed" tab). Fields: id, name, icon, color, category, blurb.
+// type=link opens a perchance slug in a new tab; stub marks a planned app.
+// Embed apps (the business suite) register a content builder in
+// window.AppContent via src/webapps.js (or src/perchedit.js for perch-edit).
+
+appCatalog
+  fileManager
+    id = file-manager
+    name = File Manager
+    icon = 📁
+    color = #22d3ee
+    category = Accessories
+    blurb = Browse files and folders
+    singleton = true
+  textEditor
+    id = text-editor
+    name = Text Editor
+    icon = 📝
+    color = #f59e0b
+    category = Accessories
+    blurb = Edit plain-text files
+    singleton = false
+  calculator
+    id = calculator
+    name = Calculator
+    icon = 🧮
+    color = #22c55e
+    category = Accessories
+    blurb = Add, subtract, multiply, divide
+    singleton = true
+  imageViewer
+    id = image-viewer
+    name = Image Viewer
+    icon = 🖼️
+    color = #ec4899
+    category = Accessories
+    blurb = View and zoom images
+    singleton = false
+  notes
+    id = notes
+    name = Notes
+    icon = 📓
+    color = #f59e0b
+    category = Accessories
+    blurb = Quick notes in Documents/Notes
+    singleton = true
+  weather
+    id = weather
+    name = Weather
+    icon = ⛅
+    color = #22d3ee
+    category = Accessories
+    blurb = Forecasts, radar and alerts
+    singleton = true
+  mail
+    id = mail
+    name = Mail
+    icon = ✉️
+    color = #ec4899
+    category = Accessories
+    blurb = Email client with folders & search
+    singleton = true
+  pdfViewer
+    id = pdf-viewer
+    name = PDF Viewer
+    icon = 📕
+    color = #ef4444
+    category = Accessories
+    blurb = Read PDF documents
+    singleton = true
+  browser
+    id = browser
+    name = Browser
+    icon = 🌐
+    color = #22d3ee
+    category = Internet
+    blurb = Browse Perchance generators
+    singleton = true
+  chat
+    id = chat
+    name = Perch Chat
+    icon = 💬
+    color = #22d3ee
+    category = Internet
+    blurb = Chat with people online
+    singleton = true
+  easyUploads
+    id = easy-uploads
+    name = Easy Uploads
+    icon = 📤
+    color = #22d3ee
+    category = Internet
+    blurb = Host a file or text and get a share link
+    singleton = true
+  terminal
+    id = terminal
+    name = Terminal
+    icon = ⌨️
+    color = #8b5cf6
+    category = System
+    blurb = The Perch shell
+    singleton = true
+  settings
+    id = settings
+    name = Settings
+    icon = ⚙️
+    color = #94a3b8
+    category = System
+    blurb = Customize Webuntu Business
+    singleton = true
+  softwareCenter
+    id = software-center
+    name = Software Center
+    icon = 🧩
+    color = #94a3b8
+    category = System
+    blurb = Browse and open apps
+    singleton = true
+  systemMonitor
+    id = system-monitor
+    name = System Monitor
+    icon = 📊
+    color = #8b5cf6
+    category = System
+    blurb = Watch CPU, RAM and uptime
+    singleton = true
+  taskManager
+    id = task-manager
+    name = Task Manager
+    icon = 🗂️
+    color = #f97316
+    category = System
+    blurb = Manage running apps and processes
+    singleton = true
+  assistant
+    id = assistant
+    name = Business Assistant
+    icon = 🧠
+    color = #7c6cff
+    category = AI & Voice
+    blurb = AI chat that can act on the OS
+    singleton = true
+  aiImages
+    id = ai-images
+    name = AI Images
+    icon = 🎨
+    color = #8b5cf6
+    category = AI & Voice
+    blurb = Generate images from a prompt
+    singleton = true
+  aiVoiceAssistant
+    id = ai-voice-assistant
+    name = AI Voice Assistant
+    icon = 🗣️
+    color = #ec4899
+    category = AI & Voice
+    blurb = Manage your day by voice (Perchance app)
+  voiceAssistant
+    id = voice-assistant
+    name = Voice Assistant
+    icon = 🎙️
+    color = #22d3ee
+    category = AI & Voice
+    blurb = A voice assistant for the OS (Perchance app)
+  theLedger
+    id = the-ledger
+    name = The Ledger
+    icon = 🧾
+    color = #22c55e
+    category = Finance
+    blurb = Bookkeeping, ledger & invoices (Perchance app)
+  projectMaster
+    id = project-master
+    name = Project Master
+    icon = 📋
+    color = #34d399
+    category = Planning
+    blurb = Projects, tasks, kanban & releases (Perchance app)
+  atomicRoadmap
+    id = atomic-roadmap
+    name = Atomic Roadmap
+    icon = 🗺️
+    color = #8b5cf6
+    category = Planning
+    blurb = Plan big builds one task at a time (Perchance app)
+  todoChecklist
+    id = todo-checklist
+    name = Todo Checklist
+    icon = ✅
+    color = #22d3ee
+    category = Productivity
+    blurb = Simple daily checklists (Perchance app)
+  fileFormatConverter
+    id = file-format-converter
+    name = File Format Converter
+    icon = 🔁
+    color = #f59e0b
+    category = Productivity
+    blurb = Convert anything between formats (Perchance app)
+  chanceCode
+    id = chance-code
+    name = Chance Code
+    icon = 💻
+    color = #7c6cff
+    category = Developer
+    blurb = Code editor for Perchance projects (Perchance app)
+  perchEdit
+    id = perch-edit
+    name = Perch Edit
+    icon = ⌨️
+    color = #7c6cff
+    category = Developer
+    blurb = Full browser-based code IDE
+    singleton = true
+  github
+    id = github
+    name = GitHub
+    icon = 🐙
+    color = #94a3b8
+    category = Developer
+    blurb = Search repos, stars and issues
+    singleton = true
+  diagramIt
+    id = diagram-it
+    name = Diagram It
+    icon = 📐
+    color = #22d3ee
+    category = Diagrams
+    blurb = IT, network & flowchart diagrams (Perchance app)
+  sysPlan
+    id = sys-plan
+    name = sys-plan
+    icon = 🧲
+    color = #f97316
+    category = Diagrams
+    blurb = System & architecture planning boards (Perchance app)
+  businessIntelligenceDashboard
+    id = business-intelligence-dashboard
+    name = Business Intelligence Dashboard
+    icon = 📈
+    color = #22d3ee
+    category = Business
+    blurb = KPIs, dashboards & reports (Perchance app)
+  businessCrm
+    id = business-crm
+    name = Business CRM
+    icon = 🤝
+    color = #34d399
+    category = Business
+    blurb = Customers, leads, deals & pipelines (Perchance app)
+  businessDocumentation
+    id = business-documentation
+    name = Business Documentation
+    icon = 📚
+    color = #f59e0b
+    category = Business
+    blurb = Docs, wikis & knowledge base (Perchance app)
+  businessPsa
+    id = business-psa
+    name = Business PSA
+    icon = ⏱️
+    color = #8b5cf6
+    category = Business
+    blurb = Professional services automation — projects, time & billing (Perchance app)
+
+// --- Phase 3, Task 15: Pinned apps for the system-bar launcher -----------------
+// App ids (from appCatalog above) shown as quick-launch icons in the taskbar.
+
+pinnedApps
+  assistant
+  file-manager
+  browser
+  terminal
+  the-ledger
+  project-master
+  software-center
+
+// --- Software Center catalog (store / "Available" tab) -------------------------
+// swcCategories keys drive the store's category filter; swcApps entries are the
+// browsable generator directory (each row opens the generator's own page).
+// The pre-installed business suite lives in appCatalog above, not here.
+
+swcCategories
+  tools
+    key = tools
+    name = Tools
+    icon = 🧰
+  finance
+    key = finance
+    name = Finance
+    icon = 💰
+  planning
+    key = planning
+    name = Planning
+    icon = 🗺️
+  developer
+    key = developer
+    name = Developer
+    icon = ⚙️
+  aiVoice
+    key = aiVoice
+    name = AI & Voice
+    icon = 🧠
+  communityHubs
+    key = communityHubs
+    name = Community
+    icon = 🕸️
+
+swcApps
+  queryArchive
+    slug = query-archive
+    title = Perchance Archive Search
+    icon = 🔎
+    color = #22d3ee
+    category = tools
+    source = Rathji
+    blurb = Full-text search across 110k+ generators
+  markdownEditor
+    slug = markdown-editor
+    title = Markdown Editor
+    icon = 📝
+    color = #22d3ee
+    category = tools
+    source = Community
+    blurb = Write and preview Markdown
+  passwordGenerator
+    slug = password-generator
+    title = Password Generator
+    icon = 🔐
+    color = #f59e0b
+    category = tools
+    source = Community
+    blurb = Strong passwords in one click
+  colorTools
+    slug = color-picker
+    title = Color Tools
+    icon = 🎨
+    color = #8b5cf6
+    category = tools
+    source = Community
+    blurb = Pick, tune and save colors
+  emojiPicker
+    slug = emoji-picker
+    title = Emoji Picker
+    icon = 😀
+    color = #f59e0b
+    category = tools
+    source = Community
+    blurb = Browse and copy emojis
+  qrCode
+    slug = qr-code
+    title = QR Code Generator
+    icon = ◼️
+    color = #94a3b8
+    category = tools
+    source = Community
+    blurb = Generate QR codes
+    comingSoon = true
+  randomNameGenerator
+    slug = random-name-generator
+    title = Random Name Generator
+    icon = 🏷️
+    color = #ec4899
+    category = tools
+    source = Community
+    blurb = Names for characters & places
+  rathjiPluginTemplate
+    slug = rathji-plugin-template
+    title = Rathji Plugin Template
+    icon = 📦
+    color = #8b5cf6
+    category = developer
+    source = Rathji
+    blurb = Scaffold your own plugin
+  gameMathPlugin
+    slug = game-math-plugin
+    title = Game Math Plugin
+    icon = ➗
+    color = #22d3ee
+    category = developer
+    source = Rathji
+    blurb = Math helpers for games
+  aiTextPlugin
+    slug = ai-text-plugin
+    title = AI Text Plugin
+    icon = ✍️
+    color = #22d3ee
+    category = communityHubs
+    source = Community
+    blurb = Text generation for any generator
+  textToImagePlugin
+    slug = text-to-image-plugin
+    title = Text-to-Image Plugin
+    icon = 🖼️
+    color = #ec4899
+    category = communityHubs
+    source = Community
+    blurb = Image generation for any generator
+  pluginDirectory
+    slug = plugins
+    title = Perchance Plugin Directory
+    icon = 🧩
+    color = #8b5cf6
+    category = communityHubs
+    source = Community
+    blurb = The official plugin catalog
+  rathjisGenerators
+    slug = rathjis-generators
+    title = Rathji's Generators
+    icon = 🧭
+    color = #7c6cff
+    category = communityHubs
+    source = Community
+    blurb = The primary shortcut source

@@ -1,0 +1,529 @@
+// ============================================================================
+//  BUSINESS ERP — PROJECT BACKLOG  (structured TODO checklist)
+//  ----------------------------------------------------------------------------
+//  WORKFLOW RULES (from the ERP spec):
+//   • Implement ONLY the first uncompleted [ ] task below, in order.
+//   • After implementing a task: write its validation tests, then flip its
+//     [ ] to [x], then STOP and await review before starting the next task.
+//   • Do NOT begin implementation work until the backlog is declared complete
+//     and the go-ahead is given.
+//  ----------------------------------------------------------------------------
+//  GENERATOR: business-erp ("Business ERP") — based on the business-template
+//  generator (config below + src/template.css + src/template.js). Pipeline
+//  partners this ERP reads from / writes to: idea-incubator (idea bundles →
+//  qualified leads), project-master (project seeds ⇄ state), the-ledger
+//  (ledger reconciliation). Master-data core shared by all modules: parties,
+//  catalog, chart of accounts.
+//
+//  PHASE 1 — ERP CORE: SHELL & DOCUMENT STORE
+//  [x] 1. Module shell & navigation — app frame with header + side navigation
+//         listing every module (Dashboard, CRM, Sales, Purchasing, Inventory,
+//         Projects, Finance, Reports), role-aware module visibility,
+//         consistent empty/loading/error states, layouts that work at phone
+//         and desktop widths.
+//  [x] 2. Canonical document store — persist every module's data as versioned
+//         JSON documents under the ERP's own storage namespace (one document
+//         per module, split by fiscal year where documents grow large), with
+//         locally cached edit keys and a fast local cache: records survive
+//         across devices/reloads and no write exceeds the storage ceiling.
+//  [x] 3. Sync, conflict & concurrency handling — reconcile the local cache
+//         against its canonical document on every startup; when the same
+//         document was edited on two devices since last sync, offer
+//         keep-mine / keep-theirs / field-level-merge resolution before any
+//         overwrite, and never silently discard either side's changes.
+//  [x] 4. Backup & restore — one-click full backup (downloadable file PLUS a
+//         published backup document covering every module) and a validated
+//         restore-from-backup flow; all writes idempotent so re-publishing
+//         identical content is a safe no-op.
+//  [x] 5. Capacity & archival — capacity view showing each module document's
+//         size against the storage ceiling, plus guided archival of old-period
+//         documents (e.g. closed prior fiscal years) to a clearly labeled
+//         read-only archive that remains retrievable on demand.
+//
+//  PHASE 2 — MASTER DATA & CONFIGURATION
+//  [x] 6. Party directory — one master list of parties typed customer /
+//         supplier / both, each with contacts, addresses, tax id, payment
+//         terms, credit limit, active status; a single rename/merge updates
+//         the whole system.
+//  [x] 7. Product & service catalog — entries typed product or service with
+//         unit of measure, default sale price, default cost, tax treatment,
+//         active flag; used consistently by sales, purchasing, inventory and
+//         invoicing.
+//  [x] 8. Chart of accounts & tax setup — configurable chart (codes, names,
+//         account classes) plus the default posting accounts the system
+//         auto-uses (AR, AP, inventory, COGS, sales revenue, tax collected,
+//         tax paid) and the tax-rate definitions applied to document lines.
+//  [x] 9. Fiscal settings & document numbering — business profile (name,
+//         address, currency, fiscal-year start) and sequential per-type
+//         document numbering (prefixes, zero-padded counters) that never
+//         reuses a number even after deletion, enforced across every module.
+//
+//  PHASE 3 — CRM & OPPORTUNITY PIPELINE
+//  [x] 10. CRM records — per-party record with source, owner, status,
+//          chronological activity/notes timeline, and follow-up reminders
+//          whose overdue items surface on the dashboard.
+//  [x] 11. Opportunity pipeline — stages (lead → qualified → proposal →
+//          won/lost), expected value, close date, probability; stage changes
+//          and wins are timestamped actions; a won opportunity can create a
+//          sales order or project in one step.
+//  [x] 12. CRM views — pipeline board, list, and per-party history views with
+//          totals and expected revenue by stage, filterable by owner, stage,
+//          date range.
+//  [x] 13. Pipeline ports — import idea-incubator bundles so incubated ideas
+//          arrive as qualified leads; export won opportunities as project
+//          seeds consumable by project-master.
+//
+//  PHASE 4 — SALES: QUOTES, ORDERS, INVOICES
+//  [x] 14. Quotes — catalog line items, manual line editing, discounting,
+//          automatic tax, validity/expiry, draft/sent/accepted/declined
+//          states; accepting converts to a sales order without retyping.
+//  [x] 15. Sales orders — created from accepted quotes or entered directly,
+//          per-line fulfillment state, delivery promises, status transitions
+//          (open → confirmed → shipped → delivered → invoiced), each stamped.
+//  [x] 16. Invoicing from orders — invoices generated from delivered order
+//          lines with partial invoicing allowed; each carries order + party
+//          references and posts automatically to the ledger when created.
+//  [x] 17. Backorders & stock checks — on confirmation check lines against
+//          available stock, split shippable vs backordered, raise purchasing
+//          shortfall automatically, relieve backorders in order-date order as
+//          stock arrives.
+//  [x] 18. Credit notes — full or partial credit notes against invoices with a
+//          required reason; reverse the invoice's ledger postings and mark
+//          the invoice credited.
+//
+//  PHASE 5 — PURCHASING & INVENTORY
+//  [x] 19. Inventory & stock movements — stock per product/location from an
+//          append-only movement log (receipt, issue, adjustment, transfer)
+//          with dates; current quantities derived, never free-edited.
+//  [x] 20. Purchase orders — lines, expected dates, receipt status; goods
+//          receipt posts stock-in at purchase cost and raises the supplier
+//          bill for the ledger in the same action.
+//  [x] 21. Bills & supplier payments — bills from POs or direct, due dates and
+//          aging; payments post cash-out and clear the referenced bill.
+//  [x] 22. Reorder suggestions — reorder points from current stock and recent
+//          usage, presented as a suggested PO that can be finalized and sent
+//          in one action.
+//  [x] 23. Stock valuation & COGS — moving-average valuation derived from the
+//          movement log; each sale posts COGS automatically so inventory
+//          value ties out to the ledger at any date.
+//
+//  PHASE 6 — PROJECTS, TIME & SERVICE DELIVERY
+//  [x] 24. Projects — linked to a party and optionally a sales order, with
+//          milestones (statuses, planned dates) and whole-project
+//          profitability vs budget.
+//  [x] 25. Tasks & timesheets — tasks under projects/milestones with assignees
+//          and states; time entries (date, hours, billable flag, rate);
+//          running billable-time vs budget totals on the project.
+//  [x] 26. Expenses & progress billing — record project expenses (linked to
+//          purchases or manual) and generate progress invoices from completed
+//          milestones or logged billable time through the same invoice
+//          mechanics as sales.
+//  [x] 27. Project state ports — publish project/billing-event bundles for the
+//          earlier pipeline; ingest project-master's and the-ledger's
+//          receipts back into the ERP project timeline.
+//
+//  PHASE 7 — FINANCE: LEDGER, AR/AP, PERIOD CLOSE
+//  [x] 28. Double-entry journals — balanced debit/credit lines with source
+//          document reference and memo; unbalanced entries rejected; posted
+//          entries immutable except via reversing entry (full audit trail).
+//  [x] 29. Automatic postings map — every money/stock event posts to the
+//          configured accounts at correct dates (invoice → AR+revenue+tax;
+//          payment → bank+AR; bill → expense/inventory+AP; goods sale →
+//          COGS+inventory); any posting failure stops the action and names
+//          the offending document.
+//  [x] 30. Receivables & payables — per-party balances with aging buckets
+//          (current/30/60/90+), statement view, payment application with
+//          partial payments and splits across invoices.
+//  [x] 31. Bank & cash accounts — manual register plus statement-matching
+//          workflow marking transactions cleared so reported cash reconciles
+//          to the bank statement.
+//  [x] 32. Period close & financial statements — trial balance with drill-down
+//          to every posted entry, P&L and balance sheet for any date range,
+//          fiscal-period close that locks posting periods and rolls net
+//          income to retained earnings, with a documented reopen procedure.
+//
+//  PHASE 8 — DASHBOARD, REPORTS & DATA UTILITIES
+//  [x] 33. Dashboard KPIs — cash position, receivables/payables, open orders
+//          and POs, overdue invoices/bills/follow-ups, revenue this period vs
+//          last, top customers, low-stock alerts; each KPI clickable through
+//          to its source list.
+//  [x] 34. Report library — saved report definitions per module (sales by
+//          period/customer/product, purchasing spend, project profitability,
+//          aged receivables, inventory valuation, tax summary); every report
+//          exportable to CSV and printable.
+//  [x] 35. Guided CSV import — parties, catalog items, opening balances, stock
+//          counts from CSV with a preview-and-fix step reporting each
+//          row-level error before anything is committed.
+//  [x] 36. Audit log — read-only, searchable, chronological log of every
+//          state-changing action (created/edited, status changed, posted or
+//          reversed, settings changed) with actor, timestamp, before/after
+//          summary.
+//
+//  PHASE 9 — QUALITY, TESTS & DOCUMENTATION
+//  [x] 37. Accounting invariant checks — books always balance (every posted
+//          journal sums to zero; AR/AP tie to invoice/bill states; inventory
+//          value ties to the movement log; cash ties to the register), re-run
+//          after every finance-affecting action, shown as a visible
+//          system-health indicator.
+//  [x] 38. Round-trip fixture suite — fixture documents for every module plus
+//          earlier-pipeline bundles (incl. older schema versions and
+//          malformed payloads), with automated tests for store save/load, sync
+//          conflicts, backup/restore, and full quote → order → delivery →
+//          invoice → payment chains.
+//  [x] 39. Error copy & recovery — every failure mode (document too large,
+//          quota reached, lost edit key, offline divergence, schema mismatch,
+//          unbalanced entry) shows a plain-language, actionable message with
+//          the exact next step.
+//  [x] 40. README & module playbook — architecture (module framework, document
+//          store layout, numbering rules, automatic-posting map, backup
+//          schedule), full user workflow per module, and the checklist for
+//          adding a new ERP module (declare documents → numbering →
+//          auto-postings → register in navigation → dashboard KPIs).
+//
+//  PHASE 10 — OPTIONAL: MULTI-USER & REALTIME COLLABORATION
+//  [ ] 41. Role & access model — roles (owner/manager/staff) scoped per
+//          module; every action authorized server-side, not just hidden in
+//          the UI.
+//  [ ] 42. Realtime hub — companion hub on realtime server capabilities keeps
+//          a lightweight index of document versions and broadcasts change
+//          events per module topic while payloads stay in the document store.
+//  [ ] 43. Concurrent editing experience — two users on the same record see
+//          each other's saved changes live with a changed marker and inline
+//          conflict resolution, degrading gracefully to polling when the hub
+//          is unreachable.
+//  [ ] 44. Multi-user audit & rate control — hub auth by role, rate-limited
+//          connections grouped by coarse network signals; every remote change
+//          flows through the same idempotent version-checked document layer
+//          so the audit log records the true actor even in multi-user mode.
+// ============================================================================
+$meta
+  title = Business ERP
+  description = A small-business ERP for Perchance — CRM & opportunities, sales (quotes → orders → invoices), purchasing & inventory, projects & time, and double-entry bookkeeping on one shared master-data core, built on the business-template foundation.
+  image = https://user.uploads.dev/file/2ae7aade766d2ceb4effdd9f079186b5.jpg
+  tags = erp, business, crm, sales, purchasing, inventory, projects, accounting
+  header 
+    mode = minimal
+
+superFetch = {import:super-fetch-plugin}
+charts = {import:data-visualization-plugin}
+uploadPlugin = {import:upload-plugin}
+generateText = {import:ai-text-plugin}
+createServerSocket = {import:server-plugin}
+
+// ============================================================================
+//  BUSINESS TEMPLATE  —  CONFIGURATION
+// ============================================================================
+//
+//  Everything the page shows lives in the `config` list below — this is the
+//  place to fill in YOUR company and product details. The page renders
+//  entirely from it, and the settings panel (gear button, bottom-right)
+//  can also be used to preview colors, scan a website for brand-matching
+//  color schemes, and import/export the whole configuration as JSON.
+//
+//  ── JSON import/export format ─────────────────────────────────────────────
+//  The exported JSON mirrors this structure exactly. Imports may be PARTIAL —
+//  any missing field falls back to these defaults. The full field-by-field
+//  guide with types lives in the settings panel → "Import & Export".
+//
+//  {
+//    schemaVersion: "1.0.0",
+//    branding:  { companyName, companyShortName, companyUrl, logoGlyph, logoUrl,
+//                 tagline, contactEmail, contactPhone, address, footerText },
+//    theme:     { mode: "light"|"dark", accentStyle: "gradient"|"solid", radius,
+//                 fontSize (15–18), fontFamily, reduceMotion (true|false) },
+//    colors:    { primary, secondary, accent, background, surface,
+//                 text, textMuted },                     // hex colors
+//    product:   { name, badge, headline, headlineAccent, subheadline,
+//                 primaryCta, primaryCtaUrl, secondaryCta, secondaryCtaUrl,
+//                 status },
+//    trustedBy: [ "Client name", ... ],
+//    features:  [ { icon, title, description }, ... ],
+//    stats:     [ { value, suffix, label }, ... ],
+//    how:       [ { title, description }, ... ],
+//    showcase:  { heading, description, points: [ ... ] },
+//    testimonials: [ { quote, name, role, company }, ... ],
+//    cta:       { heading, description, buttonText, buttonUrl },
+//    manual:    { heading, description, chapters: [ { title, body }, ... ] },
+//    faq:       [ { question, answer }, ... ],
+//    footer:    { columns: [ { heading, links: [ { label, url }, ... ] }, ... ] },
+//    admin:     { showSettingsButton }
+//  }
+//
+//  Editing tips:
+//  • Add or remove list items in any `…` list (features, stats, faq …) —
+//    just add/remove numbered items like f1, f2, …
+//  • Strings are written raw (no quotes). Numbers and true/false are kept
+//    as numbers/booleans automatically.
+//  • In footerText, \{year\} and \{companyName\} are placeholders that get
+//    filled in automatically.
+// ============================================================================
+
+config
+  schemaVersion = 1.0.0
+
+  // ── Company / brand identity ─────────────────────────────────────────────
+  branding
+    companyName = Business ERP         // ← your company name (header, footer, copyright)
+    companyShortName = Business ERP    // compact variant for narrow screens (optional)
+    companyUrl = https://perchance.org/business-erp  // ← your website (links the logo & footer)
+    logoGlyph = B                      // single letter/monogram in the logo mark
+    logoUrl =                          // optional square logo image — upload it in the
+                                       //   settings panel (Branding → Logo image) to get a
+                                       //   hosted URL; shown instead of the letter mark
+    tagline = CRM, sales, stock, projects and books — one system that stays in sync
+    contactEmail = hello@your-company.com
+    contactPhone = +1 (555) 010-0000
+    address = 123 Main Street, Suite 100, Anytown, USA
+    footerText = © \{year\} \{companyName\}. All rights reserved.
+
+  // ── Visual theme ─────────────────────────────────────────────────────────
+  theme
+    mode = light                      // light | dark
+    accentStyle = gradient            // gradient | solid (how CTAs & highlights are filled)
+    radius = 16                       // corner radius in px
+    fontSize = 16                     // base text size in px (15 = small, 16 = normal, 18 = large)
+    fontFamily = lato                 // font pairing: lato | inter | roboto | open-sans | source-sans |
+                                      //   ibm-plex | dm-sans | manrope | montserrat-lato |
+                                      //   playfair-lato | merriweather-inter
+    reduceMotion = false              // true disables animations & transitions
+
+  // ── Brand palette (hex colors) ───────────────────────────────────────────
+  colors
+    primary = #0a58ca                 // trust blue — main brand color, buttons, links, highlights
+    secondary = #6ea8fe               // soft blue — gradients, charts, avatars
+    accent = #084298                  // deep blue — stars, badges, small details
+    background = #f8f9fa              // page background
+    surface = #ffffff                 // cards & section backgrounds
+    text = #212529                    // main text
+    textMuted = #6c757d               // secondary text
+
+  // ── Product / project — the hero section ──────────────────────────────────
+  product
+    name = Business ERP
+    badge = Small-business ERP
+    headline = Run your whole business on one system.
+    headlineAccent = one system.      // word(s) highlighted in the brand gradient
+    subheadline = Quotes become orders, orders become invoices, stock moves, projects track time, and every transaction flows into the books — automatically.
+    primaryCta = Get started
+    primaryCtaUrl = #
+    secondaryCta = See how it works
+    secondaryCtaUrl = #how
+    status = ERP core · rolling out     // small status chip under the CTAs (empty to hide)
+
+  // ── "Trusted by" strip ────────────────────────────────────────────────────
+  trustedBy = [["Acme Corp","Globex Industries","Initech","Umbrella Systems","Stark Enterprises","Wayne Group"]]
+
+  // ── Feature grid (3–8 cards) ──────────────────────────────────────────────
+  features
+    f1
+      icon = zap
+      title = Instant deployments
+      description = Ship updates in seconds with automated build and release pipelines baked in from day one.
+    f2
+      icon = shield
+      title = Enterprise-grade security
+      description = Role-based access, audit logs, and encryption at rest keep your data protected at every layer.
+    f3
+      icon = globe
+      title = Global by default
+      description = Run in regions worldwide with automatic failover and a 99.99% uptime guarantee.
+    f4
+      icon = chart
+      title = Actionable analytics
+      description = Real-time dashboards and reports give your team the visibility it needs to make confident decisions.
+    f5
+      icon = layers
+      title = Modular architecture
+      description = Clean, documented APIs and pluggable components make the system easy to extend and maintain.
+    f6
+      icon = code
+      title = Developer friendly
+      description = Comprehensive docs, typed SDKs, and a CLI that fits naturally into your existing workflow.
+
+  // ── Stats band ────────────────────────────────────────────────────────────
+  stats
+    s1
+      value = 99.99
+      suffix = %
+      label = Uptime SLA
+    s2
+      value = 12
+      suffix = k+
+      label = Active users
+    s3
+      value = 40
+      suffix = +
+      label = Countries served
+    s4
+      value = 24
+      suffix = /7
+      label = Dedicated support
+
+  // ── Analytics charts (business graphs) ───────────────────────────────────
+  // Rendered with the data-visualization-plugin. Three charts: revenue (line),
+  // leads (bars) and channels (donut). In pjs list syntax, single arrays are
+  // wrapped in one extra [ ] — so labels = [["Jan","Feb",…]] etc.
+  charts
+    enabled = true
+    heading = Performance at a glance
+    description = A live look at the metrics your team cares about most — revenue, pipeline and where your traffic comes from.
+    revenue
+      title = Monthly revenue
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      series
+        s1
+          name = This year
+          data = [[42,48,45,52,58,63,70,74,82,90,95,112]]
+        s2
+          name = Last year
+          data = [[30,34,38,41,45,49,54,58,61,66,70,78]]
+    leads
+      title = New leads per month
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      values = [[120,135,128,150,168,182,205,198,226,248,270,305]]
+    channels
+      title = Traffic sources
+      values = [[["Organic search",38],["Paid ads",24],["Referrals",18],["Social media",12],["Direct",8]]]
+
+  // ── "How it works" steps (3) ──────────────────────────────────────────────
+  how
+    h1
+      title = Connect
+      description = Bring your existing tools and data. Step-by-step migration guides make the switch painless.
+    h2
+      title = Configure
+      description = Set up roles, branding, and workflows in minutes with guided, zero-code onboarding.
+    h3
+      title = Launch
+      description = Go live with confidence. We monitor, scale, and support you around the clock.
+
+  // ── Showcase section (left column) ────────────────────────────────────────
+  showcase
+    heading = Built to be dependable
+    description = Under the hood, everything is engineered for transparency and control — so your team can move fast without surprises.
+    points = [["A single source of truth for your team's workflow","Integrates with the tools you already use","Scales from a small team to the whole enterprise"]]
+
+  // ── Testimonials (3) ──────────────────────────────────────────────────────
+  testimonials
+    t1
+      quote = We rolled this out to our entire team in a day — the smoothest onboarding we've experienced with any platform.
+      name = Sarah Chen
+      role = Head of Operations
+      company = Acme Corp
+    t2
+      quote = The reliability speaks for itself: zero downtime across six months of heavy production use.
+      name = Marcus Reid
+      role = CTO
+      company = Globex Industries
+    t3
+      quote = It replaced three separate tools and paid for itself within the first quarter. Our teams love it.
+      name = Amara Okafor
+      role = Product Lead
+      company = Initech
+
+  // ── Final call-to-action band ─────────────────────────────────────────────
+  cta
+    heading = Ready to take the next step?
+    description = Join the teams that ship with confidence. Set up your workspace today — no credit card required.
+    buttonText = Get started today
+    buttonUrl = #
+
+  // ── Product manual (documentation chapters) ──────────────────────────────
+  // A docs-style section with a contents sidebar. Each chapter renders as a
+  // numbered card with a title and body text. Add/remove chapters like m1, m2…
+  // (body is a single string — use the settings panel or a JSON import if you
+  // want real paragraph breaks).
+  manual
+    heading = Product manual
+    description = A guided walkthrough of the product — from first log-in to everyday workflows, admin and support.
+    chapters
+      m1
+        title = Getting started
+        body = Create your account, invite teammates, and complete your first project from template to launch in under an hour.
+      m2
+        title = Installation & setup
+        body = Guided onboarding covers roles, integrations and branding, with step-by-step migration guides that make switching from your existing tools painless.
+      m3
+        title = Everyday workflows
+        body = Build, review and ship from one workspace. Dashboards, notifications and automations keep the whole team aligned.
+      m4
+        title = Admin, billing & support
+        body = Manage users and permissions, review usage and invoices, and reach our 24/7 support team from the help center.
+
+  // ── FAQ accordion ─────────────────────────────────────────────────────────
+  faq
+    q1
+      question = How long does it take to get started?
+      answer = Most teams are up and running within a day. Guided onboarding covers setup, team invites, and integration with your existing tools.
+    q2
+      question = Can we use our existing tools and data?
+      answer = Yes. Migration guides and adapters cover the most common tools and formats, and our team can assist with custom integrations.
+    q3
+      question = Is our data secure?
+      answer = Data is encrypted in transit and at rest, access is role-based and audited, and deployments run in regions of your choice.
+    q4
+      question = What does it cost?
+      answer = Pricing scales with your team and usage. Contact us for a tailored quote — most teams start small and grow with the platform.
+    q5
+      question = What kind of support do we get?
+      answer = Every plan includes access to documentation and community support. Priority plans add a 24/7 support line with guaranteed response times.
+
+  // ── Footer link columns ───────────────────────────────────────────────────
+  footer
+    columns
+      col1
+        heading = Product
+        links
+          l1
+            label = Features
+            url = #features
+          l2
+            label = How it works
+            url = #how
+          l3
+            label = Pricing
+            url = #cta
+          l4
+            label = FAQ
+            url = #faq
+      col2
+        heading = Company
+        links
+          l1
+            label = About
+            url = #
+          l2
+            label = Careers
+            url = #
+          l3
+            label = Contact
+            url = #
+          l4
+            label = Press kit
+            url = #
+      col3
+        heading = Resources
+        links
+          l1
+            label = Documentation
+            url = #
+          l2
+            label = API reference
+            url = #
+          l3
+            label = System status
+            url = #
+          l4
+            label = Community
+            url = #
+
+  // ── Editor / admin behavior ───────────────────────────────────────────────
+  admin
+    showSettingsButton = true         // shows the ⚙ panel used to configure, scan & export
+
+  // ── ERP application settings ──────────────────────────────────────────────
+  // Read by src/erp.js at boot. Role-aware module visibility (Task 1) uses
+  // roleDefault until the server-authorised role model lands in Phase 10.
+  erp
+    version = 0.1.0
+    roleDefault = owner               // owner | manager | staff

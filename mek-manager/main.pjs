@@ -1,0 +1,202 @@
+// ============================================================================
+//  BATTLETECH MERCENARY MANAGER — main.pjs
+//  A fan-made management sim: run the business & personnel side of a
+//  BattleTech mercenary company; battles are AI-simulated and narrated.
+//
+//  STATUS  (full spec: src/ROADMAP.md)
+//  • All 21 roadmap tasks (7 phases) are implemented and verified —
+//    flip an item's `done` back to false in the `features` list below
+//    to track new work; the on-page Roadmap panel re-renders from it.
+//
+//  ARCHITECTURE  (business-template pattern)
+//  • main.pjs        — $meta, plugin imports, config, roadmap checklist
+//  • index.html      — static shell: header/HUD/nav, screen sections,
+//                      new-game modal; loads src/*.js in dependency order
+//  • src/base.css    — design system (tokens + all component styles)
+//  • src/framework.js— BT: config/theme loader, roadmap panel, UI helpers
+//  • src/data.js     — D: eras, factions, weapons, mechs, missions, names
+//  • src/core.js     — MGM: company/unit/person generation, market & offers,
+//                      battle simulation, finance, events, save sanitizer
+//  • src/ai.js       — BMGA: generateText/image narration with fallbacks
+//  • src/ui.js       — BMUI: screen & modal renderers
+//  • src/game.js     — BMG: boot/router/actions, deploy & battle flow,
+//                      event queue, save/load/new-game/bankruptcy flows
+//  • src/ROADMAP.md  — roadmap spec    • src/README.md — dev notes
+// ============================================================================
+
+$meta
+  title = BattleTech Mercenary Manager
+  description = Fan-made management sim: hire pilots, maintain mechs, take contracts, and read the AI-simulated after-action reports of your mercenary company.
+  tags = battletech, management, sim, mech, mercenary, game, strategy
+  header
+    mode = minimal
+
+// ── Plugin imports (roadmap-driven) ─────────────────────────────────────────
+generateText = {import:ai-text-plugin}       // P5/P1: narrative after-action reports, personalities & voices
+generateImage = {import:text-to-image-plugin} // P1/P5/P6: portraits, battle-scene & salvage art
+kv = {import:kv-plugin}                      // P2/P7: persistent company saves (ledger, roster, mechbay)
+
+// ============================================================================
+//  CONFIG — theme & branding for the whole app. Read explicitly into a plain
+//  object by src/framework.js at boot; edit the values here to restyle.
+// ============================================================================
+config
+  schemaVersion = 0.1.0
+
+  branding
+    companyName = BattleTech Mercenary Manager
+    companyShortName = Merc Manager
+    logoGlyph = M
+    tagline = For the right price, we'll break anything.
+    footerText = © \{year\} \{companyName\} — unofficial fan project
+
+  theme
+    mode = dark                  // dark | light — see note in src/README.md
+    accentStyle = gradient       // gradient | solid
+    radius = 14                  // px corner radius
+    fontSize = 16                // base px (14–20)
+    fontFamily = rajdhani-inter  // rajdhani-inter | lato | inter
+    reduceMotion = false
+
+  // primary/secondary/accent apply to both light and dark mode;
+  // background/surface/text/textMuted tune the DARK theme's neutrals
+  // (light mode uses its own neutral defaults in framework.js).
+  // ── BATTLETECH THEME: olive-drab hull, battle-amber highlights ──
+  colors
+    primary = #e2a63b            // battle-amber — actions, highlights, logo
+    secondary = #5f6f3f          // olive drab — gradients, secondary UI
+    accent = #9aa75a             // army/CRT green — chips, small details
+    background = #0f120b         // olive-black hull
+    surface = #161a11            // armored panels
+    text = #e7e1ce               // bone white
+    textMuted = #968e74          // khaki
+
+  admin
+    showSettingsButton = false   // future config panel
+
+// ============================================================================
+//  FEATURES — roadmap checklist (the live TODO list; mirrors src/ROADMAP.md).
+//  UPDATE AS WE WORK: flip an item's `done` from false to true once its task
+//  is implemented and verified. Keys f1..f21 map 1:1 to roadmap tasks 1..21.
+//  Rendered on the page by renderRoadmap() in src/framework.js.
+// ============================================================================
+features
+
+  // ── Phase 1 · Personnel & Unit Foundation ──────────────────────────────────
+  f1
+    phase = 1
+    title = Pilot & Staff Generation
+    desc = Personnel (Pilots/Techs/Support) with unique IDs, age & appearance, personality traits, quirks, personal motivations and generated backstories; AI portrait prompts derive from each person's look.
+    done = true
+  f2
+    phase = 1
+    title = Mech Data Model
+    desc = Mech chassis, faction origin, provenance (founding/market/salvage), condition (per-location HP/Armor), equipped weapons plus critical internal components (gyro, engine, cockpit, sensors, heat sinks, jump jets) that take battle damage, reduce combat power and drive repair costs.
+    done = true
+  f3
+    phase = 1
+    title = Personnel Mapping
+    desc = Pilot↔Mech assignments editable from the roster dossier, mechbay cards and at deploy; mech readiness reflects pilot availability (injured/down/no-pilot states); Techs & Support on payroll; firing a pilot releases their machine.
+    done = true
+  f4
+    phase = 1
+    title = Personnel Interaction System
+    desc = Personality surfaces everywhere: trait-driven battle moments, post-battle victory/defeat quotes from survivors, trait-flavored voice lines, and a relationship (bond) system — rivalries, buddies, shipmates, mentors — formed on hiring, shown in dossiers, and driving company events (old grudges, shipmates' pranks).
+    done = true
+
+  // ── Phase 2 · Financial & Resource Management ──────────────────────────────
+  f5
+    phase = 2
+    title = Company Ledger
+    desc = Full C-bill ledger with live cash-flow analytics: all-time and trailing-4-week income/expense/net, per-category breakdown chips (contracts, payroll, upkeep, repairs, hiring, refits, loans), weekly burn and a runway projection with a LOW RUNWAY warning, alongside the 30-row transaction list.
+    done = true
+  f6
+    phase = 2
+    title = Market Logic
+    desc = Buy/sell mechs, parts & equipment with era-gated supply, used-new condition pricing and inventory sell-off. Market mood refreshes every two weeks: a per-cycle demand factor (war-boom seller's market, buyer's market, or steady trade) plus era tech-scarcity pricing (tech & mech era multipliers) drive price swings, with a live market-conditions strip showing mood and era flavor.
+    done = true
+  f7
+    phase = 2
+    title = Payroll & Logistics Loop
+    desc = Recurring weekly billing cycle: payroll from staff count & role (pilot/tech/support salaries scale with skill & gunnery) plus a maintenance & logistics bill that responds to equipment quality — per-mech upkeep scales with armor wear and damaged/destroyed internals (components add up to +40%), while each active tech cuts upkeep 3% (to −30% cap). Advance week levies payroll, maintenance and 8% loan interest; a Payroll & Logistics breakdown on the Company screen shows the burn by role, per-mech base, tech efficiency and component-wear penalty.
+    done = true
+
+  // ── Phase 3 · Era & World Setting ──────────────────────────────────────────
+  f8
+    phase = 3
+    title = Era Configuration
+    desc = Era selector (Succession Wars → Clan Invasion → Civil War → FedCom Civil War → Jihad → Dark Age) with era dossier stats on the new-game screen. Each era gates available tech (era-valid weapon/machine pools; Clan hardware appears from the Invasion on), the market's mech & weapon catalog, enemy faction pools (era min/max), and LosTech cache rates (scarcity falls, LosTech rises over time). Starting lances are era-valid and salvage pulls era-appropriate hardware — a Succession Wars company never finds a Gauss rifle.
+    done = true
+  f9
+    phase = 3
+    title = Faction Relationship Matrix
+    desc = Standing (-10..+10) with every Inner Sphere & Clan faction, earned in battle (victory +3 / partial +1 / defeat -3, attacking a House's world costs rep) and eroded by events. Reputation drives contracts: pay multiplier, salvage terms, offer availability, and rep-gated mission types (base defense/capture at rep 1, assassination at 3, objective raids at 4, Clan Trials at 6). It also drives pricing — each market cycle has a Dealer faction whose trust shifts buy & sell prices (up to ±6%), shown in the market-conditions strip. Rep slowly decays toward zero weekly, so standing must be maintained.
+    done = true
+
+  // ── Phase 4 · Mission Market & Contract Logic ──────────────────────────────
+  f10
+    phase = 4
+    title = Contract Generator
+    desc = Mission types: assassination, base defense, capture/escort, raid, recon, garrison, objective raid, Clan Trial. Mission types are weighted 3x for factions that favor them (each faction has a favor list), and pools are rep-gated, era-aware, and clan-aware. Generated contracts carry a full parameter set: employer, target faction, planet, terrain, threat, pay, salvage %, duration, and victory condition — all shown on the board cards.
+    done = true
+  f11
+    phase = 4
+    title = Mission Parameters
+    desc = Every contract packs target strength (threat skulls, enemy force multiplier vs your lance power), terrain modifiers (12 biomes with accuracy effects from -15% swamp to +6% open plains; terrain is flavor-weighted per mission type — recon favors open ground, defense/garrison favor urban & ruins, Clan Trials are fought on formal open fields), victory conditions (per-mission objective text), and payout (pay × difficulty × reputation multiplier, salvage % negotiated). Terrain accuracy modifiers are shown on the board cards and in the deploy brief.
+    done = true
+  f12
+    phase = 4
+    title = Contract Acceptance Flow
+    desc = From the board: Brief & deploy → select up to 4 ready mechs (live lance-power tally, launch gated on selection, 4-machine cap) → pre-flight risk readout comparing your lance power against the estimated enemy force (comfortable / even odds / outgunned) → Launch drop rolls the sim → after-action report modal with AI narrative + battle image, then queued post-battle events. Stale contracts (refreshed off the board mid-modal) are caught with a clear toast.
+    done = true
+
+  // ── Phase 5 · AI Battle Simulation & Reporting ─────────────────────────────
+  f13
+    phase = 5
+    title = Combat Resolver
+    desc = Outcome engine from unit stats, terrain & mission type (no manual tactics). Seeded per-battle RNG (mulberry32); hits resolve across 8 locations (armor → internal structure → weapon/component loss; CT/cockpit/engine hits fatal, leg hits cripple). Accuracy from pilot Gunnery, company morale, and terrain modifier. Mission-specific AI: assassination hunts the target commander, capture guards the VIP, defense/garrison face reinforcement waves with hold-the-line break conditions, recon withdraws on intel complete, Clan Trials follow honor rules. Per-mission victory/partial/defeat resolution, XP & morale outcomes. Balance locked by sim sweeps: fresh company, regular difficulty ≈ 60% win / 10% partial / 30% defeat.
+    done = true
+  f14
+    phase = 5
+    title = Damage Calculation
+    desc = Component-level damage & pilot injuries during the simulation. Hits resolve across 8 hit locations (armor → internal structure → weapon loss by location → component damage/destroyed: engine, gyro, cockpit, sensors, heat sinks, jump jets); CT/cockpit/engine breaches are fatal, leg loss cripples. Destroyed mechs zero all locations/components and free their pilot; survivors get damage written back. Pilot injuries (killed in action, cockpit shrapnel) set 1-4 week injured status. Post-battle the Repair Bay prices repairs from the same damage model (armor, structure, destroyed weapons, component damage) — destroyed mechs can be rebuilt as a full rebuild. Battle XP improves gunnery/piloting/skill with on-field skill-up logging and salary recalibration.
+    done = true
+  f15
+    phase = 5
+    title = Narrative Report Generator
+    desc = Simulation logs → multi-paragraph reports with pilot personalities. The battle log's key moments (kills, component hits, traits, quotes, end conditions) are distilled and fed to the AI as an after-action brief with mission/employer/enemy/terrain/rounds/lance detail and a per-pilot personality line (callsign, background, traits, motivation) so the report reads as authored by the company's own people — pilots speak in their own voice. Reports stream into the modal with a loading indicator; if the AI is unavailable they fall back to a structured template report. Completed narratives are stored with the report and shown again from the Reports archive.
+    done = true
+  f16
+    phase = 5
+    title = Visual Asset Integration
+    desc = AI battle-scene images & pilot portraits from simulation results. The after-action report renders a battle illustration (planet, terrain & mood per outcome — victory/partial/defeat — generated at 768x512 from the battle's own params) into the report modal, and each pilot dossier can commission a portrait (built from build, hair, features & career into the prompt, 512x512). Portraits are cached in kv by pilot id so they persist, and both run through the text-to-image plugin with streaming loading states.
+    done = true
+
+  // ── Phase 6 · Salvage & Discovery ──────────────────────────────────────────
+  f17
+    phase = 6
+    title = Salvage Calculation
+    desc = Recoverable parts/mechs determined by simulation damage. Every enemy kill is rolled for salvage against your negotiated salvage rights (Clan hulls 10% harder), and how the machine died matters: catastrophic kills (ammo cook-off, core vent — ~35% of kills) leave 45% less recoverable value and produce lower-condition hulls, while clean kills yield better salvage. Recovered lots are staged as weapon parts (1-3 weapons), mech hulls (condition 12-60%, cheaper to restore when rougher), or scrap with a market value — all visible in the Salvage Bay with restore/sell/scrap/keep actions and bulk liquidate options.
+    done = true
+  f18
+    phase = 6
+    title = Salvage Processing
+    desc = Salvage Bay menu for every recovered lot with per-kind actions. Scrap is liquidated for C-bills (with a bulk "liquidate all" button), weapon parts can be kept for the refit bay or sold, and mech hulls can be restored (cost scales with condition — rougher hulls are cheaper), sold for their current value, or scrapped — restored machines join the mechbay with a salvage origin. Every transaction posts to the ledgers.
+    done = true
+  f19
+    phase = 6
+    title = Star League Cache Events
+    desc = LosTech cache discovery; extraction & security logic for rare hardware. Every operation rolls an era-driven cache chance (era LosTech rate, boosted on objective raids and Clan Trials). A discovery opens the Star League Cache event: formal excavation (safe but slow — 40% a rival claim arrives and you salvage scraps), fast extraction tonight (risky, but success grants a tier-2 prize with more rolls on the rare LosTech table — Gauss, ER PPC, ER large laser, UAC/10, LB-X/10 plus era weapons), or selling the coordinates to ComStar for clean C-bills. Event modal flow (incident kicker, body, choice hints, outcomes with real money/rep/morale effects) also drives the wider company-event pool after every battle.
+    done = true
+
+  // ── Phase 7 · Company Growth & Loop ────────────────────────────────────────
+  f20
+    phase = 7
+    title = Mechbay Management
+    desc = Refit mechs using purchased or salvaged parts. Full mechbay lifecycle: hull-integrity bar, weapon strip (destroyed ✕ markers) and component panels per machine; pilot assignment straight from the bay; repairs priced from the damage model with standard & rush (×2 cost) options, tech-count speed-up, weekly bay-progress ticks, and cancel-with-50%-refund; wrecked mechs can be fully rebuilt. The refit bay installs inventory weapons (25% labor, Clan-on-IS compatibility rules) and strips mounts back to parts; machines can be sold for current-condition value.
+    done = true
+  f21
+    phase = 7
+    title = Game Loop Integration
+    desc = Mission → Battle → Salvage → Finance → Refit as one cohesive loop. Take a contract from the board → deploy a lance → the resolver yields a battle with payout, reputation shifts, pilot injuries & XP, mech damage, and a salvage queue → Salvage Bay converts the haul into parts/hulls/cash → the weekly finance cycle (payroll, maintenance & logistics, 8% loan interest, era-paced market refresh, offer expiry, rep decay toward zero) funds the next moves → the mechbay repairs/rebuilds and the refit bay re-arms → repeat. Every stage feeds the next with real state — damage, injuries, parts inventory, the ledger — and the whole loop persists through kv saves with forward-compatible save patching.
+    done = true

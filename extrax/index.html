@@ -1,0 +1,829 @@
+<style>
+  :root{
+    --bg:#0e1016; --panel:#161a24; --panel2:#1d2331; --line:#272e40;
+    --text:#e8eaf2; --muted:#98a0b6; --accent:#8b5cf6; --accent2:#2cb67d;
+    --danger:#e5484d;
+  }
+  *{box-sizing:border-box}
+  html{color-scheme:dark}
+  body{
+    margin:0; text-align:left; background:var(--bg); color:var(--text);
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    min-height:100vh;
+  }
+  .wrap{max-width:1200px; margin:0 auto; padding:28px 20px 90px;}
+  header h1{
+    font-size:32px; margin:0 0 4px; letter-spacing:-.5px;
+    background:linear-gradient(90deg,#a78bfa,#34d399);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+  }
+  header p{color:var(--muted); margin:0 0 22px; font-size:15px;}
+  .capture{
+    display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    padding:12px; margin-bottom:10px;
+  }
+  #genInput{
+    flex:1; min-width:230px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:11px 14px;
+    font-size:15px; outline:none; transition:border-color .15s;
+  }
+  #genInput:focus{border-color:var(--accent)}
+  #captureBtn{
+    background:var(--accent); color:#fff; border:none; border-radius:10px;
+    padding:11px 20px; font-size:15px; font-weight:600; cursor:pointer;
+    transition:filter .15s;
+  }
+  #captureBtn:hover{filter:brightness(1.12)}
+  #captureBtn:disabled{opacity:.55; cursor:default}
+  .opt{display:flex; align-items:center; gap:7px; color:var(--muted); font-size:14px; cursor:pointer; user-select:none;}
+  .opt input{accent-color:var(--accent); width:16px; height:16px; cursor:pointer;}
+  #progress{
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:12px 16px; font-size:14px; color:var(--muted); margin-bottom:18px;
+    display:flex; align-items:center; gap:10px;
+  }
+  #progress.err{color:#ffb4b4; border-color:#5a2a2e; background:#24161a;}
+  .spin{
+    width:16px; height:16px; border-radius:50%; flex:none;
+    border:2px solid var(--line); border-top-color:var(--accent);
+    animation:sp .8s linear infinite;
+  }
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .toolbar{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    margin-bottom:16px; flex-wrap:wrap;
+  }
+  .count{color:var(--muted); font-size:14px;}
+  #searchInput{
+    background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:9px; padding:8px 12px; font-size:14px; outline:none; min-width:220px;
+  }
+  #searchInput:focus{border-color:var(--accent)}
+  .io{
+    display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+    margin:-6px 0 16px;
+  }
+  .io button{
+    border:1px solid var(--line); background:var(--panel2); color:var(--text);
+    border-radius:9px; padding:8px 14px; font-size:13px; cursor:pointer;
+    transition:all .12s; white-space:nowrap;
+  }
+  .io button:hover{border-color:var(--accent); color:#fff}
+  .io button:disabled{opacity:.5; cursor:default}
+  .io .prim{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  .io .prim:hover{filter:brightness(1.12); color:#fff}
+  .io .hint{color:var(--muted); font-size:12px; margin-left:2px;}
+  .grid{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:16px;
+  }
+  .card{
+    background:var(--panel); border:1px solid var(--line); border-radius:14px;
+    overflow:hidden; display:flex; flex-direction:column; transition:transform .12s, border-color .12s;
+  }
+  .card:hover{transform:translateY(-2px); border-color:#39415c;}
+  .thumb{height:180px; background:var(--panel2); position:relative;}
+  .thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+  .body{padding:14px 16px 16px; display:flex; flex-direction:column; gap:10px; flex:1;}
+  .head{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;}
+  .title{color:#fff; font-size:17px; font-weight:700; text-decoration:none;}
+  .title:hover{color:var(--accent)}
+  .slug{color:var(--muted); font-size:12.5px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .rows{display:flex; flex-direction:column; gap:5px;}
+  .row{display:flex; gap:8px; font-size:13.5px; line-height:1.45;}
+  .lab{color:var(--accent2); font-weight:600; flex:none; text-transform:uppercase; font-size:11.5px; letter-spacing:.4px; padding-top:2px;}
+  .val{color:var(--text);}
+  .tags{display:flex; flex-wrap:wrap; gap:6px;}
+  .chip{
+    background:#241f38; color:#c9b8ff; border:1px solid #3a2f5e;
+    border-radius:999px; padding:3px 10px; font-size:12px;
+  }
+  .fonts{display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:2px;}
+  .fontchip{
+    background:#101f2a; color:#8fd3ff; border:1px solid #1c4661;
+    border-radius:8px; padding:4px 10px; font-size:12.5px;
+    font-family:ui-monospace,Menlo,Consolas,monospace;
+  }
+  .fontchip::before{content:"Aa"; font-size:10px; opacity:.65; margin-right:6px; font-weight:700;}
+  .cssbox{
+    border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--panel2);
+  }
+  .cssbox summary{
+    cursor:pointer; padding:7px 12px; font-size:13px; color:var(--muted);
+    list-style:none; user-select:none;
+  }
+  .cssbox summary::-webkit-details-marker{display:none}
+  .cssbox summary:hover{color:#fff}
+  .cssbox[open] summary{border-bottom:1px solid var(--line)}
+  .cssbox pre{
+    margin:0; padding:11px 13px; max-height:260px; overflow:auto;
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+    line-height:1.55; color:#c8d3ea; white-space:pre; text-align:left;
+  }
+  .notes{
+    width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line);
+    border-radius:9px; padding:9px 11px; font-size:13px; font-family:inherit;
+    resize:vertical; outline:none; min-height:46px;
+  }
+  .notes:focus{border-color:var(--accent)}
+  .actions{display:flex; gap:8px; margin-top:auto;}
+  .actions button{
+    border:1px solid var(--line); background:var(--panel2); color:var(--text);
+    border-radius:8px; padding:7px 12px; font-size:13px; cursor:pointer; transition:all .12s;
+    white-space:nowrap;
+  }
+  .actions button:hover{border-color:var(--accent); color:#fff}
+  .actions button:disabled{opacity:.6; cursor:default}
+  .actions .delBtn:hover{border-color:var(--danger); color:#ff9a9a}
+  .actions .delBtn.armed{background:var(--danger); border-color:var(--danger); color:#fff}
+  .empty{
+    border:1.5px dashed var(--line); border-radius:14px; padding:48px 24px;
+    text-align:center; color:var(--muted);
+  }
+  .empty .big{font-size:34px; margin-bottom:8px;}
+  .empty .ex{font-size:13.5px; margin-top:12px; color:#6d7590;}
+  .ex code{background:var(--panel2); padding:2px 6px; border-radius:5px; color:#c9b8ff;}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Extrax</h1>
+    <p>Capture the theme of any Perchance generator — its mood, aesthetic and palette — and keep it as a reusable reference.</p>
+  </header>
+
+  <section class="capture">
+    <input id="genInput" placeholder="e.g. perchance.org/cozy-forest-quest  or just the name" spellcheck="false" />
+    <button id="captureBtn">Capture theme</button>
+    <label class="opt"><input type="checkbox" id="moodChk" /> also make a mood image</label>
+  </section>
+
+  <div id="progress" hidden></div>
+
+  <div class="io">
+    <button id="exportJsonBtn" class="prim">Export JSON</button>
+    <button id="exportMdBtn">Export Markdown</button>
+    <button id="importBtn">Import…</button>
+    <span class="hint">download a backup of your vault, or load one on another device</span>
+    <input type="file" id="fileInput" accept=".json,.md,.markdown,application/json,text/markdown" hidden />
+  </div>
+
+  <section class="library">
+    <div class="toolbar" id="toolbar" hidden>
+      <span class="count"><span id="countEl">0</span> saved</span>
+      <input id="searchInput" placeholder="search themes, tags, notes..." />
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty">
+      <div class="big">🗄️</div>
+      <div>No captured themes yet.</div>
+      <div class="ex">Try it: paste a generator like <code>lowpoly-procedural-island</code> or <code>webgpu-position-based-fluids</code> above and hit <b>Capture theme</b>.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+  const FOLDER = root.kv.themeVault;
+  const genInput = document.getElementById("genInput");
+  const captureBtn = document.getElementById("captureBtn");
+  const moodChk = document.getElementById("moodChk");
+  const progressEl = document.getElementById("progress");
+  const grid = document.getElementById("grid");
+  const empty = document.getElementById("empty");
+  const toolbar = document.getElementById("toolbar");
+  const searchInput = document.getElementById("searchInput");
+  const countEl = document.getElementById("countEl");
+  const exportJsonBtn = document.getElementById("exportJsonBtn");
+  const exportMdBtn = document.getElementById("exportMdBtn");
+  const importBtn = document.getElementById("importBtn");
+  const fileInput = document.getElementById("fileInput");
+
+  let cards = [];
+  let cardsById = new Map();
+
+  const PALETTES = [
+    ["#8b5cf6","#2cb67d"],["#f97316","#ef4444"],["#06b6d4","#3b82f6"],
+    ["#ec4899","#8b5cf6"],["#22c55e","#0ea5e9"],["#eab308","#f97316"],
+    ["#a855f7","#d946ef"],["#14b8a6","#84cc16"]
+  ];
+
+  function esc(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+  function extractName(input){
+    let s = (input||"").trim().toLowerCase();
+    let m = s.match(/perchance\.org\/([a-z0-9\-]+)/);
+    if (m) return m[1];
+    m = s.match(/^([a-z0-9\-]+)\.perchance\.org/);
+    if (m) return m[1];
+    s = s.replace(/^[a-z]+:\/\//,"").replace(/^www\./,"").replace(/\/+$/,"");
+    return s.split(/[\/?#]/)[0].trim();
+  }
+
+  function parseMeta(code){
+    const meta = {title:"", description:"", image:"", tags:""};
+    if (!code) return meta;
+    const lines = code.split(/\r?\n/);
+    const idx = lines.findIndex(l => l.trim() === "$meta");
+    if (idx < 0) return meta;
+    const metaIndent = (lines[idx].match(/^\s*/)||[""])[0].length;
+    let curKey = null, curIndent = 0;
+    for (let i = idx+1; i < lines.length; i++){
+      const line = lines[i];
+      if (line.trim() === "") continue;
+      const indent = (line.match(/^\s*/)||[""])[0].length;
+      if (indent <= metaIndent) break;
+      const m = line.match(/^\s*(\w+)\s*=\s*(.*)$/);
+      if (m){
+        const key = m[1];
+        curIndent = indent;
+        if (["title","description","image","tags"].includes(key)){
+          curKey = key;
+          meta[key] = meta[key] ? meta[key] + "\n" + m[2].trim() : m[2].trim();
+        } else {
+          curKey = null;
+        }
+      } else if (curKey === "description"){
+        meta.description += (indent > curIndent ? "\n" : " ") + line.trim();
+      }
+    }
+    return meta;
+  }
+
+  const GENERIC_FONTS = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-sans-serif|ui-serif|ui-monospace|ui-rounded|emoji|math|fangsong|inherit|initial|unset|revert|revert-layer|var|default|normal|auto|-apple-system|BlinkMacSystemFont|Segoe UI Emoji|Apple Color Emoji|Noto Color Emoji|Droid Sans Fallback|system|-system-ui)$/i;
+
+  function extractFonts(src){
+    const fonts = [];
+    const seen = new Set();
+    const add = n => {
+      n = n.trim().replace(/^["']|["']$/g, "");
+      if (n && !GENERIC_FONTS.test(n) && !seen.has(n)){ seen.add(n); fonts.push(n); }
+    };
+    let m;
+    const famRe = /font-family\s*:\s*([^;{}]+)/gi;
+    while ((m = famRe.exec(src))) m[1].split(",").forEach(p => add(p));
+    const gRe = /family=([^&"')\s]+)/g;
+    while ((m = gRe.exec(src))) {
+      add(decodeURIComponent(m[1].split(":")[0].split("@")[0].split(",")[0]).replace(/\+/g, " "));
+    }
+    return fonts.slice(0, 8);
+  }
+
+  function extractFontLinks(src){
+    const links = [];
+    const seen = new Set();
+    const add = u => {
+      u = u.trim().replace(/;$/,"");
+      if (u && !seen.has(u)){ seen.add(u); links.push(u); }
+    };
+    let m;
+    const impRe = /@import\s+(?:url\(\s*)?['"]([^'"]+)['"]\s*\)?/gi;
+    while ((m = impRe.exec(src))) add(m[1]);
+    const linkRe = /<link[^>]*href\s*=\s*["']([^"']+)["']/gi;
+    while ((m = linkRe.exec(src))) {
+      if (/fonts\.(googleapis\.com|gstatic\.com)|\.css([?#]|$)/i.test(m[1]) && !/data:/i.test(m[1])) add(m[1]);
+    }
+    return links.slice(0, 5);
+  }
+
+  function extractCssTokens(src){
+    const vars = {};
+    const vRe = /(--[\w-]+)\s*:\s*([^;{}]+)/g;
+    let m;
+    while ((m = vRe.exec(src))) {
+      const v = m[2].trim();
+      if (!(m[1] in vars) && v) vars[m[1]] = v;
+    }
+    const keyProps = ["background-color","background","color","font-family","font-size","line-height","letter-spacing","border-radius","box-shadow","text-align"];
+    const props = {};
+    const bRe = /\b(?:body|html)\s*\{([^}]*)\}/gi;
+    while ((m = bRe.exec(src))) {
+      const block = m[1];
+      for (const p of keyProps) {
+        if (p in props) continue;
+        const pm = block.match(new RegExp("(?:^|[;}])\\s*" + p + "\\s*:\\s*([^;]+)"));
+        if (pm) props[p] = pm[1].trim();
+      }
+    }
+    return { vars, props };
+  }
+
+  function resolveVars(value, vars){
+    return String(value).replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\)/g, (m, name, fb) => vars[name] || (fb ? fb.trim() : m));
+  }
+
+  function buildCssCode(c){
+    const out = [];
+    const vars = c.cssVars || {};
+    for (const link of (c.fontLinks || [])) {
+      if (/fonts\.googleapis/i.test(link)) out.push(`@import url('${link}');`);
+    }
+    const vkeys = Object.keys(vars);
+    if (vkeys.length){
+      out.push(":root {");
+      for (const k of vkeys.slice(0, 40)) out.push(`  ${k}: ${vars[k]};`);
+      out.push("}");
+    }
+    const ks = c.keyStyles || {};
+    const order = ["background-color","background","color","font-family","font-size","line-height","letter-spacing","border-radius","box-shadow","text-align"];
+    const bstyles = order.filter(p => ks[p]).map(p => `${p}: ${resolveVars(ks[p], vars)};`);
+    if (bstyles.length){
+      out.push("body {");
+      for (const s of bstyles) out.push("  " + s);
+      out.push("}");
+    }
+    return out.join("\n");
+  }
+
+  async function analyzeTheme(name, code, meta, html){
+    const desc = (meta.description || "(none given)").replace(/\n/g," ");
+    const codeSnip = (code || "").slice(0, 5000).replace(/\$\{/g, "\\${");
+    const htmlSnip = (html || "").slice(0, 5000).replace(/\$\{/g, "\\${");
+    const prompt = `You are a design and theme analyst. Below is the source of a Perchance generator (a small HTML/JS web app built on the Perchance template engine): first its main.pjs (data/templates), then its index.html (structure + CSS). Its own metadata description is: "${desc}"
+
+Analyze its THEME: what it is about and the mood/aesthetic it evokes, written so the theme can be reused later as a design reference by someone recreating a similar project. Keep every line terse.
+
+MAIN.PJS:
+${codeSnip}
+
+INDEX.HTML (structure + CSS):
+${htmlSnip}
+
+Output EXACTLY this format and nothing else (no markdown, no preamble):
+GENRE:
+MOOD/VIBE:
+VISUAL AESTHETIC:
+COLOR PALETTE:
+CORE SUBJECT:
+THEME IN ONE LINE:
+TAGS:`;
+    const result = await root.generateText(prompt);
+    return result.text.trim();
+  }
+
+  function parseTags(theme, metaTags){
+    const out = [];
+    const m = theme.match(/^TAGS:\s*(.+)$/mi);
+    if (m) m[1].split(",").map(t=>t.trim()).filter(Boolean).forEach(t=>{ const k=t.toLowerCase(); if(!out.includes(k)) out.push(k); });
+    if (metaTags) metaTags.split(",").map(t=>t.trim()).filter(Boolean).forEach(t=>{ const k=t.toLowerCase(); if(!out.includes(k)) out.push(k); });
+    return out.slice(0, 10);
+  }
+
+  async function makeMoodImage(theme){
+    const lines = {};
+    theme.split("\n").forEach(l => { const i = l.indexOf(":"); if (i > 0) lines[l.slice(0,i).trim().toUpperCase()] = l.slice(i+1).trim(); });
+    const prompt = `A mood/atmosphere image representing the theme of a web app: ${lines["THEME IN ONE LINE"] || theme.slice(0,200)}. Style: ${lines["VISUAL AESTHETIC"] || ""}, ${lines["GENRE"] || ""}. Palette: ${lines["COLOR PALETTE"] || "warm, atmospheric"}. No text, no words, no letters, no UI, no logos. Beautiful, evocative, high quality digital art.`;
+    const res = await root.generateImage({ prompt, resolution: "512x512", negativePrompt: "text, words, letters, logo, watermark, ui, interface, blurry" });
+    return res.dataUrl;
+  }
+
+  function gradient(id){
+    let h = 0;
+    for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    const p = PALETTES[h % PALETTES.length];
+    return `linear-gradient(135deg, ${p[0]}, ${p[1]})`;
+  }
+
+  function themeRows(theme){
+    return (theme||"").split("\n").map(l=>l.trim()).filter(l=>l && !/^TAGS:/i.test(l));
+  }
+
+  function cardHTML(c){
+    const rows = themeRows(c.theme).map(l => {
+      const i = l.indexOf(":");
+      if (i > 0) return `<div class="row"><span class="lab">${esc(l.slice(0,i).trim())}</span><span class="val">${esc(l.slice(i+1).trim())}</span></div>`;
+      return `<div class="row"><span class="val">${esc(l)}</span></div>`;
+    }).join("");
+    const tags = c.tags.map(t=>`<span class="chip">${esc(t)}</span>`).join("");
+    const fontChips = (c.fonts||[]).map(f=>`<span class="fontchip">${esc(f)}</span>`).join("");
+    const cssCode = buildCssCode(c);
+    const thumb = c.image
+      ? `<img src="${esc(c.image)}" alt="">`
+      : `<div class="thumb" style="background:${gradient(c.id)}"></div>`;
+    return `<article class="card" data-id="${c.id}">
+      <div class="thumb">${thumb}</div>
+      <div class="body">
+        <div class="head">
+          <a class="title" href="https://perchance.org/${esc(c.name)}" target="_blank" rel="noopener">${esc(c.title||c.name)}</a>
+          <span class="slug">${esc(c.name)}</span>
+        </div>
+        <div class="rows">${rows}</div>
+        ${fontChips ? `<div class="fonts">${fontChips}</div>` : ""}
+        <div class="tags">${tags}</div>
+        <textarea class="notes" rows="2" placeholder="Your notes for later reference...">${esc(c.notes||"")}</textarea>
+        ${cssCode ? `<details class="cssbox"><summary>Recreate CSS</summary><pre>${esc(cssCode)}</pre></details>` : ""}
+        <div class="actions">
+          <button class="copyBtn">Copy theme</button>
+          <button class="copyCssBtn">Copy CSS</button>
+          <button class="moodBtn">Mood image</button>
+          <button class="delBtn">Delete</button>
+        </div>
+      </div>
+    </article>`;
+  }
+
+  function render(){
+    const q = (searchInput.value||"").trim().toLowerCase();
+    const list = q
+      ? cards.filter(c => {
+          const hay = [c.title, c.name, c.theme, c.tags.join(" "), c.notes, (c.fonts||[]).join(" "),
+            Object.values(c.cssVars||{}).join(" "), Object.values(c.keyStyles||{}).join(" ")].join(" ").toLowerCase();
+          return hay.includes(q);
+        })
+      : cards;
+    grid.innerHTML = list.map(cardHTML).join("");
+    countEl.textContent = cards.length;
+    toolbar.hidden = cards.length === 0;
+    empty.hidden = cards.length > 0;
+    bindCardEvents();
+  }
+
+  function bindCardEvents(){
+    document.querySelectorAll(".card").forEach(cardEl => {
+      const id = cardEl.dataset.id;
+      cardEl.querySelector(".copyBtn").addEventListener("click", async e => {
+        const c = cardsById.get(id);
+        if (!c) return;
+        const btn = e.currentTarget;
+        try {
+          await navigator.clipboard.writeText(c.theme);
+        } catch(err) {
+          const ta = document.createElement("textarea");
+          ta.value = c.theme; document.body.appendChild(ta); ta.select();
+          document.execCommand("copy"); ta.remove();
+        }
+        flash(btn, "Copied!");
+      });
+      cardEl.querySelector(".copyCssBtn").addEventListener("click", async e => {
+        const c = cardsById.get(id);
+        if (!c) return;
+        const btn = e.currentTarget;
+        try {
+          await navigator.clipboard.writeText(buildCssCode(c));
+        } catch(err) {
+          const ta = document.createElement("textarea");
+          ta.value = buildCssCode(c); document.body.appendChild(ta); ta.select();
+          document.execCommand("copy"); ta.remove();
+        }
+        flash(btn, "Copied!");
+      });
+      cardEl.querySelector(".moodBtn").addEventListener("click", async e => {
+        const c = cardsById.get(id);
+        if (!c) return;
+        const btn = e.currentTarget;
+        btn.disabled = true; btn.textContent = "Generating...";
+        try {
+          const url = await makeMoodImage(c.theme);
+          c.image = url;
+          await FOLDER.set("card_"+id, c);
+          const thumb = cardEl.querySelector(".thumb");
+          thumb.innerHTML = `<img src="${esc(url)}" alt="">`;
+          btn.textContent = "Mood image";
+        } catch(err) {
+          console.error(err);
+          btn.textContent = "Failed — retry";
+        }
+        btn.disabled = false;
+      });
+      const ta = cardEl.querySelector(".notes");
+      let t;
+      ta.addEventListener("input", () => {
+        clearTimeout(t);
+        t = setTimeout(() => updateNotes(id, ta.value), 400);
+      });
+      cardEl.querySelector(".delBtn").addEventListener("click", async e => {
+        const btn = e.currentTarget;
+        if (!btn.classList.contains("armed")){
+          btn.classList.add("armed"); btn.textContent = "Confirm?";
+          setTimeout(() => { btn.classList.remove("armed"); btn.textContent = "Delete"; }, 2500);
+          return;
+        }
+        await deleteCard(id);
+      });
+    });
+  }
+
+  function flash(btn, txt){
+    const old = btn.textContent;
+    btn.textContent = txt;
+    setTimeout(() => btn.textContent = old, 1300);
+  }
+
+  function showProgress(msg, isError){
+    progressEl.innerHTML = (isError ? "" : '<div class="spin"></div>') + `<div>${msg}</div>`;
+    progressEl.hidden = false;
+  }
+
+  function setBusy(b){
+    captureBtn.disabled = b;
+    captureBtn.textContent = b ? "Working..." : "Capture theme";
+  }
+
+  async function saveCard(card){
+    await FOLDER.set("card_"+card.id, card);
+    await FOLDER.update("order", o => {
+      const arr = Array.isArray(o) ? o : [];
+      if (!arr.includes(card.id)) arr.unshift(card.id);
+      return arr;
+    });
+  }
+
+  async function deleteCard(id){
+    await FOLDER.delete("card_"+id);
+    await FOLDER.update("order", o => (Array.isArray(o)?o:[]).filter(x => x !== id));
+    cards = cards.filter(c => c.id !== id);
+    cardsById.delete(id);
+    render();
+  }
+
+  async function updateNotes(id, notes){
+    const c = cardsById.get(id);
+    if (!c) return;
+    c.notes = notes;
+    await FOLDER.set("card_"+id, c);
+  }
+
+  function dateStr(){
+    const d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+  }
+
+  function downloadFile(name, text, mime){
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  }
+
+  function exportJSON(){
+    if (!cards.length){ showProgress("Nothing to export yet — capture a theme first.", true); return; }
+    const payload = {
+      format: "extrax-vault",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      cards: cards.map(c => c)
+    };
+    downloadFile(`extrax-vault-${dateStr()}.json`, JSON.stringify(payload, null, 2), "application/json");
+    showProgress(`Exported <b>${cards.length}</b> theme${cards.length===1?"":"s"} as JSON — full backup, import it anywhere.`);
+  }
+
+  function cardToMarkdown(c){
+    const L = [];
+    L.push(`## ${c.title || c.name} — ${c.name}`);
+    L.push("");
+    L.push(`- **Captured:** ${new Date(c.createdAt || Date.now()).toISOString()}`);
+    if (c.description) L.push(`- **Description:** ${String(c.description).replace(/\s*\n\s*/g, " ")}`);
+    if (c.tags && c.tags.length) L.push(`- **Tags:** ${c.tags.join(", ")}`);
+    if (c.fonts && c.fonts.length) L.push(`- **Fonts:** ${c.fonts.join(", ")}`);
+    if ((c.fontLinks && c.fontLinks.length) || (c.cssVars && Object.keys(c.cssVars).length) || (c.keyStyles && Object.keys(c.keyStyles).length)){
+      L.push(`- **CSS:** ${JSON.stringify({ fontLinks: c.fontLinks || [], vars: c.cssVars || {}, styles: c.keyStyles || {} })}`);
+    }
+    const rows = themeRows(c.theme);
+    if (rows.length){
+      L.push("");
+      L.push("### Theme");
+      for (const r of rows){
+        const i = r.indexOf(":");
+        if (i > 0) L.push(`**${r.slice(0,i).trim()}:** ${r.slice(i+1).trim()}`);
+        else L.push(`- ${r}`);
+      }
+    }
+    if (c.notes && c.notes.trim()){
+      L.push("");
+      L.push("### Notes");
+      L.push("");
+      L.push(c.notes.replace(/\n+$/, ""));
+    }
+    if (c.image){
+      L.push("");
+      L.push("### Mood");
+      L.push("");
+      L.push(`![mood](${c.image})`);
+    }
+    L.push("");
+    L.push("---");
+    return L.join("\n");
+  }
+
+  function exportMarkdown(){
+    if (!cards.length){ showProgress("Nothing to export yet — capture a theme first.", true); return; }
+    const header = [
+      "# Extrax Theme Vault",
+      "",
+      `${cards.length} theme${cards.length===1?"":"s"} · exported ${dateStr()} · saved as a readable reference (importable back into Extrax)`,
+      ""
+    ].join("\n");
+    const body = cards.map(cardToMarkdown).join("\n");
+    downloadFile(`extrax-vault-${dateStr()}.md`, header + body + "\n", "text/markdown");
+    showProgress(`Exported <b>${cards.length}</b> theme${cards.length===1?"":"s"} as Markdown.`);
+  }
+
+  function parseVaultMarkdown(text){
+    const out = [];
+    let cur = null;
+    let section = "", themeParts = [], notesParts = [], moodUrl = "";
+    const finalize = () => {
+      out.push({
+        id: cur.name + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+        name: cur.name,
+        title: cur.title || cur.name,
+        description: cur.description || "",
+        tags: cur.tags || [],
+        theme: themeParts.join("\n"),
+        notes: notesParts.join("\n").trim(),
+        image: moodUrl || "",
+        fonts: cur.fonts || [],
+        fontLinks: cur.fontLinks || [],
+        cssVars: cur.cssVars || {},
+        keyStyles: cur.keyStyles || {},
+        createdAt: cur.createdAt || Date.now()
+      });
+    };
+    for (const raw of String(text).split(/\r?\n/)){
+      const line = raw.trimEnd();
+      const tm = line.match(/^## (.+) — ([a-z0-9-]+)\s*$/);
+      if (tm){
+        if (cur) finalize();
+        cur = { name: tm[2], title: tm[1].trim() };
+        section = ""; themeParts = []; notesParts = []; moodUrl = "";
+        continue;
+      }
+      if (!cur) continue;
+      if (/^###\s+/.test(line)){ section = line.replace(/^###\s+/, "").trim().toLowerCase(); continue; }
+      if (/^-{3,}\s*$/.test(line)){ section = ""; continue; }
+      const clean = line.replace(/^[-*]\s+/, "");
+      if (section === "theme"){
+        const bm = clean.match(/^\*\*([^*]+):\*\*\s?(.*)$/);
+        if (bm) themeParts.push(`${bm[1].trim()}: ${bm[2]}`);
+        else if (clean) themeParts.push(clean);
+        continue;
+      }
+      if (section === "notes"){ if (clean) notesParts.push(clean); continue; }
+      if (section === "mood"){
+        const im = clean.match(/^!\[mood\]\((.+)\)$/);
+        if (im) moodUrl = im[1];
+        continue;
+      }
+      const hm = line.match(/^[-*]\s+\*\*([^*]+):\*\*\s?(.*)$/);
+      if (hm){
+        const key = hm[1].toLowerCase();
+        const val = hm[2];
+        if (key === "captured"){ const t = Date.parse(val); if (!isNaN(t)) cur.createdAt = t; }
+        else if (key === "tags") cur.tags = val.split(",").map(s => s.trim()).filter(Boolean);
+        else if (key === "fonts") cur.fonts = val.split(",").map(s => s.trim()).filter(Boolean);
+        else if (key === "description") cur.description = val;
+        else if (key === "css"){
+          try {
+            const j = JSON.parse(val);
+            cur.fontLinks = j.fontLinks || [];
+            cur.cssVars = j.vars || {};
+            cur.keyStyles = j.styles || {};
+          } catch(err) { /* skip malformed css line */ }
+        }
+      }
+    }
+    if (cur) finalize();
+    return out;
+  }
+
+  async function handleImportFile(file){
+    try {
+      const text = await file.text();
+      let imported;
+      const ext = (file.name || "").toLowerCase();
+      const isJson = ext.endsWith(".json") || (!ext.endsWith(".md") && !ext.endsWith(".markdown") && /^\s*[\[{]/.test(text));
+      if (isJson){
+        const data = JSON.parse(text);
+        const arr = Array.isArray(data) ? data : (data && Array.isArray(data.cards) ? data.cards : null);
+        if (!arr) throw new Error("That JSON doesn't look like an Extrax vault export.");
+        imported = arr.filter(c => c && c.name);
+      } else {
+        imported = parseVaultMarkdown(text);
+        if (!imported.length) throw new Error("Couldn't find any theme sections in that Markdown.");
+      }
+      const fresh = [];
+      let skipped = 0;
+      for (const c of imported){
+        if (!c.id) c.id = c.name + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+        if (cardsById.has(c.id)){ skipped++; continue; }
+        c.title = c.title || c.name;
+        c.description = c.description || "";
+        c.tags = Array.isArray(c.tags) ? c.tags : [];
+        c.theme = c.theme || "";
+        c.notes = c.notes || "";
+        c.image = c.image || "";
+        c.fonts = Array.isArray(c.fonts) ? c.fonts : [];
+        c.fontLinks = Array.isArray(c.fontLinks) ? c.fontLinks : [];
+        c.cssVars = c.cssVars && typeof c.cssVars === "object" ? c.cssVars : {};
+        c.keyStyles = c.keyStyles && typeof c.keyStyles === "object" ? c.keyStyles : {};
+        c.createdAt = c.createdAt || Date.now();
+        fresh.push(c);
+      }
+      if (!fresh.length){
+        showProgress(skipped ? `All <b>${skipped}</b> theme${skipped===1?"":"s"} in that file are already in your vault.` : "No importable themes found in that file.", true);
+        return;
+      }
+      for (let i = fresh.length - 1; i >= 0; i--) await saveCard(fresh[i]);
+      cards = fresh.concat(cards);
+      for (const c of fresh) cardsById.set(c.id, c);
+      const extra = skipped ? ` (<b>${skipped}</b> already in vault)` : "";
+      showProgress(`Imported <b>${fresh.length}</b> theme${fresh.length===1?"":"s"}${extra}.`);
+      render();
+    } catch(err){
+      console.error(err);
+      showProgress("Import failed: " + esc(err && err.message || err), true);
+    }
+  }
+
+  exportJsonBtn.addEventListener("click", exportJSON);
+  exportMdBtn.addEventListener("click", exportMarkdown);
+  importBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (f) handleImportFile(f);
+    fileInput.value = "";
+  });
+
+  async function capture(){
+    const name = extractName(genInput.value);
+    if (!name || !/^[a-z0-9\-]+$/.test(name)){
+      showProgress("Please enter a valid Perchance generator name or URL (e.g. <code>cozy-forest-quest</code>).", true);
+      return;
+    }
+    setBusy(true);
+    try {
+      showProgress(`Fetching <b>${esc(name)}</b>...`);
+      let r;
+      try {
+        r = await fetch(`https://perchance.org/api/getGeneratorsAndDependencies?generatorNames=${encodeURIComponent(name)}`).then(res => res.json());
+      } catch(err) {
+        throw new Error("Could not reach the Perchance API from this page.");
+      }
+      const g = r && r.generators && r.generators[name];
+      if (!g){
+        showProgress(`Couldn't find a generator named <b>${esc(name)}</b>. It may not exist, or its source isn't public.`, true);
+        return;
+      }
+      const meta = parseMeta(g.code || "");
+      let html = "";
+      try {
+        showProgress(`Fetching <b>${esc(name)}</b>...`);
+        html = await root.superFetch(`https://perchance.org/api/getGeneratorHtml?generatorName=${encodeURIComponent(name)}`).then(res => res.text());
+      } catch(err) {
+        console.warn("html fetch failed", err);
+      }
+      const src = (g.code || "") + "\n" + html;
+      const { vars: cssVars, props: keyStyles } = extractCssTokens(src);
+      const fonts = extractFonts(src);
+      const fontLinks = extractFontLinks(src);
+      showProgress("Analyzing the theme...");
+      const theme = await analyzeTheme(name, g.code || "", meta, html);
+      let image = meta.image || "";
+      if (moodChk.checked){
+        showProgress("Generating mood image...");
+        try { image = await makeMoodImage(theme); } catch(err) { console.warn("mood image failed", err); }
+      }
+      const id = name + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+      const card = {
+        id, name,
+        title: meta.title || name,
+        description: meta.description,
+        tags: parseTags(theme, meta.tags),
+        theme, image, notes: "",
+        fonts, fontLinks, cssVars, keyStyles,
+        createdAt: Date.now()
+      };
+      await saveCard(card);
+      cards.unshift(card);
+      cardsById.set(card.id, card);
+      genInput.value = "";
+      showProgress(`Captured <b>${esc(card.title)}</b> — saved to your vault.`);
+      render();
+    } catch(err){
+      console.error(err);
+      showProgress("Something went wrong: " + esc(err && err.message || err), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  captureBtn.addEventListener("click", capture);
+  genInput.addEventListener("keydown", e => { if (e.key === "Enter") capture(); });
+  searchInput.addEventListener("input", render);
+
+  (async function init(){
+    try {
+      const order = (await FOLDER.get("order")) || [];
+      const vals = await FOLDER.getMany(order.map(id => "card_"+id));
+      for (let i = 0; i < order.length; i++){
+        if (vals[i] !== undefined) cards.push(vals[i]);
+      }
+      cardsById = new Map(cards.map(c => [c.id, c]));
+    } catch(err) {
+      console.error("load failed", err);
+    }
+    render();
+  })();
+</script>

@@ -1,0 +1,2500 @@
+// ═══════════════════════════════════════════════════════════════════════
+// ai-code-tool-integration — Perchance plugin (rathji-plugin-template base)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Bridges a local dev workspace and a 3rd-party AI coding platform: syncs
+// context (file tree, file contents, token budget), sends structured
+// prompts, parses code blocks out of responses, applies them to files only
+// after user approval, logs everything for rollback, and translates API
+// errors into actionable notifications.
+//
+// Built on the rathji-plugin-template structure (perchance.org/
+// rathji-plugin-template). Consuming generators import it once with the
+// standard import block, then call the bound function (the $output below),
+// e.g. from a script:  await root.aiCode(opts).authenticate();
+// (The docs page shows the exact import line.)
+//
+// IMPLEMENTED: 12 modules — Connection Protocol, Health Monitoring, Credential
+// Management store, File System Indexing, Targeted Context Injection, Token
+// Budget Tracking, Prompt Dispatcher, Response Parser, Local File Application,
+// Change Validation Gate, Execution Log with rollback, and the Error Handling
+// Bridge. Each module is a composable, never-throwing helper.
+// ═══════════════════════════════════════════════════════════════════════
+
+$meta
+  title = ai-code-tool-integration
+  description = A bridge plugin for synchronizing a local dev workspace with a 3rd-party AI coding platform (Codex / Claude Code style): secure connection sessions, context file-tree sync with token budgets, prompt dispatch, code-block parsing, gated file application, logs with rollback, and friendly API-error handling. Built on the rathji-plugin-template structure.
+  tags = plugin, ai, code, integration, bridge, session, context, rollback
+  header
+    mode = minimal
+
+
+// ── 0. IMPORTS ─────────────────────────────────────────────────────────
+
+simpleGenFooter = {import:simple-gen-footer}
+kv = {import:kv-plugin}
+
+
+// ── 1. EMBEDDED DATA (lazy-initialised payload) ─────────────────────────
+// Small default bundle, created exactly once on first use.
+
+initAiCodeToolIntegrationData() =>
+  window.AI_CODE_TOOL_INTEGRATION_PAYLOAD = {
+    version: 1,
+    defaults: {
+      probePath: "/models",
+      scheme: "Bearer",
+      headerName: "Authorization",
+      timeoutMs: 15000,
+      heartbeat: { intervalMs: 30000, backoffMs: 1000, backoffMaxMs: 60000 }
+    }
+  };
+  return window.AI_CODE_TOOL_INTEGRATION_PAYLOAD;
+
+aiCodeToolIntegrationDefaults() =>
+  if(!window.AI_CODE_TOOL_INTEGRATION_PAYLOAD) initAiCodeToolIntegrationData();
+  return window.AI_CODE_TOOL_INTEGRATION_PAYLOAD;
+
+
+// ── 2. LISTS (config presets users can point the plugin at) ─────────────
+// A `key = value` options node. baseUrl + apiKey are intentionally NOT here
+// — credentials come from the consumer (env-style variable, user input) or
+// from the per-user credential store (Module 3), never from hardcoded source.
+// `credential` names a store profile to resolve apiKey from at
+// authenticate() time (true = profile "default").
+
+aiCodeToolIntegrationOpts
+  platform = generic-ai
+  probePath = /models
+  scheme = Bearer
+  headerName = Authorization
+  timeoutMs = 15000
+  autoConnect = false
+  model =
+  credential =
+
+
+// ── 3. HELPERS ──────────────────────────────────────────────────────────
+// One job each, kept out of $output, reachable from the page as root.<name>
+// so they can be tested directly.
+
+aiCodeToolIntegrationResolve(v) =>
+  if(v == null) return v;
+  if(typeof v !== "object") return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem;
+  } catch(e) {}
+  return v;
+
+aiCodeToolIntegrationProbeField(obj, key) =>
+  if(obj == null) return undefined;
+  let v = undefined;
+  try { v = obj[key]; } catch(e) { return undefined; }
+  if(v === undefined || v === null) return undefined;
+  return aiCodeToolIntegrationResolve(v);
+
+aiCodeToolIntegrationError(code, message, status) =>
+  let info = aiCodeToolIntegrationErrorInfo(code, status);
+  let err = {
+    ok: false,
+    code: code || "error",
+    message: message || "Something went wrong.",
+    status: (typeof status === "undefined") ? null : status,
+    severity: info.severity,
+    userMessage: info.userMessage,
+    action: info.action,
+    toString: function() { return "(ai-code-tool-integration: " + this.message + ")"; }
+  };
+  if(status === 429 || code === "rate_limited") err.retryAfterSeconds = 5;
+  let def = null;
+  try { def = window.AI_CODE_TOOL_INTEGRATION_ERRORS || aiCodeToolIntegrationErrorsBuild({ auto: true }); window.AI_CODE_TOOL_INTEGRATION_ERRORS = def; } catch(e) { def = null; }
+  if(def) { try { def._record({ code: err.code, message: err.message, status: err.status, severity: err.severity, userMessage: err.userMessage, action: err.action, ts: new Date().toISOString() }); } catch(e) {} }
+  return err;
+
+aiCodeToolIntegrationSafeMessage(e) =>
+  if(e == null) return "unknown error";
+  let m = (typeof e.message === "string") ? e.message : String(e);
+  if(m.length > 200) m = m.slice(0, 200) + "...";
+  return m;
+
+aiCodeToolIntegrationNewId() =>
+  if(typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return "sess_" + crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+  }
+  return "sess_" + Math.random().toString(36).slice(2, 10);
+
+aiCodeToolIntegrationFingerprint(key) =>
+  if(typeof key !== "string" || !key.trim()) return "(none)";
+  let k = key.trim();
+  return "..." + (k.length > 4 ? k.slice(-4) : k);
+
+aiCodeToolIntegrationErrorText(code) =>
+  if(code === "auth_failed") return "Authentication failed: the API rejected the provided credentials.";
+  if(code === "invalid_config") return "Invalid configuration: required options are missing.";
+  if(code === "timeout") return "The connection attempt timed out.";
+  if(code === "network_error") return "A network error occurred while contacting the API.";
+  if(code === "http_error") return "The API returned an HTTP error during the connection probe.";
+  if(code === "transport_unavailable") return "No fetch implementation and no custom transport were available.";
+  if(code === "no_credentials") return "No credential is available: nothing is stored for the requested credential profile.";
+  if(code === "credential_store_error") return "The credential store could not be read or written.";
+  if(code === "invalid_credential") return "A non-empty credential value is required.";
+  if(code === "invalid_index_source") return "The index source must be a File System Access directory handle (kind 'directory' with a values() iterator) or a plain object mapping workspace-relative paths to file content/metadata.";
+  if(code === "invalid_index_path") return "The file table contains an invalid path (paths must be non-empty, workspace-relative, with no '..' segments).";
+  if(code === "invalid_index_value") return "The file table contains a value that is not file content or recognized metadata.";
+  if(code === "invalid_index_conflict") return "The file table declares the same path as both a file and a directory.";
+  if(code === "index_error") return "The file index could not be built.";
+  if(code === "invalid_tree") return "A tree node object was expected.";
+  return "The connection could not be established.";
+
+// ── Config assembly: input (options node or plain object) + opts override ─
+
+aiCodeToolIntegrationConfig(input, opts) =>
+  let defaults = aiCodeToolIntegrationDefaults().defaults;
+  let config = {};
+  let keys = ["platform", "baseUrl", "apiKey", "credential", "probePath", "scheme", "headerName", "timeoutMs", "autoConnect", "model", "transport", "fetchFn", "heartbeatEnabled", "heartbeatIntervalMs", "heartbeatBackoffMs", "heartbeatBackoffMaxMs"];
+  let i = 0, key = "", v = undefined;
+  for(i = 0; i < keys.length; i++) {
+    key = keys[i];
+    if(input != null) {
+      v = aiCodeToolIntegrationProbeField(input, key);
+      if(v !== undefined) config[key] = v;
+    }
+  }
+  for(i = 0; i < keys.length; i++) {
+    key = keys[i];
+    if(opts != null) {
+      v = aiCodeToolIntegrationProbeField(opts, key);
+      if(v !== undefined) config[key] = v;
+    }
+  }
+  config.platform = (typeof config.platform === "string" && config.platform) ? config.platform : "generic-ai";
+  config.scheme = (typeof config.scheme === "string" && config.scheme) ? config.scheme : defaults.scheme;
+  config.headerName = (typeof config.headerName === "string" && config.headerName) ? config.headerName : defaults.headerName;
+  config.probePath = (typeof config.probePath === "string" && config.probePath) ? config.probePath : defaults.probePath;
+  config.timeoutMs = (typeof config.timeoutMs === "number" && config.timeoutMs > 0) ? config.timeoutMs : defaults.timeoutMs;
+  if(typeof config.autoConnect === "undefined") config.autoConnect = false;
+  config.heartbeatEnabled = !!config.heartbeatEnabled;
+  let hbDef = defaults.heartbeat || { intervalMs: 30000, backoffMs: 1000, backoffMaxMs: 60000 };
+  config.heartbeatIntervalMs = (typeof config.heartbeatIntervalMs === "number" && config.heartbeatIntervalMs > 0) ? config.heartbeatIntervalMs : hbDef.intervalMs;
+  config.heartbeatBackoffMs = (typeof config.heartbeatBackoffMs === "number" && config.heartbeatBackoffMs > 0) ? config.heartbeatBackoffMs : hbDef.backoffMs;
+  config.heartbeatBackoffMaxMs = (typeof config.heartbeatBackoffMaxMs === "number" && config.heartbeatBackoffMaxMs > 0) ? config.heartbeatBackoffMaxMs : hbDef.backoffMaxMs;
+  let missing = [];
+  if(typeof config.baseUrl !== "string" || !config.baseUrl.trim()) {
+    missing.push("baseUrl");
+  } else {
+    config.baseUrl = config.baseUrl.trim();
+  }
+  let credRef = config.credential;
+  config.credentialProfile = null;
+  if(credRef === true) {
+    config.credentialProfile = "default";
+  } else if(typeof credRef === "string" && credRef.trim()) {
+    config.credentialProfile = credRef.trim();
+  } else if(credRef !== null && typeof credRef === "object" && typeof credRef.profile === "string" && credRef.profile.trim()) {
+    config.credentialProfile = credRef.profile.trim();
+  }
+  delete config.credential;
+  if(typeof config.apiKey === "string" && config.apiKey.trim()) {
+    config.apiKey = config.apiKey.trim();
+  } else {
+    delete config.apiKey;
+    if(!config.credentialProfile) missing.push("apiKey");
+  }
+  if(config.transport !== undefined && typeof config.transport !== "function") {
+    let err = aiCodeToolIntegrationError("invalid_config", "The transport option must be a function (or omitted) — it receives the session and returns an ok result, or an ok:false result carrying code/message/status.");
+    err.missing = ["transport"];
+    return { ok: false, missing: ["transport"], config: config, result: err };
+  }
+  if(config.fetchFn !== undefined && typeof config.fetchFn !== "function") {
+    let err = aiCodeToolIntegrationError("invalid_config", "The fetchFn option must be a function (or omitted) — it is used as the fetch implementation for the built-in connection probe.");
+    err.missing = ["fetchFn"];
+    return { ok: false, missing: ["fetchFn"], config: config, result: err };
+  }
+  if(missing.length) {
+    let hint = "Pass an options node or object with " + missing.join(" and ") + ". Example: aiCode({ baseUrl: 'https://api.example.com/v1', apiKey: myKey }). Or store the key once per browser via aiCodeToolIntegrationCredentials().ingest(key) and create the session with credential: true.";
+    let err = aiCodeToolIntegrationError("invalid_config", hint);
+    err.missing = missing;
+    return { ok: false, missing: missing, config: config, result: err };
+  }
+  return { ok: true, config: config };
+
+// ── Default transport: probe the platform to establish the session ──────
+// GET <baseUrl>/<probePath> with the Authorization header; 2xx means the
+// session is authenticated and live. Consumers may supply their own
+// `transport` function instead — it receives the session and returns an
+// ok:true result, or an ok:false result carrying code/message/status.
+// Never throws.
+
+aiCodeToolIntegrationRace(promise, ms) =>
+  return new Promise(function(resolve) {
+    let timer = setTimeout(function() { resolve({ timedOut: true }); }, ms);
+    promise.then(
+      function(v) { clearTimeout(timer); resolve({ timedOut: false, value: v }); },
+      function(e) { clearTimeout(timer); resolve({ timedOut: false, error: e }); }
+    );
+  });
+
+async aiCodeToolIntegrationProbe(session) =>
+  let fetchFn = session._fetchFn;
+  if(!fetchFn && typeof fetch === "function") fetchFn = fetch;
+  if(!fetchFn) {
+    return { ok: false, code: "transport_unavailable", message: aiCodeToolIntegrationErrorText("transport_unavailable") };
+  }
+  let base = String(session.baseUrl || "").replace(/\/+$/, "");
+  let path = String(session.probePath || "/models").replace(/^\/+/, "");
+  let url = base + "/" + path;
+  let timeoutMs = session.timeoutMs || 15000;
+  let ctrl = null;
+  if(typeof AbortController !== "undefined") ctrl = new AbortController();
+  let reqOpts = { method: "GET", headers: session.authHeaders() };
+  if(ctrl) reqOpts.signal = ctrl.signal;
+  let started = null;
+  try {
+    started = Promise.resolve(fetchFn(url, reqOpts));
+  } catch(e) {
+    return { ok: false, code: "network_error", message: "Network request failed: " + aiCodeToolIntegrationSafeMessage(e) };
+  }
+  let out = await aiCodeToolIntegrationRace(started, timeoutMs);
+  if(out.timedOut) {
+    if(ctrl) { try { ctrl.abort(); } catch(e) {} }
+    return { ok: false, code: "timeout", message: "Connection attempt timed out after " + timeoutMs + "ms." };
+  }
+  if(out.error) {
+    return { ok: false, code: "network_error", message: "Network request failed: " + aiCodeToolIntegrationSafeMessage(out.error) };
+  }
+  let res = out.value;
+  let status = (res && res.status !== undefined) ? res.status : 200;
+  if(status >= 200 && status < 300) return { ok: true, status: status };
+  if(status === 401 || status === 403) {
+    return { ok: false, code: "auth_failed", status: status, message: "The API rejected the credentials (HTTP " + status + "). Check your API key and session configuration." };
+  }
+  return { ok: false, code: "http_error", status: status, message: "The API responded with HTTP " + status + " during the connection probe." };
+
+// ── Session factory: the handle returned by $output ─────────────────────
+
+aiCodeToolIntegrationSession(config) =>
+  let key = config.apiKey;
+  let session = {
+    ok: true,
+    kind: "ai-code-tool-integration-session",
+    id: aiCodeToolIntegrationNewId(),
+    platform: config.platform,
+    baseUrl: config.baseUrl,
+    probePath: config.probePath,
+    model: config.model || null,
+    credentialProfile: config.credentialProfile || null,
+    credentialBackend: null,
+    scheme: config.scheme,
+    headerName: config.headerName,
+    timeoutMs: config.timeoutMs,
+    autoConnect: !!config.autoConnect,
+    status: "unauthenticated",
+    createdAt: new Date().toISOString(),
+    authenticatedAt: null,
+    keyFingerprint: aiCodeToolIntegrationFingerprint(key),
+    lastAttempt: null,
+    error: null,
+    heartbeat: null,
+    heartbeatIntervalMs: (typeof config.heartbeatIntervalMs === "number" && config.heartbeatIntervalMs > 0) ? config.heartbeatIntervalMs : 30000,
+    heartbeatBackoffMs: (typeof config.heartbeatBackoffMs === "number" && config.heartbeatBackoffMs > 0) ? config.heartbeatBackoffMs : 1000,
+    heartbeatBackoffMaxMs: (typeof config.heartbeatBackoffMaxMs === "number" && config.heartbeatBackoffMaxMs > 0) ? config.heartbeatBackoffMaxMs : 60000
+  };
+  Object.defineProperty(session, "_secret", { value: key, enumerable: false, writable: true });
+  if(typeof config.transport === "function") {
+    Object.defineProperty(session, "_transport", { value: config.transport, enumerable: false, writable: true });
+  }
+  if(typeof config.fetchFn === "function") {
+    Object.defineProperty(session, "_fetchFn", { value: config.fetchFn, enumerable: false, writable: true });
+  }
+  session.authHeaders = function() {
+    let h = {};
+    if(session._secret) h[session.headerName] = session.scheme ? (session.scheme + " " + session._secret) : session._secret;
+    return h;
+  };
+  session.isConnected = function() { return session.status === "connected"; };
+  session.authenticate = async function() {
+    if(session.status === "authenticating") return session;
+    session.status = "authenticating";
+    session.error = null;
+    session.lastAttempt = { at: new Date().toISOString(), code: null, message: null, status: null };
+    let cred = null;
+    try {
+      cred = await aiCodeToolIntegrationResolveCredentials(session);
+    } catch(e) {
+      cred = { ok: false, code: "credential_store_error", message: "Credential resolution threw: " + aiCodeToolIntegrationSafeMessage(e) };
+    }
+    if(!cred.ok) {
+      session.error = { code: cred.code, message: cred.message, status: null };
+      session.lastAttempt.code = cred.code;
+      session.lastAttempt.message = cred.message;
+      session.status = "error";
+      return session;
+    }
+    let transport = session._transport || aiCodeToolIntegrationProbe;
+    let r = null;
+    try {
+      r = await transport(session);
+    } catch(e) {
+      r = { ok: false, code: "unexpected_error", message: "Transport threw: " + aiCodeToolIntegrationSafeMessage(e) };
+    }
+    if(r && r.ok === true) {
+      session.status = "connected";
+      session.authenticatedAt = new Date().toISOString();
+      session.lastAttempt.code = "ok";
+      session.lastAttempt.message = "Authenticated successfully.";
+      session.lastAttempt.status = (typeof r.status !== "undefined") ? r.status : null;
+      return session;
+    }
+    let code = (r && r.code) || "auth_failed";
+    let msg = (r && r.message) || aiCodeToolIntegrationErrorText(code);
+    session.error = { code: code, message: msg, status: (r && r.status !== undefined) ? r.status : null };
+    session.lastAttempt.code = code;
+    session.lastAttempt.message = msg;
+    session.lastAttempt.status = session.error.status;
+    session.status = (code === "auth_failed") ? "auth_failed" : "error";
+    return session;
+  };
+  session.describe = function() {
+    return "ai-code-tool-integration session " + session.id + " | " + session.status + " | " + session.platform + " | " + session.baseUrl + (session.model ? " | model " + session.model : "") + " | key " + session.keyFingerprint + (session.credentialProfile ? " | store profile '" + session.credentialProfile + "'" : "");
+  };
+  session.toJSON = function() {
+    return {
+      ok: session.ok,
+      kind: session.kind,
+      id: session.id,
+      status: session.status,
+      platform: session.platform,
+      baseUrl: session.baseUrl,
+      probePath: session.probePath,
+      model: session.model,
+      scheme: session.scheme,
+      headerName: session.headerName,
+      timeoutMs: session.timeoutMs,
+      autoConnect: session.autoConnect,
+      createdAt: session.createdAt,
+      authenticatedAt: session.authenticatedAt,
+      keyFingerprint: session.keyFingerprint,
+      credentialProfile: session.credentialProfile,
+      credentialBackend: session.credentialBackend,
+      lastAttempt: session.lastAttempt,
+      error: session.error
+    };
+  };
+  session.toString = function() { return session.describe(); };
+  session.startHeartbeat = function(opts) {
+    if(session.heartbeat && session.heartbeat.running) return session.heartbeat;
+    let o = opts || {};
+    let pick = function(v, fallback) { return (typeof v === "number" && v > 0) ? v : fallback; };
+    let intervalMs = pick(o.intervalMs, session.heartbeatIntervalMs);
+    let backoffMs = pick(o.backoffMs, session.heartbeatBackoffMs);
+    let backoffMaxMs = pick(o.backoffMaxMs, session.heartbeatBackoffMaxMs);
+    let onEvent = (typeof o.onEvent === "function") ? o.onEvent : null;
+    session.heartbeat = aiCodeToolIntegrationHeartbeat(session, { intervalMs: intervalMs, backoffMs: backoffMs, backoffMaxMs: backoffMaxMs, onEvent: onEvent });
+    session.heartbeat.start();
+    return session.heartbeat;
+  };
+  session.stopHeartbeat = function() {
+    if(session.heartbeat) session.heartbeat.stop();
+    return session;
+  };
+  session.heartbeatStatus = function() {
+    if(!session.heartbeat) return "no-heartbeat";
+    return session.heartbeat.status;
+  };
+  if(session.autoConnect) session.authenticate();
+  return session;
+
+
+// ── Module 2: Health monitoring (heartbeat) ───────────────────────────────
+// Periodic checks validate the session is still alive; a failed check arms
+// a reconnection sequence (single-flight, one scheduled attempt per
+// failure) with exponential backoff. Status log: ok | reconnecting | down
+// | stopped (+ starting while the first check is in flight). auth_failed
+// (rejected credentials) halts the heartbeat — retrying would not help.
+// Single-timer design: exactly one next check is ever scheduled, so a
+// failure can never fan out into duplicate reconnection sequences.
+
+aiCodeToolIntegrationBackoff(failures, baseMs, maxMs) =>
+  let f = (typeof failures === "number" && failures >= 1) ? Math.floor(failures) : 1;
+  let base = (typeof baseMs === "number" && baseMs > 0) ? baseMs : 1000;
+  let max = (typeof maxMs === "number" && maxMs > 0) ? maxMs : 60000;
+  let delay = base * Math.pow(2, f - 1);
+  return Math.min(Math.round(delay), max);
+
+aiCodeToolIntegrationHeartbeat(session, opts) =>
+  let o = opts || {};
+  let config = {
+    intervalMs: (typeof o.intervalMs === "number" && o.intervalMs > 0) ? o.intervalMs : 30000,
+    backoffMs: (typeof o.backoffMs === "number" && o.backoffMs > 0) ? o.backoffMs : 1000,
+    backoffMaxMs: (typeof o.backoffMaxMs === "number" && o.backoffMaxMs > 0) ? o.backoffMaxMs : 60000,
+    checkOnStart: o.checkOnStart !== false,
+    onEvent: (typeof o.onEvent === "function") ? o.onEvent : null
+  };
+  let controller = {
+    kind: "ai-code-tool-integration-heartbeat",
+    running: false,
+    status: "stopped",
+    consecutiveFailures: 0,
+    totalChecks: 0,
+    reconnectCount: 0,
+    lastCheckAt: null,
+    lastOkAt: null,
+    lastResult: null,
+    history: [],
+    config: { intervalMs: config.intervalMs, backoffMs: config.backoffMs, backoffMaxMs: config.backoffMaxMs }
+  };
+  let timer = null;
+  let inFlight = false;
+  controller.push = function(entry) {
+    if(!entry.ts) entry.ts = new Date().toISOString();
+    controller.history.push(entry);
+    if(controller.history.length > 200) controller.history.shift();
+    if(config.onEvent) { try { config.onEvent(entry); } catch(e) {} }
+    return entry;
+  };
+  controller.scheduleNext = function(delayMs) {
+    if(!controller.running) return;
+    if(timer) { clearTimeout(timer); timer = null; }
+    timer = setTimeout(async function() {
+      timer = null;
+      await controller.runCheck();
+    }, delayMs);
+  };
+  controller.runCheck = async function() {
+    if(inFlight) return controller.lastResult;
+    inFlight = true;
+    controller.totalChecks++;
+    let attemptsBefore = controller.consecutiveFailures;
+    let checkError = null;
+    try {
+      await session.authenticate();
+    } catch(e) {
+      checkError = { code: "unexpected_error", message: "Heartbeat check threw: " + aiCodeToolIntegrationSafeMessage(e) };
+    }
+    controller.lastCheckAt = new Date().toISOString();
+    let ok = !checkError && session.status === "connected";
+    if(ok) {
+      controller.consecutiveFailures = 0;
+      if(attemptsBefore > 0) controller.reconnectCount++;
+      controller.lastOkAt = controller.lastCheckAt;
+      controller.status = "ok";
+      controller.lastResult = { ok: true, status: (session.lastAttempt && session.lastAttempt.status) || null };
+      controller.push({
+        event: attemptsBefore > 0 ? "reconnect-ok" : "check-ok",
+        status: controller.status,
+        failures: 0,
+        detail: attemptsBefore > 0 ? "Reconnection succeeded — session healthy again." : "Heartbeat check passed — session active."
+      });
+      controller.scheduleNext(config.intervalMs);
+    } else {
+      let code = checkError ? checkError.code : ((session.error && session.error.code) || "check-failed");
+      let message = checkError ? checkError.message : ((session.error && session.error.message) || aiCodeToolIntegrationErrorText(code));
+      controller.consecutiveFailures++;
+      controller.lastResult = { ok: false, code: code, message: message };
+      if(code === "auth_failed") {
+        controller.status = "down";
+        controller.push({
+          event: "auth-fail",
+          status: controller.status,
+          failures: controller.consecutiveFailures,
+          detail: "Credentials rejected — heartbeat halted until restarted."
+        });
+        controller.running = false;
+        if(timer) { clearTimeout(timer); timer = null; }
+      } else {
+        controller.status = "reconnecting";
+        let delayMs = aiCodeToolIntegrationBackoff(controller.consecutiveFailures, config.backoffMs, config.backoffMaxMs);
+        controller.push({
+          event: attemptsBefore > 0 ? "reconnect-fail" : "check-fail",
+          status: controller.status,
+          failures: controller.consecutiveFailures,
+          detail: attemptsBefore > 0 ? "Reconnection attempt failed — retrying with backoff." : "Heartbeat check failed — starting reconnection sequence.",
+          nextRetryMs: delayMs
+        });
+        controller.scheduleNext(delayMs);
+      }
+    }
+    inFlight = false;
+    return controller.lastResult;
+  };
+  controller.start = function() {
+    if(controller.running) return controller;
+    controller.running = true;
+    controller.status = session.isConnected() ? "ok" : "starting";
+    controller.push({ event: "start", status: controller.status, failures: controller.consecutiveFailures, detail: "Heartbeat started." });
+    controller.scheduleNext(config.checkOnStart ? 0 : config.intervalMs);
+    return controller;
+  };
+  controller.stop = function() {
+    if(!controller.running) return controller;
+    controller.running = false;
+    if(timer) { clearTimeout(timer); timer = null; }
+    controller.push({ event: "stop", status: controller.status, failures: controller.consecutiveFailures, detail: "Heartbeat stopped." });
+    controller.status = "stopped";
+    return controller;
+  };
+  controller.checkNow = function() { return controller.runCheck(); };
+  controller.isOk = function() { return controller.status === "ok"; };
+  return controller;
+
+
+// ── Module 3: Credential management (per-user local key store) ────────────
+// API keys are never hardcoded in source and never logged. Consumers ingest
+// a key once per browser into a credential store; sessions then reference
+// the store by profile name, and authenticate() pulls the raw key out at
+// the last moment to assemble the auth header. Storage is per-user and
+// local: kv-plugin (IndexedDB) when the module is on the page — this plugin
+// imports it, so it is — with localStorage and page-lifetime memory as
+// graceful fallbacks. Readable surfaces (get/describe/JSON/console) expose
+// only a fully masked redaction plus a fingerprint; the raw value leaves
+// the store exclusively through read(), for session header assembly.
+
+aiCodeToolIntegrationRedact(key) =>
+  if(typeof key !== "string") return "(none)";
+  let k = key.trim();
+  if(!k.length) return "(none)";
+  if(k.length <= 4) return new Array(k.length + 1).join("*");
+  return new Array(k.length - 3).join("*") + k.slice(-4);
+
+aiCodeToolIntegrationKvHandle() =>
+  try {
+    if(typeof window !== "undefined" && window.__kvPluginProxy7583683) return window.__kvPluginProxy7583683;
+    if(typeof root !== "undefined" && root.kv) return root.kv;
+  } catch(e) {}
+  return null;
+
+async aiCodeToolIntegrationCredentialOp(kind, profile, record) =>
+  let payload = aiCodeToolIntegrationDefaults();
+  let kv = null;
+  if(!payload._kvDown) kv = aiCodeToolIntegrationKvHandle();
+  if(kv) {
+    try {
+      let folder = kv["ai-code-tool-integration"];
+      if(kind === "write") {
+        await folder.set(profile, record);
+        return { ok: true, backend: "kv" };
+      }
+      if(kind === "remove") {
+        await folder.delete(profile);
+        return { ok: true, backend: "kv" };
+      }
+      let v = await folder.get(profile);
+      if(v === undefined || v === null) {
+        let emptySet = payload._kvEmptyProfiles || (payload._kvEmptyProfiles = {});
+        if(!emptySet[profile]) {
+          let delays = [100, 200];
+          let i = 0;
+          for(i = 0; i < delays.length && (v === undefined || v === null); i++) {
+            await new Promise(function(r2) { setTimeout(r2, delays[i]); });
+            v = await folder.get(profile);
+          }
+          if(v === undefined || v === null) emptySet[profile] = true;
+        }
+      }
+      return { ok: true, backend: "kv", record: (v === undefined || v === null) ? null : v };
+    } catch(e) {
+      payload._kvDown = true;
+    }
+  }
+  try {
+    let ls = (typeof localStorage !== "undefined") ? localStorage : null;
+    let lsKey = "ai-code-tool-integration:credential:" + profile;
+    if(ls) {
+      if(kind === "write") {
+        ls.setItem(lsKey, JSON.stringify(record));
+        return { ok: true, backend: "localStorage" };
+      }
+      if(kind === "remove") {
+        ls.removeItem(lsKey);
+        return { ok: true, backend: "localStorage" };
+      }
+      let raw2 = ls.getItem(lsKey);
+      let rec = null;
+      if(raw2) {
+        try { rec = JSON.parse(raw2); } catch(e) { rec = null; }
+      }
+      return { ok: true, backend: "localStorage", record: rec };
+    }
+  } catch(e) {}
+  if(!payload._memoryCredentials) payload._memoryCredentials = {};
+  let mem = payload._memoryCredentials;
+  if(kind === "write") {
+    mem[profile] = record;
+    return { ok: true, backend: "memory" };
+  }
+  if(kind === "remove") {
+    delete mem[profile];
+    return { ok: true, backend: "memory" };
+  }
+  return { ok: true, backend: "memory", record: mem[profile] || null };
+
+aiCodeToolIntegrationCredentials(opts) =>
+  let o = opts || {};
+  let profile = (typeof o.profile === "string" && o.profile.trim()) ? o.profile.trim() : "default";
+  let store = {
+    kind: "ai-code-tool-integration-credentials",
+    ok: true,
+    profile: profile,
+    describe: function() {
+      return "ai-code-tool-integration credential store | profile '" + store.profile + "' | keys kept per-user in this browser only";
+    },
+    toJSON: function() {
+      return { ok: store.ok, kind: store.kind, profile: store.profile };
+    },
+    toString: function() { return store.describe(); },
+    ingest: async function(raw, o2) {
+      if(typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, code: "invalid_credential", message: "No credential value was provided to ingest()." };
+      }
+      let oo = o2 || {};
+      let label = (typeof oo.label === "string" && oo.label.trim()) ? oo.label.trim() : null;
+      let trimmed = raw.trim();
+      let before = await aiCodeToolIntegrationCredentialOp("read", profile, null);
+      let existed = !!(before && before.ok && before.record && before.record.secret);
+      let out = await aiCodeToolIntegrationCredentialOp("write", profile, { secret: trimmed, storedAt: new Date().toISOString(), label: label });
+      if(!out.ok) {
+        return { ok: false, code: "credential_store_error", message: "Could not write to the credential store." };
+      }
+      return { ok: true, profile: profile, backend: out.backend, replaced: existed, fingerprint: aiCodeToolIntegrationFingerprint(trimmed), redacted: aiCodeToolIntegrationRedact(trimmed), storedAt: new Date().toISOString() };
+    },
+    has: async function() {
+      let r = await aiCodeToolIntegrationCredentialOp("read", profile, null);
+      return !!(r && r.ok && r.record && r.record.secret);
+    },
+    get: async function() {
+      let r = await aiCodeToolIntegrationCredentialOp("read", profile, null);
+      if(!r || !r.ok) return { ok: false, code: "credential_store_error", message: "The credential store could not be read." };
+      if(!r.record || !r.record.secret) {
+        return { ok: true, has: false, profile: profile, backend: r.backend, fingerprint: "(none)", redacted: "(none)", storedAt: null, label: null };
+      }
+      return { ok: true, has: true, profile: profile, backend: r.backend, fingerprint: aiCodeToolIntegrationFingerprint(r.record.secret), redacted: aiCodeToolIntegrationRedact(r.record.secret), storedAt: r.record.storedAt || null, label: r.record.label || null };
+    },
+    read: async function() {
+      let r = await aiCodeToolIntegrationCredentialOp("read", profile, null);
+      if(!r || !r.ok) return { ok: false, code: "credential_store_error", message: "The credential store could not be read." };
+      if(!r.record || !r.record.secret) return { ok: true, has: false, value: null, profile: profile, backend: r.backend };
+      return { ok: true, has: true, value: r.record.secret, profile: profile, backend: r.backend };
+    },
+    clear: async function() {
+      let r = await aiCodeToolIntegrationCredentialOp("read", profile, null);
+      let existed = !!(r && r.ok && r.record && r.record.secret);
+      let out = await aiCodeToolIntegrationCredentialOp("remove", profile, null);
+      if(!out.ok) return { ok: false, code: "credential_store_error", message: "Could not clear the credential store." };
+      return { ok: true, cleared: existed, profile: profile, backend: out.backend };
+    }
+  };
+  return store;
+
+async aiCodeToolIntegrationResolveCredentials(session) =>
+  if(session._secret) return { ok: true, source: "provided" };
+  let profile = session.credentialProfile;
+  if(!profile) {
+    return { ok: false, code: "no_credentials", message: "No apiKey was provided and no credential profile is configured. Pass apiKey to the plugin, or set credential to a profile name after storing the key with aiCodeToolIntegrationCredentials().ingest(key)." };
+  }
+  let store = aiCodeToolIntegrationCredentials({ profile: profile });
+  let r = null;
+  try { r = await store.read(); } catch(e) { r = null; }
+  if(!r || !r.ok) {
+    return { ok: false, code: "credential_store_error", message: "The credential store could not be read while resolving profile '" + profile + "'." };
+  }
+  if(!r.has || !r.value) {
+    return { ok: false, code: "no_credentials", message: "No stored credential for profile '" + profile + "'. Store one first, e.g. await aiCodeToolIntegrationCredentials({ profile: '" + profile + "' }).ingest(yourKey)." };
+  }
+  session._secret = r.value;
+  session.keyFingerprint = aiCodeToolIntegrationFingerprint(r.value);
+  session.credentialBackend = r.backend;
+  return { ok: true, source: "store", backend: r.backend };
+
+
+// ── Module 4: File System Indexing (structural context map) ──────────────
+// aiCodeToolIntegrationIndexTree(source, opts) builds a normalized file tree
+// {kind, name, path, size, type, children} from a local workspace so it can
+// be sent to the AI as structural context (task 5 consumes it). `source` is
+// one of:
+//   • an injected FILE TABLE — a plain object mapping workspace-relative
+//     paths to content/metadata, for sandboxed environments that have no
+//     direct filesystem access (the docs demo uses this; a browser page
+//     cannot enumerate local folders without the File System Access API):
+//       { "main.js": "console.log(1)",
+//         "src/app.js": { type: "text/javascript", bytes: "…" },
+//         "assets/": null }
+//     A value may be: string | Uint8Array | ArrayBuffer | Blob | DataView
+//     (file bytes), a number (byte-count placeholder, content unknown),
+//     null (empty text file), or a metadata object {size?, type?, bytes?
+//     |content?, dir?}. A path ending in "/" (or a {dir:true} value / a
+//     type of "directory") declares a DIRECTORY — the way to express empty
+//     ones. "\\" separators are normalized; ".." segments and empty paths
+//     are rejected loudly (never thrown), as is a path that would have to
+//     be both a file and a directory.
+//   • a File System Access DIRECTORY HANDLE — anything with .kind ===
+//     "directory" and a .values() iterator over {name, kind} entries (real
+//     or faked); walked depth-first and asynchronously. Real handles first
+//     need read permission (showDirectoryPicker grants it on user gesture).
+// The walk honors IGNORE RULES. Defaults (aiCodeToolIntegrationDefaultIgnores:
+// node_modules, .git, .hg, .svn, .DS_Store, __pycache__, .venv, venv) plus
+// opts.ignore patterns — exact segment names, *-globs on a name (e.g.
+// "*.min.js"), or slash-paths matched against the workspace-relative path
+// (e.g. "docs/generated/**" ignores that whole subtree). opts.ignoreDefaults
+// false clears the built-ins. BINARY files are excluded by default (known
+// binary extensions / binary mime types / NUL bytes in the first 1 KB when
+// content is available) unless opts.includeBinaries is true — a binary file
+// that sneaks into context would just waste tokens, since its bytes are not
+// readable text.
+// Result: the ROOT directory node — {kind:"directory", name, path:"",
+// type:"directory", size: total file bytes beneath it, children:[...]},
+// children sorted directories-first then alphabetically. Every node is
+// {kind, name, path, size, type, children} — files carry children:null;
+// directory size aggregates the file bytes below. This is a STRUCTURAL map
+// only (no file contents) — task 5 reads contents back through the same
+// source when building context. Any problem resolves to an {ok:false, code,
+// message} error object; the function never throws.
+
+aiCodeToolIntegrationNameMatch(name, pattern) =>
+  if(typeof name !== "string" || typeof pattern !== "string") return false;
+  if(pattern.indexOf("*") === -1) return name === pattern;
+  let out = "^", i = 0, ch = "";
+  for(i = 0; i < pattern.length; i++) {
+    ch = pattern.charAt(i);
+    if(ch === "*") out += "[^/]*";
+    else out += ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  }
+  out += "$";
+  try { return new RegExp(out).test(name); } catch(e) { return name === pattern; }
+
+aiCodeToolIntegrationPatternSegments(pattern) =>
+  if(typeof pattern !== "string" || !pattern.trim()) return [];
+  let out = [], parts = pattern.split("/"), i = 0, p = "";
+  for(i = 0; i < parts.length; i++) {
+    p = parts[i];
+    if(p === "" || p === ".") continue;
+    out.push(p);
+  }
+  return out;
+
+aiCodeToolIntegrationPatternMatches(segs, pattern) =>
+  if(!segs || !segs.length || typeof pattern !== "string") return false;
+  if(pattern.indexOf("/") === -1) return aiCodeToolIntegrationNameMatch(segs[segs.length - 1], pattern);
+  let psegs = aiCodeToolIntegrationPatternSegments(pattern);
+  if(!psegs.length) return false;
+  if(psegs[psegs.length - 1] === "**") psegs.pop();
+  if(psegs.length > segs.length) return false;
+  let i = 0;
+  for(i = 0; i < psegs.length; i++) {
+    if(!aiCodeToolIntegrationNameMatch(segs[i], psegs[i])) return false;
+  }
+  return true;
+
+aiCodeToolIntegrationDefaultIgnores() =>
+  return ["node_modules", ".git", ".hg", ".svn", ".DS_Store", "__pycache__", ".venv", "venv"];
+
+aiCodeToolIntegrationIsIgnored(segs, patterns) =>
+  if(!segs || !segs.length || !patterns || !patterns.length) return false;
+  let i = 0;
+  for(i = 0; i < patterns.length; i++) {
+    if(aiCodeToolIntegrationPatternMatches(segs, patterns[i])) return true;
+  }
+  return false;
+
+aiCodeToolIntegrationTextExtMime() =>
+  return {
+    js: "text/javascript", mjs: "text/javascript", cjs: "text/javascript", jsx: "text/jsx",
+    ts: "text/typescript", tsx: "text/tsx", json: "application/json", jsonc: "application/json",
+    map: "application/json", ipynb: "application/json", webmanifest: "application/manifest+json",
+    md: "text/markdown", markdown: "text/markdown", txt: "text/plain", text: "text/plain",
+    html: "text/html", htm: "text/html", css: "text/css", scss: "text/scss", sass: "text/sass", less: "text/less",
+    xml: "application/xml", svg: "image/svg+xml", yml: "application/yaml", yaml: "application/yaml", toml: "application/toml",
+    ini: "text/plain", cfg: "text/plain", conf: "text/plain", env: "text/plain", lock: "text/plain",
+    py: "text/x-python", rb: "text/x-ruby", go: "text/x-go", rs: "text/x-rust",
+    java: "text/x-java", kt: "text/x-kotlin", kts: "text/x-kotlin", swift: "text/x-swift",
+    c: "text/x-c", h: "text/x-c-header", cpp: "text/x-c++", hpp: "text/x-c++-header", cc: "text/x-c++", cs: "text/x-csharp",
+    php: "text/x-php", sh: "text/x-shellscript", bash: "text/x-shellscript", zsh: "text/x-shellscript", fish: "text/x-shellscript",
+    bat: "text/x-batch", cmd: "text/x-batch", ps1: "text/x-powershell",
+    sql: "text/x-sql", graphql: "text/x-graphql", gql: "text/x-graphql",
+    vue: "text/x-vue", svelte: "text/x-svelte", lua: "text/x-lua", pl: "text/x-perl", pm: "text/x-perl",
+    r: "text/x-r", dart: "text/x-dart", clj: "text/x-clojure", ex: "text/x-elixir", exs: "text/x-elixir",
+    erl: "text/x-erlang", fs: "text/x-fsharp", fsx: "text/x-fsharp", sol: "text/x-solidity"
+  };
+
+aiCodeToolIntegrationBinaryExtMime() =>
+  return {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    avif: "image/avif", ico: "image/x-icon", bmp: "image/bmp", tif: "image/tiff", tiff: "image/tiff", heic: "image/heic",
+    woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf", eot: "font/eot",
+    mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", opus: "audio/opus",
+    m4a: "audio/mp4", flac: "audio/flac", aac: "audio/aac", mid: "audio/midi",
+    mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", avi: "video/x-msvideo",
+    mkv: "video/x-matroska", m4v: "video/mp4", mpg: "video/mpeg", mpeg: "video/mpeg",
+    zip: "application/zip", gz: "application/gzip", tgz: "application/gzip", tar: "application/x-tar",
+    bz2: "application/x-bzip2", xz: "application/x-xz", zst: "application/zstd", "7z": "application/x-7z-compressed", rar: "application/vnd.rar",
+    pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    odt: "application/vnd.oasis.opendocument.text", ods: "application/vnd.oasis.opendocument.spreadsheet",
+    exe: "application/octet-stream", dll: "application/octet-stream", so: "application/octet-stream",
+    dylib: "application/octet-stream", dmg: "application/octet-stream", iso: "application/octet-stream",
+    bin: "application/octet-stream", dat: "application/octet-stream", wasm: "application/wasm",
+    class: "application/java-vm", jar: "application/java-archive", pyc: "application/octet-stream",
+    o: "application/octet-stream", a: "application/octet-stream", deb: "application/vnd.debian.binary-package",
+    rpm: "application/x-rpm", apk: "application/vnd.android.package-archive", ipa: "application/octet-stream",
+    swf: "application/x-shockwave-flash", crx: "application/x-chrome-extension", msi: "application/x-msi",
+    pdb: "application/octet-stream"
+  };
+
+aiCodeToolIntegrationExtOf(name) =>
+  if(typeof name !== "string") return "";
+  let n = name;
+  let slash = n.lastIndexOf("/");
+  if(slash !== -1) n = n.slice(slash + 1);
+  let dot = n.lastIndexOf(".");
+  if(dot <= 0) return "";
+  return n.slice(dot + 1).toLowerCase();
+
+aiCodeToolIntegrationMimeLooksBinary(mime) =>
+  if(typeof mime !== "string" || !mime) return false;
+  let m = mime.toLowerCase();
+  if(m.indexOf("image/") === 0 && m !== "image/svg+xml") return true;
+  if(m.indexOf("audio/") === 0 || m.indexOf("video/") === 0 || m.indexOf("font/") === 0) return true;
+  if(m === "application/octet-stream" || m === "application/pdf" || m === "application/zip" || m === "application/gzip" || m === "application/wasm") return true;
+  if(m.indexOf("application/vnd.") === 0 || m.indexOf("application/x-") === 0 || m.indexOf("application/java") === 0) return true;
+  return false;
+
+aiCodeToolIntegrationByteLength(v) =>
+  if(v == null) return 0;
+  if(typeof v === "string") {
+    try { if(typeof TextEncoder !== "undefined") return new TextEncoder().encode(v).length; } catch(e) {}
+    return v.length;
+  }
+  if(typeof v === "number") return Math.max(0, Math.floor(v));
+  if(typeof Uint8Array !== "undefined" && v instanceof Uint8Array) return v.length;
+  if(typeof ArrayBuffer !== "undefined" && v instanceof ArrayBuffer) return v.byteLength;
+  if(typeof DataView !== "undefined" && v instanceof DataView) return v.byteLength;
+  if(typeof Blob !== "undefined" && v instanceof Blob) return v.size;
+  if(typeof v === "object" && v !== null) {
+    if(typeof v.size === "number") return Math.max(0, Math.floor(v.size));
+    if(typeof v.byteLength === "number") return Math.max(0, Math.floor(v.byteLength));
+  }
+  return 0;
+
+aiCodeToolIntegrationLooksBinaryContent(v) =>
+  try {
+    let bytes = null;
+    if(typeof Uint8Array !== "undefined" && v instanceof Uint8Array) bytes = v;
+    else if(typeof ArrayBuffer !== "undefined" && v instanceof ArrayBuffer) bytes = new Uint8Array(v);
+    else if(typeof DataView !== "undefined" && v instanceof DataView) bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if(!bytes) return false;
+    let n = Math.min(bytes.length, 1024), i = 0;
+    for(i = 0; i < n; i++) if(bytes[i] === 0) return true;
+  } catch(e) {}
+  return false;
+
+aiCodeToolIntegrationTableValueMeta(v) =>
+  if(v == null) return { kind: "file", bytes: "", size: null, type: null };
+  if(typeof v === "string") return { kind: "file", bytes: v, size: null, type: null };
+  if(typeof v === "number") return { kind: "file", bytes: null, size: Math.max(0, Math.floor(v)), type: null };
+  if(typeof Uint8Array !== "undefined" && v instanceof Uint8Array) return { kind: "file", bytes: v, size: null, type: null };
+  if(typeof ArrayBuffer !== "undefined" && v instanceof ArrayBuffer) return { kind: "file", bytes: v, size: null, type: null };
+  if(typeof DataView !== "undefined" && v instanceof DataView) return { kind: "file", bytes: v, size: null, type: null };
+  if(typeof Blob !== "undefined" && v instanceof Blob) return { kind: "file", bytes: v, size: null, type: null };
+  if(typeof v !== "object" || Array.isArray(v)) return { invalid: true };
+  let t = v.type;
+  if(v.dir === true || v.directory === true || t === "directory") return { kind: "dir" };
+  let meta = { kind: "file", bytes: null, size: null, type: null };
+  if(typeof v.size === "number" && v.size >= 0) meta.size = Math.floor(v.size);
+  if(typeof v.type === "string" && v.type.trim()) meta.type = v.type.trim();
+  let b = (v.bytes !== undefined) ? v.bytes : ((v.content !== undefined) ? v.content : null);
+  if(b !== null && b !== undefined) {
+    let okBytes = typeof b === "string";
+    if(!okBytes && typeof Uint8Array !== "undefined") okBytes = b instanceof Uint8Array;
+    if(!okBytes && typeof ArrayBuffer !== "undefined") okBytes = b instanceof ArrayBuffer;
+    if(!okBytes && typeof DataView !== "undefined") okBytes = b instanceof DataView;
+    if(!okBytes && typeof Blob !== "undefined") okBytes = b instanceof Blob;
+    if(okBytes) meta.bytes = b;
+    else return { invalid: true };
+  }
+  return meta;
+
+aiCodeToolIntegrationNormalizeSegs(raw) =>
+  if(typeof raw !== "string") return null;
+  let s = raw.replace(/\\/g, "/");
+  if(s.trim().charAt(0) === "/") return null;
+  let parts = s.split("/"), segs = [], i = 0, p = "";
+  for(i = 0; i < parts.length; i++) {
+    p = parts[i];
+    if(p === "" || p === ".") continue;
+    segs.push(p);
+  }
+  if(!segs.length) return null;
+  for(i = 0; i < segs.length; i++) {
+    if(segs[i] === "..") return null;
+  }
+  return segs;
+
+aiCodeToolIntegrationIndexConfig(opts) =>
+  let cfg = { ignorePatterns: [], ignoreDefaults: true, includeBinaries: false, rootName: "", maxDepth: 0 };
+  if(opts != null) {
+    let v = aiCodeToolIntegrationProbeField(opts, "ignore");
+    if(Array.isArray(v)) {
+      cfg.ignorePatterns = [];
+      let i = 0, ip = "";
+      for(i = 0; i < v.length; i++) {
+        ip = aiCodeToolIntegrationResolve(v[i]);
+        if(typeof ip === "string" && ip.trim()) cfg.ignorePatterns.push(ip.trim());
+      }
+    } else if(typeof v === "string" && v.trim()) {
+      cfg.ignorePatterns = [v.trim()];
+    }
+    if(aiCodeToolIntegrationProbeField(opts, "ignoreDefaults") === false) cfg.ignoreDefaults = false;
+    cfg.includeBinaries = aiCodeToolIntegrationProbeField(opts, "includeBinaries") === true;
+    let rn = aiCodeToolIntegrationProbeField(opts, "rootName");
+    if(typeof rn === "string" && rn.trim()) cfg.rootName = rn.trim();
+    let md = aiCodeToolIntegrationProbeField(opts, "maxDepth");
+    if(typeof md === "number" && md > 0) cfg.maxDepth = Math.floor(md);
+  }
+  let patterns = cfg.ignorePatterns.slice();
+  if(cfg.ignoreDefaults) {
+    let defs = aiCodeToolIntegrationDefaultIgnores();
+    let i = 0;
+    for(i = 0; i < defs.length; i++) patterns.push(defs[i]);
+  }
+  cfg.ignorePatterns = patterns;
+  return cfg;
+
+aiCodeToolIntegrationFileNode(name, path, meta, cfg) =>
+  let ext = aiCodeToolIntegrationExtOf(name);
+  let textMime = aiCodeToolIntegrationTextExtMime()[ext];
+  let binMime = aiCodeToolIntegrationBinaryExtMime()[ext];
+  let type = (meta && typeof meta.type === "string" && meta.type) ? meta.type : null;
+  let binary = false;
+  if(binMime) {
+    binary = true;
+  } else if(!textMime) {
+    if(type && aiCodeToolIntegrationMimeLooksBinary(type)) binary = true;
+    else if(meta && meta.bytes !== null && meta.bytes !== undefined && aiCodeToolIntegrationLooksBinaryContent(meta.bytes)) binary = true;
+  }
+  if(binary) {
+    if(!cfg.includeBinaries) return null;
+    if(!type) type = binMime || "application/octet-stream";
+  } else {
+    if(!type) type = textMime || "text/plain";
+  }
+  let size = (meta && typeof meta.size === "number") ? meta.size : aiCodeToolIntegrationByteLength(meta ? meta.bytes : null);
+  return { kind: "file", name: name, path: path, size: size, type: type, children: null };
+
+aiCodeToolIntegrationFinalizeDir(node) =>
+  if(!node || node.kind === "file") return (node && typeof node.size === "number") ? node.size : 0;
+  let rawList = [];
+  if(Array.isArray(node.children)) {
+    rawList = node.children;
+  } else if(node.children && typeof node.children === "object") {
+    let names = Object.keys(node.children), i = 0;
+    for(i = 0; i < names.length; i++) rawList.push(node.children[names[i]]);
+  }
+  let kept = [], total = 0, i = 0, c = null, sub = 0, wasDeclared = false;
+  for(i = 0; i < rawList.length; i++) {
+    c = rawList[i];
+    if(!c) continue;
+    if(c.kind === "directory") {
+      wasDeclared = c.declared === true;
+      sub = aiCodeToolIntegrationFinalizeDir(c);
+      if(!wasDeclared && c.children.length === 0) continue;
+      total += sub;
+      kept.push(c);
+    } else {
+      if(typeof c.size === "number") total += c.size;
+      kept.push(c);
+    }
+  }
+  kept.sort(function(a, b) {
+    if(!a || !b) return 0;
+    if(a.kind !== b.kind) return a.kind === "directory" ? -1 : 1;
+    let an = a.name.toLowerCase(), bn = b.name.toLowerCase();
+    if(an < bn) return -1;
+    if(an > bn) return 1;
+    return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
+  });
+  if(node.declared !== undefined) delete node.declared;
+  node.children = kept;
+  node.size = total;
+  return total;
+
+async aiCodeToolIntegrationIndexTable(source, cfg) =>
+  let root = { kind: "directory", name: cfg.rootName || "workspace", path: "", type: "directory", size: 0, children: {} };
+  let keys = Object.keys(source), markers = [], files = [], ki = 0, key = "", raw = "", segs = null, val = null, meta = null;
+  for(ki = 0; ki < keys.length; ki++) {
+    key = keys[ki];
+    raw = String(key);
+    segs = aiCodeToolIntegrationNormalizeSegs(raw);
+    if(!segs) {
+      return { ok: false, code: "invalid_index_path", message: "The file table contains an invalid path: '" + raw + "'. Paths must be non-empty and workspace-relative (no leading '/', no '..' segments)." };
+    }
+    if(cfg.maxDepth && segs.length > cfg.maxDepth) continue;
+    val = aiCodeToolIntegrationResolve(source[key]);
+    meta = aiCodeToolIntegrationTableValueMeta(val);
+    if(meta.invalid) {
+      return { ok: false, code: "invalid_index_value", message: "The file table value for '" + raw + "' is not file content or recognized metadata. Use a string, Uint8Array, ArrayBuffer, Blob, DataView, a byte-count number, null for an empty file, or an object with {size?, type?, bytes?|content?, dir?}." };
+    }
+    if(/[\\/]$/.test(raw.trim()) || meta.kind === "dir") markers.push(segs);
+    else files.push({ segs: segs, meta: meta });
+  }
+  let dirResult = function(segs2) {
+    let cur = root, i2 = 0, seg2 = "", existing = null;
+    for(i2 = 0; i2 < segs2.length; i2++) {
+      seg2 = segs2[i2];
+      if(aiCodeToolIntegrationIsIgnored(segs2.slice(0, i2 + 1), cfg.ignorePatterns)) return { ok: true, skipped: true };
+      existing = cur.children[seg2];
+      if(existing) {
+        if(existing.kind !== "directory") {
+          return { ok: false, code: "invalid_index_conflict", message: "The file table declares '" + segs2.join("/") + "' as a directory but that path already holds file content. A path cannot be both a file and a directory." };
+        }
+      } else {
+        existing = { kind: "directory", name: seg2, path: (cur.path ? cur.path + "/" : "") + seg2, type: "directory", size: 0, children: {}, declared: false };
+        cur.children[seg2] = existing;
+      }
+      cur = existing;
+    }
+    return { ok: true, node: cur };
+  };
+  let m = 0, d = null, f = 0, entry = null, name = "", node = null, existing2 = null, parent = null;
+  for(m = 0; m < markers.length; m++) {
+    d = dirResult(markers[m]);
+    if(!d.ok) return { ok: false, code: d.code, message: d.message };
+    if(d.skipped) continue;
+    d.node.declared = true;
+  }
+  for(f = 0; f < files.length; f++) {
+    entry = files[f];
+    parent = root;
+    if(entry.segs.length > 1) {
+      d = dirResult(entry.segs.slice(0, entry.segs.length - 1));
+      if(!d.ok) return { ok: false, code: d.code, message: d.message };
+      if(d.skipped) continue;
+      parent = d.node;
+    }
+    name = entry.segs[entry.segs.length - 1];
+    if(aiCodeToolIntegrationIsIgnored(entry.segs, cfg.ignorePatterns)) continue;
+    existing2 = parent.children[name];
+    if(existing2 && existing2.kind === "directory") {
+      return { ok: false, code: "invalid_index_conflict", message: "The file table declares '" + entry.segs.join("/") + "' as file content, but that path is a directory (declared explicitly or implied by deeper paths)." };
+    }
+    node = aiCodeToolIntegrationFileNode(name, entry.segs.join("/"), entry.meta, cfg);
+    if(node) parent.children[name] = node;
+  }
+  aiCodeToolIntegrationFinalizeDir(root);
+  return root;
+
+async aiCodeToolIntegrationReadEntries(handle) =>
+  let raw = null;
+  try { raw = (typeof handle.values === "function") ? handle.values() : null; } catch(e) { raw = null; }
+  if(raw == null) return [];
+  if(typeof raw === "function") { try { raw = raw(); } catch(e) { return []; } }
+  let items = [];
+  if(raw && typeof raw[Symbol.asyncIterator] === "function") {
+    for await (let v of raw) items.push(v);
+  } else if(raw && typeof raw[Symbol.iterator] === "function") {
+    for (let v of raw) items.push(v);
+  } else if(raw && typeof raw.next === "function") {
+    let step = await raw.next();
+    while(step && !step.done) {
+      items.push(step.value);
+      step = await raw.next();
+    }
+  }
+  return items;
+
+async aiCodeToolIntegrationHandleFileMeta(entry, cfg) =>
+  let file = null;
+  if(typeof entry.getFile === "function") {
+    try { file = await entry.getFile(); } catch(e) { file = null; }
+  }
+  let size = null, type = null, bytes = null;
+  if(file) {
+    if(typeof file.size === "number") size = file.size;
+    if(typeof file.type === "string" && file.type) type = file.type;
+  }
+  if(size === null && typeof entry.size === "number") size = entry.size;
+  if(type === null && typeof entry.type === "string" && entry.type) type = entry.type;
+  if(!cfg.includeBinaries && file && typeof file.slice === "function" && typeof file.arrayBuffer === "function") {
+    try { bytes = await file.slice(0, 1024).arrayBuffer(); } catch(e) { bytes = null; }
+  }
+  return { size: size, type: type, bytes: bytes };
+
+async aiCodeToolIntegrationIndexHandleDir(handle, cfg, ownPath, depth) =>
+  let name = (handle && handle.name != null) ? String(handle.name) : "folder";
+  let node = { kind: "directory", name: name, path: ownPath, type: "directory", size: 0, children: [], declared: true };
+  let entries = await aiCodeToolIntegrationReadEntries(handle);
+  let ei = 0, entry = null, en = "", childPath = "", childSegs = null, sub = null, fnode = null;
+  for(ei = 0; ei < entries.length; ei++) {
+    entry = entries[ei];
+    if(!entry || typeof entry !== "object") continue;
+    en = (entry.name != null) ? String(entry.name) : "";
+    if(!en) continue;
+    if(cfg.maxDepth && depth + 1 > cfg.maxDepth) break;
+    childSegs = ownPath ? ownPath.split("/").concat([en]) : [en];
+    if(aiCodeToolIntegrationIsIgnored(childSegs, cfg.ignorePatterns)) continue;
+    childPath = ownPath ? ownPath + "/" + en : en;
+    if(entry.kind === "directory" || typeof entry.values === "function") {
+      try {
+        sub = await aiCodeToolIntegrationIndexHandleDir(entry, cfg, childPath, depth + 1);
+        node.children.push(sub);
+      } catch(e) {}
+    } else {
+      try {
+        let meta = await aiCodeToolIntegrationHandleFileMeta(entry, cfg);
+        fnode = aiCodeToolIntegrationFileNode(en, childPath, meta, cfg);
+        if(fnode) node.children.push(fnode);
+      } catch(e) {}
+    }
+  }
+  return node;
+
+async aiCodeToolIntegrationIndexHandle(handle, cfg) =>
+  if(!handle || typeof handle.values !== "function") {
+    return { ok: false, code: "invalid_index_source", message: "A directory handle needs a values() iterator over its {name, kind} entries — the provided object has none. Pass a directory handle (kind 'directory'), not a file handle." };
+  }
+  let node = await aiCodeToolIntegrationIndexHandleDir(handle, cfg, "", 0);
+  node.path = "";
+  let hn = (handle.name != null) ? String(handle.name) : "";
+  node.name = cfg.rootName || hn || "workspace";
+  aiCodeToolIntegrationFinalizeDir(node);
+  return node;
+
+async aiCodeToolIntegrationIndexTree(source, opts) =>
+  let cfg = aiCodeToolIntegrationIndexConfig(opts);
+  try {
+    let src = aiCodeToolIntegrationResolve(source);
+    if(src == null || typeof src !== "object" || Array.isArray(src)) {
+      return { ok: false, code: "invalid_index_source", message: "No valid index source was provided. Pass a File System Access directory handle (kind 'directory' with a values() iterator) or a plain file-table object mapping workspace-relative paths to file content, e.g. { 'main.js': 'const x = 1;', 'src/util.js': { type: 'text/javascript', bytes: 'export const util = 1;' } }." };
+    }
+    if(src.kind === "file" || typeof src.getFile === "function") {
+      return { ok: false, code: "invalid_index_source", message: "The source looks like a single file handle. Pass the PARENT directory handle instead — the index is a tree of the whole workspace." };
+    }
+    let out = null;
+    if(src.kind === "directory" || typeof src.values === "function") {
+      out = await aiCodeToolIntegrationIndexHandle(src, cfg);
+    } else {
+      out = await aiCodeToolIntegrationIndexTable(src, cfg);
+    }
+    if(out && out.ok === false) return out;
+    return out;
+  } catch(e) {
+    return { ok: false, code: "index_error", message: "The file index could not be built: " + aiCodeToolIntegrationSafeMessage(e) };
+  }
+
+aiCodeToolIntegrationTreeStats(node) =>
+  if(!node || typeof node !== "object" || (node.kind !== "directory" && node.kind !== "file")) {
+    return { ok: false, code: "invalid_tree", message: "aiCodeToolIntegrationTreeStats expects a tree node (kind 'directory' or 'file') as returned by aiCodeToolIntegrationIndexTree." };
+  }
+  let dirs = 0, files = 0, bytes = 0;
+  let walk = function(n) {
+    if(!n || typeof n !== "object") return;
+    if(n.kind === "file") {
+      files++;
+      if(typeof n.size === "number") bytes += n.size;
+      return;
+    }
+    dirs++;
+    let i2 = 0;
+    for(i2 = 0; i2 < (n.children || []).length; i2++) walk(n.children[i2]);
+  };
+  walk(node);
+  return { dirCount: dirs, fileCount: files, totalBytes: bytes };
+
+
+// ── Module 5: Targeted Context Injection (contents → prompt window) ──────
+// aiCodeToolIntegrationInject(source, query, opts) reads the files the index
+// flagged as relevant — selected by exact path, glob pattern or path
+// substring — and formats their CONTENTS as tagged context blocks for the
+// AI prompt. It is the content counterpart to Module 4's structural map: the
+// index answers "what files exist", injection answers "what's inside the
+// ones we care about". Blocks use unambiguous FILE / END FILE fences so a
+// later stage can split them mechanically:
+//
+//   ----- FILE: src/index.js -----
+//   type: text/javascript
+//   size: 55 bytes
+//   <file content>
+//   ----- END FILE: src/index.js -----
+//
+// `source` is the same two forms IndexTree accepts (a file table or a File
+// System Access directory handle) and the SAME ignore rules apply, so noise
+// directories never leak contents into a prompt. `query` selects files:
+//   • a plain object {path, maxBytes?} — exact path match, optional
+//     per-query content cap
+//   • a string containing * or ? — glob over the workspace-relative path
+//     (** crosses directories, * stays inside one segment). A pattern with
+//     no slash matches the FILE NAME at any depth (`*.js` → every .js file
+//     in the workspace); a pattern with a slash matches the path from the
+//     root (`src/**` → the whole subtree; `**/*.test.js` → test files at
+//     any depth)
+//   • any other string — case-insensitive substring of the path
+// A single value or an array selects multiple files; a file matched by
+// several queries is injected once (first match wins).
+// Per-file content is capped at opts.maxBytes (default 8000 chars) and
+// truncated with a visible marker; opts.maxFiles limits how many files are
+// injected (default 25); opts.totalBytes caps the whole window (injection
+// stops when the next block would exceed it). opts.context — an existing
+// context window — has the new blocks appended to it. Binary files are
+// skipped (their bytes are not readable text) and counted in stats. The
+// resolved {ok, context, blocks, stats} (or an {ok:false, code, message}
+// error) is returned; the function never throws.
+
+aiCodeToolIntegrationGlobRegex(pattern) =>
+  let out = "^", i = 0, ch = "";
+  for(i = 0; i < pattern.length; i++) {
+    ch = pattern.charAt(i);
+    if(ch === "*") out += "[^/]*";
+    else if(ch === "?") out += "[^/]";
+    else out += ch.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  }
+  out += "$";
+  try { return new RegExp(out); } catch(e) { return null; }
+
+aiCodeToolIntegrationSegmentMatch(name, pattern) =>
+  if(typeof name !== "string" || typeof pattern !== "string") return false;
+  if(pattern === "**") return true;
+  if(pattern.indexOf("*") === -1 && pattern.indexOf("?") === -1) return name === pattern;
+  let re = aiCodeToolIntegrationGlobRegex(pattern);
+  if(!re) return name === pattern;
+  return re.test(name);
+
+aiCodeToolIntegrationQuerySegments(query) =>
+  if(typeof query !== "string") return null;
+  let q = query.trim().replace(/\\/g, "/");
+  while(q.indexOf("//") !== -1) q = q.replace(/\/\//g, "/");
+  if(q.charAt(0) === "/") q = q.slice(1);
+  let parts = q.split("/"), segs = [], i = 0, p = "";
+  for(i = 0; i < parts.length; i++) {
+    p = parts[i];
+    if(p === "" || p === ".") continue;
+    segs.push(p);
+  }
+  return segs;
+
+aiCodeToolIntegrationQueryMatch(segs, query) =>
+  if(!segs || !segs.length) return false;
+  let qsegs = aiCodeToolIntegrationQuerySegments(query);
+  if(!qsegs || !qsegs.length) return false;
+  let m = segs.length, n = qsegs.length, memo = [], i2 = 0, j2 = 0;
+  for(i2 = 0; i2 <= m; i2++) {
+    memo.push([]);
+    for(j2 = 0; j2 <= n; j2++) memo[i2].push(-1);
+  }
+  let f = function(i, j) {
+    if(memo[i][j] !== -1) return memo[i][j] === 1;
+    let res = false;
+    if(j === n) res = (i === m);
+    else if(qsegs[j] === "**") {
+      if(f(i, j + 1)) res = true;
+      else if(i < m && f(i + 1, j)) res = true;
+    } else if(i < m && aiCodeToolIntegrationSegmentMatch(segs[i], qsegs[j])) {
+      res = f(i + 1, j + 1);
+    }
+    memo[i][j] = res ? 1 : 0;
+    return res;
+  };
+  return f(0, 0);
+
+aiCodeToolIntegrationFlattenFiles(node, out) =>
+  if(!node || typeof node !== "object") return;
+  if(node.kind === "file") {
+    out.push({ path: node.path, name: node.name, size: node.size, type: node.type });
+    return;
+  }
+  let i = 0;
+  for(i = 0; i < (node.children || []).length; i++) aiCodeToolIntegrationFlattenFiles(node.children[i], out);
+
+aiCodeToolIntegrationSelectFiles(files, query) =>
+  let stats = { queries: 0, exact: 0, glob: 0, substring: 0, matched: 0, duplicates: 0 };
+  if(!files || !files.length || query == null) return { selected: [], stats: stats };
+  let list = Array.isArray(query) ? query : [query];
+  let selected = [], seen = {}, qi = 0, q = null, qpath = "", cap = null, isObj = false, fi = 0, file = null, hitKind = "", hasGlob = false;
+  for(qi = 0; qi < list.length; qi++) {
+    q = aiCodeToolIntegrationResolve(list[qi]);
+    cap = null;
+    isObj = (q != null && typeof q === "object");
+    if(isObj) {
+      qpath = aiCodeToolIntegrationProbeField(q, "path");
+      let c = aiCodeToolIntegrationProbeField(q, "maxBytes");
+      if(typeof c === "number" && c > 0) cap = Math.floor(c);
+    } else if(typeof q === "string") {
+      qpath = q;
+    } else {
+      continue;
+    }
+    if(typeof qpath !== "string" || !qpath.trim()) continue;
+    stats.queries++;
+    qpath = qpath.trim().replace(/^\/+/, "");
+    hasGlob = (qpath.indexOf("*") !== -1 || qpath.indexOf("?") !== -1);
+    for(fi = 0; fi < files.length; fi++) {
+      file = files[fi];
+      hitKind = "";
+      if(hasGlob) {
+        if(qpath.indexOf("/") === -1) {
+          if(aiCodeToolIntegrationSegmentMatch(file.name, qpath)) hitKind = "glob";
+        } else if(aiCodeToolIntegrationQueryMatch(file.path.split("/"), qpath)) {
+          hitKind = "glob";
+        }
+      } else if(file.path === qpath) {
+        hitKind = "exact";
+      } else if(file.path.toLowerCase().indexOf(qpath.toLowerCase()) !== -1) {
+        hitKind = "substring";
+      }
+      if(!hitKind) continue;
+      if(seen[file.path]) {
+        stats.duplicates++;
+        continue;
+      }
+      seen[file.path] = true;
+      selected.push({ file: file, kind: hitKind, cap: cap });
+      stats.matched++;
+      if(hitKind === "exact") stats.exact++;
+      else if(hitKind === "glob") stats.glob++;
+      else stats.substring++;
+    }
+  }
+  return { selected: selected, stats: stats };
+
+aiCodeToolIntegrationDecodeBytes(v) =>
+  try {
+    if(typeof v === "string") return v;
+    if(typeof Uint8Array !== "undefined" && v instanceof Uint8Array) {
+      if(typeof TextDecoder !== "undefined") return new TextDecoder().decode(v);
+      return Array.prototype.map.call(v, function(b) { return String.fromCharCode(b); }).join("");
+    }
+    if(typeof ArrayBuffer !== "undefined" && v instanceof ArrayBuffer) {
+      if(typeof TextDecoder !== "undefined") return new TextDecoder().decode(new Uint8Array(v));
+      return "";
+    }
+    if(typeof DataView !== "undefined" && v instanceof DataView) {
+      if(typeof TextDecoder !== "undefined") return new TextDecoder().decode(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+      return "";
+    }
+    if(typeof Blob !== "undefined" && v instanceof Blob) {
+      if(typeof v.text === "function") return v.text();
+      if(typeof v.arrayBuffer === "function") return v.arrayBuffer().then(function(b) { return new TextDecoder().decode(new Uint8Array(b)); });
+      return "";
+    }
+  } catch(e) {}
+  return "";
+
+aiCodeToolIntegrationTableContent(source, path) =>
+  let val = null;
+  try { val = source[path]; } catch(e) { val = undefined; }
+  if(val === undefined) return { ok: false, reason: "missing" };
+  let meta = aiCodeToolIntegrationTableValueMeta(val);
+  if(meta.invalid) return { ok: false, reason: "invalid" };
+  if(meta.kind === "dir") return { ok: false, reason: "dir" };
+  if(meta.bytes !== null && meta.bytes !== undefined) {
+    if(aiCodeToolIntegrationLooksBinaryContent(meta.bytes)) return { ok: true, text: null, binary: true };
+    return { ok: true, text: aiCodeToolIntegrationDecodeBytes(meta.bytes) };
+  }
+  if(val == null) return { ok: true, text: "" };
+  if(typeof val === "number") return { ok: true, text: null, missing: true };
+  return { ok: true, text: null, missing: true };
+
+async aiCodeToolIntegrationHandleEntries(handle, cfg, ownPath, depth, out) =>
+  let entries = await aiCodeToolIntegrationReadEntries(handle);
+  let ei = 0, entry = null, en = "", childPath = "", childSegs = null;
+  for(ei = 0; ei < entries.length; ei++) {
+    entry = entries[ei];
+    if(!entry || typeof entry !== "object") continue;
+    en = (entry.name != null) ? String(entry.name) : "";
+    if(!en) continue;
+    if(cfg.maxDepth && depth + 1 > cfg.maxDepth) break;
+    childSegs = ownPath ? ownPath.split("/").concat([en]) : [en];
+    if(aiCodeToolIntegrationIsIgnored(childSegs, cfg.ignorePatterns)) continue;
+    childPath = ownPath ? ownPath + "/" + en : en;
+    if(entry.kind === "directory" || typeof entry.values === "function") {
+      await aiCodeToolIntegrationHandleEntries(entry, cfg, childPath, depth + 1, out);
+    } else {
+      out.push({ path: childPath, entry: entry });
+    }
+  }
+
+async aiCodeToolIntegrationHandleContent(entry) =>
+  try {
+    if(typeof entry.getFile !== "function") {
+      if(typeof entry.text === "function") {
+        let t = await entry.text();
+        return { ok: true, text: (typeof t === "string") ? t : "" };
+      }
+      return { ok: false, reason: "no-reader" };
+    }
+    let file = await entry.getFile();
+    if(!file) return { ok: false, reason: "no-file" };
+    if(typeof file.text === "function") {
+      let t = await file.text();
+      if(typeof t === "string") return { ok: true, text: t };
+    }
+    if(typeof file.arrayBuffer === "function") {
+      let buf = await file.arrayBuffer();
+      let u8 = new Uint8Array(buf);
+      if(aiCodeToolIntegrationLooksBinaryContent(u8)) return { ok: true, text: null, binary: true };
+      return { ok: true, text: aiCodeToolIntegrationDecodeBytes(u8) };
+    }
+    return { ok: false, reason: "no-reader" };
+  } catch(e) {
+    return { ok: false, reason: "read-error" };
+  }
+
+aiCodeToolIntegrationTruncate(text, maxChars) =>
+  if(typeof text !== "string") return { text: "", truncated: false, kept: 0 };
+  if(!maxChars || maxChars <= 0) return { text: text, truncated: false, kept: text.length };
+  if(text.length <= maxChars) return { text: text, truncated: false, kept: text.length };
+  return { text: text.slice(0, maxChars), truncated: true, kept: maxChars };
+
+aiCodeToolIntegrationFormatBlock(block) =>
+  let head = "----- FILE: " + block.path + " -----";
+  let tail = "----- END FILE: " + block.path + " -----";
+  let meta = "type: " + (block.type || "text/plain") + "\nsize: " + block.size + " bytes";
+  let body = "";
+  if(block.missing) body = "[content unavailable in source — byte-count placeholder only]";
+  else if(block.truncated) body = block.content + "\n[... truncated: kept " + block.keptBytes + " of " + block.size + " bytes ...]";
+  else if(block.content === "") body = "[empty file]";
+  else body = block.content;
+  return head + "\n" + meta + "\n" + body + "\n" + tail;
+
+async aiCodeToolIntegrationInject(source, query, opts) =>
+  let cfg = aiCodeToolIntegrationIndexConfig(opts);
+  try {
+    let src = aiCodeToolIntegrationResolve(source);
+    if(src == null || typeof src !== "object" || Array.isArray(src)) {
+      return { ok: false, code: "invalid_inject_source", message: "No valid injection source was provided. Pass the same source aiCodeToolIntegrationIndexTree accepts: a File System Access directory handle or a file-table object mapping workspace-relative paths to file content." };
+    }
+    let tree = await aiCodeToolIntegrationIndexTree(src, opts);
+    if(!tree || tree.ok === false) {
+      if(tree && tree.ok === false) return { ok: false, code: tree.code, message: tree.message };
+      return { ok: false, code: "index_error", message: "The file index could not be built before injection." };
+    }
+    let files = [];
+    aiCodeToolIntegrationFlattenFiles(tree, files);
+    let sel = aiCodeToolIntegrationSelectFiles(files, query);
+    let maxBytes = 8000, maxFiles = 25, totalBytes = null, context = "";
+    if(opts != null) {
+      let mb = aiCodeToolIntegrationProbeField(opts, "maxBytes");
+      if(typeof mb === "number" && mb > 0) maxBytes = Math.floor(mb);
+      let mf = aiCodeToolIntegrationProbeField(opts, "maxFiles");
+      if(typeof mf === "number" && mf > 0) maxFiles = Math.floor(mf);
+      let tb = aiCodeToolIntegrationProbeField(opts, "totalBytes");
+      if(typeof tb === "number" && tb > 0) totalBytes = Math.floor(tb);
+      let ctx = aiCodeToolIntegrationProbeField(opts, "context");
+      if(typeof ctx === "string") context = ctx;
+    }
+    let blocks = [], stats = sel.stats, used = context ? aiCodeToolIntegrationByteLength(context) : 0, nextSep = context ? 2 : 0, srcIsHandle = (src.kind === "directory" || typeof src.values === "function");
+    stats.source = srcIsHandle ? "handle" : "table";
+    stats.files = files.length;
+    stats.maxBytes = maxBytes;
+    stats.maxFiles = maxFiles;
+    stats.totalBytes = totalBytes;
+    stats.injected = 0;
+    stats.binarySkipped = 0;
+    stats.missingContent = 0;
+    stats.readErrors = 0;
+    stats.stoppedByMaxFiles = false;
+    stats.stoppedByTotal = false;
+    let handleMap = null;
+    if(srcIsHandle) {
+      let hm = [];
+      await aiCodeToolIntegrationHandleEntries(src, cfg, "", 0, hm);
+      handleMap = {};
+      let i2 = 0;
+      for(i2 = 0; i2 < hm.length; i2++) handleMap[hm[i2].path] = hm[i2].entry;
+    }
+    let si = 0, item = null, file = null, cap = null, readRes = null, content = null, tc = null, t = null, block = null, blockLen = 0, parts = [], bi = 0, finalCtx = "";
+    for(si = 0; si < sel.selected.length; si++) {
+      if(stats.injected >= maxFiles) { stats.stoppedByMaxFiles = true; break; }
+      item = sel.selected[si];
+      file = item.file;
+      cap = item.cap || maxBytes;
+      if(aiCodeToolIntegrationMimeLooksBinary(file.type)) { stats.binarySkipped++; continue; }
+      if(srcIsHandle) {
+        let entry = handleMap ? handleMap[file.path] : null;
+        if(!entry) { stats.readErrors++; continue; }
+        readRes = await aiCodeToolIntegrationHandleContent(entry);
+        if(!readRes.ok) { stats.readErrors++; continue; }
+        if(readRes.binary) { stats.binarySkipped++; continue; }
+        content = readRes.text;
+      } else {
+        tc = aiCodeToolIntegrationTableContent(src, file.path);
+        if(!tc.ok) { stats.readErrors++; continue; }
+        if(tc.binary) { stats.binarySkipped++; continue; }
+        if(tc.missing) content = null;
+        else content = tc.text;
+      }
+      if(typeof content !== "string") {
+        block = { path: file.path, type: file.type, size: file.size, content: "", missing: true, truncated: false, keptBytes: 0 };
+        stats.missingContent++;
+      } else {
+        t = aiCodeToolIntegrationTruncate(content, cap);
+        block = { path: file.path, type: file.type, size: file.size, content: t.text, truncated: t.truncated, keptBytes: t.kept, missing: false };
+      }
+      blockLen = aiCodeToolIntegrationByteLength(aiCodeToolIntegrationFormatBlock(block));
+      if(totalBytes && used + nextSep + blockLen > totalBytes) { stats.stoppedByTotal = true; break; }
+      blocks.push(block);
+      used += nextSep + blockLen;
+      nextSep = 2;
+      stats.injected++;
+    }
+    for(bi = 0; bi < blocks.length; bi++) parts.push(aiCodeToolIntegrationFormatBlock(blocks[bi]));
+    let built = parts.join("\n\n");
+    finalCtx = context ? (context + (built ? "\n\n" + built : "")) : built;
+    stats.contextBytes = aiCodeToolIntegrationByteLength(finalCtx);
+    return { ok: true, context: finalCtx, blocks: blocks, stats: stats };
+  } catch(e) {
+    return { ok: false, code: "inject_error", message: "Context injection failed: " + aiCodeToolIntegrationSafeMessage(e) };
+  }
+
+
+// ── Module 6: Token Budget Tracking ──────────────────────────────────────
+// aiCodeToolIntegrationBudget(opts) tracks how many tokens a context window
+// will send, so a prompt never exceeds the platform's limit. Estimation uses
+// the standard chars/4 heuristic (UTF-8 bytes / 4, rounded up); a configurable
+// `overhead` accounts for framing/instructions. used + remaining always sum to
+// limit. add() admits content, refuses it (budget_exceeded), or truncates it
+// to fit ({truncate:true}); charge() admits an explicit token count (e.g. a
+// Module-5 stats.contextBytes figure); reset() zeroes the window back to the
+// base overhead. estimate(text) is monotonic. Never throws.
+
+aiCodeToolIntegrationTokenEstimate(text) =>
+  if(typeof text !== "string") return 0;
+  return Math.ceil(aiCodeToolIntegrationByteLength(text) / 4);
+
+aiCodeToolIntegrationBudget(opts) =>
+  let o = opts || {};
+  let limit = (typeof o.limit === "number" && o.limit > 0) ? Math.floor(o.limit) : 32000;
+  let overhead = (typeof o.overhead === "number" && o.overhead >= 0) ? Math.floor(o.overhead) : 0;
+  let used = overhead;
+  let addCount = 0;
+  let controller = {
+    ok: true,
+    kind: "ai-code-tool-integration-budget",
+    limit: limit,
+    overhead: overhead,
+    used: 0,
+    remaining: 0,
+    addCount: 0,
+    describe: function() {
+      return "ai-code-tool-integration budget | limit " + controller.limit + " tokens | used " + controller.used + " | remaining " + controller.remaining + " | overhead " + controller.overhead;
+    },
+    toJSON: function() {
+      return { ok: controller.ok, kind: controller.kind, limit: controller.limit, overhead: controller.overhead, used: controller.used, remaining: controller.remaining, addCount: controller.addCount };
+    },
+    toString: function() { return controller.describe(); },
+    estimate: function(text) { return aiCodeToolIntegrationTokenEstimate(text); },
+    add: function(text, o2) {
+      if(typeof text !== "string") {
+        return { ok: false, code: "invalid_budget_input", message: "aiCodeToolIntegrationBudget.add expects a string of text to count toward the window." };
+      }
+      let truncate = !!(o2 && o2.truncate === true);
+      let est = aiCodeToolIntegrationTokenEstimate(text);
+      if(used + est > limit) {
+        let avail = Math.max(0, limit - used);
+        if(!truncate) {
+          controller._sync();
+          return { ok: false, code: "budget_exceeded", message: "This content would exceed the window budget (" + (used + est) + " > " + limit + " tokens). Raise the limit, send less context, or call add with {truncate:true}.", added: false, rejected: true, needed: est, available: avail, estimatedTokens: est, used: used, limit: limit, remaining: avail };
+        }
+        let keepChars = (avail <= 0) ? 0 : avail * 4;
+        let cut = text.slice(0, keepChars);
+        let cutEst = aiCodeToolIntegrationTokenEstimate(cut);
+        if(used + cutEst > limit) {
+          controller._sync();
+          return { ok: false, code: "budget_exceeded", message: "The content could not be truncated enough to fit the remaining budget (" + avail + " tokens available).", added: false, rejected: true, needed: est, available: avail, estimatedTokens: est, used: used, limit: limit, remaining: avail };
+        }
+        used += cutEst;
+        addCount++;
+        controller._sync();
+        return { ok: true, added: true, truncated: true, estimatedTokens: cutEst, keptChars: cut.length, droppedChars: text.length - cut.length, used: used, limit: limit, remaining: controller.remaining };
+      }
+      used += est;
+      addCount++;
+      controller._sync();
+      return { ok: true, added: true, truncated: false, estimatedTokens: est, used: used, limit: limit, remaining: controller.remaining };
+    },
+    charge: function(tokens) {
+      if(typeof tokens !== "number" || !(tokens > 0)) {
+        return { ok: false, code: "invalid_budget_input", message: "aiCodeToolIntegrationBudget.charge expects a positive token count (e.g. Math.ceil(contextBytes / 4))." };
+      }
+      let t = Math.ceil(tokens);
+      if(used + t > limit) {
+        let avail = Math.max(0, limit - used);
+        controller._sync();
+        return { ok: false, code: "budget_exceeded", message: "Charging " + t + " tokens would exceed the window budget (" + (used + t) + " > " + limit + ").", added: false, rejected: true, needed: t, available: avail, charged: 0, used: used, limit: limit, remaining: avail };
+      }
+      used += t;
+      addCount++;
+      controller._sync();
+      return { ok: true, added: true, charged: t, used: used, limit: limit, remaining: controller.remaining };
+    },
+    reset: function() {
+      used = overhead;
+      addCount = 0;
+      controller._sync();
+      return controller;
+    }
+  };
+  controller._sync = function() {
+    controller.used = used;
+    controller.remaining = Math.max(0, limit - used);
+    controller.addCount = addCount;
+  };
+  controller._sync();
+  return controller;
+
+
+// ── Module 7: Prompt Dispatcher ──────────────────────────────────────────
+// aiCodeToolIntegrationDispatch(session, payload, opts) sends a structured
+// request (Context + User Prompt) to the AI platform and awaits the response.
+// It fails fast when the session is down, streams progress through an
+// onChunk hook, and funnels every failure through the error bridge — the
+// shared mapper below (aiCodeToolIntegrationMapError) that Module 12 builds its
+// Errors controller on. Payload: {prompt, context?, system?, model?}. opts:
+// {transport?, onChunk?, timeoutMs?, fetchFn?, endpoint?, budget?}. The
+// default transport POSTs {model, messages} to baseUrl/chat/completions and,
+// when the response is SSE, streams it chunk by chunk. Never throws.
+
+aiCodeToolIntegrationErrorInfo(code, status) =>
+  let s = (typeof status === "number") ? status : ((status != null) ? Number(status) : null);
+  let c = code || "error";
+  if(s === 429 || c === "rate_limited") return { severity: "warn", userMessage: "The AI service is rate-limiting your requests.", action: "Slow down and retry in a few seconds.", retryAfterSeconds: 5 };
+  if(s === 401 || s === 403 || c === "auth_failed") return { severity: "error", userMessage: "Your API credentials were rejected.", action: "Check your API key and re-authenticate." };
+  if(s >= 500 || c === "server_error") return { severity: "error", userMessage: "The AI service hit a server-side problem.", action: "Retry shortly — the service may be recovering." };
+  if(s === 400 || s === 422) return { severity: "error", userMessage: "The AI service rejected the request.", action: "Check the request payload (model, message format, context size)." };
+  if(c === "timeout") return { severity: "warn", userMessage: "The request timed out.", action: "Retry, or send less context so it completes faster." };
+  if(c === "network_error" || c === "transport_unavailable") return { severity: "error", userMessage: "Couldn't reach the AI service.", action: "Check your internet connection and retry." };
+  if(c === "invalid_config") return { severity: "error", userMessage: "The plugin was configured incorrectly.", action: "Check the missing options reported above and retry." };
+  if(c === "no_credentials" || c === "invalid_credential" || c === "credential_store_error") return { severity: "error", userMessage: "There's a problem with your saved API credential.", action: "Re-store the key in the credential store and reconnect." };
+  if(c === "session_down") return { severity: "error", userMessage: "The session isn't connected.", action: "Reconnect before sending prompts." };
+  if(c === "budget_exceeded") return { severity: "warn", userMessage: "The context window is over budget.", action: "Reduce the context or raise the token limit." };
+  if(c === "missing_prompt" || c === "invalid_dispatch_input" || c === "invalid_parse_input" || c === "invalid_budget_input" || c === "invalid_apply_input" || c === "target_missing" || c === "target_is_directory" || c === "insert_anchor_missing" || c === "requires_gate") return { severity: "error", userMessage: "The requested operation couldn't be completed from the input given.", action: "Check the details above and retry with valid input." };
+  return { severity: "error", userMessage: "Something went wrong talking to the AI service.", action: "Check the error details below and retry." };
+
+aiCodeToolIntegrationMapError(status, code, message) =>
+  let info = aiCodeToolIntegrationErrorInfo(code, status);
+  let err = aiCodeToolIntegrationError(code || "error", message || aiCodeToolIntegrationErrorText(code), status);
+  err.severity = info.severity;
+  err.userMessage = info.userMessage;
+  err.action = info.action;
+  return err;
+
+aiCodeToolIntegrationExtractContent(j) =>
+  if(!j || typeof j !== "object") return "";
+  if(typeof j.content === "string") return j.content;
+  if(j.choices && Array.isArray(j.choices) && j.choices.length) {
+    let c0 = j.choices[0];
+    if(c0) {
+      if(c0.message && typeof c0.message.content === "string") return c0.message.content;
+      if(c0.delta && typeof c0.delta.content === "string") return c0.delta.content;
+      if(typeof c0.text === "string") return c0.text;
+    }
+  }
+  if(typeof j.message === "string") return j.message;
+  if(typeof j.output === "string") return j.output;
+  return JSON.stringify(j);
+
+async aiCodeToolIntegrationReadSSE(res, onChunk) =>
+  if(!res || !res.body || typeof res.body.getReader !== "function") return null;
+  let reader = null;
+  try { reader = res.body.getReader(); } catch(e) { return null; }
+  let dec = null;
+  try { dec = new TextDecoder(); } catch(e) {}
+  let buf = "", content = "", usage = null, gotAny = false;
+  for(;;) {
+    let step = null;
+    try { step = await reader.read(); } catch(e) { break; }
+    if(!step || step.done) break;
+    gotAny = true;
+    let piece = dec ? dec.decode(step.value, { stream: true }) : (typeof step.value === "string" ? step.value : "");
+    buf += piece;
+    let lines = buf.split("\n");
+    buf = lines.pop();
+    for(let li = 0; li < lines.length; li++) {
+      let line = lines[li].trim();
+      if(line.indexOf("data:") !== 0) continue;
+      let data = line.slice(5).trim();
+      if(data === "[DONE]") continue;
+      let obj = null;
+      try { obj = JSON.parse(data); } catch(e) { continue; }
+      if(obj && obj.usage) usage = obj.usage;
+      let delta = obj && obj.choices && obj.choices[0] && obj.choices[0].delta;
+      let chunk = delta && typeof delta.content === "string" ? delta.content : null;
+      if(chunk) {
+        content += chunk;
+        if(onChunk) { try { onChunk({ textChunk: chunk, raw: obj }); } catch(e) {} }
+      }
+    }
+  }
+  if(!gotAny && !content) return { content: "", usage: null };
+  return { content: content, usage: usage };
+
+async aiCodeToolIntegrationDispatchDefault(session, payload, opts) =>
+  let o = opts || {};
+  let fetchFn = o.fetchFn || session._fetchFn || (typeof fetch === "function" ? fetch : null);
+  if(!fetchFn) return { ok: false, code: "transport_unavailable", message: aiCodeToolIntegrationErrorText("transport_unavailable") };
+  let base = String(session.baseUrl || "").replace(/\/+$/, "");
+  let endpoint = (typeof o.endpoint === "string" && o.endpoint.trim()) ? o.endpoint.trim() : "/chat/completions";
+  let url = base + endpoint;
+  let body = "";
+  try { body = JSON.stringify(payload); } catch(e) { return { ok: false, code: "unexpected_error", message: "The outgoing payload could not be serialized to JSON." }; }
+  let headers = session.authHeaders();
+  headers["Content-Type"] = "application/json";
+  let reqOpts = { method: "POST", headers: headers, body: body };
+  let ctrl = null;
+  if(typeof AbortController !== "undefined") ctrl = new AbortController();
+  if(ctrl) reqOpts.signal = ctrl.signal;
+  let timeoutMs = (typeof o.timeoutMs === "number" && o.timeoutMs > 0) ? o.timeoutMs : (session.timeoutMs || 15000);
+  let started = null;
+  try { started = Promise.resolve(fetchFn(url, reqOpts)); } catch(e) { return { ok: false, code: "network_error", message: "Network request failed: " + aiCodeToolIntegrationSafeMessage(e) }; }
+  let out = await aiCodeToolIntegrationRace(started, timeoutMs);
+  if(out.timedOut) {
+    if(ctrl) { try { ctrl.abort(); } catch(e) {} }
+    return { ok: false, code: "timeout", message: "Prompt dispatch timed out after " + timeoutMs + "ms." };
+  }
+  if(out.error) return { ok: false, code: "network_error", message: "Network request failed: " + aiCodeToolIntegrationSafeMessage(out.error) };
+  let res = out.value;
+  let status = (res && res.status !== undefined) ? res.status : 200;
+  if(!(status >= 200 && status < 300)) {
+    let detail = "";
+    try {
+      let j = await res.json();
+      detail = (j && ((j.error && j.error.message) || j.message)) || "";
+    } catch(e) {}
+    return { ok: false, code: (status === 401 || status === 403) ? "auth_failed" : "http_error", status: status, message: detail ? (String(detail) + " (HTTP " + status + ")") : ("The API responded with HTTP " + status + ".") };
+  }
+  let content = null, usage = null, raw = null, streamed = false;
+  if(o.onChunk && res && res.body && typeof res.body.getReader === "function") {
+    let sse = await aiCodeToolIntegrationReadSSE(res, o.onChunk);
+    if(sse !== null) { content = sse.content; usage = sse.usage; streamed = true; }
+  }
+  if(content === null) {
+    let j = null;
+    try { j = await res.json(); } catch(e) { j = null; }
+    raw = j;
+    content = aiCodeToolIntegrationExtractContent(j);
+    if(j && j.usage) usage = j.usage;
+  }
+  return { ok: true, content: content, raw: raw, usage: usage, model: (payload && payload.model) || null, streamed: streamed };
+
+async aiCodeToolIntegrationDispatch(session, payload, opts) =>
+  try {
+    if(!session || typeof session !== "object" || session.kind !== "ai-code-tool-integration-session") {
+      return { ok: false, code: "invalid_dispatch_input", message: "aiCodeToolIntegrationDispatch expects a session handle — the object returned by aiCode(...)." };
+    }
+    let o = opts || {};
+    let p = payload || {};
+    let context = aiCodeToolIntegrationResolve(p.context);
+    let prompt = aiCodeToolIntegrationResolve(p.prompt);
+    let system = aiCodeToolIntegrationResolve(p.system);
+    let model = aiCodeToolIntegrationResolve(p.model);
+    if(typeof prompt !== "string" || !prompt.trim()) {
+      return { ok: false, code: "missing_prompt", message: "A prompt is required. Pass payload { prompt: '...', context: '...' }." };
+    }
+    if(context != null && typeof context !== "string") context = String(context);
+    if(typeof context === "string" && !context.trim()) context = "";
+    if(system != null && typeof system !== "string") system = String(system);
+    if(typeof model !== "string" || !model.trim()) model = session.model || null;
+    if(!session.isConnected()) {
+      await session.authenticate();
+      if(!session.isConnected()) {
+        let code = session.status === "auth_failed" ? "auth_failed" : "session_down";
+        let msg = session.error ? session.error.message : (code === "session_down" ? "The session is not connected. Reconnect before dispatching prompts." : aiCodeToolIntegrationErrorText("auth_failed"));
+        return aiCodeToolIntegrationMapError(session.error && session.error.status, code, msg);
+      }
+    }
+    let userText = context ? (context + "\n\n" + prompt) : prompt;
+    let messages = [];
+    if(system) messages.push({ role: "system", content: system });
+    messages.push({ role: "user", content: userText });
+    let outPayload = { messages: messages };
+    if(model) outPayload.model = model;
+    let onChunk = (typeof o.onChunk === "function") ? o.onChunk : null;
+    let budget = aiCodeToolIntegrationResolve(o.budget);
+    if(budget && budget.kind === "ai-code-tool-integration-budget") {
+      let est = budget.estimate(userText) + (system ? budget.estimate(system) : 0);
+      if(budget.used + est > budget.limit) {
+        return { ok: false, code: "budget_exceeded", message: "The outgoing prompt would exceed the session budget (" + (budget.used + est) + " > " + budget.limit + " tokens).", severity: "warn", userMessage: "The context window is over budget.", action: "Reduce the context or raise the token limit.", needed: est, available: Math.max(0, budget.limit - budget.used) };
+      }
+      budget.charge(est);
+    }
+    let transport = (typeof o.transport === "function") ? o.transport : aiCodeToolIntegrationDispatchDefault;
+    let started = Date.now();
+    let r = null;
+    try {
+      r = await transport(session, outPayload, {
+        timeoutMs: (typeof o.timeoutMs === "number" && o.timeoutMs > 0) ? o.timeoutMs : undefined,
+        onChunk: onChunk,
+        fetchFn: (typeof o.fetchFn === "function") ? o.fetchFn : undefined,
+        endpoint: (typeof o.endpoint === "string" && o.endpoint.trim()) ? o.endpoint.trim() : undefined
+      });
+    } catch(e) {
+      r = { ok: false, code: "unexpected_error", message: "Dispatch transport threw: " + aiCodeToolIntegrationSafeMessage(e) };
+    }
+    let tookMs = Date.now() - started;
+    if(!r) r = { ok: false, code: "unexpected_error", message: "The dispatch transport returned nothing." };
+    if(r.ok !== true) return aiCodeToolIntegrationMapError(r.status, r.code, r.message);
+    let content = r.content;
+    if(typeof content !== "string") content = aiCodeToolIntegrationExtractContent(r.raw || r);
+    let log = aiCodeToolIntegrationResolve(o.log);
+    if(log && log.kind === "ai-code-tool-integration-log") {
+      try {
+        await log.record("prompt", { model: r.model || outPayload.model || null, prompt: prompt, context: context || null, system: system || null, usage: r.usage || null, estimatedTokens: aiCodeToolIntegrationTokenEstimate((system || "") + userText), tookMs: tookMs });
+      } catch(e) {}
+    }
+    return {
+      ok: true,
+      content: content,
+      raw: (r.raw !== undefined) ? r.raw : r,
+      model: r.model || outPayload.model || null,
+      usage: r.usage || null,
+      streamed: !!r.streamed,
+      estimatedTokens: aiCodeToolIntegrationTokenEstimate((system || "") + userText),
+      tookMs: tookMs,
+      sent: outPayload
+    };
+  } catch(e) {
+    return { ok: false, code: "dispatch_error", message: "Prompt dispatch failed: " + aiCodeToolIntegrationSafeMessage(e) };
+  }
+
+
+// ── Module 8: Response Parser ────────────────────────────────────────────
+// aiCodeToolIntegrationParse(text) splits an AI response into conversational
+// prose and fence-delimited code blocks. A fence opening ``` carries an
+// optional hint — language first, then an optional path (` ```javascript
+// src/foo.js `) — so downstream application (Module 9) knows both what and
+// where. Line ranges (1-based) are tracked per block; a block whose closing
+// fence is missing is recovered to the end of the response and flagged
+// (stats.unclosed). Handles 3-backtick fences; other text is conversation.
+// Never throws; non-string input → typed invalid_parse_input.
+
+aiCodeToolIntegrationParse(text) =>
+  if(typeof text !== "string") {
+    return { ok: false, code: "invalid_parse_input", message: "aiCodeToolIntegrationParse expects a string (the AI's response text)." };
+  }
+  let lines = text.split("\n");
+  let conversation = [], blocks = [], cur = null, inBlock = false, i = 0, line = "", stats = { fences: 0, unclosed: 0 };
+  for(i = 0; i < lines.length; i++) {
+    line = lines[i];
+    if(/^```/.test(line.trimStart())) {
+      stats.fences++;
+      if(!inBlock) {
+        let hint = line.trimStart().slice(3).trim();
+        let lang = "", path = null;
+        if(hint) {
+          let m = hint.match(/^(\S+)\s*(.*)$/);
+          if(m) {
+            lang = m[1];
+            if(m[2] && m[2].trim()) path = m[2].trim();
+          }
+        }
+        cur = { lang: lang, path: path, code: [], startLine: i + 1 };
+        inBlock = true;
+      } else {
+        cur.endLine = i + 1;
+        cur.code = cur.code.join("\n");
+        blocks.push(cur);
+        cur = null;
+        inBlock = false;
+      }
+      continue;
+    }
+    if(inBlock) cur.code.push(line);
+    else conversation.push(line);
+  }
+  if(inBlock && cur) {
+    cur.endLine = lines.length;
+    cur.code = cur.code.join("\n");
+    cur.unclosed = true;
+    blocks.push(cur);
+    stats.unclosed++;
+  }
+  return {
+    ok: true,
+    conversation: conversation.join("\n").replace(/^\n+/, "").replace(/\n+$/, "").trim(),
+    blocks: blocks,
+    stats: { blocks: blocks.length, fences: stats.fences, unclosed: stats.unclosed }
+  };
+
+
+// ── Module 9: Local File Application ─────────────────────────────────────
+// aiCodeToolIntegrationApply(source, blocks, opts) takes parsed code blocks
+// (Module 8) and computes their effect on a workspace, WITHOUT writing anything
+// on its own. The workspace is a writable file-table object (path → content)
+// — the portable stand-in for the local filesystem in a sandboxed browser.
+// Each block is {path, code, op?} where op is:
+//   • "overwrite" (default) — replace the whole file (or create it with
+//     {create:true})
+//   • "insert" — merge code into the file without touching surrounding
+//     content, via {line: N} (1-based, insert AFTER line N; 0 prepends; past
+//     the end appends) or {marker: "…", position: "before"|"after"} (insert
+//     around the first occurrence; missing marker → insert_anchor_missing)
+// Every block becomes a change record {id, path, op, oldBytes, newBytes,
+// diff, status} whose diff is produced by aiCodeToolIntegrationLineDiff
+// (shared with Module 10's gate). Records are routed through a validation gate
+// (Module 10) so nothing is written without approval; with no gate they are
+// returned as prepared (dry-run) unless opts.apply:true explicitly writes.
+// Per-record results are returned in order; never throws.
+
+aiCodeToolIntegrationLineDiff(oldText, newText) =>
+  let a = (typeof oldText === "string" && oldText.length) ? oldText.split("\n") : [];
+  let b = (typeof newText === "string" && newText.length) ? newText.split("\n") : [];
+  let m = a.length, n = b.length, i = 0, j = 0, k = 0;
+  if(m * n > 4000000) {
+    let out = [];
+    for(i = 0; i < m; i++) out.push({ type: "del", text: a[i], oldLine: i + 1 });
+    for(j = 0; j < n; j++) out.push({ type: "add", text: b[j], newLine: j + 1 });
+    return { ok: true, lines: out, added: n, removed: m, summary: "+" + n + " -" + m, fallback: true };
+  }
+  let dp = [], row = null;
+  for(i = 0; i <= m; i++) {
+    row = new Array(n + 1);
+    row[n] = 0;
+    dp.push(row);
+  }
+  for(j = 0; j <= n; j++) dp[m][j] = 0;
+  for(i = m - 1; i >= 0; i--) {
+    for(j = n - 1; j >= 0; j--) {
+      dp[i][j] = (a[i] === b[j]) ? (dp[i + 1][j + 1] + 1) : ((dp[i + 1][j] >= dp[i][j + 1]) ? dp[i + 1][j] : dp[i][j + 1]);
+    }
+  }
+  let out = [], i2 = 0, j2 = 0;
+  while(i2 < m && j2 < n) {
+    if(a[i2] === b[j2]) { out.push({ type: "same", text: a[i2], oldLine: i2 + 1, newLine: j2 + 1 }); i2++; j2++; }
+    else if(dp[i2 + 1][j2] >= dp[i2][j2 + 1]) { out.push({ type: "del", text: a[i2], oldLine: i2 + 1 }); i2++; }
+    else { out.push({ type: "add", text: b[j2], newLine: j2 + 1 }); j2++; }
+  }
+  while(i2 < m) { out.push({ type: "del", text: a[i2], oldLine: i2 + 1 }); i2++; }
+  while(j2 < n) { out.push({ type: "add", text: b[j2], newLine: j2 + 1 }); j2++; }
+  let added = 0, removed = 0;
+  for(k = 0; k < out.length; k++) { if(out[k].type === "add") added++; else if(out[k].type === "del") removed++; }
+  return { ok: true, lines: out, added: added, removed: removed, summary: (added + removed) ? ("+" + added + " -" + removed) : "unchanged" };
+
+aiCodeToolIntegrationSourceText(source, path) =>
+  let found = false, val = null;
+  try { if(path in source) { val = source[path]; found = true; } } catch(e) {}
+  if(!found) {
+    try { if((path + "/") in source) return { ok: true, exists: true, isDir: true, text: "" }; } catch(e) {}
+  }
+  if(!found) return { ok: true, exists: false, text: "" };
+  let meta = aiCodeToolIntegrationTableValueMeta(val);
+  if(meta.invalid) return { ok: false, reason: "invalid" };
+  if(meta.kind === "dir") return { ok: true, exists: true, isDir: true, text: "" };
+  if(meta.bytes !== null && meta.bytes !== undefined) {
+    if(aiCodeToolIntegrationLooksBinaryContent(meta.bytes)) return { ok: true, exists: true, binary: true, text: "" };
+    return { ok: true, exists: true, text: aiCodeToolIntegrationDecodeBytes(meta.bytes) };
+  }
+  return { ok: true, exists: true, text: "" };
+
+aiCodeToolIntegrationInsertText(oldText, code, spec) =>
+  if(typeof oldText !== "string") oldText = "";
+  if(typeof code !== "string") {
+    return { ok: false, code: "invalid_apply_input", message: "A code string is required to insert into a file." };
+  }
+  let line = spec && spec.line;
+  if(typeof line === "number" && line >= 0) {
+    let li = Math.floor(line);
+    let lines = oldText.split("\n");
+    if(li === 0) return { ok: true, text: code + (oldText ? "\n" + oldText : "") };
+    if(li >= lines.length) {
+      let sep = oldText ? (oldText.charAt(oldText.length - 1) === "\n" ? "" : "\n") : "";
+      return { ok: true, text: oldText + sep + code };
+    }
+    lines.splice(li, 0, code);
+    return { ok: true, text: lines.join("\n") };
+  }
+  let marker = spec && spec.marker;
+  if(typeof marker === "string" && marker.length) {
+    let idx = oldText.indexOf(marker);
+    if(idx === -1) {
+      return { ok: false, code: "insert_anchor_missing", message: "The insert marker '" + marker + "' was not found in the target file." };
+    }
+    let lineStart = oldText.lastIndexOf("\n", idx - 1) + 1;
+    let lineEnd = oldText.indexOf("\n", idx);
+    if(lineEnd === -1) lineEnd = oldText.length;
+    if(spec && spec.position === "before") {
+      return { ok: true, text: oldText.slice(0, lineStart) + code + oldText.slice(lineStart) };
+    }
+    if(lineEnd === oldText.length) {
+      return { ok: true, text: oldText + (oldText && oldText.charAt(oldText.length - 1) === "\n" ? "" : "\n") + code };
+    }
+    return { ok: true, text: oldText.slice(0, lineEnd + 1) + code + oldText.slice(lineEnd + 1) };
+  }
+  return { ok: false, code: "invalid_apply_input", message: "An insert needs a spec: {line: N} (1-based — inserts after line N; 0 prepends) or {marker: '...', position: 'before'|'after'} (inserts on its own line before/after the line containing marker)." };
+
+async aiCodeToolIntegrationApply(source, blocks, opts) =>
+  try {
+    if(!source || typeof source !== "object" || Array.isArray(source)) {
+      return { ok: false, code: "invalid_apply_input", message: "aiCodeToolIntegrationApply expects a writable file-table source (an object mapping workspace-relative paths to content) plus blocks {path, code, op?}." };
+    }
+    let o = opts || {};
+    let list = Array.isArray(blocks) ? blocks : [blocks];
+    let gate = aiCodeToolIntegrationResolve(o.gate);
+    let commit = (typeof o.commit === "function") ? o.commit : null;
+    let create = o.create === true;
+    let applyDirect = o.apply === true;
+    if(gate && gate.kind !== "ai-code-tool-integration-gate" && typeof gate.enqueue !== "function") gate = null;
+    let records = [], i = 0, blk = null, path = "", code = "", op = "", cur = null, newText = null, ins = null, rec = null, diffRes = null;
+    for(i = 0; i < list.length; i++) {
+      blk = aiCodeToolIntegrationResolve(list[i]);
+      if(!blk || typeof blk !== "object") {
+        records.push({ ok: false, path: null, op: null, code: "invalid_apply_input", message: "Each apply block must be an object {path, code, op?}." });
+        continue;
+      }
+      path = blk.path;
+      if(typeof path !== "string" || !path.trim()) {
+        records.push({ ok: false, path: path, op: blk.op, code: "invalid_apply_input", message: "An apply block needs a non-empty workspace-relative path." });
+        continue;
+      }
+      path = path.trim().replace(/^\/+/, "");
+      code = blk.code;
+      if(typeof code !== "string") {
+        records.push({ ok: false, path: path, op: blk.op, code: "invalid_apply_input", message: "The code for '" + path + "' must be a string." });
+        continue;
+      }
+      op = (typeof blk.op === "string" && blk.op) ? blk.op : "overwrite";
+      cur = aiCodeToolIntegrationSourceText(source, path);
+      if(!cur.ok) {
+        records.push({ ok: false, path: path, op: op, code: "invalid_apply_input", message: "The existing value for '" + path + "' is not recognized content." });
+        continue;
+      }
+      if(cur.isDir) {
+        records.push({ ok: false, path: path, op: op, code: "target_is_directory", message: "'" + path + "' is a directory, not a file — it cannot be written." });
+        continue;
+      }
+      if(cur.binary) {
+        records.push({ ok: false, path: path, op: op, code: "target_is_binary", message: "'" + path + "' contains binary bytes and cannot be overwritten as text." });
+        continue;
+      }
+      if(!cur.exists && !create) {
+        records.push({ ok: false, path: path, op: op, code: "target_missing", message: "'" + path + "' does not exist in the workspace. Pass {create:true} to allow creating it." });
+        continue;
+      }
+      let oldText = cur.exists ? cur.text : "";
+      if(op === "insert") {
+        ins = aiCodeToolIntegrationInsertText(oldText, code, blk);
+        if(!ins.ok) {
+          records.push({ ok: false, path: path, op: op, code: ins.code, message: ins.message });
+          continue;
+        }
+        newText = ins.text;
+      } else {
+        newText = code;
+      }
+      rec = {
+        id: "chg_" + aiCodeToolIntegrationNewId().slice(5),
+        path: path,
+        op: op,
+        oldBytes: oldText,
+        newBytes: newText,
+        existed: cur.exists,
+        diff: null,
+        status: "pending"
+      };
+      diffRes = aiCodeToolIntegrationLineDiff(oldText, newText);
+      rec.diff = (diffRes && diffRes.ok) ? diffRes.lines : null;
+      if(gate) {
+        gate.enqueue(rec);
+        rec.status = "gated";
+        records.push(rec);
+        continue;
+      }
+      if(applyDirect) {
+        let committed = true, errMsg = null;
+        try {
+          if(commit) commit(rec);
+          else source[path] = newText;
+        } catch(e) {
+          committed = false;
+          errMsg = aiCodeToolIntegrationSafeMessage(e);
+        }
+        rec.status = committed ? "applied" : "commit_failed";
+        rec.appliedAt = committed ? new Date().toISOString() : null;
+        if(!committed) rec.error = errMsg;
+        records.push(rec);
+        continue;
+      }
+      rec.status = "prepared";
+      records.push(rec);
+    }
+    let gated = 0, applied = 0, prepared = 0, ri = 0;
+    for(ri = 0; ri < records.length; ri++) {
+      if(records[ri].status === "gated") gated++;
+      else if(records[ri].status === "applied") applied++;
+      else if(records[ri].status === "prepared") prepared++;
+    }
+    return {
+      ok: true,
+      records: records,
+      gated: gated,
+      applied: applied,
+      prepared: prepared,
+      message: gated ? (gated + " change(s) queued in the validation gate — nothing was written yet.") : (applied ? (applied + " change(s) applied to the workspace.") : (prepared ? (prepared + " change(s) prepared but NOT applied — pass a gate (aiCodeToolIntegrationGate) to route them through approval, or set apply:true to write directly.") : "No changes were produced."))
+    };
+  } catch(e) {
+    return { ok: false, code: "apply_error", message: "File application failed: " + aiCodeToolIntegrationSafeMessage(e) };
+  }
+
+
+// ── Module 10: Change Validation Gate ────────────────────────────────────
+// aiCodeToolIntegrationGate(opts) is the approval chokepoint between the AI
+// and the workspace: nothing is written to disk until a change is explicitly
+// approved. Module 9's apply enqueues change records here; approve()/approveAll()
+// release them to the gate's commit function (the actual writer), reject()/
+// rejectAll() drop them. Each pending change carries {id, path, op, oldBytes,
+// newBytes, diff} — the line diff (shared aiCodeToolIntegrationLineDiff) is
+// computed at enqueue time so a reviewer can see exactly what will change.
+// Never throws; unapproved changes never reach the writer.
+
+aiCodeToolIntegrationGate(opts) =>
+  let o = opts || {};
+  let maxPending = (typeof o.maxPending === "number" && o.maxPending > 0) ? Math.floor(o.maxPending) : 50;
+  let commit = (typeof o.commit === "function") ? o.commit : null;
+  let onEvent = (typeof o.onEvent === "function") ? o.onEvent : null;
+  let log = aiCodeToolIntegrationResolve(o.log);
+  if(log && log.kind !== "ai-code-tool-integration-log") log = null;
+  let controller = {
+    ok: true,
+    kind: "ai-code-tool-integration-gate",
+    maxPending: maxPending,
+    pending: [],
+    approved: [],
+    rejected: [],
+    history: [],
+    setCommit: function(fn) { if(typeof fn === "function") commit = fn; return controller; },
+    _push: function(entry) {
+      if(!entry.ts) entry.ts = new Date().toISOString();
+      controller.history.push(entry);
+      if(controller.history.length > 200) controller.history.shift();
+      if(onEvent) { try { onEvent(entry); } catch(e) {} }
+      return entry;
+    },
+    _take: function(from, ref) {
+      let arr = controller[from];
+      let idx = -1, i = 0;
+      if(ref && typeof ref === "object") idx = arr.indexOf(ref);
+      else if(typeof ref === "string") {
+        for(i = 0; i < arr.length; i++) { if(arr[i].id === ref) { idx = i; break; } }
+      }
+      if(idx === -1) return null;
+      return arr.splice(idx, 1)[0];
+    },
+    enqueue: function(change) {
+      if(!change || typeof change !== "object") {
+        return { ok: false, code: "invalid_gate_input", message: "The gate's enqueue expects a change record {path, op, oldBytes?, newBytes?}." };
+      }
+      if(typeof change.path !== "string" || !change.path.trim()) {
+        return { ok: false, code: "invalid_gate_input", message: "A change record needs a non-empty path." };
+      }
+      if(typeof change.newBytes !== "string") {
+        return { ok: false, code: "invalid_gate_input", message: "A change record needs newBytes (the content to write after approval)." };
+      }
+      if(controller.pending.length >= maxPending) {
+        return { ok: false, code: "gate_full", message: "The gate already holds " + maxPending + " pending changes. Approve or reject some before enqueuing more." };
+      }
+      let rec = change;
+      if(!rec.id) rec.id = "chg_" + aiCodeToolIntegrationNewId().slice(5);
+      rec.status = "pending";
+      if(!rec.diff && typeof rec.oldBytes === "string") {
+        let d = aiCodeToolIntegrationLineDiff(rec.oldBytes, rec.newBytes);
+        rec.diff = (d && d.ok) ? d.lines : null;
+      }
+      controller.pending.push(rec);
+      controller._push({ event: "enqueue", id: rec.id, path: rec.path, op: rec.op });
+      return { ok: true, change: rec, pending: controller.pending.length };
+    },
+    approve: async function(ref) {
+      let rec = controller._take("pending", ref);
+      if(!rec) return { ok: false, code: "change_not_found", message: "No pending change matches that reference (pass the change record or its id)." };
+      if(commit) {
+        let ok = true, errMsg = null;
+        try { await commit(rec); } catch(e) { ok = false; errMsg = aiCodeToolIntegrationSafeMessage(e); }
+        rec.status = ok ? "approved" : "commit_failed";
+        rec.appliedAt = ok ? new Date().toISOString() : null;
+        rec.committed = ok;
+        if(!ok) rec.error = errMsg;
+        controller.approved.push(rec);
+        controller._push({ event: ok ? "approved" : "commit_failed", id: rec.id, path: rec.path, error: ok ? null : errMsg });
+        if(ok && log) {
+          try { await log.applied(rec); } catch(e) {}
+          try { await log.record("approval", { id: rec.id, path: rec.path }); } catch(e) {}
+        }
+        return ok
+          ? { ok: true, change: rec, committed: true, pending: controller.pending.length }
+          : { ok: false, code: "commit_failed", message: "The writer failed while applying '" + rec.path + "': " + errMsg, change: rec, committed: false };
+      }
+      rec.status = "approved";
+      rec.committed = false;
+      controller.approved.push(rec);
+      controller._push({ event: "approved", id: rec.id, path: rec.path });
+      return { ok: true, change: rec, committed: false, pending: controller.pending.length, message: "Approved (no commit function is set — the change was recorded but not written)." };
+    },
+    reject: function(ref) {
+      let rec = controller._take("pending", ref);
+      if(!rec) return { ok: false, code: "change_not_found", message: "No pending change matches that reference (pass the change record or its id)." };
+      rec.status = "rejected";
+      controller.rejected.push(rec);
+      controller._push({ event: "rejected", id: rec.id, path: rec.path });
+      return { ok: true, change: rec, pending: controller.pending.length };
+    },
+    approveAll: async function() {
+      let results = [], i = 0, copy = controller.pending.slice();
+      for(i = 0; i < copy.length; i++) results.push(await controller.approve(copy[i]));
+      return { ok: true, results: results, approved: controller.approved.length, rejected: controller.rejected.length, pending: controller.pending.length };
+    },
+    rejectAll: function() {
+      let results = [], i = 0, copy = controller.pending.slice();
+      for(i = 0; i < copy.length; i++) results.push(controller.reject(copy[i]));
+      return { ok: true, results: results, approved: controller.approved.length, rejected: controller.rejected.length, pending: controller.pending.length };
+    },
+    isPending: function(ref) {
+      let i = 0;
+      if(ref && typeof ref === "object") return controller.pending.indexOf(ref) !== -1;
+      if(typeof ref === "string") { for(i = 0; i < controller.pending.length; i++) { if(controller.pending[i].id === ref) return true; } }
+      return false;
+    },
+    pendingCount: function() { return controller.pending.length; },
+    describe: function() {
+      return "ai-code-tool-integration gate | " + controller.pending.length + " pending · " + controller.approved.length + " approved · " + controller.rejected.length + " rejected | nothing is written without approval";
+    },
+    toJSON: function() {
+      return { ok: controller.ok, kind: controller.kind, pending: controller.pending.length, approved: controller.approved.length, rejected: controller.rejected.length, maxPending: controller.maxPending };
+    },
+    toString: function() { return controller.describe(); }
+  };
+  return controller;
+
+
+// ── Module 11: Execution Log ─────────────────────────────────────────────
+// aiCodeToolIntegrationLog(opts) keeps an append-only audit trail of every
+// prompt sent (dispatch) and every file change applied (gate approval) —
+// entries {ts, kind, payload} where kind is prompt | change | approval |
+// rollback — persists it via kv-plugin (bounded, never throws) and can roll
+// back the last n applied changes by writing their previous bytes back
+// through the commit function (or the source file-table). Nothing is ever
+// deleted: rollback records a rollback entry, so the whole trail survives.
+
+aiCodeToolIntegrationLog(opts) =>
+  let o = opts || {};
+  let maxEntries = (typeof o.maxEntries === "number" && o.maxEntries > 0) ? Math.floor(o.maxEntries) : 500;
+  let storageName = (typeof o.storage === "string" && o.storage.trim().length) ? o.storage.trim() : "aiCodeToolIntegrationLog";
+  let onEvent = (typeof o.onEvent === "function") ? o.onEvent : null;
+  let commit = (typeof o.commit === "function") ? o.commit : null;
+  let sourceTable = (o.source && typeof o.source === "object" && !Array.isArray(o.source)) ? o.source : null;
+  let controller = {
+    ok: true,
+    kind: "ai-code-tool-integration-log",
+    entries: [],
+    maxEntries: maxEntries,
+    storageName: storageName,
+    setCommit: function(fn) { if(typeof fn === "function") commit = fn; return controller; },
+    setSource: function(src) { sourceTable = (src && typeof src === "object" && !Array.isArray(src)) ? src : null; return controller; },
+    _kvFolder: function() {
+      try { if(root && root.kv && root.kv[storageName]) return root.kv[storageName]; } catch(e) {}
+      return null;
+    },
+    _persist: async function() {
+      let folder = controller._kvFolder();
+      if(!folder) return { ok: true, persisted: false, message: "kv-plugin storage is unavailable — the execution log is in-memory only for this session." };
+      try {
+        await folder.set("entries", controller.entries);
+        return { ok: true, persisted: true };
+      } catch(e) {
+        return { ok: false, code: "log_persist_failed", message: "Could not persist the execution log: " + aiCodeToolIntegrationSafeMessage(e) };
+      }
+    },
+    load: async function() {
+      let folder = controller._kvFolder();
+      if(!folder) return { ok: true, entries: controller.entries, persisted: false, message: "kv-plugin storage is unavailable — starting with an empty in-memory log." };
+      try {
+        let saved = await folder.get("entries");
+        if(Array.isArray(saved) && saved.length) {
+          let clean = [], i = 0;
+          for(i = 0; i < saved.length; i++) {
+            if(saved[i] && typeof saved[i] === "object" && typeof saved[i].ts === "string" && typeof saved[i].kind === "string") clean.push(saved[i]);
+          }
+          controller.entries = clean;
+        } else {
+          controller.entries = [];
+        }
+      } catch(e) {
+        return { ok: false, code: "log_load_failed", message: "Could not read the execution log: " + aiCodeToolIntegrationSafeMessage(e) };
+      }
+      return { ok: true, entries: controller.entries };
+    },
+    _push: function(entry) {
+      controller.entries.push(entry);
+      if(controller.entries.length > maxEntries) controller.entries.splice(0, controller.entries.length - maxEntries);
+      if(onEvent) { try { onEvent(entry); } catch(e) {} }
+    },
+    record: async function(kind, payload) {
+      if(typeof kind !== "string" || (["prompt", "change", "approval", "rollback"].indexOf(kind) === -1)) {
+        return { ok: false, code: "invalid_log_input", message: "log.record expects a kind of prompt, change, approval, or rollback." };
+      }
+      if(payload === undefined) payload = null;
+      let entry = { ts: new Date().toISOString(), kind: kind, payload: payload };
+      controller._push(entry);
+      let p = await controller._persist();
+      return { ok: true, entry: entry, size: controller.entries.length, persisted: !!(p.ok && p.persisted) };
+    },
+    applied: async function(change) {
+      if(!change || typeof change !== "object" || typeof change.path !== "string" || !change.path.trim() || typeof change.newBytes !== "string" || typeof change.oldBytes !== "string") {
+        return { ok: false, code: "invalid_log_input", message: "log.applied expects an applied change record {path, oldBytes, newBytes}." };
+      }
+      if(typeof change.existed !== "boolean") change.existed = true;
+      return controller.record("change", change);
+    },
+    rollback: async function(n) {
+      if(typeof n !== "number" || !isFinite(n) || n <= 0) {
+        return { ok: false, code: "invalid_log_input", message: "rollback expects a positive count of the most recent applied changes to undo." };
+      }
+      if(!commit && !sourceTable) {
+        return { ok: false, code: "no_writer", message: "rollback has no writer — pass {commit: fn} or {source: fileTable} so restored bytes can be written back." };
+      }
+      let targets = [], i = 0;
+      for(i = controller.entries.length - 1; i >= 0 && targets.length < n; i--) {
+        if(controller.entries[i].kind === "change" && !controller.entries[i].rolledBackAt) targets.push(controller.entries[i]);
+      }
+      if(targets.length === 0) {
+        return { ok: true, rolledBack: [], failed: [], written: 0, requested: n, message: "There are no applied changes to roll back." };
+      }
+      let rolledBack = [], failed = [], rec = null, restore = null;
+      for(i = 0; i < targets.length; i++) {
+        rec = targets[i].payload;
+        if(!rec || typeof rec !== "object" || typeof rec.path !== "string" || typeof rec.oldBytes !== "string") {
+          failed.push({ path: rec ? rec.path : null, code: "invalid_log_entry", message: "A logged change is missing its path or previous bytes — it cannot be restored." });
+          continue;
+        }
+        restore = { path: rec.path, op: "overwrite", oldBytes: rec.newBytes, newBytes: rec.oldBytes, deletion: !rec.existed };
+        try {
+          if(commit) { await commit(restore); }
+          else if(sourceTable) {
+            if(restore.deletion) delete sourceTable[rec.path];
+            else sourceTable[rec.path] = rec.oldBytes;
+          }
+          targets[i].rolledBackAt = new Date().toISOString();
+          rolledBack.push(rec);
+        } catch(e) {
+          failed.push({ path: rec.path, code: "rollback_failed", message: aiCodeToolIntegrationSafeMessage(e) });
+        }
+      }
+      controller._push({ ts: new Date().toISOString(), kind: "rollback", payload: { count: rolledBack.length, restored: rolledBack.map(function(x) { return x.path; }), failed: failed.map(function(x) { return x.path; }) } });
+      let p = await controller._persist();
+      return { ok: true, rolledBack: rolledBack, failed: failed, written: rolledBack.length, requested: n, message: "Rolled back " + rolledBack.length + " of " + targets.length + " applied change(s).", persisted: !!(p.ok && p.persisted) };
+    },
+    find: function(kind) {
+      if(typeof kind !== "string") return [];
+      let out = [], i = 0;
+      for(i = 0; i < controller.entries.length; i++) { if(controller.entries[i].kind === kind) out.push(controller.entries[i]); }
+      return out;
+    },
+    describe: function() {
+      let counts = { prompt: 0, change: 0, approval: 0, rollback: 0 }, i = 0;
+      for(i = 0; i < controller.entries.length; i++) { if(counts[controller.entries[i].kind] !== undefined) counts[controller.entries[i].kind]++; }
+      return "ai-code-tool-integration log | " + controller.entries.length + " entries (" + counts.prompt + " prompts · " + counts.change + " changes · " + counts.approval + " approvals · " + counts.rollback + " rollbacks) | rollback restores previous bytes";
+    },
+    toJSON: function() {
+      return { ok: controller.ok, kind: controller.kind, size: controller.entries.length, maxEntries: maxEntries, entries: controller.entries.slice() };
+    },
+    toString: function() { return controller.describe(); }
+  };
+  return controller;
+
+
+// ── Module 12: Error Handling Bridge ─────────────────────────────────────
+// aiCodeToolIntegrationErrors(opts) is the central sink for API errors. It
+// captures any error-shaped value (the plugin's own typed errors, plain
+// {status, code, message} objects, raw exceptions), maps it through
+// aiCodeToolIntegrationErrorInfo → {severity, userMessage, action}, records
+// it in a bounded history, and fires a central notify() hook so a UI can
+// surface actionable notifications (e.g. 429 → "slow down, retry in ~5s").
+// No argument returns the SHARED default controller, which every
+// aiCodeToolIntegrationError construction already funnels into — so a single
+// setNotify() catches all plugin errors. opts (non-empty) returns a private
+// controller for local capture(). Nothing ever throws.
+
+aiCodeToolIntegrationErrorsBuild(o) =>
+  let notify = (typeof o.notify === "function") ? o.notify : null;
+  let maxHistory = (typeof o.maxHistory === "number" && o.maxHistory > 0) ? Math.floor(o.maxHistory) : 200;
+  let history = [];
+  let controller = {
+    ok: true,
+    kind: "ai-code-tool-integration-errors",
+    autoCapture: !!o.auto,
+    setNotify: function(fn) { if(typeof fn === "function") notify = fn; return controller; },
+    capture: function(e) {
+      let rec = null;
+      let shaped = false;
+      if(e && typeof e === "object" && !Array.isArray(e)) {
+        shaped = (typeof e.code === "string") || (e.status !== undefined) || (e.ok === false) || (typeof e.userMessage === "string");
+      }
+      if(shaped) {
+        let info = aiCodeToolIntegrationErrorInfo(e.code, e.status);
+        rec = {
+          code: e.code || "error",
+          message: ((typeof e.message === "string") && e.message) ? e.message : aiCodeToolIntegrationErrorText(e.code || "error"),
+          status: (typeof e.status === "number") ? e.status : ((e.status != null) ? Number(e.status) : null),
+          severity: (typeof e.severity === "string") ? e.severity : info.severity,
+          userMessage: (typeof e.userMessage === "string") ? e.userMessage : info.userMessage,
+          action: (typeof e.action === "string") ? e.action : info.action,
+          ts: new Date().toISOString()
+        };
+        if(rec.status === 429 || rec.code === "rate_limited") rec.retryAfterSeconds = info.retryAfterSeconds || 5;
+      } else {
+        let msg = aiCodeToolIntegrationSafeMessage(e);
+        let info = aiCodeToolIntegrationErrorInfo("unexpected_error");
+        rec = { code: "unexpected_error", message: msg, status: null, severity: info.severity, userMessage: info.userMessage, action: info.action, ts: new Date().toISOString() };
+      }
+      controller._record(rec);
+      let err = aiCodeToolIntegrationError(rec.code, rec.message, rec.status);
+      err.severity = rec.severity;
+      err.userMessage = rec.userMessage;
+      err.action = rec.action;
+      if(rec.retryAfterSeconds) err.retryAfterSeconds = rec.retryAfterSeconds;
+      return err;
+    },
+    _record: function(rec) {
+      let last = history.length ? history[history.length - 1] : null;
+      let now = Date.now();
+      if(last && last.code === rec.code && last.status === rec.status && (new Date(last.ts).getTime() > now - 5000)) {
+        last.count = (last.count || 1) + 1;
+        return;
+      }
+      rec.count = 1;
+      history.push(rec);
+      if(history.length > maxHistory) history.shift();
+      if(notify) { try { notify(rec); } catch(e) {} }
+    },
+    recent: function(n) {
+      let take = (typeof n === "number" && n > 0) ? Math.floor(n) : history.length;
+      return history.slice(Math.max(0, history.length - take));
+    },
+    clear: function() { history = []; return controller; },
+    describe: function() { return "ai-code-tool-integration errors bridge | " + history.length + " captured | notify " + (notify ? "wired" : "not set"); },
+    toJSON: function() { return { ok: controller.ok, kind: controller.kind, size: history.length, recent: controller.recent(5) }; },
+    toString: function() { return controller.describe(); }
+  };
+  return controller;
+
+aiCodeToolIntegrationErrors(opts) =>
+  if(!opts) return aiCodeToolIntegrationErrorsDefault();
+  return aiCodeToolIntegrationErrorsBuild(opts);
+
+aiCodeToolIntegrationErrorsDefault() =>
+  if(!window.AI_CODE_TOOL_INTEGRATION_ERRORS) {
+    window.AI_CODE_TOOL_INTEGRATION_ERRORS = aiCodeToolIntegrationErrorsBuild({ auto: true });
+  }
+  return window.AI_CODE_TOOL_INTEGRATION_ERRORS;
+
+
+// ── 4. ENTRY POINT ($output) ────────────────────────────────────────────
+// aiCodeToolIntegration(input, opts) → session handle. `input` is an options
+// node (aiCodeToolIntegrationOpts or the consumer's own) or a plain object;
+// `opts` overrides individual keys (handy for transports / per-call keys).
+// Never throws: invalid or missing config returns a readable {ok:false, ...}
+// error object whose toString() renders a "(ai-code-tool-integration: …)"
+// placeholder in list templates.
+
+$output(input, opts) =>
+  let built = aiCodeToolIntegrationConfig(input, opts);
+  if(!built.ok) return built.result;
+  let session = aiCodeToolIntegrationSession(built.config);
+  if(built.config.heartbeatEnabled) session.startHeartbeat();
+  return session;

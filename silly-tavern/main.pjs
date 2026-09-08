@@ -1,0 +1,972 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// SILLYTAVERN INTEROP — parse & serialize SillyTavern file formats
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A Perchance plugin that speaks SillyTavern's real interchange formats:
+//   • Character cards — v1 (tavern_v1), v2 (chara_card_v2), v3 (chara_card_v3)
+//   • PNG character cards — 'chara' + 'ccv3' tEXt chunks (ccv3 takes precedence)
+//   • Lorebooks / world info — modern name/entries shape + legacy WI entry shapes
+//   • Chat logs — .jsonl (one message object per line)
+//
+// Structure follows Rathji's plugin template ($meta / embedded data / helpers /
+// entry point). The entry point is a NAMESPACE OBJECT (kv-plugin style):
+//
+//   stInterop = import:sillytavern-interop   // wrap in the standard import braces at the top of the importing generator's lists
+//
+//   let card = await root.stInterop.stiparseCharacter(file);   // File|Blob|ArrayBuffer|string
+//   let v2   = root.stInterop.toV2(card);                    // canonical → chara_card_v2
+//   let png  = await root.stInterop.sticardToPNG(card);         // PNG with chara + ccv3 chunks
+//
+// Everything throws actionable Errors with a .code (see stistError / errors.codes).
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = SillyTavern Interop
+  description = Import and export SillyTavern character cards (v1/v2/v3), PNG cards with chara/ccv3 chunks, lorebooks, and .jsonl chat logs — into Perchance-usable structures and back, byte-faithfully. Importable as a standard Perchance plugin (stInterop = import:plugin-name).
+  tags = plugin, sillytavern, character, cards, import, export, interop, lorebook, chat, rpg
+  header
+    mode = minimal
+
+// ── 0. IMPORTS (optional) ───────────────────────────────────────────────────
+simpleGenFooter = {import:simple-gen-footer}
+
+// ── 1. EMBEDDED DATA (constants + shared helpers) ──────────────────────────
+// Lazy-init bundle of module constants, mirroring the Rathji template's
+// one-time payload pattern. Most of the plugin's state is pure functions, so
+// this is small — mainly spec field names.
+
+stiinitStInteropData() =>
+  if(!window.__ST_INTEROP_DATA__) {
+    window.__ST_INTEROP_DATA__ = {
+      version: "0.1.0",
+      stringFields: ["name","description","personality","scenario","first_mes","mes_example","creator_notes","system_prompt","post_history_instructions","creator","character_version"],
+      canonicalKeys: ["name","description","personality","scenario","first_mes","mes_example","creator_notes","system_prompt","post_history_instructions","alternate_greetings","tags","creator","character_version","extensions","character_book","talkativeness","fav"],
+      legacyWIFields: ["key","keysecondary","order","disable","position","content","comment","constant","selective","uid","extensions","excludeRecursion","displayIndex","probability","useProbability","depth","selectiveLogic","outletName","group","groupOverride","groupWeight","preventRecursion","delayUntilRecursion","scanDepth","matchWholeWords","useGroupScoring","caseSensitive","automationId","role","vectorized","sticky","cooldown","delay","triggers","ignoreBudget","matchPersonaDescription","matchCharacterDescription","matchCharacterPersonality","matchCharacterDepthPrompt","matchScenario","matchCreatorNotes"],
+      messageKeys: ["name","is_user","is_name","is_system","send_date","mes","swipes","swipe_info","extra"],
+      canonicalSet: new WeakSet()
+    };
+  }
+  return window.__ST_INTEROP_DATA__;
+
+stistInteropDefaults() =>
+  if(!window.__ST_INTEROP_DATA__) stiinitStInteropData();
+  return window.__ST_INTEROP_DATA__;
+
+// ── 2. ERROR HELPERS ────────────────────────────────────────────────────────
+// Errors carry a stable .code (see stistInteropNamespace().errors.codes) and a
+// human-readable message. parse* functions throw these; nothing else throws.
+
+stistError(code, message) =>
+  let err = new Error("[sillytavern-interop " + code + "] " + message);
+  err.code = code;
+  err.stInteropError = true;
+  return err;
+
+stidescribeType(v) =>
+  if(v === null) return "null";
+  if(Array.isArray(v)) return "an array";
+  let t = typeof v;
+  if(t === "object") return "an object (" + (v.constructor ? v.constructor.name : "unknown") + ")";
+  return "a " + t;
+
+stistrOr(v, d) =>
+  if(typeof v === "string") return v;
+  if(v == null) return d;
+  if(typeof v === "object") return d;
+  return String(v);
+
+stideepClone(v) =>
+  if(v == null || typeof v !== "object") return v;
+  try { return structuredClone(v); } catch(e) {
+    try { return JSON.parse(JSON.stringify(v)); } catch(e2) { return v; }
+  }
+
+// ── 3. FILE / BLOB INPUT PLUMBING ───────────────────────────────────────────
+// Accepts File, Blob, ArrayBuffer, Uint8Array/other views, or a plain string.
+// Text sources come back as {kind:"text", text}; binary as {kind:"binary", bytes}.
+
+async stireadInput(input) =>
+  if(input == null) throw stistError("E_EMPTY", "No input provided. Pass a File, Blob, ArrayBuffer, Uint8Array, or a string of text/JSON.");
+  if(typeof input === "string") return { kind: "text", text: input, name: null };
+  if(input instanceof ArrayBuffer) return { kind: "binary", bytes: new Uint8Array(input), name: null };
+  if(ArrayBuffer.isView(input)) return { kind: "binary", bytes: new Uint8Array(input.buffer, input.byteOffset, input.byteLength), name: null };
+  if(typeof File !== "undefined" && input instanceof File) {
+    return { kind: "binary", bytes: new Uint8Array(await input.arrayBuffer()), name: input.name || null };
+  }
+  if(typeof Blob !== "undefined" && input instanceof Blob) {
+    return { kind: "binary", bytes: new Uint8Array(await input.arrayBuffer()), name: input.name || null };
+  }
+  throw stistError("E_INPUT", "Unsupported input type: " + stidescribeType(input) + ". Expected File, Blob, ArrayBuffer, Uint8Array, or string.");
+
+// ── 4. UNICODE-SAFE BASE64 ──────────────────────────────────────────────────
+// Encodes/decodes UTF-8 to/from base64 without atob/btoa mojibake or call-stack
+// blowups at large sizes. The PNG 'chara'/'ccv3' chunks store base64 of UTF-8
+// JSON, so this must be exact for emoji, CJK, quotes and newlines.
+
+stib64encode(str) =>
+  let bytes = new TextEncoder().encode(String(str));
+  let bin = "";
+  for(let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+
+stib64decode(str) =>
+  if(typeof str !== "string") throw stistError("E_BASE64", "Invalid base64: expected a string, got " + stidescribeType(str) + ".");
+  let clean = str.replace(/\s+/g, "");
+  if(!clean) throw stistError("E_BASE64", "Invalid base64: empty string.");
+  if(!/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) throw stistError("E_BASE64", "Invalid base64: characters outside the base64 alphabet.");
+  let bin;
+  try { bin = atob(clean); } catch(e) { throw stistError("E_BASE64", "Invalid base64: " + e.message); }
+  let bytes = new Uint8Array(bin.length);
+  for(let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+
+// ── 5. CRC-32 (IEEE, table-based) ───────────────────────────────────────────
+// Used to verify chunk CRCs on read and compute them on write, per the PNG spec.
+
+stistCrc32Table() =>
+  if(!window.__ST_CRC_TABLE__) {
+    let t = new Uint32Array(256);
+    for(let n = 0; n < 256; n++) {
+      let c = n;
+      for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    window.__ST_CRC_TABLE__ = t;
+  }
+  return window.__ST_CRC_TABLE__;
+
+sticrc32(bytes, start, end) =>
+  let t = stistCrc32Table();
+  let c = 0xFFFFFFFF;
+  if(start == null) start = 0;
+  if(end == null) end = bytes.length;
+  for(let i = start; i < end; i++) c = (c >>> 8) ^ t[(c ^ bytes[i]) & 0xFF];
+  return (c ^ 0xFFFFFFFF) >>> 0;
+
+// ── 6. PNG CHUNK READER ─────────────────────────────────────────────────────
+// Parses the signature + chunk sequence (length/type/data/CRC), verifies every
+// chunk CRC, and extracts tEXt (and tolerates iTXt) text chunks.
+
+stiisPNG(bytes) =>
+  return bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47 && bytes[4] === 0x0D && bytes[5] === 0x0A && bytes[6] === 0x1A && bytes[7] === 0x0A;
+
+stireadU32(bytes, offset) =>
+  return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+
+stichunkTypeName(bytes, offset) =>
+  return String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+
+stiparsePNGChunks(bytes) =>
+  if(!stiisPNG(bytes)) throw stistError("E_PNG_MAGIC", "Not a PNG file: the first 8 bytes do not match the PNG signature (89 50 4E 47 0D 0A 1A 0A).");
+  let chunks = [];
+  let offset = 8;
+  let foundIend = false;
+  while(offset + 12 <= bytes.length) {
+    let len = stireadU32(bytes, offset);
+    if(offset + 12 + len > bytes.length) throw stistError("E_PNG_TRUNCATED", "PNG is truncated: chunk '" + stichunkTypeName(bytes, offset) + "' extends past the end of the file.");
+    let type = String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+    let data = bytes.subarray(offset + 8, offset + 8 + len);
+    let crc = stireadU32(bytes, offset + 8 + len);
+    let computed = sticrc32(bytes, offset + 4, offset + 8 + len);
+    if(crc !== computed) throw stistError("E_PNG_CRC", "PNG CRC mismatch in '" + type + "' chunk (expected 0x" + computed.toString(16) + ", got 0x" + crc.toString(16) + "). The file may be corrupted.");
+    chunks.push({ type: type, data: data, offset: offset, length: len });
+    offset += 12 + len;
+    if(type === "IEND") { foundIend = true; break; }
+  }
+  if(!foundIend) throw stistError("E_PNG_IEND", "PNG has no IEND chunk.");
+  return chunks;
+
+stichunkKeyword(chunk) =>
+  let d = chunk.data;
+  let s = "";
+  for(let i = 0; i < d.length && d[i] !== 0; i++) s += String.fromCharCode(d[i]);
+  return s;
+
+stiparseTextChunk(chunk) =>
+  let d = chunk.data;
+  let i = 0;
+  let kw = "";
+  while(i < d.length && d[i] !== 0) { kw += String.fromCharCode(d[i]); i++; }
+  if(i >= d.length) return null;
+  i++;
+  let text = "";
+  for(; i < d.length; i++) text += String.fromCharCode(d[i]);
+  return { keyword: kw, text: text, type: chunk.type };
+
+async stiinflateBytes(bytes) =>
+  try {
+    let ds = new DecompressionStream("deflate");
+    let stream = new Blob([bytes]).stream().pipeThrough(ds);
+    let buf = await new Response(stream).arrayBuffer();
+    return new Uint8Array(buf);
+  } catch(e) {
+    throw stistError("E_ITXT_INFLATE", "Could not decompress iTXt chunk: " + e.message);
+  }
+
+async stiparseITextChunk(chunk) =>
+  let d = chunk.data;
+  let i = 0;
+  let kw = "";
+  while(i < d.length && d[i] !== 0) { kw += String.fromCharCode(d[i]); i++; }
+  if(i >= d.length) return null;
+  i++;
+  if(i + 2 > d.length) return null;
+  let flag = d[i], method = d[i + 1];
+  i += 2;
+  while(i < d.length && d[i] !== 0) i++;
+  if(i >= d.length) return null;
+  i++;
+  while(i < d.length && d[i] !== 0) i++;
+  if(i >= d.length) return null;
+  i++;
+  let data = d.subarray(i);
+  if(flag === 1) data = await stiinflateBytes(data);
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: false }).decode(data); } catch(e) { text = ""; }
+  return { keyword: kw, text: text, type: chunk.type };
+
+async stireadTextChunks(bytes) =>
+  let chunks = stiparsePNGChunks(bytes);
+  let out = [];
+  for(let c of chunks) {
+    if(c.type === "tEXt") {
+      let p = stiparseTextChunk(c);
+      if(p) out.push(p);
+    } else if(c.type === "iTXt") {
+      let p = await stiparseITextChunk(c);
+      if(p) out.push(p);
+    }
+  }
+  return out;
+
+stipickCardChunk(list) =>
+  let ccv3 = null, chara = null;
+  for(let c of list) {
+    let k = (c.keyword || "").toLowerCase();
+    if(k === "ccv3" && !ccv3) ccv3 = c;
+    if(k === "chara" && !chara) chara = c;
+  }
+  return ccv3 || chara;
+
+// ── 7. PNG CHUNK WRITER / EDITOR ────────────────────────────────────────────
+// Given a source PNG, strips existing chara/ccv3 tEXt chunks (case-insensitive),
+// inserts fresh 'chara' + 'ccv3' chunks immediately before IEND, recomputes all
+// chunk lengths + CRCs, and emits a valid PNG.
+
+stistringToLatin1Bytes(s) =>
+  let out = new Uint8Array(s.length);
+  for(let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xFF;
+  return out;
+
+stiencodeChunkBytes(type, data) =>
+  let len = data.length;
+  let out = new Uint8Array(12 + len);
+  out[0] = (len >>> 24) & 0xFF; out[1] = (len >>> 16) & 0xFF; out[2] = (len >>> 8) & 0xFF; out[3] = len & 0xFF;
+  out[4] = type.charCodeAt(0); out[5] = type.charCodeAt(1); out[6] = type.charCodeAt(2); out[7] = type.charCodeAt(3);
+  out.set(data, 8);
+  let crc = sticrc32(out, 4, 8 + len);
+  out[8 + len] = (crc >>> 24) & 0xFF; out[9 + len] = (crc >>> 16) & 0xFF; out[10 + len] = (crc >>> 8) & 0xFF; out[11 + len] = crc & 0xFF;
+  return out;
+
+stimakeTextChunkBytes(keyword, text) =>
+  let kw = stistringToLatin1Bytes(keyword);
+  let tb = new TextEncoder().encode(text);
+  let data = new Uint8Array(kw.length + 1 + tb.length);
+  data.set(kw, 0);
+  data[kw.length] = 0;
+  data.set(tb, kw.length + 1);
+  return stiencodeChunkBytes("tEXt", data);
+
+sticoncatPNGChunks(chunks) =>
+  let total = 8;
+  for(let c of chunks) total += c.length;
+  let out = new Uint8Array(total);
+  out.set([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], 0);
+  let o = 8;
+  for(let c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+
+stiwritePNGWithCardChunks(pngBytes, v2Json, v3Json) =>
+  let chunks = stiparsePNGChunks(pngBytes);
+  let kept = chunks.filter(function(c) {
+    if(c.type !== "tEXt" && c.type !== "iTXt") return true;
+    let k = stichunkKeyword(c).toLowerCase();
+    return !(k === "chara" || k === "ccv3");
+  });
+  let iendIdx = -1;
+  for(let i = 0; i < kept.length; i++) if(kept[i].type === "IEND") { iendIdx = i; break; }
+  if(iendIdx < 0) throw stistError("E_PNG_IEND", "Cannot embed card data: PNG has no IEND chunk.");
+  let iend = kept[iendIdx];
+  let before = [];
+  for(let i = 0; i < kept.length; i++) if(i !== iendIdx) before.push(kept[i]);
+  let outChunks = [];
+  for(let c of before) outChunks.push(stiencodeChunkBytes(c.type, c.data));
+  outChunks.push(stimakeTextChunkBytes("chara", stib64encode(v2Json)));
+  outChunks.push(stimakeTextChunkBytes("ccv3", stib64encode(v3Json)));
+  outChunks.push(stiencodeChunkBytes(iend.type, iend.data));
+  return sticoncatPNGChunks(outChunks);
+
+// ── 8. CHARACTER CARD SPEC DETECTION ────────────────────────────────────────
+// v1: flat keys, no `spec`. v2: spec === "chara_card_v2". v3: spec === "chara_card_v3".
+
+stidetectSpec(obj) =>
+  if(obj == null || typeof obj !== "object" || Array.isArray(obj)) throw stistError("E_CARD_SHAPE", "Character data must be a JSON object — got " + stidescribeType(obj) + ".");
+  if(obj.spec === "chara_card_v2") return "v2";
+  if(obj.spec === "chara_card_v3") return "v3";
+  if(obj.spec !== undefined) throw stistError("E_CARD_SPEC", "Unrecognized character card spec '" + String(obj.spec) + "'. Expected 'chara_card_v2' or 'chara_card_v3' (or a spec-less v1 card).");
+  if(typeof obj.name === "string" || typeof obj.description === "string" || typeof obj.personality === "string" || typeof obj.scenario === "string") return "v1";
+  let keys = Object.keys(obj);
+  throw stistError("E_CARD_SHAPE", "Could not detect a character card: no 'spec' field and none of the classic v1 fields (name, description, personality, scenario). Keys found: " + (keys.length ? keys.slice(0, 10).join(", ") + (keys.length > 10 ? ", …" : "") : "none"));
+
+// ── 9. CANONICAL CARD MODEL ─────────────────────────────────────────────────
+// One normalised shape with always-present fields. Unknown keys survive in a
+// `legacy` bucket so nothing is ever dropped.
+
+stinormalizeGreetings(v) =>
+  if(Array.isArray(v)) return v.filter(function(x) { return typeof x === "string"; });
+  if(typeof v === "string") return [v];
+  return [];
+
+stiv1ToCanonical(src) =>
+  let s = (src && typeof src === "object" && !Array.isArray(src)) ? src : {};
+  let data = stistInteropDefaults();
+  let known = data.canonicalKeys;
+  let legacy = {};
+  for(let k of Object.keys(s)) if(known.indexOf(k) < 0) legacy[k] = s[k];
+  let tags = [];
+  if(Array.isArray(s.tags)) tags = s.tags.map(String);
+  else if(typeof s.tags === "string" && s.tags.trim()) tags = s.tags.split(",").map(function(t) { return t.trim(); }).filter(Boolean);
+  if("tags" in s) legacy.tags = s.tags;
+  let ext = (s.extensions && typeof s.extensions === "object" && !Array.isArray(s.extensions)) ? stideepClone(s.extensions) : {};
+  let out = {};
+  for(let f of data.stringFields) out[f] = stistrOr(s[f], "");
+  out.alternate_greetings = stinormalizeGreetings(s.alternate_greetings);
+  out.tags = tags;
+  out.extensions = ext;
+  out.character_book = (s.character_book && typeof s.character_book === "object" && !Array.isArray(s.character_book)) ? stideepClone(s.character_book) : null;
+  out.talkativeness = typeof s.talkativeness === "number" ? s.talkativeness : 0.5;
+  out.fav = (s.fav === true || s.fav === "true");
+  out.legacy = legacy;
+  stistInteropDefaults().canonicalSet.add(out);
+  return out;
+
+stiv2ToCanonical(raw) =>
+  let data = (raw && raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)) ? raw.data : {};
+  let c = stiv1ToCanonical(data);
+  if(data.creator_notes && typeof data.creator_notes === "object") {
+    c.creator_notes = (typeof data.creator_notes.text === "string") ? data.creator_notes.text : JSON.stringify(data.creator_notes);
+  }
+  c.legacy.spec = raw.spec;
+  c.legacy.spec_version = raw.spec_version;
+  if(raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for(let k of Object.keys(raw)) {
+      if(k === "spec" || k === "spec_version" || k === "data") continue;
+      if(k in c.legacy) continue;
+      c.legacy[k] = stideepClone(raw[k]);
+    }
+  }
+  let ext = c.extensions;
+  c.talkativeness = (ext && typeof ext.talkativeness === "number") ? ext.talkativeness : 0.5;
+  c.fav = (ext && typeof ext.fav === "boolean") ? ext.fav : false;
+  if(ext) { delete ext.talkativeness; delete ext.fav; }
+  return c;
+
+stiv3ToCanonical(raw) =>
+  let data = (raw && raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)) ? raw.data : {};
+  let c = stiv2ToCanonical(raw);
+  if(data.creator && typeof data.creator === "object" && !Array.isArray(data.creator)) {
+    if(typeof data.creator.name === "string") c.creator = data.creator.name;
+    c.legacy.creatorObject = stideepClone(data.creator);
+  }
+  if(Array.isArray(data.assets)) c.legacy.assets = stideepClone(data.assets);
+  return c;
+
+stitoCanonicalFromRaw(raw, spec) =>
+  if(spec === "v1") return stiv1ToCanonical(raw);
+  if(spec === "v2") return stiv2ToCanonical(raw);
+  if(spec === "v3") return stiv3ToCanonical(raw);
+  throw stistError("E_CARD_SPEC", "Unknown spec '" + spec + "'.");
+
+stitoCanonicalAnyRaw(obj) =>
+  return stitoCanonicalFromRaw(obj, stidetectSpec(obj));
+
+stitoCanonicalAny(x) =>
+  if(x == null) throw stistError("E_CARD", "No character data provided.");
+  if(x.canonical && typeof x.canonical === "object") return x.canonical;
+  if(window.__ST_INTEROP_DATA__ && window.__ST_INTEROP_DATA__.canonicalSet.has(x)) return x;
+  if(typeof x.name === "string" || x.spec !== undefined || (x.data && typeof x.data === "object" && (x.spec || typeof x.data.name === "string"))) return stitoCanonicalAnyRaw(x);
+  throw stistError("E_CARD", "Cannot interpret " + stidescribeType(x) + " as a character card. Pass a parsed card (result of stiparseCharacter), a raw v1/v2/v3 card object, or a canonical card.");
+
+stimergeLegacy(target, legacy, exclude) =>
+  if(!legacy || typeof legacy !== "object") return;
+  for(let k of Object.keys(legacy)) {
+    if(exclude.indexOf(k) >= 0) continue;
+    if(k in target) continue;
+    target[k] = legacy[k];
+  }
+
+// ── 10. CANONICAL → v1/v2/v3 SERIALIZATION ─────────────────────────────────
+// Never destroys unknown extension keys; mirrors talkativeness/fav into
+// data.extensions (v2/v3) exactly like SillyTavern does.
+
+sticanonicalToV2(c) =>
+  let data = stistInteropDefaults();
+  let out = {};
+  for(let f of data.stringFields) out[f] = stistrOr(c[f], "");
+  out.alternate_greetings = Array.isArray(c.alternate_greetings) ? c.alternate_greetings.map(String) : [];
+  out.tags = Array.isArray(c.tags) ? c.tags.map(String) : [];
+  let ext = stideepClone((c.extensions && typeof c.extensions === "object") ? c.extensions : {});
+  ext.talkativeness = typeof c.talkativeness === "number" ? c.talkativeness : 0.5;
+  ext.fav = !!c.fav;
+  out.extensions = ext;
+  if(c.character_book && typeof c.character_book === "object") out.character_book = stideepClone(c.character_book);
+  stimergeLegacy(out, c.legacy, ["spec", "spec_version", "creatorObject", "assets"]);
+  return { spec: "chara_card_v2", spec_version: "2.0", data: out };
+
+sticanonicalToV3(c) =>
+  let v2 = sticanonicalToV2(c);
+  let data = v2.data;
+  data.creator = (c.legacy && c.legacy.creatorObject) ? stideepClone(c.legacy.creatorObject) : { name: stistrOr(c.creator, ""), version: "", notes: "" };
+  if(c.legacy && Array.isArray(c.legacy.assets)) data.assets = stideepClone(c.legacy.assets);
+  return { spec: "chara_card_v3", spec_version: "3.0", data: data };
+
+sticanonicalToV1(c) =>
+  let data = stistInteropDefaults();
+  let out = {};
+  for(let f of data.stringFields) out[f] = stistrOr(c[f], "");
+  out.alternate_greetings = Array.isArray(c.alternate_greetings) ? c.alternate_greetings.map(String) : [];
+  out.tags = Array.isArray(c.tags) ? c.tags.join(",") : "";
+  out.talkativeness = typeof c.talkativeness === "number" ? c.talkativeness : 0.5;
+  out.fav = !!c.fav;
+  out.extensions = stideepClone((c.extensions && typeof c.extensions === "object") ? c.extensions : {});
+  if(c.character_book && typeof c.character_book === "object") out.character_book = stideepClone(c.character_book);
+  stimergeLegacy(out, c.legacy, ["spec", "spec_version", "creatorObject", "assets"]);
+  return out;
+
+// ── 11. CHARACTER CARD PARSING (JSON + PNG) ────────────────────────────────
+// stiparseCharacter returns { spec, canonical, original, source, portrait, fileName }.
+// PNG: ccv3 chunk takes precedence over chara, exactly like SillyTavern.
+
+async stipngToDataUrl(bytes) =>
+  try {
+    let blob = new Blob([bytes], { type: "image/png" });
+    return await stiblobToDataUrl(blob);
+  } catch(e) { return null; }
+
+stiblobToDataUrl(blob) =>
+  return new Promise(function(resolve, reject) {
+    let fr = new FileReader();
+    fr.onload = function() { resolve(fr.result); };
+    fr.onerror = function() { reject(fr.error || new Error("FileReader failed")); };
+    fr.readAsDataURL(blob);
+  });
+
+async stiparseCharacter(input) =>
+  let src = await stireadInput(input);
+  let raw = null, portrait = null, source = "json";
+  if(src.kind === "binary") {
+    if(stiisPNG(src.bytes)) {
+      source = "png";
+      let textChunks = await stireadTextChunks(src.bytes);
+      let cardChunk = stipickCardChunk(textChunks);
+      if(!cardChunk) throw stistError("E_NO_CARD_CHUNK", "PNG has no character data: no 'ccv3' or 'chara' text chunk was found.");
+      let jsonText = stib64decode(cardChunk.text);
+      try { raw = JSON.parse(jsonText); } catch(e) { throw stistError("E_JSON", "Character JSON inside the PNG '" + cardChunk.keyword + "' chunk is invalid: " + e.message); }
+      portrait = await stipngToDataUrl(src.bytes);
+    } else {
+      let text = new TextDecoder("utf-8", { fatal: false }).decode(src.bytes).replace(/^\uFEFF/, "").trim();
+      if(!text) throw stistError("E_EMPTY", "Empty input: no character data to parse.");
+      try { raw = JSON.parse(text); } catch(e) { throw stistError("E_JSON", "Input is neither a PNG card nor valid JSON: " + e.message); }
+    }
+  } else {
+    let text = (src.text || "").replace(/^\uFEFF/, "").trim();
+    if(!text) throw stistError("E_EMPTY", "Empty input: no character data to parse.");
+    try { raw = JSON.parse(text); } catch(e) { throw stistError("E_JSON", "Invalid character JSON: " + e.message); }
+  }
+  let spec = stidetectSpec(raw);
+  let canonical = stitoCanonicalFromRaw(raw, spec);
+  return { spec: spec, canonical: canonical, original: raw, source: source, portrait: portrait, fileName: src.name || null };
+
+// ── 12. CARD EXPORT ─────────────────────────────────────────────────────────
+// sticardToJSON(card, spec) → pretty JSON string. sticardToPNG(card, {image}) → a
+// valid PNG buffer carrying chara (v2) + ccv3 (v3) chunks, using the given
+// portrait (data URL / File / Blob / bytes / <canvas>) or a generated fallback.
+
+sticardToJSON(card, spec) =>
+  let target = spec || "v2";
+  let c = stitoCanonicalAny(card);
+  let obj = null;
+  if(target === "v1") obj = sticanonicalToV1(c);
+  else if(target === "v2") obj = sticanonicalToV2(c);
+  else if(target === "v3") obj = sticanonicalToV3(c);
+  else throw stistError("E_SPEC", "Unknown target spec '" + target + "'. Use 'v1', 'v2' or 'v3'.");
+  return JSON.stringify(obj, null, 2);
+
+async sticoerceToPNG(bytes) =>
+  let blob = new Blob([bytes]);
+  let bmp = null;
+  try {
+    if(typeof createImageBitmap === "function") bmp = await createImageBitmap(blob);
+  } catch(e) {}
+  if(!bmp) {
+    try {
+      bmp = await new Promise(function(resolve, reject) {
+        let imgEl = new Image();
+        imgEl.onload = function() { resolve(imgEl); };
+        imgEl.onerror = function() { reject(new Error("could not decode image")); };
+        imgEl.src = URL.createObjectURL(blob);
+      });
+    } catch(e2) {
+      throw stistError("E_IMAGE", "Portrait is not a PNG and could not be re-encoded: " + e2.message);
+    }
+  }
+  let cv = document.createElement("canvas");
+  cv.width = bmp.width || 512; cv.height = bmp.height || 512;
+  let ctx = cv.getContext("2d");
+  ctx.drawImage(bmp, 0, 0);
+  let out = await new Promise(function(resolve, reject) {
+    cv.toBlob(function(b) { if(b) resolve(b); else reject(new Error("toBlob failed")); }, "image/png");
+  });
+  return new Uint8Array(await out.arrayBuffer());
+
+async stiimageToPNGBytes(img) =>
+  let bytes = null;
+  if(typeof img === "string") {
+    let r = await fetch(img);
+    if(!r.ok) throw stistError("E_IMAGE", "Could not fetch portrait image (HTTP " + r.status + ").");
+    bytes = new Uint8Array(await r.arrayBuffer());
+  } else if(typeof Blob !== "undefined" && img instanceof Blob) {
+    bytes = new Uint8Array(await img.arrayBuffer());
+  } else if(img instanceof ArrayBuffer) {
+    bytes = new Uint8Array(img);
+  } else if(ArrayBuffer.isView(img)) {
+    bytes = new Uint8Array(img.buffer, img.byteOffset, img.byteLength);
+  } else if(img && typeof img.getContext === "function") {
+    let blob = await new Promise(function(resolve, reject) {
+      img.toBlob(function(b) { if(b) resolve(b); else reject(new Error("toBlob failed")); }, "image/png");
+    });
+    bytes = new Uint8Array(await blob.arrayBuffer());
+  } else {
+    throw stistError("E_IMAGE", "Unsupported portrait source: " + stidescribeType(img) + ". Pass a data URL, File/Blob, Uint8Array, or <canvas>.");
+  }
+  if(!stiisPNG(bytes)) bytes = await sticoerceToPNG(bytes);
+  return bytes;
+
+async stiplaceholderPNG(c) =>
+  let cv = document.createElement("canvas");
+  cv.width = 512; cv.height = 512;
+  let ctx = cv.getContext("2d");
+  let g = ctx.createLinearGradient(0, 0, 512, 512);
+  g.addColorStop(0, "#4c3d8f");
+  g.addColorStop(1, "#141b2d");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 512, 512);
+  let name = stistrOr(c.name, "?") || "?";
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.font = "bold 220px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  let first = Array.from(name.trim())[0] || "?";
+  ctx.fillText(first.toUpperCase(), 256, 262);
+  let blob = await new Promise(function(resolve, reject) {
+    cv.toBlob(function(b) { if(b) resolve(b); else reject(new Error("toBlob failed")); }, "image/png");
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+
+async sticardToPNG(card, opts) =>
+  let c = stitoCanonicalAny(card);
+  let v2 = sticanonicalToV2(c);
+  let v3 = sticanonicalToV3(c);
+  let base = null;
+  if(opts && opts.image != null) base = await stiimageToPNGBytes(opts.image);
+  if(!base) base = await stiplaceholderPNG(c);
+  return stiwritePNGWithCardChunks(base, JSON.stringify(v2), JSON.stringify(v3));
+
+// ── 13. LOREBOKS / WORLD INFO ───────────────────────────────────────────────
+// stiparseLorebook → { name, description, scan_depth, token_budget,
+// recursive_scanning, extensions, entries: [canonical…], legacy }.
+// Legacy "world info" entries are normalised to the modern shape following
+// SillyTavern's convertWorldInfoToCharacterBook mapping.
+
+stientryToCanonical(src) =>
+  let e = (src && typeof src === "object" && !Array.isArray(src)) ? src : {};
+  let isLegacy = ("key" in e) || ("order" in e) || ("disable" in e) || ("keysecondary" in e) || ("uid" in e);
+  if(isLegacy) return stilegacyEntryToCanonical(e);
+  let keys = Array.isArray(e.keys) ? e.keys.map(String) : (typeof e.keys === "string" ? [e.keys] : []);
+  let secondary = Array.isArray(e.secondary_keys) ? e.secondary_keys.map(String) : (typeof e.secondary_keys === "string" ? [e.secondary_keys] : []);
+  let known = ["id","keys","secondary_keys","content","enabled","insertion_order","case_sensitive","selective","constant","position","name","comment","priority","extensions","use_regex"];
+  let legacy = {};
+  for(let k of Object.keys(e)) if(known.indexOf(k) < 0) legacy[k] = e[k];
+  let ext = (e.extensions && typeof e.extensions === "object" && !Array.isArray(e.extensions)) ? stideepClone(e.extensions) : {};
+  let entry = {
+    id: (typeof e.id === "number") ? e.id : (typeof e.id === "string" ? e.id : null),
+    keys: keys,
+    secondary_keys: secondary,
+    content: typeof e.content === "string" ? e.content : "",
+    enabled: e.enabled !== false,
+    insertion_order: typeof e.insertion_order === "number" ? e.insertion_order : 100,
+    case_sensitive: !!e.case_sensitive,
+    selective: !!e.selective,
+    constant: !!e.constant,
+    position: typeof e.position === "string" ? e.position : "before_char",
+    name: typeof e.name === "string" ? e.name : "",
+    comment: typeof e.comment === "string" ? e.comment : "",
+    priority: typeof e.priority === "number" ? e.priority : 10,
+    extensions: ext,
+    legacy: legacy
+  };
+  if(typeof e.use_regex === "boolean") entry.use_regex = e.use_regex;
+  return entry;
+
+stilegacyEntryToCanonical(e) =>
+  let data = stistInteropDefaults();
+  let known = data.legacyWIFields;
+  let legacy = {};
+  for(let k of Object.keys(e)) if(known.indexOf(k) < 0) legacy[k] = e[k];
+  let keys = typeof e.key === "string" ? [e.key] : (Array.isArray(e.key) ? e.key.map(String) : []);
+  let secondary = typeof e.keysecondary === "string" ? [e.keysecondary] : (Array.isArray(e.keysecondary) ? e.keysecondary.map(String) : []);
+  let ext = (e.extensions && typeof e.extensions === "object" && !Array.isArray(e.extensions)) ? stideepClone(e.extensions) : {};
+  ext.position = e.position;
+  let map = {
+    exclude_recursion: e.excludeRecursion,
+    display_index: e.displayIndex,
+    probability: (e.probability != null) ? e.probability : null,
+    useProbability: e.useProbability ?? false,
+    depth: (e.depth != null) ? e.depth : 4,
+    selectiveLogic: (e.selectiveLogic != null) ? e.selectiveLogic : 0,
+    outlet_name: e.outletName ?? "",
+    group: e.group ?? "",
+    group_override: e.groupOverride ?? false,
+    group_weight: (e.groupWeight != null) ? e.groupWeight : null,
+    prevent_recursion: e.preventRecursion ?? false,
+    delay_until_recursion: e.delayUntilRecursion ?? false,
+    scan_depth: (e.scanDepth != null) ? e.scanDepth : null,
+    match_whole_words: (e.matchWholeWords != null) ? e.matchWholeWords : null,
+    use_group_scoring: e.useGroupScoring ?? false,
+    case_sensitive: (e.caseSensitive != null) ? e.caseSensitive : null,
+    automation_id: e.automationId ?? "",
+    role: (e.role != null) ? e.role : 0,
+    vectorized: e.vectorized ?? false,
+    sticky: (e.sticky != null) ? e.sticky : null,
+    cooldown: (e.cooldown != null) ? e.cooldown : null,
+    delay: (e.delay != null) ? e.delay : null,
+    triggers: e.triggers ?? [],
+    ignore_budget: e.ignoreBudget ?? false,
+    match_persona_description: e.matchPersonaDescription ?? false,
+    match_character_description: e.matchCharacterDescription ?? false,
+    match_character_personality: e.matchCharacterPersonality ?? false,
+    match_character_depth_prompt: e.matchCharacterDepthPrompt ?? false,
+    match_scenario: e.matchScenario ?? false,
+    match_creator_notes: e.matchCreatorNotes ?? false
+  };
+  for(let k of Object.keys(map)) if(map[k] !== undefined) ext[k] = map[k];
+  let order = (typeof e.order === "number") ? e.order : (typeof e.order === "string" ? (parseInt(e.order, 10) || 100) : 100);
+  return {
+    id: (typeof e.uid === "number") ? e.uid : (typeof e.uid === "string" ? e.uid : null),
+    keys: keys,
+    secondary_keys: secondary,
+    content: typeof e.content === "string" ? e.content : "",
+    enabled: !e.disable,
+    insertion_order: order,
+    case_sensitive: (typeof e.case_sensitive === "boolean") ? e.case_sensitive : (e.caseSensitive === true),
+    selective: !!e.selective,
+    constant: !!e.constant,
+    position: (e.position === 0 || e.position === "0") ? "before_char" : "after_char",
+    name: typeof e.name === "string" ? e.name : "",
+    comment: typeof e.comment === "string" ? e.comment : "",
+    priority: 10,
+    extensions: ext,
+    legacy: legacy,
+    use_regex: true
+  };
+
+stientryToOut(e) =>
+  let out = {
+    keys: Array.isArray(e.keys) ? e.keys.slice() : [],
+    secondary_keys: Array.isArray(e.secondary_keys) ? e.secondary_keys.slice() : [],
+    comment: e.comment || "",
+    content: e.content || "",
+    constant: !!e.constant,
+    selective: !!e.selective,
+    insertion_order: (typeof e.insertion_order === "number") ? e.insertion_order : 100,
+    enabled: e.enabled !== false,
+    position: e.position || "before_char",
+    name: e.name || "",
+    priority: (typeof e.priority === "number") ? e.priority : 10,
+    case_sensitive: !!e.case_sensitive,
+    extensions: stideepClone((e.extensions && typeof e.extensions === "object") ? e.extensions : {})
+  };
+  if(e.id != null) out.id = e.id;
+  if(e.use_regex !== undefined) out.use_regex = !!e.use_regex;
+  stimergeLegacy(out, e.legacy, []);
+  return out;
+
+stinormalizeLorebookAny(b) =>
+  if(b == null || typeof b !== "object" || !Array.isArray(b.entries)) throw stistError("E_LOREBOOK", "Expected a lorebook object with an 'entries' array (got " + stidescribeType(b) + ").");
+  return b;
+
+async stiparseLorebook(input) =>
+  let src = await stireadInput(input);
+  let text;
+  if(src.kind === "binary") {
+    if(stiisPNG(src.bytes)) throw stistError("E_WRONG_TYPE", "This looks like a PNG character card, not a .json lorebook. Pass a .json lorebook file.");
+    text = new TextDecoder("utf-8", { fatal: false }).decode(src.bytes);
+  } else {
+    text = src.text || "";
+  }
+  text = text.replace(/^\uFEFF/, "");
+  if(!text.trim()) throw stistError("E_EMPTY", "Empty lorebook input.");
+  let obj;
+  try { obj = JSON.parse(text); } catch(e) { throw stistError("E_JSON", "Invalid lorebook JSON: " + e.message); }
+  if(obj == null || typeof obj !== "object" || Array.isArray(obj)) throw stistError("E_LOREBOOK_SHAPE", "Lorebook must be a JSON object with a top-level 'entries' array — got " + stidescribeType(obj) + ".");
+  if(!Array.isArray(obj.entries)) throw stistError("E_NO_ENTRIES", "Not a valid lorebook: missing top-level 'entries' array (a lorebook JSON always has an 'entries' key).");
+  let known = ["name","description","scan_depth","token_budget","recursive_scanning","extensions","entries"];
+  let legacy = {};
+  for(let k of Object.keys(obj)) if(known.indexOf(k) < 0) legacy[k] = obj[k];
+  return {
+    name: typeof obj.name === "string" ? obj.name : "",
+    description: typeof obj.description === "string" ? obj.description : "",
+    scan_depth: typeof obj.scan_depth === "number" ? obj.scan_depth : 4,
+    token_budget: typeof obj.token_budget === "number" ? obj.token_budget : 500,
+    recursive_scanning: !!obj.recursive_scanning,
+    extensions: (obj.extensions && typeof obj.extensions === "object" && !Array.isArray(obj.extensions)) ? stideepClone(obj.extensions) : {},
+    entries: obj.entries.map(stientryToCanonical),
+    legacy: legacy,
+    fileName: src.name || null
+  };
+
+stilorebookToJSON(book) =>
+  let b = stinormalizeLorebookAny(book);
+  let out = {
+    name: stistrOr(b.name, ""),
+    description: stistrOr(b.description, ""),
+    scan_depth: typeof b.scan_depth === "number" ? b.scan_depth : 4,
+    token_budget: typeof b.token_budget === "number" ? b.token_budget : 500,
+    recursive_scanning: !!b.recursive_scanning,
+    extensions: stideepClone((b.extensions && typeof b.extensions === "object") ? b.extensions : {}),
+    entries: (b.entries || []).map(stientryToOut)
+  };
+  stimergeLegacy(out, b.legacy, []);
+  return JSON.stringify(out, null, 2);
+
+sticharacterBookFromCard(card) =>
+  let c = stitoCanonicalAny(card);
+  return (c.character_book && typeof c.character_book === "object") ? stideepClone(c.character_book) : null;
+
+stiattachCharacterBook(card, lorebook) =>
+  let c = stitoCanonicalAny(card);
+  let b = stinormalizeLorebookAny(lorebook);
+  let book = stideepClone(b);
+  delete book.fileName;
+  stimergeLegacy(book, b.legacy, []);
+  delete book.legacy;
+  book.entries = (b.entries || []).map(function(en) {
+    if(en && typeof en === "object" && "legacy" in en) return stientryToOut(en);
+    return stientryToOut(stientryToCanonical(en));
+  });
+  let c2 = stideepClone(c);
+  c2.character_book = book;
+  return c2;
+
+// ── 14. .jsonl CHAT FILES ───────────────────────────────────────────────────
+// stiparseChat → { metadata (chat_metadata line, if any), messages: [canonical…],
+// count, fileName }. Malformed lines report the exact line number.
+
+stiisChatMetadata(o) =>
+  if(o == null || typeof o !== "object" || Array.isArray(o)) return false;
+  if("chat_metadata" in o) return true;
+  if(("user_name" in o || "character_name" in o) && !("mes" in o)) return true;
+  return false;
+
+stimessageToCanonical(m) =>
+  let src = (m && typeof m === "object" && !Array.isArray(m)) ? m : {};
+  let data = stistInteropDefaults();
+  let known = data.messageKeys;
+  let legacy = {};
+  for(let k of Object.keys(src)) if(known.indexOf(k) < 0) legacy[k] = src[k];
+  let is_user = !!src.is_user;
+  let is_system = !!src.is_system;
+  let role = "assistant";
+  if(is_system) role = "system";
+  else if(is_user) role = "user";
+  return {
+    role: role,
+    name: typeof src.name === "string" ? src.name : "",
+    is_user: is_user,
+    is_name: !!src.is_name,
+    is_system: is_system,
+    send_date: typeof src.send_date === "string" ? src.send_date : "",
+    mes: typeof src.mes === "string" ? src.mes : "",
+    swipes: Array.isArray(src.swipes) ? src.swipes.filter(function(x) { return typeof x === "string"; }) : [],
+    swipe_info: (src.swipe_info && typeof src.swipe_info === "object") ? stideepClone(src.swipe_info) : {},
+    extra: (src.extra && typeof src.extra === "object") ? stideepClone(src.extra) : {},
+    legacy: legacy
+  };
+
+async stiparseChat(input) =>
+  let src = await stireadInput(input);
+  let text;
+  if(src.kind === "binary") {
+    if(stiisPNG(src.bytes)) throw stistError("E_WRONG_TYPE", "This looks like a PNG character card, not a .jsonl chat file.");
+    text = new TextDecoder("utf-8", { fatal: false }).decode(src.bytes);
+  } else {
+    text = src.text || "";
+  }
+  text = text.replace(/^\uFEFF/, "");
+  let lines = text.split(/\r?\n/);
+  let messages = [];
+  let metadata = null;
+  let seenFirst = false;
+  for(let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if(!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch(e) { throw stistError("E_JSONL_LINE", "Malformed chat line " + (i + 1) + ": " + e.message); }
+    if(!seenFirst && stiisChatMetadata(obj)) { metadata = obj; seenFirst = true; continue; }
+    seenFirst = true;
+    messages.push(stimessageToCanonical(obj));
+  }
+  return { metadata: metadata, messages: messages, count: messages.length, fileName: src.name || null };
+
+stinormalizeChatAny(c) =>
+  if(c == null || typeof c !== "object" || !Array.isArray(c.messages)) throw stistError("E_CHAT", "Expected a chat object with a 'messages' array (got " + stidescribeType(c) + ").");
+  return c;
+
+stichatToJSONL(chat) =>
+  let c = stinormalizeChatAny(chat);
+  let lines = [];
+  if(c.metadata) lines.push(JSON.stringify(c.metadata));
+  for(let m of c.messages) {
+    let o = {
+      name: m.name || "",
+      is_user: !!m.is_user,
+      is_name: !!m.is_name,
+      is_system: !!m.is_system,
+      send_date: m.send_date || "",
+      mes: m.mes || "",
+      swipes: Array.isArray(m.swipes) ? m.swipes.slice() : [],
+      swipe_info: (m.swipe_info && typeof m.swipe_info === "object") ? stideepClone(m.swipe_info) : {},
+      extra: (m.extra && typeof m.extra === "object") ? stideepClone(m.extra) : {}
+    };
+    stimergeLegacy(o, m.legacy, []);
+    lines.push(JSON.stringify(o));
+  }
+  return lines.length ? lines.join("\n") + "\n" : "";
+
+stichatToPrompt(chat) =>
+  let c = stinormalizeChatAny(chat);
+  let system = [];
+  let messages = [];
+  for(let m of c.messages) {
+    if(m.is_system || m.role === "system") { system.push({ speaker: "system", text: m.mes || "" }); continue; }
+    let speaker = m.is_user ? (m.name || "user") : (m.name || "character");
+    messages.push({ speaker: speaker, text: m.mes || "" });
+  }
+  return { system: system, messages: messages };
+
+// ── 15. PJS EXPORT HELPERS ──────────────────────────────────────────────────
+// Render canonical data as Perchance list text (and back via createPerchanceTree).
+
+stiescapePjs(s) =>
+  return String(s == null ? "" : s).replace(/\\/g, "\\\\").replace(/\{/g, "\\{").replace(/\}/g, "\\}").replace(/\[/g, "\\[").replace(/\]/g, "\\]").replace(/\r/g, "").replace(/\n/g, "\\n");
+
+stitoPjs(card) =>
+  let c = stitoCanonicalAny(card);
+  let e = stiescapePjs;
+  let out = "character\n";
+  out += "  name\n    " + e(c.name) + "\n";
+  out += "  description\n    " + e(c.description) + "\n";
+  out += "  personality\n    " + e(c.personality) + "\n";
+  out += "  scenario\n    " + e(c.scenario) + "\n";
+  out += "  firstMes\n    " + e(c.first_mes) + "\n";
+  out += "  mesExample\n    " + e(c.mes_example) + "\n";
+  out += "  creatorNotes\n    " + e(c.creator_notes) + "\n";
+  out += "  systemPrompt\n    " + e(c.system_prompt) + "\n";
+  out += "  postHistoryInstructions\n    " + e(c.post_history_instructions) + "\n";
+  if(c.alternate_greetings.length) {
+    out += "  alternateGreetings\n";
+    for(let g of c.alternate_greetings) out += "    " + e(g) + "\n";
+  }
+  if(c.tags.length) {
+    out += "  tags\n";
+    for(let t of c.tags) out += "    " + e(t) + "\n";
+  }
+  out += "  $output = [\"[this.name] — [this.description]\"]\n";
+  return out;
+
+stitoPjsLorebook(book) =>
+  let b = stinormalizeLorebookAny(book);
+  let e = stiescapePjs;
+  let out = "lorebook\n";
+  out += "  name\n    " + e(b.name) + "\n";
+  out += "  entries\n";
+  for(let en of b.entries) {
+    out += "    " + e(en.name || en.keys[0] || "entry") + ": " + e(en.content) + "\n";
+  }
+  out += "  $output = [this.name]\n";
+  return out;
+
+stitoPjsChat(chat) =>
+  let c = stinormalizeChatAny(chat);
+  let e = stiescapePjs;
+  let out = "chat\n";
+  for(let m of c.messages) {
+    let speaker = m.is_user ? "user" : (m.is_system ? "system" : (m.name || "character"));
+    out += "  " + e(speaker + ": " + m.mes) + "\n";
+  }
+  return out;
+
+stifromPjs(text) =>
+  if(typeof text !== "string" || !text.trim()) throw stistError("E_PJS", "Empty pjs text.");
+  try { return createPerchanceTree(text); } catch(e) { throw stistError("E_PJS", "Could not build a Perchance tree from the text: " + e.message); }
+
+// ── 16. ENTRY POINT ─────────────────────────────────────────────────────────
+// Returns the plugin namespace. When another generator writes
+//   stInterop = import:this-generator
+// `root.stInterop` IS this object, so every method is reachable as
+// root.stInterop.stiparseCharacter(...), root.stInterop.toV2(...), etc.
+// The namespace is cached on window so it is stable across evaluations.
+
+async stiextractPNGText(input) =>
+  let src = await stireadInput(input);
+  if(src.kind !== "binary" || !stiisPNG(src.bytes)) throw stistError("E_PNG_MAGIC", "Expected a PNG file/buffer.");
+  let textChunks = await stireadTextChunks(src.bytes);
+  return textChunks.map(function(c) { return { keyword: c.keyword, text: c.text }; });
+
+stistInteropNamespace() =>
+  if(!window.__ST_INTEROP_NAMESPACE__) {
+    window.__ST_INTEROP_NAMESPACE__ = {
+      version: "0.1.0",
+      parseCharacter: stiparseCharacter,
+      detectSpec: stidetectSpec,
+      toCanonical: stitoCanonicalAnyRaw,
+      fromV1: stiv1ToCanonical,
+      fromV2: stiv2ToCanonical,
+      fromV3: stiv3ToCanonical,
+      toV1: function(c) { return sticanonicalToV1(stitoCanonicalAny(c)); },
+      toV2: function(c) { return sticanonicalToV2(stitoCanonicalAny(c)); },
+      toV3: function(c) { return sticanonicalToV3(stitoCanonicalAny(c)); },
+      cardToJSON: sticardToJSON,
+      cardToPNG: sticardToPNG,
+      parseLorebook: stiparseLorebook,
+      lorebookToJSON: stilorebookToJSON,
+      characterBookFromCard: sticharacterBookFromCard,
+      attachCharacterBook: stiattachCharacterBook,
+      parseChat: stiparseChat,
+      chatToJSONL: stichatToJSONL,
+      chatToPrompt: stichatToPrompt,
+      extractPNGText: stiextractPNGText,
+      toPjs: stitoPjs,
+      toPjsLorebook: stitoPjsLorebook,
+      toPjsChat: stitoPjsChat,
+      fromPjs: stifromPjs,
+      b64encode: stib64encode,
+      b64decode: stib64decode,
+      errors: { codes: ["E_EMPTY","E_INPUT","E_JSON","E_JSONL_LINE","E_BASE64","E_PNG_MAGIC","E_PNG_TRUNCATED","E_PNG_CRC","E_PNG_IEND","E_NO_CARD_CHUNK","E_CARD_SHAPE","E_CARD_SPEC","E_CARD","E_SPEC","E_IMAGE","E_LOREBOOK_SHAPE","E_NO_ENTRIES","E_LOREBOOK","E_WRONG_TYPE","E_CHAT","E_ITXT_INFLATE","E_PJS"] }
+    };
+  }
+  return window.__ST_INTEROP_NAMESPACE__;
+
+$output = [stistInteropNamespace()]

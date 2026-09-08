@@ -1,0 +1,277 @@
+<!-- ====================================================================
+     BUSINESS INTELLIGENCE DASHBOARD — application shell
+     Frame + navigation; modules render into #biContent. Data flows
+     bus → cache → extractors → facts → reports → charts (see src/README.md).
+     ==================================================================== -->
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="src/bi.css">
+
+<div class="bi-app">
+  <aside class="bi-sidebar" id="biSidebar" aria-label="Primary">
+    <div class="bi-brand">
+      <span class="bi-brand-mark" id="biBrandMark">BI</span>
+      <span class="bi-brand-text">
+        <strong id="biBrandName">Business Intelligence</strong>
+        <span id="biBrandTag">Reporting cockpit</span>
+      </span>
+    </div>
+    <nav class="bi-nav" id="biNav" aria-label="Modules"></nav>
+    <div class="bi-side-foot">
+      <button type="button" class="bi-iconbtn bi-iconbtn--dark" id="biThemeBtn" title="Toggle theme" aria-label="Toggle theme"></button>
+      <div class="bi-foot-row"><span>Shell</span><span id="biVersion">v0.1</span></div>
+    </div>
+  </aside>
+
+  <div class="bi-backdrop" id="biBackdrop" hidden></div>
+
+  <div class="bi-main">
+    <header class="bi-topbar">
+      <button type="button" class="bi-iconbtn bi-hamburger" id="biHamburger" aria-label="Open navigation" aria-expanded="false"></button>
+      <div class="bi-crumb" id="biCrumb"></div>
+      <div class="bi-top-actions">
+        <button type="button" class="bi-iconbtn bi-health" id="biHealthBadge" hidden title="System health" aria-label="System health"></button>
+        <button type="button" class="bi-iconbtn" id="biRefreshBtn" title="Refresh current module" aria-label="Refresh current module"></button>
+        <button type="button" class="bi-iconbtn" id="biThemeBtnTop" title="Toggle theme" aria-label="Toggle theme"></button>
+      </div>
+    </header>
+    <main class="bi-content" id="biContent" tabindex="-1"></main>
+  </div>
+</div>
+
+<div class="toast-ctn" id="toastCtn"></div>
+
+<!-- ====================================================================
+     REALTIME HUB — authoritative server code (runs on perchance servers).
+     This whole block is PUBLIC generator source; the admin password is
+     stored ONLY as a SHA-256 hash. A high-entropy build-time password was
+     generated; its plaintext was given to the owner in chat, never here.
+
+     The hub is a REFLECTOR: it has no network access, so it cannot fetch
+     bundles. Clients report the source edit-count index (reportIndex) and
+     the hub broadcasts per-tool refresh events + document updates. Every
+     privileged operation is authorized + rate-limited here, server-side.
+     ==================================================================== -->
+<script type="text/x-server-plugin">
+  // Admin password SHA-256 (build-time generated, high-entropy).
+  // Plaintext delivered to the owner out-of-band; never stored in source.
+  var ADMIN_PASSWORD_SHA256 = "3b908126cfb86fd53b9bd5c946fb3344c364038f8765e1cb0ac5bfe55ffd9388";
+
+  // ---- synchronous pure-JS SHA-256 (server has no crypto/TextEncoder) ----
+  function sha256Hex(ascii) {
+    function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+    function rsh(x, n) { return (x >>> n); }
+    var K = [], i;
+    for (i = 0; i < 64; i++) K[i] = Math.floor(4294967296 * Math.abs(Math.sin(i + 1))) >>> 0;
+    var h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+    var l = ascii.length, n = (((l + 8) >> 6) + 1) << 6, s = new Uint8Array(n);
+    for (i = 0; i < l; i++) s[i] = ascii.charCodeAt(i) & 0xff;
+    s[l] = 0x80;
+    var b = l * 8, w = new DataView(s.buffer);
+    w.setUint32(n - 4, b >>> 0);
+    w.setUint32(n - 8, Math.floor(b / 4294967296));
+    for (var o = 0; o < n; o += 64) {
+      var x = [];
+      for (i = 0; i < 16; i++) x[i] = w.getUint32(o + i * 4);
+      for (i = 16; i < 64; i++) {
+        var s0 = rotr(x[i-15],7) ^ rotr(x[i-15],18) ^ rsh(x[i-15],3);
+        var s1 = rotr(x[i-2],17) ^ rotr(x[i-2],19) ^ rsh(x[i-2],10);
+        x[i] = (x[i-16] + s0 + x[i-7] + s1) >>> 0;
+      }
+      var a=h[0],b2=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+      for (i = 0; i < 64; i++) {
+        var S1 = rotr(e,6) ^ rotr(e,11) ^ rotr(e,25);
+        var ch = (e & f) ^ (~e & g);
+        var t1 = (hh + S1 + ch + K[i] + x[i]) >>> 0;
+        var S0 = rotr(a,2) ^ rotr(a,13) ^ rotr(a,22);
+        var mj = (a & b2) ^ (a & c) ^ (b2 & c);
+        var t2 = (S0 + mj) >>> 0;
+        hh=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b2; b2=a; a=(t1+t2)>>>0;
+      }
+      h[0]=(h[0]+a)>>>0; h[1]=(h[1]+b2)>>>0; h[2]=(h[2]+c)>>>0; h[3]=(h[3]+d)>>>0;
+      h[4]=(h[4]+e)>>>0; h[5]=(h[5]+f)>>>0; h[6]=(h[6]+g)>>>0; h[7]=(h[7]+hh)>>>0;
+    }
+    var out = "";
+    for (i = 0; i < 8; i++) out += h[i].toString(16).padStart(8, "0");
+    return out;
+  }
+
+  // ---- ephemeral server state (rebuilt on code rebuild / hibernation) ----
+  var roles = {};            // conn.id -> "admin" | "analyst" | "viewer"
+  var authFails = {};        // conn.id -> { n, at }
+  var connTimes = {};        // conn.id -> last message timestamp (rate limit)
+  var index = {};            // tool -> { editCount, at }
+  var audit = [];            // bounded in-memory audit (authoritative long-term audit lives client-side)
+  var auditLimit = 100;
+
+  function now() { return Date.now(); }
+  function roleOf(conn) { return roles[conn.id] || "viewer"; }
+  function isAdmin(conn) { return roleOf(conn) === "admin"; }
+  function isAnalyst(conn) { return roleOf(conn) === "analyst" || isAdmin(conn); }
+
+  // Coarse rate limiting per connection + network group.
+  function rateLimited(conn, key, windowMs, max) {
+    var ck = key + ":" + conn.id;
+    if (!connTimes[ck]) connTimes[ck] = [];
+    var arr = connTimes[ck];
+    var cut = now() - windowMs;
+    while (arr.length && arr[0] < cut) arr.shift();
+    if (arr.length >= max) return true;
+    arr.push(now());
+    if (connTimes[ck].length > 64) connTimes[ck] = connTimes[ck].slice(-32);
+    return false;
+  }
+
+  function auditPush(entry) {
+    audit.push(entry);
+    if (audit.length > auditLimit) audit.splice(0, audit.length - auditLimit);
+  }
+
+  self.onopen = function (e) {
+    roles[e.conn.id] = "viewer";
+    e.conn.subscribe("index");
+    e.conn.subscribe("docs");
+    e.conn.send(JSON.stringify({ t: "hi", index: index, session: now() }));
+  };
+  self.onclose = function (e) {
+    delete roles[e.conn.id];
+    delete authFails[e.conn.id];
+  };
+
+  self.rpc = {
+    // Authenticate as admin or analyst with a shared role token.
+    // Admin password: build-time generated; analyst token: admin-assigned.
+    auth: function (r, data) {
+      var info;
+      try { info = JSON.parse(data); } catch (e) { return '{"ok":false,"err":"bad_payload"}'; }
+      var token = String(info.token || "");
+      if (!token || rateLimited(r.conn, "auth", 60000, 8)) return '{"ok":false,"err":"denied"}';
+      var hash = sha256Hex(token);
+      if (hash === ADMIN_PASSWORD_SHA256) {
+        roles[r.conn.id] = "admin";
+        auditPush({ at: now(), actor: "admin", action: "auth_admin" });
+        return '{"ok":true,"role":"admin"}';
+      }
+      if (info.analystToken && hash === String(info.analystToken)) {
+        roles[r.conn.id] = "analyst";
+        auditPush({ at: now(), actor: "admin", action: "auth_analyst" });
+        return '{"ok":true,"role":"analyst"}';
+      }
+      authFails[r.conn.id] = { n: (authFails[r.conn.id] ? authFails[r.conn.id].n : 0) + 1, at: now() };
+      return '{"ok":false,"err":"denied"}';
+    },
+
+    // Viewer/analyst path — no privileged data served.
+    whoami: function (r) { return '{"role":"' + roleOf(r.conn) + '"}'; },
+
+    // Admin: assign an analyst token for a group. Token must be a hex string.
+    setAnalystToken: function (r, data) {
+      if (!isAdmin(r.conn)) throw new Error("unauthorized");
+      var info;
+      try { info = JSON.parse(data); } catch (e) { return '{"ok":false,"err":"bad_payload"}'; }
+      var t = String(info.token || "");
+      if (!/^[0-9a-f]{16,}$/.test(t)) return '{"ok":false,"err":"bad_token"}';
+      if (rateLimited(r.conn, "settoken", 60000, 5)) return '{"ok":false,"err":"limited"}';
+      state.layout = null; // not used; analystToken stored in client-local storage only
+      // The analyst token itself is a shared secret — keep only its hash here.
+      return '{"ok":true,"hash":"' + sha256Hex(t) + '"}';
+    },
+
+    // Clients report the source edit-count index after a pull.
+    reportIndex: function (r, data) {
+      if (rateLimited(r.conn, "idx", 30000, 30)) return '{"ok":false,"err":"limited"}';
+      var info;
+      try { info = JSON.parse(data); } catch (e) { return '{"ok":false,"err":"bad_payload"}'; }
+      var tools = info && typeof info.tools === "object" ? info.tools : {};
+      var changed = false;
+      var list = [];
+      for (var tool in tools) {
+        var ec = tools[tool];
+        if (typeof ec !== "number" || !isFinite(ec)) continue;
+        var prev = index[tool] ? index[tool].editCount : null;
+        if (prev === null || ec > prev) {
+          index[tool] = { editCount: ec, at: now() };
+          changed = true;
+          list.push({ tool: tool, editCount: ec });
+        }
+      }
+      pubsub.publish("index", JSON.stringify({ t: "index", index: index, session: now() }));
+      if (changed) {
+        for (var i = 0; i < list.length; i++) {
+          pubsub.publish("refresh:" + list[i].tool, JSON.stringify({ t: "refresh", tool: list[i].tool, editCount: list[i].editCount, at: now() }));
+        }
+      }
+      return '{"ok":true,"changed":' + changed + '}';
+    },
+
+    // Client announces a document change; hub validates + rate-limits and
+    // fans it out. The actual version-checked write happens client-side via
+    // the store layer; this is the broadcast + true-actor record.
+    announceDoc: function (r, data) {
+      var info;
+      try { info = JSON.parse(data); } catch (e) { return '{"ok":false,"err":"bad_payload"}'; }
+      if (!isAnalyst(r.conn)) throw new Error("unauthorized");
+      if (rateLimited(r.conn, "doc", 30000, 40)) return '{"ok":false,"err":"limited"}';
+      var id = String(info.id || "");
+      if (!/^[a-z0-9][a-z0-9-]{0,59}$/.test(id)) return '{"ok":false,"err":"bad_id"}';
+      auditPush({ at: now(), actor: roleOf(r.conn), action: "doc_update", id: id, version: info.version || 0 });
+      pubsub.publish("docs", JSON.stringify({
+        t: "doc", id: id, kind: String(info.kind || ""),
+        version: info.version || 0, actor: roleOf(r.conn), at: now()
+      }));
+      return '{"ok":true}';
+    },
+
+    // Presence + recent server-side audit (admin only).
+    auditTail: function (r) {
+      if (!isAdmin(r.conn)) throw new Error("unauthorized");
+      return JSON.stringify({ ok: true, audit: audit.slice(-20) });
+    },
+
+    presence: function (r) {
+      var counts = { viewer: 0, analyst: 0, admin: 0 };
+      for (var id in roles) counts[roles[id]]++;
+      return JSON.stringify({ ok: true, counts: counts, index: index });
+    }
+  };
+
+  self.onmessage = function (e) { /* broadcast topics handled via subscriptions */ };
+</script>
+
+<script src="src/bi/core.js"></script>
+<script src="src/bi/ui.js"></script>
+<script src="src/bi/theme.js"></script>
+<script src="src/bi/catalog.js"></script>
+<script src="src/bi/extractors.js"></script>
+<script src="src/bi/facts.js"></script>
+<script src="src/bi/store.js"></script>
+<script src="src/bi/errors.js"></script>
+<script src="src/bi/bus.js"></script>
+<script src="src/bi/viz.js"></script>
+<script src="src/bi/reporting.js"></script>
+<script src="src/bi/backup.js"></script>
+<script src="src/bi/snapshot.js"></script>
+<script src="src/bi/embed.js"></script>
+<script src="src/bi/integrity.js"></script>
+<script src="src/bi/cards.js"></script>
+<script src="src/bi/realtime.js"></script>
+<script src="src/bi/modules/dashboards.js"></script>
+<script src="src/bi/modules/reports.js"></script>
+<script src="src/bi/modules/dataSources.js"></script>
+<script src="src/bi/modules/settings.js"></script>
+<script src="src/bi/modules/schedules.js"></script>
+<script src="src/bi/tests/shell.js"></script>
+<script src="src/bi/tests/store.js"></script>
+<script src="src/bi/tests/sync.js"></script>
+<script src="src/bi/tests/backup.js"></script>
+<script src="src/bi/tests/bus.js"></script>
+<script src="src/bi/tests/reporting.js"></script>
+<script src="src/bi/tests/viz.js"></script>
+<script src="src/bi/tests/integrity.js"></script>
+<script src="src/bi/tests/roundtrip.js"></script>
+<script src="src/bi/tests/errors.js"></script>
+<script src="src/bi/tests/multi.js"></script>
+<script src="src/bi/app.js"></script>

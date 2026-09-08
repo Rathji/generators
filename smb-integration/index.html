@@ -1,0 +1,1555 @@
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0a0e17; --card: #141b2d; --card-soft: #0b0f1a; --border: rgba(148,163,184,.14);
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #7c6cff; --accent2: #22d3ee;
+    --grad: linear-gradient(92deg, #8b7cff, #22d3ee);
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); text-align: left;
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 48px 22px 80px; }
+  h1 { font-size: 2rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+  h1 .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .tagline { color: var(--muted); margin: 0 0 34px; font-size: 1.05rem; }
+  h2 { font-size: 1.3rem; margin: 40px 0 12px; }
+  p { margin: 8px 0; }
+  code { font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; font-size: .88em; background: #0b0f1a; border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; color: var(--accent2); overflow-wrap: anywhere; }
+  .codeblock { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card-soft); margin: 10px 0; }
+  .codebar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.03); }
+  .fname { font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; font-size: .75rem; color: var(--muted); letter-spacing: .04em; }
+  .copyBtn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 7px; padding: 3px 10px; font-size: .72rem; font-weight: 700; cursor: pointer; transition: color .15s, border-color .15s; font-family: inherit; }
+  .copyBtn:hover { color: var(--accent2); border-color: var(--accent2); }
+  pre { margin: 0; padding: 13px 16px; overflow-x: auto; }
+  pre code { background: none; border: none; padding: 0; color: #cdd8ec; display: block; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.8px; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: .92rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+  th { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; }
+  td code { overflow-wrap: anywhere; }
+  .demo { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+  .demo-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px; font-size: .88rem; color: var(--muted); }
+  .demo-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; min-width: 0; }
+  .demo-row input[type="text"] { background: #0b0f1a; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 12px; font-family: inherit; font-size: .85rem; width: min(220px, 100%); max-width: 100%; }
+  .demo-row input[type="text"]:focus { outline: none; border-color: var(--accent2); }
+  .demo-row input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #0b0f1a; cursor: pointer; }
+  .demo-btn { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 8px 16px; font-size: .85rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: all .15s; }
+  .demo-btn:hover { border-color: var(--accent2); transform: translateY(-1px); }
+  #demoOut { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: #0b0f1a; border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-height: 60px; }
+  .note { color: var(--muted); font-size: .88rem; }
+  a { color: var(--accent2); }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+</style>
+
+<script type="text/x-server-plugin">
+// ═══════════════════════════════════════════════════════════════════════════
+// SMB PIPELINE HUB — live index + pub/sub relay for the file bus
+// ═══════════════════════════════════════════════════════════════════════════
+// Any generator that imports smb-integration and embeds THIS script (as the
+// FIRST <script type="text/x-server-plugin">) becomes a hub. Tools report
+// "I just published bundle X (edit N)" over RPC; the hub keeps a compact
+// latest-per-key index in `state` (the server's durable bytes) and broadcasts
+// a {type:"change"} event on the per-tool/type topic AND the
+// "smb-hub:changes" broadcast topic, so any subscribed socket — or an embedded
+// tool iframe via the hub page's postMessage bridge — hears about the update
+// in seconds instead of on the next poll.
+//
+// TO DEPLOY A STANDALONE HUB: create a generator named "smb-hub", add to the
+// top of ITS main.pjs:
+//   createServerSocket = {import:server-plugin}
+//   smbIntegration = {import:smb-integration}
+// and paste this script + the "hub page glue" script (just below) into ITS
+// index.html. This generator doubles as a hub for testing, so it ships both.
+//
+// Server-script rules: SYNCHRONOUS only — no TextEncoder/TextDecoder/atob/
+// btoa/crypto/fetch/imports/async/timers. `state` is the durable zero-init
+// Uint8Array; `self.rpc` methods run per request; `pubsub` relays events.
+// Names here must be valid bus names ([a-z0-9-], bounded). Everything in this
+// element is PUBLIC source — it holds no secrets.
+
+var SMBH_MAGIC = 0x534D4248;              // "SMBH"
+var SMBH_VERSION = 1;
+var SMBH_HEADER = 12;                     // magic(4) + version(1) + logLen(u32 BE) + reserved(3)
+var SMBH_MAX_LOG = 262144;                // 256 KiB of event log before compaction
+var SMBH_MAX_UNIQUE = 256;                // compaction keeps at most this many latest-per-key entries
+var SMBH_MAX_TOOL = 40;
+var SMBH_MAX_TYPE = 40;
+var SMBH_MAX_NAME = 120;
+var SMBH_MAX_RATE = 30;                   // reports allowed per window per net group
+var SMBH_RATE_WINDOW = 60000;             // ms
+
+// Layout of ONE log entry (after the 2-byte big-endian entryLen):
+//   kind(1)=1 change | atSeconds(u32 BE) | atMs(u16 BE) | editCount(u32 BE)
+//   | toolLen(1) | tool(ASCII) | typeLen(1) | bundleType(ASCII) | nameLen(1) | name(ASCII)
+// Fixed part = 1+4+2+4+1+1+1 = 14 bytes; min entry = 2 + 14 + 3 = 19.
+
+function smbhEnsureInit() {
+  if (state[0] === 0x53 && state[1] === 0x4D && state[2] === 0x42 && state[3] === 0x48) return;
+  state[0] = 0x53; state[1] = 0x4D; state[2] = 0x42; state[3] = 0x48;
+  state[4] = SMBH_VERSION;
+  smbhSetLogLen(0);
+  state[9] = 0; state[10] = 0; state[11] = 0;
+}
+function smbhLogLen() {
+  return ((state[5] & 0xff) << 24) | ((state[6] & 0xff) << 16) | ((state[7] & 0xff) << 8) | (state[8] & 0xff);
+}
+function smbhSetLogLen(n) {
+  n = n >>> 0;
+  state[5] = (n >>> 24) & 0xff; state[6] = (n >>> 16) & 0xff; state[7] = (n >>> 8) & 0xff; state[8] = n & 0xff;
+}
+function smbhReadU32(off) {
+  return ((state[off] & 0xff) << 24) | ((state[off + 1] & 0xff) << 16) | ((state[off + 2] & 0xff) << 8) | (state[off + 3] & 0xff);
+}
+function smbhReadU16(off) {
+  return ((state[off] & 0xff) << 8) | (state[off + 1] & 0xff);
+}
+function smbhStr(data) {
+  if (typeof data === "string") return data;
+  if (data instanceof Uint8Array) { var s = ""; for (var i = 0; i < data.length; i++) s += String.fromCharCode(data[i]); return s; }
+  if (data && data.buffer && typeof data.byteLength === "number") {
+    var u = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength);
+    var s2 = ""; for (var j = 0; j < u.length; j++) s2 += String.fromCharCode(u[j]); return s2;
+  }
+  return String(data == null ? "" : data);
+}
+function smbhAsciiBytes(s, max) {
+  var out = [];
+  var str = String(s == null ? "" : s);
+  for (var i = 0; i < str.length && out.length < max; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 32 || c > 126) break;
+    out.push(c);
+  }
+  return out;
+}
+function smbhValidName(s, max) {
+  var str = String(s == null ? "" : s);
+  if (!str.length || str.length > max) return false;
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (!((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45)) return false;
+  }
+  return true;
+}
+// Walk every entry in the log in order, calling fn(entry). Corrupt tails are
+// ignored (never thrown — the hub must not die from bad bytes).
+function smbhWalkLog(fn) {
+  var len = smbhLogLen();
+  var off = SMBH_HEADER;
+  var end = off + len;
+  while (off + 2 <= end) {
+    var eLen = smbhReadU16(off);
+    if (eLen < 19 || off + eLen > end) break;
+    var p = off + 2;
+    var kind = state[p];
+    var atMs = smbhReadU32(p + 1) * 1000 + smbhReadU16(p + 5);
+    var editCount = smbhReadU32(p + 7);
+    var tLen = state[p + 11];
+    var tool = "";
+    for (var i = 0; i < tLen; i++) tool += String.fromCharCode(state[p + 12 + i]);
+    var q = p + 12 + tLen;
+    var yLen = state[q];
+    var bundleType = "";
+    for (var j = 0; j < yLen; j++) bundleType += String.fromCharCode(state[q + 1 + j]);
+    var r = q + 1 + yLen;
+    var nLen = state[r];
+    var name = "";
+    for (var k = 0; k < nLen; k++) name += String.fromCharCode(state[r + 1 + k]);
+    fn({ kind: kind, at: atMs, editCount: editCount, tool: tool, bundleType: bundleType, name: name });
+    off += eLen;
+  }
+}
+// Append one change event to the log (compacting first if the log is full).
+// Returns the entry length, or null if it could not be stored.
+function smbhAppend(ev) {
+  smbhEnsureInit();
+  var toolBytes = smbhAsciiBytes(ev.tool, SMBH_MAX_TOOL);
+  var typeBytes = smbhAsciiBytes(ev.bundleType, SMBH_MAX_TYPE);
+  var nameBytes = smbhAsciiBytes(ev.name, SMBH_MAX_NAME);
+  if (!toolBytes.length || !typeBytes.length || !nameBytes.length) return null;
+  var eLen = 2 + 14 + toolBytes.length + typeBytes.length + nameBytes.length;
+  var len = smbhLogLen();
+  if (len + eLen > SMBH_MAX_LOG) {
+    smbhCompact();
+    len = smbhLogLen();
+    if (len + eLen > SMBH_MAX_LOG) return null;
+  }
+  var off = SMBH_HEADER + len;
+  state[off] = (eLen >>> 8) & 0xff; state[off + 1] = eLen & 0xff;
+  var p = off + 2;
+  state[p] = 1;                                    // kind = change
+  var atMs = Math.floor(ev.at);
+  var sec = Math.floor(atMs / 1000);
+  state[p + 1] = (sec >>> 24) & 0xff; state[p + 2] = (sec >>> 16) & 0xff; state[p + 3] = (sec >>> 8) & 0xff; state[p + 4] = sec & 0xff;
+  var ms = atMs % 1000;
+  state[p + 5] = (ms >>> 8) & 0xff; state[p + 6] = ms & 0xff;
+  var ec = Math.max(0, Math.floor(ev.editCount)) >>> 0;
+  state[p + 7] = (ec >>> 24) & 0xff; state[p + 8] = (ec >>> 16) & 0xff; state[p + 9] = (ec >>> 8) & 0xff; state[p + 10] = ec & 0xff;
+  state[p + 11] = toolBytes.length;
+  var q = p + 12;
+  for (var i = 0; i < toolBytes.length; i++) state[q + i] = toolBytes[i];
+  var y = q + toolBytes.length;
+  state[y] = typeBytes.length;
+  for (var j = 0; j < typeBytes.length; j++) state[y + 1 + j] = typeBytes[j];
+  var r = y + 1 + typeBytes.length;
+  state[r] = nameBytes.length;
+  for (var k = 0; k < nameBytes.length; k++) state[r + 1 + k] = nameBytes[k];
+  smbhSetLogLen(len + eLen);
+  return eLen;
+}
+// Rewrite the log keeping only the newest entry per (tool:bundleType), and at
+// most SMBH_MAX_UNIQUE of those (oldest keys evicted first).
+function smbhCompact() {
+  smbhEnsureInit();
+  var latest = new Map();
+  smbhWalkLog(function (e) {
+    var key = e.tool + ":" + e.bundleType;
+    var cur = latest.get(key);
+    if (!cur || e.at >= cur.at) latest.set(key, e);
+  });
+  var entries = [];
+  latest.forEach(function (v) { entries.push(v); });
+  entries.sort(function (a, b) { return b.at - a.at; });
+  if (entries.length > SMBH_MAX_UNIQUE) entries = entries.slice(0, SMBH_MAX_UNIQUE);
+  entries.sort(function (a, b) { return a.at - b.at; });
+  smbhSetLogLen(0);
+  for (var i = 0; i < entries.length; i++) smbhAppend(entries[i]);
+}
+// Build the queryable index as plain objects, optionally filtered.
+function smbhIndexJson(filter) {
+  filter = filter || {};
+  var out = [];
+  smbhWalkLog(function (e) {
+    if (filter.tool && filter.tool !== e.tool) return;
+    if (filter.bundleType && filter.bundleType !== e.bundleType) return;
+    out.push({ tool: e.tool, bundleType: e.bundleType, name: e.name, editCount: e.editCount, at: e.at });
+  });
+  out.sort(function (a, b) { return a.at - b.at; });
+  return out;
+}
+// Per-net-group sliding-window rate limit (ephemeral — resets on rebuild,
+// which is fine: a rebuilt runtime has no accumulated abuse either).
+var smbhRateBuckets = new Map();
+function smbhRateAllow(net3) {
+  var now = Date.now();
+  var b = smbhRateBuckets.get(net3);
+  if (!b || now - b.windowStart >= SMBH_RATE_WINDOW) {
+    smbhRateBuckets.set(net3, { windowStart: now, count: 1 });
+    return true;
+  }
+  b.count++;
+  return b.count <= SMBH_MAX_RATE;
+}
+
+self.rpc = {
+  // Report "I published bundle <name> (edit N)". Returns {ok:true,...} or a
+  // typed failure. On success the change event is broadcast to every
+  // subscriber of the per-tool/type topic and the "smb-hub:changes" topic.
+  smbHubReport({ conn }, data) {
+    var p;
+    try { p = JSON.parse(smbhStr(data) || "{}"); } catch (e) { p = null; }
+    if (!p || typeof p !== "object") return JSON.stringify({ ok:false, code:"malformed", error:"report payload must be a JSON object" });
+    var tool = String(p.tool || ""), bt = String(p.bundleType || ""), name = String(p.name || "");
+    if (!smbhValidName(tool, SMBH_MAX_TOOL)) return JSON.stringify({ ok:false, code:"invalid_name", error:"tool must be 1-" + SMBH_MAX_TOOL + " lowercase letters, numbers and hyphens" });
+    if (!smbhValidName(bt, SMBH_MAX_TYPE)) return JSON.stringify({ ok:false, code:"invalid_name", error:"bundleType must be 1-" + SMBH_MAX_TYPE + " lowercase letters, numbers and hyphens" });
+    if (!smbhValidName(name, SMBH_MAX_NAME)) return JSON.stringify({ ok:false, code:"invalid_name", error:"name must be 1-" + SMBH_MAX_NAME + " lowercase letters, numbers and hyphens" });
+    var at = (typeof p.at === "number" && isFinite(p.at)) ? p.at : Date.now();
+    var editCount = (typeof p.editCount === "number" && p.editCount >= 0) ? Math.floor(p.editCount) : 0;
+    var net3 = (conn && conn.net && typeof conn.net[3] === "number") ? conn.net[3] : 0;
+    if (!smbhRateAllow(net3)) return JSON.stringify({ ok:false, code:"rate_limited", error:"too many reports from this network — slow down" });
+    if (!smbhAppend({ tool: tool, bundleType: bt, name: name, editCount: editCount, at: at })) {
+      return JSON.stringify({ ok:false, code:"storage", error:"hub index is full" });
+    }
+    var ev = JSON.stringify({ type: "change", version: 1, tool: tool, bundleType: bt, name: name, editCount: editCount, at: at, atIso: new Date(at).toISOString() });
+    if (pubsub.numSubscribers("smb-hub:" + tool + ":" + bt) > 0) pubsub.publish("smb-hub:" + tool + ":" + bt, ev);
+    if (pubsub.numSubscribers("smb-hub:changes") > 0) pubsub.publish("smb-hub:changes", ev);
+    return JSON.stringify({ ok:true, tool: tool, bundleType: bt, name: name, editCount: editCount });
+  },
+
+  // Query the index. Optional {tool} / {bundleType} filters; omit for all.
+  smbHubGetIndex({ conn }, data) {
+    var p;
+    try { p = JSON.parse(smbhStr(data) || "{}"); } catch (e) { p = {}; }
+    if (!p || typeof p !== "object") p = {};
+    var entries = smbhIndexJson({ tool: String(p.tool || ""), bundleType: String(p.bundleType || "") });
+    return JSON.stringify({ ok:true, hub:1, count:entries.length, entries: entries });
+  },
+
+  // Subscribe this connection to change-event topics. Payload: {topics:[...]},
+  // or {all:true} for the broadcast topic, or {tool,bundleType} for one topic.
+  smbHubSubscribe({ conn }, data) {
+    var p;
+    try { p = JSON.parse(smbhStr(data) || "{}"); } catch (e) { p = null; }
+    if (!p || typeof p !== "object") return JSON.stringify({ ok:false, code:"malformed", error:"subscribe payload must be a JSON object" });
+    var topics = [];
+    if (Array.isArray(p.topics)) {
+      for (var i = 0; i < p.topics.length && topics.length < 8; i++) {
+        var t = String(p.topics[i] || "");
+        if (t.length && t.length <= 128 && t.charAt(0) !== "@") topics.push(t);
+      }
+    } else if (p.all) {
+      topics.push("smb-hub:changes");
+    } else if (p.tool && p.bundleType) {
+      topics.push("smb-hub:" + String(p.tool) + ":" + String(p.bundleType));
+    }
+    for (var j = 0; j < topics.length; j++) { try { conn.subscribe(topics[j]); } catch (e) {} }
+    return JSON.stringify({ ok:true, subscribed: topics });
+  },
+
+  smbHubUnsubscribe({ conn }, data) {
+    var p;
+    try { p = JSON.parse(smbhStr(data) || "{}"); } catch (e) { p = null; }
+    if (!p || typeof p !== "object") return JSON.stringify({ ok:false, code:"malformed", error:"unsubscribe payload must be a JSON object" });
+    var topics = [];
+    if (Array.isArray(p.topics)) topics = p.topics.map(function (t) { return String(t || ""); });
+    else if (p.all) topics.push("smb-hub:changes");
+    else if (p.tool && p.bundleType) topics.push("smb-hub:" + String(p.tool) + ":" + String(p.bundleType));
+    for (var j = 0; j < topics.length; j++) { try { conn.unsubscribe(topics[j]); } catch (e) {} }
+    return JSON.stringify({ ok:true, unsubscribed: topics });
+  }
+};
+</script>
+
+<script>
+  // ── SMB HUB PAGE GLUE ──
+  // When THIS generator is used as the hub (it embeds the server script above),
+  // this glue bridges server change events to the subscribed iframes and
+  // answers the postMessage ops from embedded tool iframes. It needs the
+  // server-plugin import (present on this page); on ordinary tool pages that
+  // import smb-integration this script is not present, and tools reach the hub
+  // through the postMessage bridge instead — no server-plugin import needed.
+  (function () {
+    if (typeof root.createServerSocket !== "function") return;
+    var socket = root.createServerSocket();
+    var reg = root.smbHubSubRegistry();
+    var glue = root.smbHubAttachGlue(socket, reg);
+    socket.addEventListener("open", function () {
+      try {
+        socket.rpc.smbHubSubscribe(JSON.stringify({ topics: ["smb-hub:changes"] })).catch(function () {});
+      } catch (e) {}
+    });
+    var router = root.smbHubRouter(socket, reg);
+    window.addEventListener("message", function (event) {
+      var msg = event.data;
+      if (!msg || msg.__smbHub !== true) return;
+      var reply = function (payload) { try { event.source.postMessage(payload, "*"); } catch (e) {} };
+      reply.__source = event.source;   // lets the registry de-dupe by iframe window
+      try { router(msg, reply); } catch (e) {}
+    });
+    window.__smbHubPage = { socket: socket, registry: reg, glue: glue };
+  })();
+</script>
+
+<div class="wrap">
+  <h1>🪄 <span class="grad">smb-integration</span></h1>
+  <p class="tagline">The <b>Small-Business Generator Pipeline</b> framework — a suite of Perchance tools (<code>idea-incubator</code> → <code>project-master</code> → <code>the-ledger</code>) linked through a shared file-based bus. Built on <b>Rathji's plugin template</b> structure. This page is the full usage reference for the framework.</p>
+
+  <h2>What this is</h2>
+  <p>A Perchance plugin is just a <b>normal generator written to be reused</b>. The one special thing is the <code>$output</code> function at the bottom of <code>main.pjs</code> — when another generator imports this one, the name on the left of the import line <b>becomes that function</b>. The lists, data and helpers below it are all ordinary Perchance code.</p>
+  <p>This generator is the pipeline's <b>shared framework</b>: the bundle envelope &amp; bus protocol, the pipeline manifest, and the connector toolkit every tool imports. This page doubles as docs <em>and</em> a live test harness — every claim below is exercised here.</p>
+
+  <h2>Import</h2>
+  <p>Consuming generators add one line to the <b>top</b> of their lists editor. The name on the left is theirs to choose — it's how they'll call the plugin from now on:</p>
+  <div id="code-import"></div>
+
+  <h2>How the pipeline works</h2>
+  <p>Five moving parts — and every one of them is optional except the file bus itself:</p>
+  <ul>
+    <li><b>The file bus</b> — every bundle is a JSON text file under its tool's own namespace (<code>https://editable.uploads.dev/file/&lt;toolStub&gt;/&lt;bundleName&gt;</code>). Files are the canonical, cross-device storage: they survive reloads, work with every tool closed, and never depend on a server being online.</li>
+    <li><b>The manifest</b> — one shared bundle (<code>smb-integration/manifest</code>) says which tool publishes/consumes what, the active bundle file names, and schema versions. Tools discover each other from it; a new tool joins by registering, not by rewiring the others.</li>
+    <li><b>Workspace stores</b> — each tool keeps its canonical data in one versioned JSON file of its own (e.g. <code>project-master/workspace</code>), with a local kv cache for instant reads, monotonic timestamps so same-millisecond edits never collide, and conflict detection when two devices edit the same file.</li>
+    <li><b>The connector</b> — the one import every tool adds. It handles edit keys (the wallet), idempotent publishes, typed pulls, freshness tracking, and optionally reporting to the hub.</li>
+    <li><b>The hub</b> — an optional live layer: a small server-plugin generator holding only a latest-per-key index (never the payloads), so subscribed tools learn of upstream updates within seconds and can render a data-age dashboard — with automatic fallback to the file bus when it's unreachable.</li>
+  </ul>
+  <p>A typical flow: idea-incubator exports an <code>idea</code> bundle → project-master adopts it, runs milestones, and publishes <code>project</code> / <code>milestone-event</code> bundles → the-ledger ingests the billing events into invoice drafts, posts them with double-entry integrity, and replies with <code>payment-receipt</code> bundles → project-master and idea-incubator pull those receipts and render paid / in-progress / adopted status. Every hop is a file write plus a file read.</p>
+  <h2>How the skeleton is structured</h2>
+  <p><code>main.pjs</code> is organised into four sections. Each one is an established plugin pattern, each described below:</p>
+  <table>
+    <tr><th>Section</th><th>What it's for</th><th>Seen in</th></tr>
+    <tr><td><code>$meta</code></td><td>Title, description and tags — shown on your listing page</td><td><code>smb-integration</code></td></tr>
+    <tr><td>Imports — <code>simpleGenFooter</code></td><td>Bind other generators' <code>$output</code> to names; the standard Perchance footer</td><td>Rathji's plugin template</td></tr>
+    <tr><td>Embedded data — <code>initSmbIntegrationData()</code></td><td>One lazy-initialised bundle for big payloads (svg templates, word lists, base64 assets). Created once, on first use</td><td><code>smb-integration</code></td></tr>
+    <tr><td>Lists — <code>smbIntegrationPresets</code></td><td>Reusable preset values; users can pass these as arguments</td><td>Rathji's plugin tutorials, step 4</td></tr>
+    <tr><td>Helpers — <code>smbIntegrationStamp()</code></td><td>The real logic, kept out of <code>$output</code> so it stays thin and testable</td><td><code>smb-integration</code></td></tr>
+    <tr><td><code>$output(...)</code></td><td>The plugin entry point — this is what importers receive</td><td>Rathji's plugin tutorials, step 6</td></tr>
+    <tr><td>Bundle envelope — <code>smbBuildEnvelope()</code> / <code>smbValidateEnvelope()</code></td><td>The canonical JSON envelope every pipeline tool publishes &amp; consumes</td><td>smb-integration</td></tr>
+    <tr><td>Bundle-type schemas — <code>smbValidatePayload()</code> / <code>smbValidateBundle()</code></td><td>Versioned payload schema registry + validation per bundle type</td><td>smb-integration</td></tr>
+    <tr><td>Pipeline registry &amp; manifest — <code>smbDefaultManifest()</code> / <code>smbRegisterTool()</code></td><td>Single source of truth listing every tool, its publishes/consumes and schema versions; new tools self-register</td><td>smb-integration</td></tr>
+    <tr><td>Bus write adapter — <code>smbPublishBundle()</code> / <code>smbBusSelfTest()</code></td><td>Publish any bundle as a text file under the tool's own namespace; edit-key create/update paths, size ceiling, readable errors, edit count</td><td>smb-integration</td></tr>
+    <tr><td>Bus read adapter — <code>smbPullBundle()</code> / <code>smbClassifyBundle()</code></td><td>Fetch any upstream bundle by URL, parse &amp; schema-validate, compare exportedAt vs the local copy → fresh / unchanged / older (gap named) / typed 404 / network / malformed / schema_gap</td><td>smb-integration</td></tr>
+    <tr><td>End-to-end bus proof — <code>smbE2EDemoBundle()</code> / <code>smbE2ESelfTest()</code></td><td>Tool A publishes a real bundle; tool B (a different generator) pulls, validates, and displays it; network-free fixture test runs the full A→B protocol loop</td><td>smb-integration</td></tr>
+    <tr><td>Connector module — <code>smbCreateConnector()</code> / <code>smbConnector()</code> / <code>smbConnectorSelfTest()</code></td><td>Drop-in client for any tool: configure(manifestUrl), publish(bundleType, payload), listUpstream(bundleType), pull(bundleName) — one typed API over the manifest + bus adapters, plus a lazy default singleton</td><td>smb-integration</td></tr>
+    <tr><td>Edit-key wallet — <code>smbWallet()</code> / <code>smbCreateWallet()</code> / <code>smbWalletSelfTest()</code></td><td>Per-device keychain for every tool's editable-file edit keys: persisted layout, startup load, loss detection (new device / cleared storage), guided recovery (fresh bundle namespace re-registered via manifest activeNames, old files stay readable)</td><td>smb-integration</td></tr>
+    <tr><td>Freshness &amp; sync-status — <code>smbSyncTracker()</code> / <code>smbCreateSyncTracker()</code> / <code>smbSyncSelfTest()</code></td><td>Per-tool record of the last publish / pull per bundle with the upstream edit count — the "last synced X ago" line and a stale warning when a consumed bundle's last successful sync is older than a configurable threshold; auto-note hooks in publish / connector.pull</td><td>smb-integration</td></tr>
+    <tr><td>Change-notification hooks — <code>smbCreateNotifier()</code> / <code>smbWatchUpstream()</code></td><td>Poll an upstream URL and fire a callback the first time its edit count / exportedAt moves; one-time "seen" ledger so re-renders don't re-notify</td><td>smb-integration</td></tr>
+    <tr><td>Guidance catalog — <code>smbGuidanceFor()</code> / <code>smbGuidanceCatalog()</code></td><td>Typed errors map to next-step advice ("quota → free space by deleting an old bundle"), so every failure tells the user what to do</td><td>smb-integration</td></tr>
+    <tr><td>Workspace stores — <code>smbCreateWorkspaceStore()</code></td><td>The shared machinery for canonical-file-per-tool workspaces: versioned JSON cache, idempotent publish, conflict-safe pull, backup/restore, monotonic timestamps</td><td>smb-integration</td></tr>
+    <tr><td>Idea incubator — <code>smbCreateIdeaStore()</code> / <code>smbIdeaRefine()</code> / <code>smbReadyIdeasNotPublished()</code> / <code>smbBuildIdeaReceipt()</code></td><td>Canonical idea drafts, refinement/readiness flow, ready→bundle export, and the "adoption receipt" chip when project-master picks the idea up</td><td>smb-integration</td></tr>
+    <tr><td>Project master — <code>smbCreateProjectStore()</code> / <code>smbBuildAdoptionDraft()</code> / <code>smbProjectPayload()</code></td><td>Canonical project plans, adopt-ready ideas, milestones/events, and project → milestone-event bundles that the ledger consumes</td><td>smb-integration</td></tr>
+    <tr><td>The ledger — <code>smbCreateLedgerStore()</code> / <code>smbLedgerReport()</code> / <code>smbPerProjectPnl()</code></td><td>Canonical invoices + payments, invoice/receipt bundle exports, milestone-event → invoice flow, and P&amp;L reporting per project</td><td>smb-integration</td></tr>
+    <tr><td>Conflict resolution — <code>smbCreateConflictResolver()</code> / <code>smbConflictPreviewHtml()</code> / <code>smbConflictSelfTest()</code></td><td>Field-level both-changed detection, a preview table (red = conflicting, grey = same), and mine / theirs / merge resolution</td><td>smb-integration</td></tr>
+    <tr><td>Safety nets — <code>smbBackupDownload()</code> / <code>smbRestoreFromFile()</code> / <code>smbSafetyNetSelfTest()</code></td><td>Full workspace backup download + file restore, so no edit is ever lost for good</td><td>smb-integration</td></tr>
+    <tr><td>Three-tool proof — <code>smbFixtures()</code> / <code>smbIntegrationSelfTest()</code></td><td>A hermetic idea-incubator → project-master → the-ledger run over one fake bus: adopt, export, bill, pay, report</td><td>smb-integration</td></tr>
+    <tr><td>Live hub — <code>smbHubIndex()</code> / <code>smbCreateHubSocketClient()</code> / <code>smbHubSelfTest()</code> + the hub server script</td><td>An optional live index + pub/sub relay for the bus: tools report publishes over RPC, the hub stores a latest-per-key index in server state and broadcasts change events; the hub page glue forwards them to subscribed iframes</td><td>smb-integration</td></tr>
+    <tr><td>Hub bridge — <code>smbCreateHubBridge()</code> / <code>smbHubRouter()</code> / <code>smbBridgeSelfTest()</code></td><td>Any tool reaches the hub through a hidden-iframe postMessage bridge (no server-plugin import); unreachable hub → degrade-to-polling on the file bus, so the pipeline never depends on the hub being open</td><td>smb-integration</td></tr>
+    <tr><td>Data-age dashboard — <code>smbPipelineStatus()</code> / <code>smbPipelineStatusPanel()</code> / <code>smbDashboardSelfTest()</code></td><td>Per-tool pipeline status panel: upstream last-published times + edit counts (from the hub index when live) and data age, with one-click per-row refresh and local-sync fallback</td><td>smb-integration</td></tr>
+  </table>
+
+  <h2>Basic usage</h2>
+  <p>Call it from a list with square brackets — whatever <code>$output</code> returns is rendered into the page:</p>
+  <div id="code-list"></div>
+  <p>Or from a <code>&lt;script&gt;</code> tag in index.html, through <code>root.</code>:</p>
+  <div id="code-script"></div>
+  <p>Pass options either as a second argument or as an options-object on its own:</p>
+  <div id="code-options"></div>
+  <p>Because list arguments are read with <code>.evaluateItem</code>, users can point your plugin at a plain Perchance list:</p>
+  <div id="code-listarg"></div>
+
+  <h2>Options</h2>
+  <table>
+    <tr><th>Option</th><th>Type</th><th>Default</th><th>Purpose</th></tr>
+    <tr><td><code>text</code></td><td>string</td><td>—</td><td>The text to render (also accepted as the first argument)</td></tr>
+    <tr><td><code>emoji</code></td><td>string</td><td><code>✨</code></td><td>Small emoji shown next to the text</td></tr>
+    <tr><td><code>color</code></td><td>hex</td><td><code>#7c6cff</code></td><td>Accent colour of the rendered badge</td></tr>
+  </table>
+
+  <h2>Live demo</h2>
+  <div class="demo">
+    <div class="demo-row">
+      <label>text <input type="text" id="demoTextInput" value="hello from smb-integration"></label>
+      <label>emoji <input type="text" id="demoEmojiInput" value="✨" style="width:64px;"></label>
+      <label>color <input type="color" id="demoColorInput" value="#7c6cff"></label>
+    </div>
+    <div class="demo-row">
+      <button class="demo-btn" onclick="demoRender()">Render</button>
+      <button class="demo-btn" onclick="demoPreset('cosmic')">🌌 Cosmic preset</button>
+      <button class="demo-btn" onclick="demoPreset('ocean')">🌊 Ocean preset</button>
+      <button class="demo-btn" onclick="demoPreset('ember')">🔥 Ember preset</button>
+      <button class="demo-btn" onclick="demoRandom()">Random preset</button>
+    </div>
+    <div id="demoOut"></div>
+    <p class="note" style="margin-top:10px;">The <b>Random preset</b> button passes the <code>smbIntegrationPresets</code> list straight to the plugin — the same pattern users get for free.</p>
+  </div>
+
+  <h2>Bundle envelope</h2>
+  <p>Every tool publishes and consumes the <b>same</b> JSON envelope, so consumers identify provenance and freshness without guessing. Canonical fields: <code>schemaVersion</code> (envelope format version), <code>bundleType</code>, <code>tool</code> (publishing generator's stub), <code>toolDisplayName</code>, <code>exportedAt</code> (ISO timestamp), <code>source</code> (workspace file/records exported from), and <code>payload</code>.</p>
+  <div id="code-envelope"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="envelopeDemo()">Build an example envelope</button>
+      <button class="demo-btn" onclick="envelopeSelfTest()">Run self-tests</button>
+    </div>
+    <div id="envelopeOut"></div>
+    <p class="note" style="margin-top:10px;">Self-tests exercise <code>smbBuildEnvelope()</code> / <code>smbValidateEnvelope()</code> — valid builds, JSON round-trips, every missing/malformed field, unknown bundle types, schema-version gaps, and garbage inputs.</p>
+  </div>
+
+  <h2>Bundle-type schemas</h2>
+  <p>Each bundle type has a <b>versioned payload schema</b>, independent of the envelope version. Every payload declares its own <code>schemaVersion</code>; validation checks required fields, types, per-type rules, and flags schema-version gaps. Required fields per type, pulled live from the registry:</p>
+  <div id="schemaTableCtn"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="schemaDemo()">Validate sample bundles</button>
+      <button class="demo-btn" onclick="schemaSelfTest()">Run schema self-tests</button>
+    </div>
+    <div id="schemaOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Validate sample bundles</b> checks a valid <code>idea</code> (accepted) and a <code>payment-receipt</code> missing its required <code>invoiceId</code> (rejected with a readable reason).</p>
+  </div>
+
+  <h2>Pipeline registry &amp; manifest</h2>
+  <p>One shared <code>pipeline-manifest</code> bundle is the single source of truth: it lists every tool — stub, display name, what it publishes, what it consumes, and current schema versions (auto-derived from the schema registry). Tools discover each other from it; a new tool joins by <b>registering itself</b>, not by rewiring the others. The manifest lives at <code>https://editable.uploads.dev/file/smb-integration/manifest</code> (published for real by the bus adapter).</p>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="manifestDemo()">Show default manifest</button>
+      <button class="demo-btn" onclick="manifestRegister()">Register a new tool</button>
+      <button class="demo-btn" onclick="manifestSelfTest()">Run manifest self-tests</button>
+    </div>
+    <div id="manifestOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Register a new tool</b> adds a "time-tracker" to the live demo manifest (an unknown <code>timesheet</code> type, so it also demonstrates the schema warning).</p>
+  </div>
+
+  <h2>Bus write adapter</h2>
+  <p>Every tool publishes bundles as text files under its <b>own namespace</b>: <code>https://editable.uploads.dev/file/&lt;toolStub&gt;/&lt;bundleName&gt;</code>. The first publish <b>creates</b> the file and returns an <b>edit key</b> (kept in the tool's local store); later publishes <b>update</b> the same file with that key and report the new <b>edit count</b> for cache-busting. Bundles over 5&nbsp;MiB are rejected <i>before any network call</i>; quota / rate-limit / unsaved-generator failures come back as readable typed errors, never thrown.</p>
+  <div id="code-bus"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="busDryRun()">Dry-run publish</button>
+      <button class="demo-btn" onclick="busPublish()">Publish for real</button>
+      <button class="demo-btn" onclick="busSelfTest()">Run self-tests</button>
+    </div>
+    <div id="busOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Dry-run</b> validates, serializes and size-checks without touching the network. <b>Publish for real</b> needs this generator <b>saved</b> (unsaved generators can't write to the bus); a second publish to the same name within ~10s is <i>superseded</i> — the readable rate-limit error that proves the failure surfacing. It publishes to <code>&lt;current generator&gt;/bus-demo</code>, so it never touches the real manifest.</p>
+  </div>
+
+  <h2>Bus read adapter</h2>
+  <p>Any tool can <b>pull</b> an upstream bundle by its public URL. The adapter fetches, parses, and schema-validates it, then compares its <code>exportedAt</code> against what the reader already has and returns a clear typed result: <b>fresh</b> (newer than your copy, or no copy yet), <b>unchanged</b> (same timestamp), <b>older</b> (upstream is older than your copy — the gap is named), or a specific failure — <b>404</b>, <b>network</b>, <b>malformed</b>, or a named <b>schema gap</b> (vN vs this library's vM). Never throws.</p>
+  <div id="code-bus-read"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <label>URL <input type="text" id="busUrlInput" style="width:min(360px,100%);max-width:100%;"></label>
+    </div>
+    <div class="demo-row">
+      <button class="demo-btn" onclick="busPull()">Pull (no local copy)</button>
+      <button class="demo-btn" onclick="busPullWithHave()">Pull as reader with local copy</button>
+      <button class="demo-btn" onclick="busReadSelfTest()">Run self-tests</button>
+    </div>
+    <div id="busReadOut"></div>
+    <p class="note" style="margin-top:10px;">The default URL is a real bundle published on the bus by the write adapter. Pull once → <b>fresh</b>; pull again "as reader" → <b>unchanged</b>. Change the file segment to a bogus name to see a typed 404.</p>
+  </div>
+
+  <h2>End-to-end bus proof</h2>
+  <p>A full round trip across <b>two real saved generators</b>: <b>tool A</b> publishes a bundle to its own bus namespace, and <b>tool B</b> — a <i>different</i> generator — pulls it by URL, validates it, and displays its contents. No business logic yet: this proves the protocol itself. This page is tool A. The two buttons below do the whole proof: <b>Publish demo bundle</b> writes a real file (tool A's side), and <b>Simulate Tool B</b> runs the exact pull + validate + display code the real tool B page will run — against that published file.</p>
+  <div id="code-e2e"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="e2ePublish()">Publish demo bundle (Tool A)</button>
+      <button class="demo-btn" onclick="e2eSimulateB()">Simulate Tool B (pull + validate + display)</button>
+      <button class="demo-btn" onclick="e2eSelfTest()">Run self-tests</button>
+    </div>
+    <div id="e2eOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Publish demo bundle</b> needs this generator <b>saved</b> and writes to <code>e2e-idea-demo</code> under this generator's namespace (never the real manifest). <b>Simulate Tool B</b> reads that public URL — the same URL any other generator reads, so the exact code below is all tool B needs.</p>
+  </div>
+  <h3 style="margin:22px 0 6px;">Tool B — paste this into any second saved generator</h3>
+  <p>Open the generator you want to be tool B (e.g. <code>project-master</code>, the natural consumer of <code>idea</code> bundles, or a throwaway fork), add <code>smbIntegration = import:smb-integration</code> to the <b>top</b> of its lists editor, and paste this into its <code>index.html</code>:</p>
+  <div id="code-toolb"></div>
+
+  <h2>Connector module</h2>
+  <p>One <b>drop-in client</b> any future tool imports. A tool creates its connector, configures it with the manifest URL, and gets the whole bus behind four methods — <code>configure(manifestUrl)</code>, <code>publish(bundleType, payload)</code>, <code>listUpstream(bundleType)</code>, <code>pull(bundleName)</code> — all returning the same typed results as the adapters. New business tools get bus access without reimplementing the protocol.</p>
+  <div id="code-connector"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="connPublishManifest()">Publish the pipeline manifest</button>
+      <button class="demo-btn" onclick="connDiscover()">Discover upstream (listUpstream)</button>
+      <button class="demo-btn" onclick="connPublish()">Publish via connector</button>
+      <button class="demo-btn" onclick="connPull()">Pull via connector</button>
+      <button class="demo-btn" onclick="connSelfTest()">Run self-tests</button>
+    </div>
+    <div id="connOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Publish the pipeline manifest</b> writes the real shared manifest to <code>&lt;current generator&gt;/manifest</code> (needs this generator saved). <b>Discover upstream</b> loads it and lists who publishes each bundle type. <b>Publish via connector</b> publishes an <code>idea</code> bundle; <b>Pull via connector</b> pulls it back through the same API a consumer tool uses.</p>
+  </div>
+
+  <h2>Edit-key wallet</h2>
+  <p>Every tool's editable-file <b>edit keys</b> live in a per-device wallet, so a tool never asks the bus "create me a file" when it already owns one. <code>smbWallet()</code> is the framework's default (localStorage-backed); <code>smbCreateWallet()</code> builds one with an injectable store. <code>smbPublishBundle()</code> auto-notes the edit key on every successful publish, and the wallet records first-seen / edit counts per file. Persisted layout: <code>smb:editkey:&lt;tool&gt;:&lt;name&gt;</code> (the flat key — source of truth), <code>smb:wallet:tool:&lt;tool&gt;</code> (JSON index), <code>smb:wallet:meta</code> (device id). Status per tool: <b>ok</b> (all expected keys held), <b>clean</b> (nothing expected yet), <b>empty</b> / <b>partial</b> (a key is expected but missing — possible loss), and <b>recovered</b>.</p>
+  <p>When keys go missing (new device, cleared storage) the manifest can still say what a tool <i>should</i> own. <b>Detect loss</b> checks each expected file upstream: a file that exists on the bus with no local key is confirmed lost. <b>Recovery</b> publishes nothing — it just adopts a <b>fresh bundle namespace</b> (e.g. <code>idea-&lt;deviceToken&gt;-&lt;time&gt;-&lt;rand&gt;</code>) for each published type, and re-registers that tool in the manifest with <code>activeNames</code> so upstream discovery follows the fresh files while the old ones stay readable at their public URLs. Everything here is local + reversible.</p>
+  <div id="code-wallet"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="walletRefresh()">Refresh status</button>
+      <button class="demo-btn" onclick="walletDetectLoss()">Detect loss</button>
+      <button class="demo-btn" onclick="walletRecoveryPlan()">Recovery plan</button>
+      <button class="demo-btn" onclick="walletApplyRecovery()">Apply recovery</button>
+      <button class="demo-btn" onclick="walletUndoRecovery()">Undo recovery</button>
+      <button class="demo-btn" onclick="walletSelfTest()">Run self-tests</button>
+    </div>
+    <div id="walletOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Refresh status</b> shows what this device's wallet holds for each tool (from the default manifest; this generator's tool stub is <code>smb-integration</code>). <b>Detect loss</b> checks the bus for each expected-but-unkeyed file (a 404 → never published, nothing lost). <b>Recovery plan</b> proposes a fresh namespace (stored on <code>window._smbRecoveryPlan</code>); <b>Apply</b> adopts it locally — a real recovery would then re-register the tool in the manifest with <code>activeNames</code>; <b>Undo</b> reverses it.</p>
+  </div>
+
+  <h2>Freshness &amp; sync-status</h2>
+  <p>Every tool tracks, per bundle, the <b>last time it pulled</b> that bundle, the <b>last time it published</b> it, and (for files it writes) its <b>upstream edit count</b>. <code>smbSyncTracker()</code> persists one JSON record per (tool, bundle) under <code>smb:sync:&lt;tool&gt;:&lt;bundle&gt;</code>; <code>smbPublishBundle()</code> and <code>connector.pull()</code> auto-note every success, so the tracking is automatic and can never break the bus. A <code>status()</code> call renders the <b>"last synced X ago"</b> line per bundle and flags a bundle <b>stale</b> when its last successful sync is older than a configurable threshold (default <code>smbSyncStaleAfterMs</code> = 1 hour; overridable per call and per tracker). Consumed bundles also report the <b>data age</b> of the upstream file (from its <code>exportedAt</code>) — the read path exposes no server edit count, so that's the honest freshness signal until the hub (§33–35) supplies true cross-device counts.</p>
+  <div id="code-sync"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <label>stale after <input type="text" id="syncThreshInput" value="30" style="width:70px;"> s</label>
+    </div>
+    <div class="demo-row">
+      <button class="demo-btn" onclick="syncRefresh()">Refresh sync status</button>
+      <button class="demo-btn" onclick="syncNotePublish()">Record a publish</button>
+      <button class="demo-btn" onclick="syncNotePull()">Record a pull</button>
+      <button class="demo-btn" onclick="syncSimulateStale()">Simulate stale sync</button>
+      <button class="demo-btn" onclick="syncClear()">Clear records</button>
+      <button class="demo-btn" onclick="syncSelfTest()">Run self-tests</button>
+    </div>
+    <div id="syncOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Refresh sync status</b> shows this tool's (current generator's) sync records with their "last synced X ago" lines and stale flags (threshold from the input — set it low to watch a fresh record go stale). <b>Record a publish</b> notes a publish of <code>idea</code> (edit count from this device's ledger); <b>Record a pull</b> notes a pull of <code>project</code> from <code>project-master</code> (upstream data exported 2h ago → its data age shows); <b>Simulate stale</b> records that pull as if it happened 2 minutes ago — over a 30s threshold it is flagged stale. <b>Clear records</b> wipes this tool's records so the demo repeats.</p>
+  </div>
+
+  <h2>Conflict preview &amp; safety nets</h2>
+  <p>Two devices editing the same workspace on the shared bus eventually disagree. The framework detects the <b>both-changed</b> conflict instead of silently overwriting, and gives you a field-level preview table (<code>smbConflictPreviewHtml</code>) plus a typed resolver (<code>resolveConflict("mine"|"theirs"|"merge")</code>). And so no edit is ever lost for good, every store can download a full backup (<code>smbBackupDownload</code>) and restore it again later (<code>smbRestoreFromFile</code>).</p>
+  <div id="code-conflict"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="conflictDemo()">Show conflict preview</button>
+      <button class="demo-btn" onclick="conflictResolve('mine')">Resolve → keep mine</button>
+      <button class="demo-btn" onclick="conflictResolve('theirs')">Resolve → keep theirs</button>
+      <button class="demo-btn" onclick="conflictResolve('merge')">Resolve → merge</button>
+      <button class="demo-btn" onclick="conflictSelfTest()">Run self-tests</button>
+    </div>
+    <div id="conflictOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Show conflict preview</b> renders the field-level table (red = truly conflicting fields, grey = unchanged). The <b>resolve</b> buttons run the raw resolver on the same local/remote snapshot to show what each mode keeps. <b>Run self-tests</b> simulates two devices diverging on one shared bus file, detects the conflict, resolves it three ways, and checks the flat-payload resolver.</p>
+  </div>
+  <div id="code-backup"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="backupDemo()">Download a workspace backup</button>
+      <label>Restore from file <input type="file" id="restoreFileInput" accept="application/json,.json" style="max-width:220px;"></label>
+      <button class="demo-btn" onclick="safetyNetSelfTest()">Run safety-net self-tests</button>
+      <button class="demo-btn" onclick="integrationSelfTest()">Run 3-tool integration self-tests</button>
+    </div>
+    <div id="safetyOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Download a workspace backup</b> builds a demo <code>the-ledger</code> workspace store, writes a couple of records, and downloads its full backup JSON. Pick that (or any <code>smbRestoreFromFile</code> backup) in <b>Restore from file</b> to parse it and apply it to a fresh store — the canonical file is safe on the bus even when the local cache is wiped.</p>
+  </div>
+
+  <h2>Live pipeline hub</h2>
+  <p>The hub is an optional <b>live index + pub/sub relay</b> for the file bus: tools report "I just published bundle X (edit N)" and subscribed peers hear about it in seconds — no polling, no edit-key handshakes on the read path. It has two transports that expose the <b>same client surface</b>:</p>
+  <ul>
+    <li><b>Socket mode</b> — a direct server socket to a hub page that embeds the server script (this page ships one). <code>smbHubIndex(\{ createSocket \})</code>.</li>
+    <li><b>Bridge mode</b> — any tool embeds the hub page in a hidden iframe and exchanges subscribe/notify/report/query JSON over postMessage, no server-plugin import needed. <code>smbHubIndex(\{ hubUrl \})</code>. When the hub is unreachable the bridge <b>degrades to polling the file bus directly</b>, so the pipeline never depends on the hub being open.</li>
+  </ul>
+  <div id="code-hub-server"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="hubLive()">Socket mode: connect + report + query</button>
+      <button class="demo-btn" onclick="hubReportDemo()">Report a publish</button>
+      <button class="demo-btn" onclick="hubRefresh()">Refresh index</button>
+      <button class="demo-btn" onclick="hubSelfTest()">Run self-tests</button>
+    </div>
+    <div id="hubOut"></div>
+    <p class="note" style="margin-top:10px;">Runs against <b>this generator's own emulated hub server</b> (the <code>text/x-server-plugin</code> script above) — while unsaved it's the local emulator; after save it talks to the real server-plugin. <b>Report a publish</b> broadcasts a change event that any subscribed client (open a second tab!) receives live. <b>Run self-tests</b> proves the client protocol + registry + fan-out against a hermetic fake socket.</p>
+  </div>
+  <div id="code-hub-client"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="bridgeRoundTrip()">Bridge: full round-trip</button>
+      <button class="demo-btn" onclick="bridgeDegrade()">Hub down → degrade to polling</button>
+      <button class="demo-btn" onclick="bridgeSelfTest()">Run self-tests</button>
+    </div>
+    <div id="bridgeOut"></div>
+    <p class="note" style="margin-top:10px;"><b>Full round-trip</b> drives the real message router (the exact code the hub page runs) over the mock transport: bridge → router → server → change event → glue → registry → notify → bridge. <b>Hub down → degrade</b> points the bridge at a router that never answers, watches it fall back to <code>hub_unavailable</code>, then shows the <code>poll()</code> fallback picking up a fresh upstream bundle straight off the bus.</p>
+  </div>
+
+  <h2>Data-age dashboard</h2>
+  <p>Every tool can render a <b>pipeline status panel</b> (<code>smbPipelineStatusPanel</code>): for each bundle the tool consumes it shows the upstream publisher, the upstream's <b>last-published time and edit count</b> (from the hub index when reachable), the <b>data age</b>, and the tool's <b>local sync</b> line. One-click per-row and per-panel refresh re-pull from the bus. When the hub is offline the panel falls back to the local sync tracker, so it always has an answer.</p>
+  <div id="code-dashboard"></div>
+  <div class="demo">
+    <div class="demo-row">
+      <button class="demo-btn" onclick="dashboardLive()">Render panel (hub live)</button>
+      <button class="demo-btn" onclick="dashboardOffline()">Render panel (hub offline)</button>
+      <button class="demo-btn" onclick="dashboardSelfTest()">Run self-tests</button>
+    </div>
+    <div id="dashboardCtn"></div>
+    <div id="dashboardOut" style="margin-top:10px;"></div>
+    <p class="note" style="margin-top:10px;">Shown for <code>the-ledger</code> (consumes <code>milestone-event</code> from <code>project-master</code>). <b>Hub live</b> connects the socket client and fills "upstream last published" from this page's emulated hub; <b>hub offline</b> renders the same panel with only local sync timestamps. <b>Refresh</b> inside the panel re-pulls each row.</p>
+  </div>
+
+  <h2>Make it yours</h2>
+  <ul>
+    <li><b>Describe.</b> Update the <code>$meta</code> title, description and tags.</li>
+    <li><b>Write the logic.</b> Add helpers in section 3 and call them from <code>$output</code>. It should return a string (usually HTML) or a Promise.</li>
+    <li><b>Trim.</b> Delete section 1 (embedded data) and the <code>smbIntegrationDefaults()</code> helper if you don't need a payload.</li>
+    <li><b>Stay robust.</b> Never throw — return a readable <code>(...)</code> placeholder on bad input, like the skeleton's <code>$output</code> does.</li>
+    <li><b>Publish.</b> Save this generator, then import it from anywhere using the standard import syntax — see the Import section above.</li>
+  </ul>
+
+  <h2>References</h2>
+  <ul>
+    <li><b>Rathji's plugin template</b> — the authoritative source of this skeleton's structure: <a href="https://perchance.org/rathji-plugin-template">perchance.org/rathji-plugin-template</a></li>
+    <li><b>Rathji's Plugin Tutorials</b> — the "Make your own plugin" guide (step 6) the template follows: <a href="https://perchance.org/rathjis-plugin-tutorials">perchance.org/rathjis-plugin-tutorials</a></li>
+    <li><b>Official plugin directory</b> — more plugin patterns: <a href="https://perchance.org/plugins">perchance.org/plugins</a></li>
+  </ul>
+
+  <h2>Notes</h2>
+  <ul>
+    <li>The skeleton <b>never throws</b> — bad input returns <code>(smbIntegration: expected some text — …)</code> instead of an exception.</li>
+    <li>Arguments support <b>plain values and Perchance lists</b> alike (every pjs value is a node, read through <code>evaluateItem</code>).</li>
+    <li>This page is the demo/test harness — the live demo calls the plugin's own <code>$output</code> to prove every documented call works.</li>
+  </ul>
+
+  <div style="margin-top:60px;">[simpleGenFooter]</div>
+</div>
+
+<script>
+  // Build the import line at RUNTIME from the generator's real name, so the
+  // source never contains an import block the engine would scan, and so the
+  // docs always show the correct copyable line — even after the user renames
+  // this generator.
+  var realName = (window.generatorName || "").trim();
+  var importLine = realName
+    ? "smbIntegration = " + "{" + "import:" + realName + "}"
+    : "smbIntegration =  <your-generator-name>  // wrap the name in the standard import braces";
+
+  // The Tool B snippet is generated at runtime so its URL always
+  // points at THIS generator's real bus file, whatever it is currently named.
+  var e2eBundleUrl = realName ? ("https://editable.uploads.dev/file/" + realName + "/e2e-idea-demo") : "https://editable.uploads.dev/file/<toolA>/e2e-idea-demo";
+  var toolBSnippet = '<div id="e2eBusProof" style="border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:16px;font-family:system-ui;background:#0b0f1a;text-align:left;max-width:660px;">\n' +
+    '  <b>Pipeline bus proof (tool B)</b> — pulled from tool A\u2019s bus file…\n' +
+    '  <div id="e2eBusOut" style="font-family:ui-monospace,monospace;font-size:.85rem;white-space:pre-wrap;margin-top:8px;color:#cdd8ec;">loading…</div>\n' +
+    '</div>\n' +
+    '<script>\n' +
+    '(async function(){\n' +
+    '  var url = ' + JSON.stringify(e2eBundleUrl) + ';   // tool A\u2019s bundle on the bus\n' +
+    '  var out = document.getElementById("e2eBusOut");\n' +
+    '  var res = await root.smbPullBundle({ url: url });\n' +
+    '  if(!res.ok){ out.textContent = "Pull failed \u2014 " + res.code + ": " + res.error; return; }\n' +
+    '  var v = root.smbValidateBundle(res.bundle);\n' +
+    '  out.textContent = [\n' +
+    '    "status: " + res.status,\n' +
+    '    "bundleType: " + res.bundle.bundleType + " (schema v" + res.schemaVersion + ")",\n' +
+    '    "from: " + res.toolDisplayName + " (" + res.tool + ")",\n' +
+    '    "exportedAt: " + res.exportedAt,\n' +
+    '    "validates: " + (v.ok ? "YES" : "NO \u2014 " + v.errors.join("; ")),\n' +
+    '    "",\n' +
+    '    "title: " + res.bundle.payload.title,\n' +
+    '    "description: " + (res.bundle.payload.description || "(none)"),\n' +
+    '    "goals: " + res.bundle.payload.goals.join(" | "),\n' +
+    '    "scope: " + res.bundle.payload.scope.join(" | "),\n' +
+    '    "tags: " + (res.bundle.payload.tags || []).join(", ")\n' +
+    '  ].join("\\n");\n' +
+    '})();\n' +
+    '<\/script>';
+
+  var DEMOS = [
+    { id: "code-import", fname: "main.pjs", code: importLine },
+    { id: "code-list", fname: "main.pjs", code: "[smbIntegration(\"hello\")]        // renders a ✨ hello badge\n\n// options can also live in a list node — a `key = value` list:\nsmbIntegrationOpts\n  text = hello\n  emoji = 🌊\n  color = #22d3ee\n\noutput\n  [smbIntegration(smbIntegrationOpts)]  // options read from the node" },
+    { id: "code-script", fname: "index.html", code: "outputEl.innerHTML = root.smbIntegration(\"hello\");\noutputEl.innerHTML = root.smbIntegration(\"hello\", { emoji: \"🌊\", color: \"#22d3ee\" });" },
+    { id: "code-options", fname: "main.pjs", code: "[smbIntegration(\"hi\", {color:\"#f97316\"})]     // value + options\n[smbIntegration({text:\"hi\", emoji:\"🌌\"})]      // options object alone" },
+    { id: "code-listarg", fname: "main.pjs", code: "// a LIST of preset options nodes:\nsmbIntegrationPresets\n  cosmic\n    text = Cosmic\n    emoji = 🌌\n    color = #8b5cf6\n  ocean\n    text = Ocean\n    emoji = 🌊\n    color = #22d3ee\n  ember\n    text = Ember\n    emoji = 🔥\n    color = #f97316\n\n[smbIntegration(smbIntegrationPresets)]  // picks a random preset" },
+    { id: "code-envelope", fname: "envelope.json", code: "{\n  \"schemaVersion\": 1,\n  \"bundleType\": \"idea\",\n  \"tool\": \"idea-incubator\",\n  \"toolDisplayName\": \"Idea Incubator\",\n  \"exportedAt\": \"2026-09-07T12:34:56.789Z\",\n  \"source\": \"ideas/idea-abc123.json\",\n  \"payload\": { \"title\": \"A great idea\", \"goals\": [\"...\"], \"scope\": [\"...\"], \"tags\": [\"...\"] }\n}" },
+    { id: "code-bus", fname: "main.pjs", code: "let pub = await root.smbPublishBundle({\n  bundle: envelopeBundle,       // built with smbBuildEnvelope\n  toolStub: \"idea-incubator\",  // defaults to bundle.tool\n  bundleName: \"idea\",          // defaults to bundle.bundleType\n  // editKey: \"...\"              // omit on first publish; auto-stored after\n});\n// ok:true  → { url:\"https://editable.uploads.dev/file/idea-incubator/idea\",\n//              editKey:\"...\", editCount:1, created:true, bytes:512, warnings:[] }\n// ok:false → { code:\"quota\"|\"too_large\"|\"superseded\"|\"unsaved_generator\"|..., error:\"readable message\" }" },
+    { id: "code-bus-read", fname: "main.pjs", code: "let res = await root.smbPullBundle({\n  url: \"https://editable.uploads.dev/file/idea-incubator/idea\",\n  have: lastLocalBundle   // optional — what this tool already has\n});\n// ok:true  → status:\"fresh\" | \"unchanged\" | \"older\" (+ parsed, validated bundle)\n// ok:false → code:\"404\" | \"network\" | \"malformed\" | \"schema_gap\" (+ readable error)" },
+
+    { id: "code-e2e", fname: "main.pjs", code: "// TOOL A — this generator (publish a bundle into its own bus namespace):\nlet built = root.smbBuildEnvelope({\n  bundleType: \"idea\", tool: \"smb-integration\", toolDisplayName: \"SMB Integration (framework)\",\n  source: \"ideas/e2e-idea-demo.json\",\n  payload: { schemaVersion: 1, id: \"e2e-idea-demo\", title: \"Widget marketplace\", goals: [\"Launch MVP\"], scope: [\"Listings\"], status: \"ready\" }\n});\nlet pub = await root.smbPublishBundle({ bundle: built.bundle, bundleName: \"e2e-idea-demo\" });\n// pub.url → https://editable.uploads.dev/file/smb-integration/e2e-idea-demo\n\n// TOOL B — a DIFFERENT saved generator (pull + validate + display):\nlet res = await root.smbPullBundle({ url: pub.url });\nlet v   = root.smbValidateBundle(res.bundle);   // v.ok → display res.bundle.payload" },
+    { id: "code-toolb", fname: "index.html (tool B)", code: toolBSnippet },
+    { id: "code-connector", fname: "main.pjs", code: "// Tool-side setup — each business tool creates its own connector:\nlet bus = root.smbCreateConnector({ toolStub: \"idea-incubator\", toolDisplayName: \"Idea Incubator\" });\nawait bus.configure(root.smbManifestUrl());\n\nlet pub = await bus.publish(\"idea\", { title: \"Widget marketplace\", goals: [\"...\"], scope: [\"...\"], status: \"ready\" });\n// → typed smbPublishBundle result (ok:true / ok:false + code + readable error)\n\nlet upstreams = await bus.listUpstream(\"project\");\n// → { ok:true, bundleType:\"project\", upstreams:[{ tool:\"project-master\",\n//       url:\"https://editable.uploads.dev/file/project-master/project\", ... }] }\n\nlet pulled = await bus.pull(\"project\");\n// → typed smbPullBundle result (fresh / unchanged / older / 404 / network / malformed / schema_gap)" },
+    { id: "code-wallet", fname: "main.pjs", code: "// Per-device wallet for the edit keys of every published file:\nlet w = root.smbWallet();                          // framework default (localStorage-backed)\nw.save(toolStub, bundleName, editKey, { editCount }); // store/update a key + provenance\nlet st = w.status({ manifest, toolStub });          // ok | clean | empty | partial | recovered\nlet plan = w.recoveryPlan({ toolStub, displayName, manifest }); // fresh namespace per published type\nw.applyRecovery(plan);   w.undoRecovery();           // local, reversible\n\n// smbPublishBundle() already calls w.noteEditKey(...) on every success,\n// and a recovered tool re-registers in the manifest with activeNames\n// so upstream discovery follows the fresh files." },
+    { id: "code-sync", fname: "main.pjs", code: "// Per-tool freshness record — answers 'how fresh is what I'm looking at?':\nlet t = root.smbSyncTracker();               // lazy singleton, localStorage-backed\n\nt.notePublish(\"smb-integration\", \"idea\", { editCount: 3 });\n// → records lastPublishedAt + upstream edit count (files this tool writes)\n\nt.notePull(\"smb-integration\", \"project\", pullResult);\n// → records lastPulledAt, pull status, upstream exportedAt (data age), publisher\n\nlet st = t.status({ tool: \"smb-integration\", bundles: [\"idea\", \"project\"],\n                    staleAfterMs: 60 * 60 * 1000 });\n// → per bundle: lastSyncedHuman: \"synced 2 minutes ago\", stale: false,\n//   staleReason: \"last pulled 3 hours ago — older than the 1 hour sync\n//   threshold; re-sync to refresh\" (when stale)\n\n// smbPublishBundle() and connector.pull() auto-note on every success, so\n// tracking is automatic — pages just call status() to render the line." },
+
+    { id: "code-conflict", fname: "main.pjs", code: "// Two devices pulled the same workspace, both edited, both pushed → conflict.\n// The store never silently overwrites either side:\nlet res = await myStore.syncDown();\nif(!res.ok && res.code === \"conflict\") {\n  // res.local  → this device's snapshot;  res.remote → the bus file\n  previewCtn.innerHTML = root.smbConflictPreviewHtml(res.local, res.remote);\n  // field-level table: red rows = truly conflicting fields (title/status),\n  // grey = unchanged between the two sides (amount)\n}\n\n// Then the user picks how to reconcile — mine / theirs / merge:\nlet r1 = await myStore.resolveConflict(\"mine\");    // keep my edits\nlet r2 = await myStore.resolveConflict(\"theirs\");  // take the bus file\nlet r3 = await myStore.resolveConflict(\"merge\");   // field-by-field merge\n//   (merge keeps the local value on a conflicting field unless the user\n//    chose the remote side via smbCreateConflictResolver().merge({choices}))" },
+
+    { id: "code-backup", fname: "main.pjs", code: "// Every workspace store can download a full backup and restore it later:\nroot.smbBackupDownload(myStore, \"my-ledger-backup.json\");\n// → triggers a browser download of { schemaVersion, kind:\"workspace-backup\",\n//     data:{...}, exportedAt, revision, editedBy }\n\n// Restore from a downloaded backup file (e.g. a <input type=file>):\nlet r = await root.smbRestoreFromFile(file, { store: myStore });\n// → { ok:true, restoredAt, revision } — the local cache is rebuilt from the\n//   backup and marked clean, ready to syncUp() back to the canonical file" },
+
+    { id: "code-hub-server", fname: "index.html (hub page)", code: "<script type=\"text/x-server-plugin\">\n// The hub: a compact latest-per-key index in `state` + pub/sub relay.\n// Deploy a standalone hub → create generator 'smb-hub' with\n//   createServerSocket = {import:server-plugin}\n//   smbIntegration      = {import:smb-integration}\n// in ITS main.pjs, paste this script + the page glue into ITS index.html.\n// RPC surface (synchronous; state is the durable Uint8Array):\nself.rpc = {\n  smbHubReport({conn}, data) { /* validate → append to log → broadcast change */ },\n  smbHubGetIndex({conn}, data) { /* walk log → {ok, count, entries} */ },\n  smbHubSubscribe({conn}, data) { /* conn.subscribe(topic) per request */ },\n  smbHubUnsubscribe({conn}, data) { /* conn.unsubscribe(topic) */ }\n};\n<\/script>" },
+
+    { id: "code-hub-client", fname: "main.pjs", code: "// Any tool reports + subscribes through ONE client surface, two transports:\n\n// SOCKET mode (needs the server-plugin import) — used on/against a hub page:\nlet hub = root.smbHubIndex({ createSocket: () => root.createServerSocket() });\nlet c = await hub.configure();                    // { ok, state:\"connected\" }\nawait hub.report({ tool: \"idea-incubator\", bundleType: \"idea\",\n                    name: \"idea\", editCount: 3, at: Date.now() });\nlet idx = await hub.queryAll();                   // { ok, count, entries }\nawait hub.subscribe({ tool: \"project-master\", bundleType: \"project\" },\n                     ev => console.log(\"live:\", ev));\n\n// BRIDGE mode (NO server-plugin needed) — a hidden iframe of the hub page:\nlet bridge = root.smbHubIndex({ hubUrl: \"https://perchance.org/smb-hub\" });\nlet bc = await bridge.configure();\n// ...same report/query/subscribe surface...\n\n// Degrade-to-polling when the hub is unreachable:\nif(!bridge.available()) {\n  bridge.startPolling(async (tool, bt) => await conn.pull(bt, { from: tool }),\n                      { types: [{ tool:\"project-master\", bundleType:\"project\" }],\n                        onPoll: r => console.log(\"polled:\", r.changed) });\n}" },
+
+    { id: "code-dashboard", fname: "main.pjs", code: "// Per-tool pipeline status panel — upstream last-published times + data age:\nroot.smbPipelineStatusPanel({\n  ctn: document.getElementById(\"statusCtn\"),\n  tool: \"the-ledger\",                          // the stub showing the panel\n  manifest: root.smbDefaultManifest(),\n  hub: root.smbHubIndex(),                     // optional — connected → live\n  onRefresh: async (bundleType) => {           // one-click refresh per row\n    let r = await conn.pull(bundleType, { from: \"project-master\" });\n    return r;\n  },\n  autoRefreshMs: 60000                          // optional\n});\n// Columns: Consumes | Upstream | Upstream last published (hub) | Data age |\n//          Local sync | [Refresh]. Falls back to the sync tracker when the\n//          hub is offline, so the panel always has an answer." }
+  ];
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+  function codeblock(fname, code) {
+    var block = el("div", "codeblock");
+    var bar = el("div", "codebar");
+    var name = el("span", "fname", fname);
+    var btn = el("button", "copyBtn", "Copy");
+    bar.append(name, btn);
+    var pre = el("pre");
+    pre.append(el("code", null, code));
+    block.append(bar, pre);
+    return block;
+  }
+  DEMOS.forEach(function(d) {
+    document.getElementById(d.id).append(codeblock(d.fname, d.code));
+  });
+
+  // Copy buttons
+  document.addEventListener("click", function(e) {
+    var btn = e.target.closest(".copyBtn");
+    if (!btn) return;
+    var code = btn.closest(".codeblock").querySelector("code").textContent;
+    function done() { btn.textContent = "Copied ✓"; setTimeout(function() { btn.textContent = "Copy"; }, 1600); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(done, function() { fallbackCopy(code); done(); });
+    } else { fallbackCopy(code); done(); }
+  });
+  function fallbackCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.append(ta); ta.select();
+    try { document.execCommand("copy"); } catch (err) {}
+    ta.remove();
+  }
+
+  // ── Live demo ──
+  // On its own page the plugin is reachable as root.$output — the same
+  // function an importing generator binds.
+  var smbIntegration = root.$output;
+
+  var demoTextEl = document.getElementById("demoTextInput");
+  var demoEmojiEl = document.getElementById("demoEmojiInput");
+  var demoColorEl = document.getElementById("demoColorInput");
+  var demoOut = document.getElementById("demoOut");
+
+  function curOpts() {
+    return { emoji: demoEmojiEl.value || undefined, color: demoColorEl.value };
+  }
+  function rv(v) { return v && typeof v.evaluateItem === "function" ? v.evaluateItem : v; }
+  function demoRender() {
+    demoOut.innerHTML = smbIntegration(demoTextEl.value || "hello", curOpts());
+  }
+  function demoPreset(name) {
+    var all = root.smbIntegrationPresets.selectAll;
+    for (var i = 0; i < all.length; i++) {
+      var t = rv(all[i].text);
+      if (t && String(t).toLowerCase() === name) {
+        var item = all[i];
+        demoOut.innerHTML = smbIntegration(item);
+        demoEmojiEl.value = rv(item.emoji);
+        demoColorEl.value = rv(item.color);
+        return;
+      }
+    }
+  }
+  function demoRandom() {
+    demoOut.innerHTML = smbIntegration(root.smbIntegrationPresets); // whole list → random preset
+  }
+
+  demoTextEl.addEventListener("input", demoRender);
+  demoEmojiEl.addEventListener("input", demoRender);
+  demoColorEl.addEventListener("input", demoRender);
+  demoRender();
+
+  // ── Bundle envelope demo ──
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function envelopeDemo() {
+    var res = root.smbBuildEnvelope({
+      bundleType: "idea",
+      tool: "idea-incubator",
+      toolDisplayName: "Idea Incubator",
+      source: "ideas/idea-demo.json",
+      payload: {
+        title: "Widget marketplace",
+        goals: ["Launch MVP", "Get 10 users"],
+        scope: ["Listings", "Checkout", "Reviews"],
+        tags: ["marketplace"],
+        status: "ready"
+      }
+    });
+    document.getElementById("envelopeOut").innerHTML =
+      "<pre style=\"margin:0;overflow:auto;\"><code style=\"background:none;border:none;padding:0;color:#cdd8ec;white-space:pre;font-size:12px;\">" +
+      escapeHtml(JSON.stringify(res.bundle, null, 2)) + "</code></pre>";
+  }
+  function envelopeSelfTest() {
+    var r = root.smbEnvelopeSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All envelope self-tests passed ✓</div>'
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Self-test failures below</div>';
+    r.results.forEach(function(x) {
+      html += '<div style="font-size:.8rem;line-height:1.5;color:' + (x.pass ? "#34d399" : "#f87171") + ';">' + (x.pass ? "✓" : "✗") + " " + escapeHtml(x.name) + "</div>";
+    });
+    document.getElementById("envelopeOut").innerHTML = html;
+  }
+  envelopeDemo();
+
+  // ── Bundle-type schemas demo ──
+  function schemaTableHtml() {
+    var schemas = root.initSmbSchemas();
+    var html = "<table><tr><th>Bundle type</th><th>Schema v</th><th>Required fields</th></tr>";
+    Object.keys(schemas).forEach(function(bt) {
+      var s = schemas[bt];
+      var reqs = Object.keys(s.properties).filter(function(k) { return s.properties[k].required; });
+      html += "<tr><td><code>" + escapeHtml(bt) + "</code></td><td>v" + s.version + "</td><td><code>" + reqs.map(escapeHtml).join("</code>, <code>") + "</code></td></tr>";
+    });
+    return html + "</table>";
+  }
+  document.getElementById("schemaTableCtn").innerHTML = schemaTableHtml();
+
+  function schemaLine(ok, label) {
+    return '<div style="font-size:.82rem;line-height:1.5;color:' + (ok ? "#34d399" : "#f87171") + ';">' + (ok ? "✓" : "✗") + " " + escapeHtml(label) + "</div>";
+  }
+  function schemaDemo() {
+    var good = root.smbBuildEnvelope({
+      bundleType: "idea", tool: "idea-incubator", toolDisplayName: "Idea Incubator", source: "ideas/idea-001.json",
+      payload: { schemaVersion: 1, id: "idea-001", title: "Widget marketplace", goals: ["Launch MVP"], scope: ["Listings", "Checkout"], status: "ready" }
+    });
+    var bad = root.smbBuildEnvelope({
+      bundleType: "payment-receipt", tool: "the-ledger", toolDisplayName: "The Ledger", source: "invoices/receipt-1.json",
+      payload: { schemaVersion: 1, receiptId: "r1", amount: 500, date: "2026-09-10" } // missing invoiceId
+    });
+    var vg = root.smbValidateBundle(good.bundle);
+    var vb = root.smbValidateBundle(bad.bundle);
+    var html = "";
+    html += schemaLine(vg.ok, "valid idea bundle → " + (vg.ok ? "accepted (schema v" + vg.schemaVersion + ")" : vg.errors.join(" | ")));
+    html += schemaLine(!vb.ok, "payment-receipt missing invoiceId → rejected: " + (vb.errors.join("; ") || "?"));
+    document.getElementById("schemaOut").innerHTML = html;
+  }
+  function schemaSelfTest() {
+    var r = root.smbSchemaSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All schema self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name); });
+    document.getElementById("schemaOut").innerHTML = html;
+  }
+  schemaDemo();
+
+  // ── Pipeline manifest demo ──
+  var demoManifest = root.smbDefaultManifest();
+  function manifestTableHtml(m) {
+    var html = "<table><tr><th>Tool</th><th>Display name</th><th>Publishes</th><th>Consumes</th><th>Schema versions</th></tr>";
+    m.tools.forEach(function(t) {
+      var sv = Object.keys(t.schemaVersions || {}).map(function(k) { return k + " v" + t.schemaVersions[k]; }).join(", ");
+      html += "<tr><td><code>" + escapeHtml(t.stub) + "</code></td><td>" + escapeHtml(t.displayName) + "</td><td><code>" + escapeHtml((t.publishes || []).join(", ")) + "</code></td><td><code>" + escapeHtml((t.consumes || []).join(", ")) + "</code></td><td>" + escapeHtml(sv) + "</td></tr>";
+    });
+    return html + "</table>";
+  }
+  function manifestDemo() {
+    var v = root.smbValidateManifest(demoManifest);
+    var w = root.smbManifestWarnings(demoManifest);
+    var html = manifestTableHtml(demoManifest);
+    html += '<div class="note" style="margin-top:8px;">Validates: ' + (v.ok ? "✓" : "✗ " + v.errors.join("; ")) + " · " + demoManifest.tools.length + " tools · URL " + root.smbManifestUrl() + "</div>";
+    if (w.length) html += '<div class="note" style="color:#fbbf24;">Warnings: ' + escapeHtml(w.join(" · ")) + "</div>";
+    document.getElementById("manifestOut").innerHTML = html;
+  }
+  function manifestRegister() {
+    demoManifest = root.smbRegisterTool(demoManifest, { stub: "time-tracker", displayName: "Time Tracker", publishes: ["timesheet"], consumes: ["project"] });
+    manifestDemo();
+  }
+  function manifestSelfTest() {
+    var r = root.smbManifestSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All manifest self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name); });
+    document.getElementById("manifestOut").innerHTML = html;
+  }
+  manifestDemo();
+
+  // ── Bus write adapter demo ──
+  var busDemoBundle = root.smbBuildEnvelope({
+    bundleType: "idea",
+    tool: (window.generatorName || "smb-integration"),
+    toolDisplayName: "SMB Integration (framework)",
+    source: "test/bus-demo.json",
+    payload: { schemaVersion: 1, id: "bus-demo", title: "Bus demo idea", goals: ["Prove the write path"], scope: ["Write", "Edit-count"], status: "ready" }
+  }).bundle;
+
+  function busLine(r, label) {
+    var head = r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ ' + escapeHtml(label) + "</div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(label) + " → " + escapeHtml(r.code || "") + ": " + escapeHtml(r.error || "") + "</div>";
+    return head + '<pre style="margin:0 0 12px;overflow:auto;"><code style="background:none;border:none;padding:0;color:#cdd8ec;white-space:pre;font-size:11.5px;">' + escapeHtml(JSON.stringify(r, null, 2)) + "</code></pre>";
+  }
+  function busDemoOpts() {
+    return { bundle: busDemoBundle, toolStub: (window.generatorName || "smb-integration"), bundleName: "bus-demo" };
+  }
+  async function busDryRun() {
+    var out = document.getElementById("busOut");
+    out.innerHTML = '<div class="note">Dry-running…</div>';
+    var r = await root.smbPublishBundle(Object.assign(busDemoOpts(), { dryRun: true }));
+    out.innerHTML = busLine(r, "Dry run publish");
+  }
+  async function busPublish() {
+    var out = document.getElementById("busOut");
+    var isUnsaved = typeof window.generatorIsUnsaved !== "undefined" && !!window.generatorIsUnsaved;
+    if (isUnsaved) {
+      out.innerHTML = '<div style="color:#fbbf24;font-size:.85rem;">✗ Cannot publish for real — this generator is <b>unsaved</b>. Save it, then publish again; the file will live under <code>' + escapeHtml(window.generatorName || "…") + '</code>.</div>';
+      return;
+    }
+    out.innerHTML = '<div class="note">Publishing…</div>';
+    var r = await root.smbPublishBundle(busDemoOpts());
+    out.innerHTML = busLine(r, "Publish for real") + (r.ok
+      ? '<div class="note">Publish again to the same name within ~10s to see the <i>superseded</i> rate-limit path, or wait and republish to see <code>editCount</code> increment with the stored edit key.</div>'
+      : "");
+  }
+  async function busSelfTest() {
+    var out = document.getElementById("busOut");
+    out.innerHTML = '<div class="note">Running self-tests…</div>';
+    var r = await root.smbBusSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All bus-write self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name + (x.detail ? " — " + x.detail : "")); });
+    out.innerHTML = html;
+  }
+  busDryRun();
+
+  // ── Bus read adapter demo ──
+  var busReadLast = null;
+  document.getElementById("busUrlInput").value = root.smbBusUrl(window.generatorName || "smb-integration", "bus-live-test");
+  function busReadLine(r, label) {
+    var head = r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ ' + escapeHtml(label) + " → status: <b>" + escapeHtml(r.status) + "</b></div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(label) + " → <b>" + escapeHtml(r.code || "") + "</b>: " + escapeHtml(r.error || "") + "</div>";
+    return head + '<pre style="margin:0 0 12px;overflow:auto;"><code style="background:none;border:none;padding:0;color:#cdd8ec;white-space:pre;font-size:11.5px;">' + escapeHtml(JSON.stringify(r, null, 2)) + "</code></pre>";
+  }
+  async function busPull() {
+    var out = document.getElementById("busReadOut");
+    out.innerHTML = '<div class="note">Pulling…</div>';
+    var r = await root.smbPullBundle({ url: document.getElementById("busUrlInput").value.trim() });
+    busReadLast = r.ok ? r.bundle : null;
+    out.innerHTML = busReadLine(r, "Pull (no local copy)");
+  }
+  async function busPullWithHave() {
+    var out = document.getElementById("busReadOut");
+    if (!busReadLast) {
+      out.innerHTML = '<div class="note" style="color:#fbbf24;">Pull once first (with "no local copy") so there is a local copy to compare against.</div>';
+      return;
+    }
+    out.innerHTML = '<div class="note">Pulling as reader…</div>';
+    var r = await root.smbPullBundle({ url: document.getElementById("busUrlInput").value.trim(), have: busReadLast });
+    out.innerHTML = busReadLine(r, "Pull with local copy");
+  }
+  async function busReadSelfTest() {
+    var out = document.getElementById("busReadOut");
+    out.innerHTML = '<div class="note">Running self-tests…</div>';
+    var r = await root.smbBusReadSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All bus-read self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+  busPull();
+
+  // ── End-to-end bus proof demo ──
+  var e2eDemoBundle = root.smbE2EDemoBundle().bundle;
+  function e2eDisplayHead(r, label) {
+    return r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ ' + escapeHtml(label) + "</div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(label) + " → <b>" + escapeHtml(r.code || "") + "</b>: " + escapeHtml(r.error || "") + "</div>";
+  }
+  function renderBundleContents(res, v) {
+    var p = res.bundle.payload;
+    var html = '<div class="note" style="margin:4px 0 8px;">— tool B displays the contents —</div>';
+    html += "<table><tr><th>Field</th><th>Value</th></tr>";
+    var rows = [
+      ["bundleType", res.bundle.bundleType + " (schema v" + res.schemaVersion + ")"],
+      ["publisher", res.toolDisplayName + " (" + res.tool + ")"],
+      ["exportedAt", res.exportedAt],
+      ["source", res.bundle.source],
+      ["validates", v.ok ? "✓ passes schema v" + v.schemaVersion : "✗ " + v.errors.join("; ")],
+      ["payload.title", p.title || "—"],
+      ["payload.description", p.description || "—"],
+      ["payload.goals", (p.goals || []).join(" | ") || "—"],
+      ["payload.scope", (p.scope || []).join(" | ") || "—"],
+      ["payload.tags", (p.tags || []).join(", ") || "—"],
+      ["payload.status", p.status || "—"]
+    ];
+    rows.forEach(function(row) { html += "<tr><td><code>" + escapeHtml(row[0]) + "</code></td><td>" + escapeHtml(row[1]) + "</td></tr>"; });
+    return html + "</table>";
+  }
+  async function e2ePublish() {
+    var out = document.getElementById("e2eOut");
+    var isUnsaved = typeof window.generatorIsUnsaved !== "undefined" && !!window.generatorIsUnsaved;
+    if (isUnsaved) {
+      out.innerHTML = '<div style="color:#fbbf24;font-size:.85rem;">✗ Cannot publish for real — this generator is <b>unsaved</b>. Save it, then publish again; the file will live under <code>' + escapeHtml(window.generatorName || "…") + '</code>.</div>';
+      return;
+    }
+    out.innerHTML = '<div class="note">Tool A publishing to the bus…</div>';
+    var r = await root.smbPublishBundle({ bundle: e2eDemoBundle, bundleName: "e2e-idea-demo" });
+    out.innerHTML = busLine(r, "Tool A publish (end-to-end demo)");
+  }
+  async function e2eSimulateB() {
+    var out = document.getElementById("e2eOut");
+    out.innerHTML = '<div class="note">Tool B pulling tool A’s bus file…</div>';
+    var url = root.smbBusUrl(window.generatorName || "smb-integration", "e2e-idea-demo");
+    var res = await root.smbPullBundle({ url: url });
+    if (!res.ok) { out.innerHTML = busReadLine(res, "Tool B pull"); return; }
+    var v = root.smbValidateBundle(res.bundle);
+    out.innerHTML = e2eDisplayHead(res, "Tool B pull") + renderBundleContents(res, v);
+  }
+  async function e2eSelfTest() {
+    var out = document.getElementById("e2eOut");
+    out.innerHTML = '<div class="note">Running the A→B fixture loop…</div>';
+    var r = await root.smbE2ESelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All end-to-end self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name + (x.detail ? " — " + x.detail : "")); });
+    out.innerHTML = html;
+  }
+  e2eSimulateB();
+
+  // ── Connector module demo ──
+  var connBus = null;
+  function connUnsavedMsg() {
+    return '<div style="color:#fbbf24;font-size:.85rem;">✗ Cannot publish for real — this generator is <b>unsaved</b>. Save it, then try again.</div>';
+  }
+  async function connPublishManifest() {
+    var out = document.getElementById("connOut");
+    if (typeof window.generatorIsUnsaved !== "undefined" && window.generatorIsUnsaved) { out.innerHTML = connUnsavedMsg(); return; }
+    out.innerHTML = '<div class="note">Publishing the canonical pipeline manifest…</div>';
+    var built = root.smbBuildEnvelope({
+      bundleType: "pipeline-manifest", tool: window.generatorName || "smb-integration",
+      toolDisplayName: "SMB Integration (framework)", source: "manifest/manifest.json",
+      payload: root.smbDefaultManifest()
+    });
+    var r = await root.smbPublishBundle({ bundle: built.bundle, bundleName: "manifest" });
+    out.innerHTML = busLine(r, "Publish canonical manifest");
+  }
+  async function connDiscover() {
+    var out = document.getElementById("connOut");
+    if (!connBus) connBus = root.smbConnector();
+    out.innerHTML = '<div class="note">Loading the manifest + discovering upstream…</div>';
+    var c = await connBus.configure();
+    if (!c.ok) {
+      out.innerHTML = '<div style="color:#f87171;font-size:.85rem;">✗ could not load the manifest — <b>' + escapeHtml(c.code || "") + "</b>: " + escapeHtml(c.error || "") + "</div>";
+      return;
+    }
+    var html = '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">✓ connector configured → manifest v' + c.manifest.schemaVersion + " (" + c.manifest.tools.length + " tools)</div>";
+    html += '<div class="note" style="margin:4px 0;">Who publishes each bundle type?</div>';
+    var types = ["idea", "project", "milestone-event", "invoice", "payment-receipt"];
+    var lines = [];
+    for (var i = 0; i < types.length; i++) {
+      var bt = types[i];
+      var ups = await connBus.listUpstream(bt);
+      lines.push('<div style="font-size:.85rem;line-height:1.6;"><code>' + escapeHtml(bt) + "</code> → " +
+        (ups.count ? ups.upstreams.map(function(u) { return escapeHtml(u.tool) + " <span style='color:#64748b;'>(" + escapeHtml(u.url) + ")</span>"; }).join(", ")
+                 : '<span style="color:#94a3b8;">nobody yet</span>') + "</div>");
+    }
+    out.innerHTML = html + lines.join("");
+  }
+  async function connPublish() {
+    var out = document.getElementById("connOut");
+    if (!connBus) connBus = root.smbConnector();
+    if (typeof window.generatorIsUnsaved !== "undefined" && window.generatorIsUnsaved) { out.innerHTML = connUnsavedMsg(); return; }
+    out.innerHTML = '<div class="note">Publishing via the connector…</div>';
+    var r = await connBus.publish("idea", {
+      id: "connector-demo", title: "Connector demo idea",
+      goals: ["Prove the connector API"], scope: ["configure", "publish", "listUpstream", "pull"],
+      tags: ["demo"], status: "ready"
+    }, { name: "connector-demo" });
+    out.innerHTML = busLine(r, "connector.publish('idea', …)");
+  }
+  async function connPull() {
+    var out = document.getElementById("connOut");
+    if (!connBus) connBus = root.smbConnector();
+    out.innerHTML = '<div class="note">Pulling via the connector…</div>';
+    var r = await connBus.pull("connector-demo", { from: window.generatorName || "smb-integration" });
+    if (!r.ok) { out.innerHTML = busReadLine(r, "connector.pull('connector-demo')"); return; }
+    var v = root.smbValidateBundle(r.bundle);
+    out.innerHTML = e2eDisplayHead(r, "connector.pull('connector-demo')") + renderBundleContents(r, v);
+  }
+  async function connSelfTest() {
+    var out = document.getElementById("connOut");
+    out.innerHTML = '<div class="note">Running connector self-tests…</div>';
+    var r = await root.smbConnectorSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All connector self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name + (x.detail ? " — " + x.detail : "")); });
+    out.innerHTML = html;
+  }
+  connDiscover();
+
+  // ── Edit-key wallet demo ──
+  var walletTool = window.generatorName || "smb-integration";
+  window._smbWallet = window._smbWallet || null;
+  window._smbRecoveryPlan = null;
+  function walletGet() {
+    if (!window._smbWallet) window._smbWallet = root.smbWallet();
+    return window._smbWallet;
+  }
+  function walletStatusLine(st) {
+    var colors = { ok: "#34d399", clean: "#94a3b8", empty: "#f87171", partial: "#fbbf24", recovered: "#34d399" };
+    var c = colors[st.state] || "#e2e8f0";
+    return '<span style="color:' + c + ';font-weight:600;">' + escapeHtml(st.state) + "</span>" +
+      " · expected: <code>" + escapeHtml((st.expected || []).join(", ") || "none") + "</code>" +
+      " · keyed: <code>" + escapeHtml((st.present || []).join(", ") || "none") + "</code>" +
+      (st.missing && st.missing.length ? ' · missing: <code style="color:#f87171;">' + escapeHtml(st.missing.join(", ")) + "</code>" : "") +
+      (st.legacy && st.legacy.length ? ' · legacy: <code style="color:#94a3b8;">' + escapeHtml(st.legacy.map(function(l) { return l.name; }).join(", ")) + "</code>" : "") +
+      (st.reason ? " · " + escapeHtml(st.reason) : "");
+  }
+  function walletToolStatusHtml() {
+    var st = walletGet().status({ manifest: root.smbDefaultManifest(), toolStub: walletTool });
+    return '<div style="margin:4px 0 0;"><code>' + escapeHtml(walletTool) + "</code> → " + walletStatusLine(st) + "</div>";
+  }
+  function walletRefresh() {
+    var out = document.getElementById("walletOut");
+    var w = walletGet();
+    var m = root.smbDefaultManifest();
+    var html = '<div class="note" style="margin-bottom:6px;">Device <code>' + escapeHtml(w.deviceId()) + "</code> · tool under test: <code>" + escapeHtml(walletTool) + "</code></div>";
+    html += '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">Wallet status per tool (default manifest)</div>';
+    m.tools.forEach(function(t) {
+      var st = w.status({ manifest: m, toolStub: t.stub });
+      html += '<div style="margin:2px 0;"><code>' + escapeHtml(t.stub) + "</code> → " + walletStatusLine(st) + "</div>";
+    });
+    var ts = w.listTools();
+    html += '<div class="note" style="margin-top:6px;">' + ts.length + " tool(s) have wallet entries · " + w.list().length + " edit key(s) held</div>";
+    out.innerHTML = html;
+  }
+  async function walletDetectLoss() {
+    var out = document.getElementById("walletOut");
+    out.innerHTML = '<div class="note">Checking each expected-but-unkeyed file on the bus…</div>';
+    var w = walletGet();
+    var r = await w.detectLoss({ manifest: root.smbDefaultManifest(), toolStub: walletTool });
+    if (!r.ok) { out.innerHTML = '<div style="color:#f87171;font-size:.85rem;">✗ ' + escapeHtml(r.error || r.code || "") + "</div>"; return; }
+    var html = '<div style="font-size:.85rem;line-height:1.7;">' +
+      "Loss suspected: <b>" + (r.lost ? "YES" : "no") + "</b> · state: <b>" + escapeHtml(r.state) + "</b><br>" +
+      "confirmed lost: <code>" + escapeHtml((r.confirmed || []).map(function(x) { return x.name; }).join(", ") || "none") + "</code> · " +
+      "unconfirmed (couldn't verify): <code>" + escapeHtml((r.unconfirmed || []).map(function(x) { return x.name; }).join(", ") || "none") + "</code><br>" +
+      '<span style="color:#94a3b8;">' + escapeHtml(r.reason || "") + "</span></div>";
+    out.innerHTML = html;
+  }
+  function walletRecoveryPlan() {
+    var out = document.getElementById("walletOut");
+    var w = walletGet();
+    var plan = w.recoveryPlan({ toolStub: walletTool, displayName: "SMB Integration (framework)", manifest: root.smbDefaultManifest() });
+    window._smbRecoveryPlan = plan;
+    if (!plan.ok) { out.innerHTML = '<div style="color:#fbbf24;font-size:.85rem;">' + escapeHtml(plan.error || "") + "</div>"; return; }
+    var html = '<div class="note" style="margin-bottom:6px;">Fresh namespace per published type (plan stored on <code>window._smbRecoveryPlan</code>):</div>';
+    html += "<table><tr><th>Type</th><th>New bundle name</th><th>Old (stays readable)</th></tr>";
+    Object.keys(plan.newNames).forEach(function(bt) {
+      var old = plan.keepsReadable.find(function(k) { return k.bundleType === bt; });
+      html += "<tr><td><code>" + escapeHtml(bt) + "</code></td><td><code>" + escapeHtml(plan.newNames[bt]) + "</code></td><td><code>" + escapeHtml(old ? old.url : "") + "</code></td></tr>";
+    });
+    html += "</table>";
+    html += '<div class="note" style="margin-top:4px;">Steps: ' + escapeHtml(plan.steps.map(function(s) { return s.step; }).join(" → ")) + "</div>";
+    out.innerHTML = html;
+  }
+  function walletApplyRecovery() {
+    var out = document.getElementById("walletOut");
+    if (!window._smbRecoveryPlan) { out.innerHTML = '<div class="note" style="color:#fbbf24;">Generate a recovery plan first.</div>'; return; }
+    var w = walletGet();
+    var r = w.applyRecovery(window._smbRecoveryPlan);
+    var html = '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ ' + escapeHtml(r.summary || "recovery applied") + "</div>";
+    html += '<div class="note">A real recovery now re-registers this tool in the pipeline manifest with <code>activeNames</code> = ' + escapeHtml(JSON.stringify(r.activeNames)) + " (via <code>smbRegisterTool</code>), so upstream discovery follows the fresh files.</div>";
+    out.innerHTML = html + walletToolStatusHtml();
+  }
+  function walletUndoRecovery() {
+    var out = document.getElementById("walletOut");
+    var w = walletGet();
+    var r = w.undoRecovery(walletTool);
+    out.innerHTML = '<div class="note">' + (r.ok ? "✓ " : "✗ ") + escapeHtml(r.summary || r.error || "") + "</div>" + walletToolStatusHtml();
+  }
+  async function walletSelfTest() {
+    var out = document.getElementById("walletOut");
+    out.innerHTML = '<div class="note">Running wallet self-tests…</div>';
+    var r = await root.smbWalletSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All wallet self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+  walletRefresh();
+
+  // ── Freshness & sync-status demo ──
+  var syncTool = window.generatorName || "smb-integration";
+  var syncThreshInput = document.getElementById("syncThreshInput");
+  function syncGet() { return root.smbSyncTracker(); }
+  function syncThreshMs() {
+    var s = parseInt(syncThreshInput.value, 10);
+    return (!isNaN(s) && s >= 0) ? s * 1000 : 30000;
+  }
+  function syncStatusLine(b) {
+    var parts = [];
+    var line = b.lastSyncedHuman === "never"
+      ? '<span style="color:#94a3b8;">never synced</span>'
+      : '<span style="color:' + (b.stale ? "#fbbf24" : "#34d399") + ';font-weight:600;">' + escapeHtml(b.lastSyncedHuman) + "</span>";
+    parts.push(line);
+    if (b.lastSyncedKind === "pulled") parts.push('pulled from <code>' + escapeHtml(b.lastSeenTool || "?") + "</code>");
+    if (b.lastPullStatus) parts.push('last pull status <code>' + escapeHtml(b.lastPullStatus) + "</code>");
+    if (b.upstreamEditCount !== null) parts.push("upstream edit count <code>" + b.upstreamEditCount + "</code>");
+    if (b.lastPublishEditCount !== null) parts.push("own edit count <code>" + b.lastPublishEditCount + "</code>");
+    if (b.dataAgeHuman) parts.push("data <code>" + escapeHtml(b.dataAgeHuman) + "</code>");
+    if (b.stale && b.staleReason) parts.push('<span style="color:#fbbf24;">⚠ ' + escapeHtml(b.staleReason) + "</span>");
+    return parts.join(" · ");
+  }
+  function syncRender(prepend) {
+    var out = document.getElementById("syncOut");
+    var st = root.smbSyncStatus({ tool: syncTool, staleAfterMs: syncThreshMs() });
+    var html = (prepend || "") + '<div class="note" style="margin:4px 0 6px;">Tool: <code>' + escapeHtml(syncTool) + '</code> · stale-after: <code>' + escapeHtml(root.smbBusAgeHuman(syncThreshMs())) + '</code> · ' + st.total + " tracked bundle(s), <b>" + st.staleCount + "</b> stale</div>";
+    var names = Object.keys(st.bundles);
+    if (!names.length) {
+      html += '<div class="note" style="color:#94a3b8;">No sync records for this tool yet — click <b>Record a publish</b> or <b>Record a pull</b> to create one, or <b>Simulate stale</b> to see the warning.</div>';
+    } else {
+      html += "<table><tr><th>Bundle</th><th>Sync status</th></tr>";
+      names.forEach(function(name) {
+        html += "<tr><td><code>" + escapeHtml(name) + "</code></td><td>" + syncStatusLine(st.bundles[name]) + "</td></tr>";
+      });
+      html += "</table>";
+    }
+    out.innerHTML = html;
+  }
+  function syncRefresh() { syncRender(""); }
+  function syncNotePublish() {
+    var count = root.smbBusGetEditCount(syncTool, "idea") || 1;
+    var r = syncGet().notePublish(syncTool, "idea", { editCount: count });
+    syncRender(r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ recorded a publish of <code>idea</code> — upstream edit count ' + r.lastPublishEditCount + '</div><div class="note" style="margin-bottom:6px;">In a real tool this happens automatically inside <code>smbPublishBundle()</code> on every successful publish.</div>'
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(r.error || "") + "</div>");
+  }
+  function syncNotePull() {
+    var exportedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    var fakeRes = { ok: true, status: "fresh", tool: "project-master", toolDisplayName: "Project Master", bundleType: "project", exportedAt: exportedAt, fetchedAt: new Date().toISOString(), size: 2048 };
+    var r = syncGet().notePull(syncTool, "project", fakeRes);
+    syncRender(r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ recorded a pull of <code>project</code> from <code>project-master</code> (upstream data exported 2 hours ago)</div><div class="note" style="margin-bottom:6px;">In a real tool this happens automatically inside <code>connector.pull()</code> on every successful pull.</div>'
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(r.error || "") + "</div>");
+  }
+  function syncSimulateStale() {
+    var exportedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    var at = Date.now() - 2 * 60 * 1000;
+    var fakeRes = { ok: true, status: "fresh", tool: "project-master", toolDisplayName: "Project Master", bundleType: "project", exportedAt: exportedAt, fetchedAt: new Date(at).toISOString(), size: 2048 };
+    var r = syncGet().notePull(syncTool, "project", fakeRes, { at: at });
+    syncRender(r.ok
+      ? '<div style="color:#fbbf24;font-weight:600;margin-bottom:4px;">⚠ recorded a pull of <code>project</code> <b>as if it happened 2 minutes ago</b> — with the current threshold it should now be flagged stale below</div>'
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(r.error || "") + "</div>");
+  }
+  function syncClear() {
+    var r = syncGet().clear(syncTool);
+    syncRender('<div class="note" style="color:#94a3b8;margin-bottom:6px;">' + (r.ok ? "✓ cleared " : "✗ ") + "this tool's sync records</div>");
+  }
+  async function syncSelfTest() {
+    var out = document.getElementById("syncOut");
+    out.innerHTML = '<div class="note">Running sync self-tests…</div>';
+    var r = await root.smbSyncSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All sync self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function(x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+  // ── Conflict preview + safety nets demo ──
+  var conflictLocal = { title: "Local title", amount: 100, status: "active", updatedAt: "2026-09-01T00:00:00.000Z" };
+  var conflictRemote = { title: "Remote title", amount: 100, status: "paused", updatedAt: "2026-09-02T00:00:00.000Z" };
+  function conflictDemo() {
+    document.getElementById("conflictOut").innerHTML =
+      '<div class="note" style="margin-bottom:6px;">Field-level diff — local vs the bus file (red = truly conflicting, grey = same on both sides):</div>' +
+      root.smbConflictPreviewHtml(conflictLocal, conflictRemote);
+  }
+  function conflictResolve(mode) {
+    var resolver = root.smbCreateConflictResolver({});
+    var merged;
+    if (mode === "mine") merged = conflictLocal;
+    else if (mode === "theirs") merged = conflictRemote;
+    else merged = resolver.merge({ local: conflictLocal, remote: conflictRemote }).merged;
+    document.getElementById("conflictOut").innerHTML =
+      '<div class="note" style="margin-bottom:6px;">Field-level diff — local vs the bus file:</div>' +
+      root.smbConflictPreviewHtml(conflictLocal, conflictRemote) +
+      '<div class="note" style="margin-top:8px;color:#22d3ee;">Resolved with mode <b>' + escapeHtml(mode) + '</b> → kept snapshot:</div>' +
+      '<pre style="margin:6px 0 0;overflow:auto;"><code style="background:none;border:none;padding:0;color:#cdd8ec;white-space:pre;font-size:11.5px;">' + escapeHtml(JSON.stringify(merged, null, 2)) + "</code></pre>";
+  }
+  async function conflictSelfTest() {
+    var out = document.getElementById("conflictOut");
+    out.innerHTML = '<div class="note">Running conflict self-tests (two devices diverging on one shared bus file)…</div>';
+    var r = await root.smbConflictSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All conflict self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+
+  function memStore() { var map = {}; return { get: function (k) { return (k in map) ? map[k] : null; }, set: function (k, v) { map[k] = v; return true; }, remove: function (k) { delete map[k]; } }; }
+  function backupDemo() {
+    var store = root.smbCreateLedgerStore({ toolStub: "the-ledger", bundleName: "books", store: memStore() });
+    store.newInvoice({ id: "inv-1001", client: "Acme Corp", amount: 1200, status: "approved", projectId: "prj-1" });
+    store.newInvoice({ id: "inv-1002", client: "Widget Co", amount: 450, status: "pending-approval", projectId: "prj-2" });
+    var r = root.smbBackupDownload(store, "smb-ledger-demo-backup.json");
+    var out = document.getElementById("safetyOut");
+    out.innerHTML = r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ Downloaded <code>' + escapeHtml(r.filename) + "</code> — " + r.bytes + " bytes (" + store.listInvoices().length + " demo invoices)</div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ ' + escapeHtml(r.error || r.code || "") + "</div>";
+  }
+  document.getElementById("restoreFileInput").addEventListener("change", async function () {
+    var out = document.getElementById("safetyOut");
+    var file = this.files && this.files[0];
+    if (!file) return;
+    out.innerHTML = '<div class="note">Restoring from <code>' + escapeHtml(file.name) + "</code>…</div>";
+    var store = root.smbCreateLedgerStore({ toolStub: "the-ledger", bundleName: "restore-demo", store: memStore() });
+    var r = await root.smbRestoreFromFile(file, { store: store });
+    if (!r.ok) { out.innerHTML = '<div style="color:#f87171;font-weight:600;">✗ <b>' + escapeHtml(r.code || "") + "</b>: " + escapeHtml(r.error || "") + "</div>"; return; }
+    out.innerHTML = '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ Restored from <code>' + escapeHtml(file.name) + "</code> — " + store.listInvoices().length + " invoice(s), revision " + r.revision + ", clean and ready to syncUp()</div>";
+  });
+  async function safetyNetSelfTest() {
+    var out = document.getElementById("safetyOut");
+    out.innerHTML = '<div class="note">Running safety-net self-tests…</div>';
+    var r = await root.smbSafetyNetSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All safety-net self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+  async function integrationSelfTest() {
+    var out = document.getElementById("safetyOut");
+    out.innerHTML = '<div class="note">Running the three-tool integration self-tests (idea-incubator → project-master → the-ledger)…</div>';
+    var r = await root.smbIntegrationSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All integration self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+
+  // ── Live pipeline hub demo ──
+  var hubClient = null;
+  var hubEvents = [];
+  function hubGet() {
+    if (!hubClient) hubClient = root.smbHubIndex({ createSocket: function () { return root.createServerSocket(); } });
+    return hubClient;
+  }
+  function hubIndexTable(q) {
+    if (!q.ok) return '<div style="color:#f87171;font-size:.85rem;">query failed — <b>' + escapeHtml(q.code || "") + "</b>: " + escapeHtml(q.error || "") + "</div>";
+    if (!q.entries || !q.entries.length) return '<div class="note" style="color:#94a3b8;">nothing reported yet — click <b>Report a publish</b>.</div>';
+    var html = "<table><tr><th>Tool</th><th>Type</th><th>Name</th><th>Edit</th><th>Reported at</th></tr>";
+    q.entries.forEach(function (e) {
+      html += "<tr><td><code>" + escapeHtml(e.tool) + "</code></td><td><code>" + escapeHtml(e.bundleType) + "</code></td><td><code>" + escapeHtml(e.name) + "</code></td><td>" + e.editCount + "</td><td>" + escapeHtml(new Date(e.at).toISOString()) + "</td></tr>";
+    });
+    return html + "</table>";
+  }
+  function hubRenderEvents() {
+    var box = document.getElementById("hubEventsBox");
+    if (!box) return;
+    if (!hubEvents.length) { box.innerHTML = '<div class="note" style="color:#94a3b8;margin-top:6px;">No change events received yet — <b>Report a publish</b> broadcasts one.</div>'; return; }
+    var html = '<div class="note" style="margin-top:8px;">⚡ Live change events received (' + hubEvents.length + "):</div>";
+    hubEvents.slice(-6).forEach(function (ev) {
+      html += '<div style="font-size:.82rem;color:#34d399;font-family:ui-monospace,monospace;">· <code>' + escapeHtml(ev.tool + "/" + ev.bundleType + "/" + ev.name) + "</code> (edit " + ev.editCount + ") @ " + escapeHtml(new Date(ev.at).toISOString()) + "</div>";
+    });
+    box.innerHTML = html;
+  }
+  function hubShell(extra) {
+    return extra + '<div id="hubEventsBox"></div>';
+  }
+  async function hubLive() {
+    var out = document.getElementById("hubOut");
+    out.innerHTML = '<div class="note">Connecting to the hub server (this generator\u2019s emulated server-plugin — real when saved)…</div>';
+    var h = hubGet();
+    h.onEvent(function (ev) { hubEvents.push(ev); hubRenderEvents(); });
+    var c = await h.configure();
+    var html = c.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">✓ hub connected — mode <code>' + escapeHtml(c.mode) + "</code> · state <code>" + escapeHtml(c.state) + "</code></div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">✗ hub unavailable — <b>' + escapeHtml(c.code || "") + "</b>: " + escapeHtml(c.error || "") + "</div>";
+    if (c.ok) {
+      var q = await h.queryAll();
+      html += '<div class="note" style="margin:4px 0;">Index: <b>' + q.count + "</b> reported bundle(s)</div>";
+      html += hubIndexTable(q);
+    }
+    out.innerHTML = hubShell(html);
+    hubRenderEvents();
+  }
+  async function hubReportDemo() {
+    var out = document.getElementById("hubOut");
+    var h = hubGet();
+    h.onEvent(function (ev) { hubEvents.push(ev); hubRenderEvents(); });
+    var c = await h.configure();
+    if (!c.ok) { out.innerHTML = '<div style="color:#f87171;font-size:.85rem;">✗ hub unavailable — ' + escapeHtml(c.error || c.code || "") + "</div>"; return; }
+    var demos = [["idea-incubator", "idea", "idea-1"], ["project-master", "project", "project-1"], ["project-master", "milestone-event", "milestone-event-1"], ["the-ledger", "invoice", "invoice-1"]];
+    var pick = demos[Math.floor(Math.random() * demos.length)];
+    var r = await h.report({ tool: pick[0], bundleType: pick[1], name: pick[2], editCount: 1 + Math.floor(Math.random() * 5), at: Date.now() });
+    var html = r.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:4px;">✓ reported: <code>' + escapeHtml(r.tool + "/" + r.bundleType + "/" + r.name) + "</code> (edit " + r.editCount + ") — change event broadcast</div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ report failed — <b>' + escapeHtml(r.code || "") + "</b>: " + escapeHtml(r.error || "") + "</div>";
+    var q = await h.queryAll();
+    html += '<div class="note" style="margin:4px 0;">Index: <b>' + q.count + "</b> reported bundle(s)</div>";
+    html += hubIndexTable(q);
+    out.innerHTML = hubShell(html);
+    hubRenderEvents();
+  }
+  async function hubRefresh() {
+    var out = document.getElementById("hubOut");
+    var h = hubGet();
+    h.onEvent(function (ev) { hubEvents.push(ev); hubRenderEvents(); });
+    var c = await h.configure();
+    var q = await h.queryAll();
+    var html = (c.ok
+      ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">✓ hub connected — mode <code>' + escapeHtml(c.mode) + "</code></div>"
+      : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">✗ hub unavailable — <b>' + escapeHtml(c.code || "") + "</b></div>") +
+      '<div class="note" style="margin:4px 0;">Index: <b>' + q.count + "</b> reported bundle(s)</div>" + hubIndexTable(q);
+    out.innerHTML = hubShell(html);
+    hubRenderEvents();
+  }
+  async function hubSelfTest() {
+    var out = document.getElementById("hubOut");
+    out.innerHTML = '<div class="note">Running hub self-tests (client protocol + registry + fan-out over a hermetic fake socket)…</div>';
+    var r = await root.smbHubSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All hub self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+  async function bridgeRoundTrip() {
+    var out = document.getElementById("bridgeOut");
+    out.innerHTML = '<div class="note">Running the full round-trip: bridge → router → server → change event → glue → registry → notify → bridge…</div>';
+    var fs = root.smbHubFakeSocket();
+    var reg = root.smbHubSubRegistry();
+    var router = root.smbHubRouter(fs, reg);
+    var bridge = root.smbCreateHubBridge({ transport: root.smbHubMockTransport(router), hubUrl: "mock://hub", timeoutMs: 2000 });
+    var c = await bridge.configure();
+    if (!c.ok) { out.innerHTML = '<div style="color:#f87171;font-weight:600;">✗ bridge did not configure — ' + escapeHtml(c.error || "") + "</div>"; return; }
+    var received = [];
+    await bridge.subscribe({ tool: "idea-incubator", bundleType: "idea" }, function (ev) { received.push(ev); });
+    var glue = root.smbHubAttachGlue(fs, reg);
+    var rep = await bridge.report({ tool: "idea-incubator", bundleType: "idea", name: "idea-1", editCount: 2, at: Date.now() });
+    var q = await bridge.queryAll();
+    var html = '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">✓ bridge connected over the mock transport (the exact router the hub page runs)</div>';
+    html += '<div class="note" style="margin:3px 0;">report → <b>' + (rep.ok ? "ok (edit " + rep.editCount + ")" : "FAIL " + rep.code) + "</b> · queryAll → <b>" + q.count + "</b> entry(ies) · change events received by the subscriber: <b>" + received.length + "</b></div>";
+    if (received.length) html += '<div style="font-size:.82rem;color:#34d399;font-family:ui-monospace,monospace;">⚡ ' + escapeHtml(received[0].tool + "/" + received[0].bundleType) + " (edit " + received[0].editCount + ")</div>";
+    out.innerHTML = html;
+  }
+  async function bridgeDegrade() {
+    var out = document.getElementById("bridgeOut");
+    out.innerHTML = '<div class="note">Pointing the bridge at a hub that never answers…</div>';
+    var deadRouter = function (msg, reply) {};
+    var dead = root.smbCreateHubBridge({ transport: root.smbHubMockTransport(deadRouter), hubUrl: "mock://dead", timeoutMs: 250 });
+    var c = await dead.configure();
+    var html = c.ok
+      ? '<div style="color:#f87171;font-weight:600;margin-bottom:4px;">✗ unexpected — the dead hub answered</div>'
+      : '<div style="color:#fbbf24;font-weight:600;margin-bottom:4px;">⚠ hub unreachable → <b>' + escapeHtml(c.code || "") + "</b> (" + escapeHtml(c.state) + ") — bridge degraded, available() = " + dead.available() + "</div>";
+    html += '<div class="note" style="margin:3px 0;">Falling back to polling the file bus directly…</div>';
+    var pb = root.smbCreateHubBridge({ hubUrl: "mock://poll", timeoutMs: 500, pollIntervalMs: 1000 });
+    var r = await pb.poll(async function (tool, bt) {
+      return { ok: true, status: "fresh", bundleName: bt, tool: tool, exportedAt: new Date().toISOString(), editCount: 7 };
+    }, { types: [{ tool: "project-master", bundleType: "project" }, { tool: "idea-incubator", bundleType: "idea" }] });
+    html += '<div style="color:#34d399;font-weight:600;margin-top:4px;">✓ poll found <b>' + r.changed.length + "</b> fresh upstream bundle(s) straight off the bus</div>";
+    r.changed.forEach(function (ch) {
+      html += '<div style="font-size:.82rem;font-family:ui-monospace,monospace;">· <code>' + escapeHtml(ch.tool + "/" + ch.bundleType) + "</code> edit " + ch.editCount + " (via " + escapeHtml(ch.via) + ")</div>";
+    });
+    html += '<div class="note" style="margin-top:6px;color:#94a3b8;">The pipeline never depends on the hub being open — the file bus is always the source of truth.</div>';
+    out.innerHTML = html;
+  }
+  async function bridgeSelfTest() {
+    var out = document.getElementById("bridgeOut");
+    out.innerHTML = '<div class="note">Running bridge self-tests (full message flow + degrade-to-polling + error legs)…</div>';
+    var r = await root.smbBridgeSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All bridge self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+
+  // ── Data-age dashboard demo ──
+  var dashPanel = null;
+  var dashFakeSync = {
+    ok: true, staleAfterMs: 3600000,
+    bundles: {
+      "milestone-event": { bundleName: "milestone-event", lastSyncedHuman: "synced 2 minutes ago", lastSyncedKind: "pulled", lastSeenTool: "project-master", lastSeenExport: new Date(Date.now() - 2 * 60 * 1000).toISOString(), dataAgeMs: 2 * 60 * 1000, dataAgeHuman: "2 minutes old", stale: false }
+    }
+  };
+  async function dashboardRender(live) {
+    var ctn = document.getElementById("dashboardCtn");
+    var out = document.getElementById("dashboardOut");
+    if (dashPanel && dashPanel.destroy) { try { dashPanel.destroy(); } catch (e) {} dashPanel = null; }
+    ctn.innerHTML = "";
+    out.innerHTML = live
+      ? '<div class="note">Connecting the hub and rendering the panel…</div>'
+      : '<div class="note">Rendering with the hub forced offline (local sync fallback)…</div>';
+    var hub;
+    if (live) {
+      hub = hubGet();
+      var c = await hub.configure();
+      if (!c.ok) out.innerHTML = '<div class="note" style="color:#fbbf24;">Hub unavailable (' + escapeHtml(c.code || "") + ") — the panel below falls back to local sync timestamps.</div>";
+    } else {
+      hub = { status: function () { return { state: "offline" }; }, available: function () { return false; }, queryAll: async function () { return { ok: false }; } };
+    }
+    var panel = root.smbPipelineStatusPanel({
+      ctn: ctn,
+      tool: "the-ledger",
+      manifest: root.smbDefaultManifest(),
+      hub: hub,
+      syncStatus: function () { return dashFakeSync; },
+      onRefresh: async function (bundleType) {
+        return { ok: true, status: "fresh", bundleType: bundleType, tool: "project-master", exportedAt: new Date().toISOString() };
+      }
+    });
+    dashPanel = panel;
+    out.innerHTML = live
+      ? '<div class="note">Panel rendered — <b>hub live</b> path (upstream last-published comes from the hub index; <b>Refresh</b> re-pulls each consumed bundle).</div>'
+      : '<div class="note">Panel rendered — <b>hub offline</b> path: "upstream last published" falls back to local sync timestamps; <b>Refresh</b> still works.</div>';
+  }
+  function dashboardLive() { dashboardRender(true); }
+  function dashboardOffline() { dashboardRender(false); }
+  async function dashboardSelfTest() {
+    var out = document.getElementById("dashboardOut");
+    out.innerHTML = '<div class="note">Running dashboard self-tests (pure status computation + refresh over a fake hub client)…</div>';
+    var r = await root.smbDashboardSelfTest();
+    var html = '<div class="note" style="margin-bottom:6px;">' + r.passCount + " passed, " + r.failCount + " failed</div>";
+    html += r.ok ? '<div style="color:#34d399;font-weight:600;margin-bottom:6px;">All dashboard self-tests passed ✓</div>' : '<div style="color:#f87171;font-weight:600;margin-bottom:6px;">Failures below</div>';
+    r.results.forEach(function (x) { html += schemaLine(x.pass, x.name); });
+    out.innerHTML = html;
+  }
+
+  syncRefresh();
+</script>

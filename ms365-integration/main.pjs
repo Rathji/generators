@@ -1,0 +1,112 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// MICROSOFT 365 INTEGRATION — Perchance plugin
+//
+// Plugs any Perchance generator into Microsoft 365 (Outlook mail, OneDrive/
+// SharePoint, Calendar, Microsoft To Do) through the Microsoft Graph API.
+//
+//   Auth     src/auth/    — OAuth2 authorization-code + PKCE flow, token
+//                           lifecycle manager (persistence + auto-refresh),
+//                           tenant & account validator, on-demand scoped
+//                           permission requests.
+//   Graph    src/graph/   — generic request wrapper (bearer headers, OData
+//                           queries, 429/503/504 backoff, 401 refresh-and-
+//                           retry, paging) + error mapping engine.
+//   Mail     src/mail/    — mailbox query, email dispatcher, calendar sync.
+//   Files    src/files/   — file discovery, upload/download streamer,
+//                           permission auditor.
+//   Tasks    src/tasks/   — To Do list sync + task state updater.
+//   Health   src/health/  — end-to-end connection check.
+//
+// All modules are exposed on window.ms365 (auth, graph, mail, files, tasks,
+// health) and each ships a validation suite — run them with ?test=<suite>.
+// Full usage & architecture docs: src/README.md and the page (index.html).
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = Microsoft 365 Integration
+  description = A Perchance plugin that plugs your generators into Microsoft 365 (Outlook mail, OneDrive/SharePoint files, Calendar, To Do/Planner) through the Microsoft Graph API — OAuth2 + PKCE sign-in with token auto-refresh, tenant & account validation, a Graph request wrapper with friendly error mapping, mail/calendar/files/tasks feature modules, connection health checks, and on-demand scoped permissions.
+  tags = microsoft, office365, outlook, onedrive, sharepoint, calendar, graph, oauth2, integration, plugin
+  header
+    mode = minimal
+
+
+// ── 0. IMPORTS ─────────────────────────────────────────────────────────────
+simpleGenFooter = {import:simple-gen-footer}
+superFetch = {import:super-fetch-plugin}
+
+
+// ── 1. CONFIG ──────────────────────────────────────────────────────────────
+// Defaults for the OAuth2 flow. Users can edit these here, or override them
+// live in the widget on the page (overrides are remembered in localStorage).
+
+ms365Config
+  clientId = 
+  tenant = common
+  scopes
+    openid
+    profile
+    email
+    offline_access
+    User.Read
+
+ms365InitConfig() =>
+  let cid = ms365Config.clientId && ms365Config.clientId.evaluateItem;
+  let ten = ms365Config.tenant && ms365Config.tenant.evaluateItem;
+  let scopes = [];
+  if(ms365Config.scopes && ms365Config.scopes.selectAll) {
+    scopes = ms365Config.scopes.selectAll.map(x => x.evaluateItem).filter(s => s);
+  }
+  return { clientId: cid || "", tenant: ten || "common", scopes };
+
+
+// ── 2. WIDGET ──────────────────────────────────────────────────────────────
+// The auth card returned by $output (and rendered on this page). Hydrated by
+// src/auth/oauth2.js via index.html's module script.
+
+ms365AuthWidget() =>
+  return `<div class="ms365-widget" id="m365AuthCard">
+    <div class="ms365-head">
+      <div class="ms365-badge">M365</div>
+      <div class="ms365-titles">
+        <div class="ms365-title">Microsoft 365</div>
+        <div class="ms365-status" id="m365Status">Not signed in</div>
+      </div>
+    </div>
+    <div class="ms365-user" id="m365User" hidden></div>
+    <div class="ms365-tokens" id="m365Tokens" hidden></div>
+    <div class="ms365-actions">
+      <button type="button" class="ms365-btn ms365-primary" id="m365SignInBtn"><svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>Sign in with Microsoft</button>
+      <button type="button" class="ms365-btn" id="m365SignOutBtn" hidden>Sign out</button>
+      <button type="button" class="ms365-btn" id="m365ValidateBtn" hidden>Validate tenant</button>
+      <button type="button" class="ms365-btn" id="m365HealthBtn" hidden>Test connection</button>
+    </div>
+    <div class="ms365-tenant" id="m365TenantResult" hidden></div>
+    <div class="ms365-tenant" id="m365HealthResult" hidden></div>
+    <div class="ms365-graph" id="m365GraphBox" hidden>
+      <div class="ms365-graph-row">
+        <select id="m365GraphMethod" class="ms365-graph-method">
+          <option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option>
+        </select>
+        <input id="m365GraphPath" class="ms365-graph-path" value="/me" autocomplete="off" spellcheck="false">
+        <button type="button" class="ms365-btn" id="m365GraphRunBtn">Run</button>
+      </div>
+      <textarea id="m365GraphBody" hidden rows="2" placeholder="Optional JSON body for POST/PATCH"></textarea>
+      <pre class="ms365-graph-out" id="m365GraphOut"></pre>
+    </div>
+    <div class="ms365-config">
+      <label>Client (Application) ID <input id="m365ClientIdInput" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off"></label>
+      <label>Tenant <input id="m365TenantInput" value="common" autocomplete="off"></label>
+      <div class="ms365-redirect">Redirect URI <code id="m365RedirectCode">…</code></div>
+    </div>
+    <div class="ms365-msg" id="m365Msg"></div>
+  </div>`;
+
+
+// ── 3. ENTRY POINT ($output) ───────────────────────────────────────────────
+// Importers get the auth widget:  ms365 = {import:ms365-integration}
+// Then render it:  [ms365]  or  outputEl.innerHTML = root.ms365();
+// The full programmatic API (auth, Graph, mail, files, tasks, health) is
+// exposed on window.ms365 (populated via index.html's module script).
+
+$output(input, opts) =>
+  ms365AuthWidget();

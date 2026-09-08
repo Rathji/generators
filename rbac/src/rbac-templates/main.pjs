@@ -1,0 +1,375 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// RBAC — role-based access control for Perchance apps
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Define roles and permissions, assign them to users, and enforce them in the
+// UI AND authoritatively on the server. Two layers, one plugin:
+//
+//   1. PURE ENGINE (client-side, offline) — roles, wildcard permissions,
+//      deny-overrides, inheritance, bans, and RESOURCE SCOPING (ownership +
+//      sharing). For UI gating and single-player apps:
+//        rbac("engine")                      → engine object
+//        rbac("can", {perms, permission})    → boolean
+//        engine.can(user, "doc.edit", {owner, sharedWith})  → scoped check
+//   2. AUTHORITATIVE SERVER (server-plugin) — durable user/role state, admin
+//      auth (identity + password hash), admin RPCs, a persisted audit log, and
+//      bans enforced everywhere (rejected at login, live sessions revoked).
+//      THE real security layer — client-side checks are cosmetic:
+//        rbac("serverScript")  → paste into <script type="text/x-server-plugin">
+//        rbac("server")        → client helper mirroring the server RPCs
+//
+// RESOURCE SCOPING in one line: a role that grants "own.doc.*" lets a user do
+// whatever "*" means for docs they OWN; "share.doc.edit" lets them edit docs
+// SHARED with them. Grant those to your baseline / editor roles and you get
+// "owners manage their own resources, editors edit shared ones" for free.
+//
+// This plugin follows the structure of Rathji's plugins (this page is its
+// docs + live demo). See Rathji's Plugin Tutorials for the conventions:
+//   perchance.org/rathjis-plugin-tutorials
+//
+// NOTE: the [GENERATED] markers below (start with @@RBAC) are produced by
+// src/rbac-build.mjs from src/rbac-engine.js / src/rbac-server-core.js /
+// src/rbac-demo-server.js. Don't edit them by hand — edit the src/ files and
+// re-run the build.
+// ═══════════════════════════════════════════════════════════════════════════
+
+$meta
+  title = RBAC — role-based access control for Perchance apps
+  description = Define roles and permissions, assign them to users, and enforce them in the UI and authoritatively on the server. Roles support wildcard permissions, deny-overrides and inheritance, with durable server state and an admin API.
+  tags = rbac, roles, permissions, authorization, admin, server, security, access-control, plugin
+  header
+    mode = minimal
+
+
+// ── 0. IMPORTS (optional) ──────────────────────────────────────────────────
+// createServerSocket powers the authoritative server layer + the client
+// helper. simpleGenFooter is the standard Perchance footer on this docs page.
+
+createServerSocket = {import:server-plugin}
+simpleGenFooter = {import:simple-gen-footer}
+
+
+// ── 1. EMBEDDED DATA ───────────────────────────────────────────────────────
+// The server scripts are bundled here as base64 strings — a server script as
+// one giant string literal full of quotes/braces/backslashes can confuse the
+// Perchance pjs parser, while base64 content (A-Za-z0-9+/=) is safe. Decoded
+// on demand by rbacB64decode().
+
+initRbacData() =>
+  window.RBAC_PAYLOAD = {
+    version: 1,
+    serverScriptB64: "@@RBAC_SERVER_SCRIPT_B64@@",
+    demoServerScriptB64: "@@RBAC_DEMO_SERVER_SCRIPT_B64@@"
+  };
+  return window.RBAC_PAYLOAD;
+
+rbacDefaults() =>
+  if(!window.RBAC_PAYLOAD) initRbacData();
+  return window.RBAC_PAYLOAD;
+
+
+// ── 2. LISTS (example data) ────────────────────────────────────────────────
+// Reference role/permission definitions — copy them, or feed them to your own
+// engine / server setup. Not read by $output; they document the permission
+// scheme used throughout the plugin (and by the demo on this page).
+
+rbacExamplePerms
+  *
+  doc.read
+  doc.create
+  doc.edit
+  doc.publish
+  doc.delete
+  doc.share
+  own.doc.*
+  share.doc.edit
+  share.doc.publish
+  share.doc.delete
+
+rbacExampleRoles
+  viewer
+    perms = doc.read, doc.create, own.doc.*
+  editor
+    inherits = viewer
+    perms = doc.edit, doc.publish, share.doc.edit, share.doc.publish
+  moderator
+    inherits = editor
+    perms = doc.delete, share.doc.delete
+  owner
+    inherits = moderator
+    perms = *
+  guest
+    inherits = viewer
+    denies = doc.create
+
+
+// ── 3. HELPERS ─────────────────────────────────────────────────────────────
+// Keep $output thin. The real work lives in named helpers (one job each).
+// Helpers stay reachable from the page as root.rbacXxx(...), which makes them
+// easy to test.
+
+rbacResolve(v) =>
+  if(v == null) return v;
+  try {
+    if(v.evaluateItem !== undefined) return v.evaluateItem; // pjs node → its evaluated value
+  } catch(e) {}
+  return v; // raw JS value → as-is
+
+rbacB64decode(b64) =>
+  return new TextDecoder().decode(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+
+// Does a permission PATTERN grant a request? ("*" everything, "a.*" a subtree,
+// "a.b" exactly a.b). Pure, offline, side-effect-free.
+rbacMatchPermission(pattern, permission) =>
+  @@RBAC_MATCH_BODY@@
+
+// Convenience: does ANY pattern in `perms` grant `permission`? Accepts a plain
+// array or a Perchance list of patterns.
+rbacPermissionsInclude(perms, permission) =>
+  if (!perms) return false;
+  let list = perms;
+  try { if (list.selectAll !== undefined) list = list.selectAll; } catch(e) {}
+  for (let i = 0; i < list.length; i++) {
+    if (rbacMatchPermission(rbacResolve(list[i]), permission)) return true;
+  }
+  return false;
+
+// Resource-scoped helpers. A resource is { owner: userId, sharedWith: [ids] }.
+// Combined with the engine: engine.can(userId, perm, resource) checks the plain
+// permission, plus "own."+perm when the user owns the resource, plus
+// "share."+perm when the resource is shared with them. These two just report
+// the dimensions (they work on a plain object or a Perchance list).
+rbacIsOwner(user, resource) =>
+  if (user == null || resource == null) return false;
+  let r = rbacResolve(resource);
+  return !!r && r.owner === rbacResolve(user);
+
+rbacIsShared(user, resource) =>
+  if (user == null || resource == null) return false;
+  let u = rbacResolve(user);
+  let r = rbacResolve(resource);
+  if (!r || !r.sharedWith) return false;
+  let shared = r.sharedWith;
+  try { if (shared.selectAll !== undefined) shared = shared.selectAll; } catch(e) {}
+  for (let i = 0; i < shared.length; i++) {
+    if (rbacResolve(shared[i]) === u) return true;
+  }
+  return false;
+
+// Fresh client-side RBAC engine: defineRole / deleteRole / grant / revoke /
+// setUserRoles / removeUser / ban / unban / isBanned / roleExists / rolesOf /
+// directRoles / hasRole / can / isOwner / isShared / effectivePermissions /
+// listRoles / listUsers / roleDef / serialize / load.
+// can(userId, permission, resource?) — resource = { owner, sharedWith } adds
+// the own./share. scoped checks (see RESOURCE SCOPING in the header).
+rbacCreateEngine() =>
+  @@RBAC_ENGINE_BODY@@
+  return __rbacEngine();
+
+// Battery of self-checks against a fresh engine (pure, offline — no server).
+// Returns { ok, total, passed, failed, results: [{name, ok, detail}] } and
+// NEVER throws. Run it from a script (root.rbacSelfTest()), a list
+// ([rbac("selfTest")]), or the demo page's Self-test card.
+rbacSelfTest() =>
+  let eng = rbacCreateEngine();
+  let results = [];
+  const check = (name, cond, detail) => { results.push({ name, ok: !!cond, detail: detail || "" }); };
+
+  eng.defineRole("viewer", { perms: ["doc.read", "own.doc.*"] });
+  eng.defineRole("editor", { perms: ["doc.edit", "share.doc.edit"], inherits: ["viewer"] });
+  eng.defineRole("writer", { perms: ["doc.write"] });
+  eng.defineRole("denier", { perms: ["*"], denies: ["doc.delete"] });
+  eng.defineRole("cycleA", { inherits: ["cycleB"] });
+  eng.defineRole("cycleB", { inherits: ["cycleA"] }); // must not hang
+  eng.grant("carol", "viewer");
+  eng.grant("carol", "denier");
+  eng.grant("bob", "editor");
+  eng.grant("eve", "writer");
+  eng.grant("dave", "cycleA");
+
+  check("exact pattern matches", rbacMatchPermission("doc.edit", "doc.edit"));
+  check("star grants everything", rbacMatchPermission("*", "anything.at.all"));
+  check("subtree wildcard", rbacMatchPermission("doc.*", "doc.edit"));
+  check("subtree wildcard deeper", rbacMatchPermission("doc.*", "doc.a.b.c"));
+  check("trailing star matches base", rbacMatchPermission("doc.edit.*", "doc.edit"));
+  check("wrong branch rejected", !rbacMatchPermission("doc.*", "user.read"));
+  check("exact perm needs exact pattern", !rbacMatchPermission("doc.edit", "doc.publish"));
+
+  check("grant allows", eng.can("bob", "doc.edit"));
+  check("inherited grant (viewer→doc.read)", eng.can("bob", "doc.read"));
+  check("ungranted denied", !eng.can("bob", "doc.delete"));
+  check("rolesOf includes inherited", eng.rolesOf("bob").has("viewer") && eng.rolesOf("bob").has("editor"));
+  check("hasRole sees inherited", eng.hasRole("bob", "viewer"));
+  check("roleDef round-trips", (d => !!d && d.perms.includes("doc.edit") && d.inherits.includes("viewer"))(eng.roleDef("editor")));
+  check("listRoles", eng.listRoles().includes("editor"));
+  check("listUsers", eng.listUsers().includes("bob"));
+  check("effectivePermissions lists patterns", (() => { let p = eng.effectivePermissions("bob"); return p.has("doc.edit") && p.has("own.doc.*"); })());
+  check("deny overrides star grant", !eng.can("carol", "doc.delete"));
+  check("deny only scoped to its pattern", eng.can("carol", "doc.edit"));
+  check("cycle-safe rolesOf", eng.rolesOf("dave").has("cycleA") && eng.rolesOf("dave").has("cycleB"));
+
+  eng.defineRole("delBase", { denies: ["doc.delete"] });
+  eng.defineRole("delTop", { perms: ["doc.delete"], inherits: ["delBase"] });
+  eng.grant("shadow", "delTop");
+  check("inherited deny overrides a grant (no shadowing)", !eng.can("shadow", "doc.delete"));
+  eng.defineRole("pubGrant", { perms: ["doc.publish"] });
+  eng.defineRole("pubDeny", { denies: ["doc.publish"] });
+  eng.grant("siblingT", "pubGrant");
+  eng.grant("siblingT", "pubDeny");
+  check("deny overrides sibling grant regardless of grant order", !eng.can("siblingT", "doc.publish"));
+
+  eng.defineRole("ownRole", { perms: ["own.doc.*"] });
+  eng.defineRole("shareRole", { perms: ["share.doc.edit"] });
+  eng.grant("ownOnly", "ownRole");
+  eng.grant("shareOnly", "shareRole");
+
+  const res = { owner: "carol", sharedWith: ["bob"] };
+  check("owner gets own.doc.edit", eng.can("ownOnly", "doc.edit", { owner: "ownOnly", sharedWith: [] }));
+  check("shared user gets share.doc.edit", eng.can("shareOnly", "doc.edit", { owner: "carol", sharedWith: ["shareOnly"] }));
+  check("stranger denied on resource", !eng.can("eve", "doc.edit", res));
+  check("own grant not applied to others' docs", !eng.can("ownOnly", "doc.edit", { owner: "bob", sharedWith: [] }));
+  check("share grant needs membership", !eng.can("shareOnly", "doc.edit", { owner: "carol", sharedWith: [] }));
+  check("no resource = global check only", !eng.can("ownOnly", "doc.edit"));
+  check("isOwner", eng.isOwner("carol", res) && !eng.isOwner("bob", res));
+  check("isShared", eng.isShared("bob", res) && !eng.isShared("eve", res));
+  check("isOwner helper", rbacIsOwner("carol", res) && !rbacIsOwner("bob", res));
+  check("isShared helper", rbacIsShared("bob", res) && !rbacIsShared("eve", res));
+  check("permissionsInclude helper", rbacPermissionsInclude(["doc.*"], "doc.publish") && !rbacPermissionsInclude(["doc.read"], "doc.edit"));
+
+  eng.ban("eve");
+  check("ban denies everything", !eng.can("eve", "doc.write"));
+
+  eng.defineRole("grantsAll", { perms: ["*"] });
+  eng.grant("quinn", "grantsAll");
+  check("star grant allows before ban", eng.can("quinn", "anything.at.all"));
+  eng.ban("quinn");
+  check("ban overrides even a star grant", !eng.can("quinn", "anything.at.all"));
+
+  let snap = eng.serialize();
+  let eng2 = rbacCreateEngine();
+  eng2.load(snap);
+  check("serialize/load preserves roles+grants", eng2.can("ownOnly", "doc.edit", { owner: "ownOnly", sharedWith: [] }));
+  check("serialize/load preserves bans", eng2.isBanned("eve"));
+
+  eng.unban("eve");
+  check("unban restores", eng.can("eve", "doc.write"));
+
+  eng.grant("bob", "writer");
+  check("second role grants", eng.can("bob", "doc.write"));
+  eng.revoke("bob", "writer");
+  check("revoke removes grant", !eng.can("bob", "doc.write"));
+
+  eng2.setUserRoles("mallory", ["editor"]);
+  check("setUserRoles replaces", eng2.can("mallory", "doc.edit") && eng2.rolesOf("mallory").has("viewer"));
+  eng2.removeUser("mallory");
+  check("removeUser removes", !eng2.rolesOf("mallory").has("editor"));
+
+  eng.deleteRole("viewer");
+  check("deleting inherited role revokes it", !eng.can("bob", "doc.read"));
+
+  let failed = results.filter(r => !r.ok);
+  return { ok: failed.length === 0, total: results.length, passed: results.length - failed.length, failed: failed.length, results };
+
+// The app-agnostic server script. Paste the result into a
+// <script type="text/x-server-plugin"> block in your index.html, then set
+// RBAC_ADMIN_USERS / RBAC_ADMIN_PASSWORD_SHA256 at the top of it.
+rbacGetServerScript() =>
+  return rbacB64decode(rbacDefaults().serverScriptB64);
+
+// This page's own server script (generic core + the demo app extension) —
+// useful as a reference for writing your own server extension.
+rbacDemoServerScript() =>
+  return rbacB64decode(rbacDefaults().demoServerScriptB64);
+
+// Client <-> server helper: returns an object mirroring the server RPCs
+// (login / logout / me / can / hasRole / rolesOf / amAdmin / adminAuth /
+// adminLogout / grantRole / revokeRole / setUserRoles / defineRole /
+// deleteRole / banUser / forgetUser / canAs / adminSnapshot / adminAudit /
+// rpc / close). opts.socketFactory overrides the socket constructor (default:
+// the server-plugin's createServerSocket).
+rbacServerCreate(opts) =>
+  opts = opts || {};
+  let factory = opts.socketFactory;
+  if (!factory && typeof root.createServerSocket === "function") factory = root.createServerSocket;
+  if (!factory) throw new Error("rbacServerCreate: server-plugin missing — add `createServerSocket = {import:server-plugin}` to your main.pjs");
+  let socket = factory();
+  if (socket && typeof socket.binaryType !== "undefined") socket.binaryType = "arraybuffer";
+  let api = { socket: socket, opened: socket.opened };
+  api.rpc = async (method, data) => {
+    await socket.opened;
+    let payload = (data === undefined || data === null) ? "{}" : (typeof data === "string" ? data : JSON.stringify(data));
+    let reply;
+    try { reply = await socket.rpc[method](payload); }
+    catch (e) { throw new Error("server rejected " + method + ": " + (e && e.message ? e.message : String(e))); }
+    if (reply instanceof ArrayBuffer) reply = new TextDecoder().decode(reply);
+    let parsed;
+    try { parsed = JSON.parse(reply); } catch (e) { parsed = { ok: false, raw: reply }; }
+    if (parsed && parsed.error) throw new Error(parsed.error);
+    return parsed;
+  };
+  api.login = (userId) => api.rpc("login", { userId: userId });
+  api.logout = () => api.rpc("logout");
+  api.me = () => api.rpc("rbac.me");
+  api.can = (permission) => api.rpc("rbac.can", { permission: permission });
+  api.hasRole = (role) => api.rpc("rbac.hasRole", { role: role });
+  api.rolesOf = () => api.rpc("rbac.rolesOf");
+  api.amAdmin = () => api.rpc("rbac.amAdmin");
+  api.adminAuth = (password) => api.rpc("rbac.authenticateAdmin", { password: password });
+  api.adminLogout = () => api.rpc("rbac.adminLogout");
+  api.grantRole = (userId, role) => api.rpc("rbac.grantRole", { userId: userId, role: role });
+  api.revokeRole = (userId, role) => api.rpc("rbac.revokeRole", { userId: userId, role: role });
+  api.setUserRoles = (userId, roles) => api.rpc("rbac.setUserRoles", { userId: userId, roles: roles });
+  api.defineRole = (name, def) => api.rpc("rbac.defineRole", Object.assign({ name: name }, def || {}));
+  api.deleteRole = (name) => api.rpc("rbac.deleteRole", { name: name });
+  api.banUser = (userId, banned) => api.rpc("rbac.banUser", { userId: userId, banned: !!banned });
+  api.forgetUser = (userId) => api.rpc("rbac.forgetUser", { userId: userId });
+  api.canAs = (userId, permission, resource) => api.rpc("rbac.canAs", { userId: userId, permission: permission, resource: resource || undefined });
+  api.adminSnapshot = () => api.rpc("rbac.adminSnapshot");
+  api.adminAudit = () => api.rpc("rbac.adminAudit");
+  api.close = (code, reason) => { try { socket.close(code, reason); } catch (e) {} };
+  return api;
+
+
+// ── 4. ENTRY POINT ($output) ───────────────────────────────────────────────
+// The plugin-definition idiom (Rathji's tutorial, step 6 "Make your own
+// plugin"). One function, several call shapes:
+//   rbac("engine")                                    action string
+//   rbac("engine", {socketFactory: ...})              action + options
+//   rbac({action: "engine"})                          options object alone
+//   rbac("can", {perms: [...], permission: "doc.edit"})
+//   rbac("match", {pattern: "doc.*", permission: "doc.edit"})
+//   rbac("owns", {user, resource}) / rbac("shared", {user, resource})
+//   rbac("selfTest")                                  run the offline engine self-test
+//   rbac("server")                                    client helper
+//   rbac("serverScript") / rbac("demoServerScript")   server script text
+// Options are read through rbacResolve so Perchance lists work anywhere a
+// plain value would. Never throw — return a readable "(...)" placeholder.
+
+$output(input, opts) =>
+  let cmd = null;
+  let o = opts || {};
+  if (input == null) {
+    if (opts != null && opts.action !== undefined) { cmd = rbacResolve(opts.action); o = opts; }
+    else return rbacCreateEngine();
+  } else if (typeof input === "object" && input.action !== undefined) {
+    cmd = rbacResolve(input.action);
+    o = input;
+  } else {
+    cmd = rbacResolve(input);
+  }
+
+  if (typeof cmd !== "string") {
+    return "(rbac: expected an action string or an options object with an `action` — got " + JSON.stringify(cmd) + ")";
+  }
+
+  let c = cmd.trim().toLowerCase();
+  if (c === "engine" || c === "createengine" || c === "create") return rbacCreateEngine();
+  if (c === "serverscript" || c === "getserverscript" || c === "script") return rbacGetServerScript();
+  if (c === "demoserverscript" || c === "demoscript") return rbacDemoServerScript();
+  if (c === "server" || c === "client" || c === "createserver") return rbacServerCreate(o);
+  if (c === "can") return rbacPermissionsInclude(o.perms, o.permission === undefined ? null : rbacResolve(o.permission));
+  if (c === "match" || c === "matchpermission") return rbacMatchPermission(o.pattern === undefined ? null : rbacResolve(o.pattern), o.permission === undefined ? null : rbacResolve(o.permission));
+  if (c === "owns") return rbacIsOwner(o.user === undefined ? null : rbacResolve(o.user), o.resource);
+  if (c === "shared") return rbacIsShared(o.user === undefined ? null : rbacResolve(o.user), o.resource);
+  if (c === "selftest" || c === "self-test" || c === "test") return rbacSelfTest();
+  return "(rbac: unknown action \"" + input + "\" — try \"engine\", \"serverScript\", \"demoServerScript\", \"server\", \"can\", \"match\", \"owns\", \"shared\" or \"selfTest\")";
