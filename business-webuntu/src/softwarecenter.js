@@ -69,6 +69,9 @@
         : [];
     } catch (e) { apps = []; }
     apps = apps.filter((a) => a.type !== "link" && !a.stub);
+    // Built-ins the user "uninstalled" (hidden via AppStore) drop off the
+    // Installed list — they show up in the Hidden-apps section instead.
+    apps = apps.filter((a) => !(window.AppStore && window.AppStore.isHidden && window.AppStore.isHidden(a.id)));
     // User-installed apps ride on top (uninstallable, tagged "User").
     if (window.AppStore && window.AppStore.getApps) {
       for (const u of window.AppStore.getApps()) {
@@ -87,6 +90,28 @@
       }
     }
     return apps;
+  }
+
+  // Built-in apps the user has "uninstalled" (hidden via AppStore) — shown in
+  // the Installed tab's Hidden-apps section so they can be restored any time.
+  function loadHidden() {
+    let apps = [];
+    try {
+      apps = (root && root.appCatalog)
+        ? root.appCatalog.selectAll.map((n) => ({
+            id: n.id.evaluateItem,
+            name: n.name.evaluateItem,
+            icon: n.icon.evaluateItem,
+            color: n.color ? n.color.evaluateItem : null,
+            category: n.category ? n.category.evaluateItem : "Other",
+            blurb: n.blurb ? n.blurb.evaluateItem : "",
+            type: n.type ? n.type.evaluateItem : "app",
+            stub: n.stub ? n.stub.evaluateItem === true : false,
+          }))
+        : [];
+    } catch (e) { apps = []; }
+    return apps.filter((a) => a.type !== "link" && !a.stub &&
+      window.AppStore && window.AppStore.isHidden && window.AppStore.isHidden(a.id));
   }
 
   function loadCategories() {
@@ -140,9 +165,38 @@
     go.type = "button";
     go.addEventListener("click", () => { if (window.Apps) window.Apps.launch(app.id); });
     actions.appendChild(go);
+    // "Move to desktop" — toggles a real desktop shortcut for this app
+    // (window.Desktop.addToDesktop / removeFromDesktop persist in the FS).
+    let onDesk = !!(window.Desktop && window.Desktop.isOnDesktop && window.Desktop.isOnDesktop(app.id));
+    const dk = el("button", "swc-desk" + (onDesk ? " swc-desk-on" : ""), onDesk ? "On desktop ✓" : "Add to desktop");
+    dk.type = "button";
+    dk.title = onDesk
+      ? "Remove this app's shortcut from the desktop"
+      : "Add this app as a shortcut on the desktop";
+    dk.addEventListener("click", () => {
+      if (!window.Desktop) {
+        if (window.Notify) window.Notify.push("Desktop unavailable", "The desktop isn't ready yet.");
+        return;
+      }
+      const res = onDesk ? window.Desktop.removeFromDesktop(app.id) : window.Desktop.addToDesktop(app);
+      if (res && res.ok) {
+        onDesk = !onDesk;
+        dk.textContent = onDesk ? "On desktop ✓" : "Add to desktop";
+        dk.classList.toggle("swc-desk-on", onDesk);
+        dk.title = onDesk
+          ? "Remove this app's shortcut from the desktop"
+          : "Add this app as a shortcut on the desktop";
+        if (window.Notify) window.Notify.push(
+          onDesk ? "Added to desktop" : "Removed from desktop",
+          onDesk ? app.name + " now appears on your desktop." : app.name + "'s desktop shortcut was removed.");
+      } else if (window.Notify) {
+        window.Notify.push("Couldn't update desktop", (res && res.error) || "Something went wrong.");
+      }
+    });
+    actions.appendChild(dk);
+    const rm = el("button", "set-btn danger", "Uninstall");
+    rm.type = "button";
     if (app.uninstallable) {
-      const rm = el("button", "set-btn danger", "Uninstall");
-      rm.type = "button";
       rm.title = "Remove this installed app";
       rm.addEventListener("click", () => {
         if (window.AppStore) {
@@ -150,8 +204,43 @@
           if (window.Notify) window.Notify.push("Uninstalled " + app.name, "The app was removed from the OS.");
         }
       });
-      actions.appendChild(rm);
+    } else if (window.AppStore && window.AppStore.isCore && window.AppStore.isCore(app.id)) {
+      rm.disabled = true;
+      rm.title = "This core system app can't be uninstalled.";
+    } else {
+      rm.title = "Uninstall this built-in app — restore it any time from Hidden apps below";
+      rm.addEventListener("click", () => {
+        if (window.AppStore) {
+          window.AppStore.hideBuiltin(app.id);
+          if (window.Notify) window.Notify.push("Uninstalled " + app.name, "It's been removed from the Start menu — restore it from Hidden apps below.");
+        }
+      });
     }
+    actions.appendChild(rm);
+    card.append(head, blurb, actions);
+    return card;
+  }
+
+  function hiddenCard(app) {
+    const card = el("div", "swc-card swc-hidden-card");
+    const head = el("div", "swc-card-head");
+    const tile = el("div", "swc-tile swc-tile-dim", app.icon);
+    Object.assign(tile.style, tileStyle(app.color));
+    const titleBox = el("div", "swc-card-titlebox");
+    titleBox.appendChild(el("div", "swc-card-title", app.name));
+    titleBox.appendChild(el("div", "swc-card-cat", app.category));
+    const tag = el("span", "swc-source webuntu", "Uninstalled");
+    head.append(tile, titleBox, tag);
+    const blurb = el("div", "swc-blurb", app.blurb || "Built-in Webuntu app.");
+    const actions = el("div", "swc-actions");
+    const restore = el("button", "set-btn swc-go", "Restore");
+    restore.type = "button";
+    restore.title = "Reinstall this built-in app";
+    restore.addEventListener("click", () => {
+      if (window.AppStore) window.AppStore.restoreBuiltin(app.id);
+      if (window.Notify) window.Notify.push("Restored " + app.name, "The app is back in the Start menu and Software Center.");
+    });
+    actions.appendChild(restore);
     card.append(head, blurb, actions);
     return card;
   }
@@ -433,6 +522,20 @@
         body.appendChild(sec);
         sec.hidden = !!query && !sec.textContent.toLowerCase().includes(query);
       }
+      // Uninstalled built-ins live here so they can always be restored.
+      const hidden = loadHidden();
+      if (hidden.length) {
+        const sec = el("div", "swc-section");
+        const head = el("div", "swc-section-head");
+        head.appendChild(el("div", "swc-section-title", "Hidden apps"));
+        head.appendChild(el("div", "swc-section-note", "Uninstalled built-ins — restore to bring them back."));
+        sec.appendChild(head);
+        const grid = el("div", "swc-grid");
+        for (const app of hidden) grid.appendChild(hiddenCard(app));
+        sec.appendChild(grid);
+        body.appendChild(sec);
+        sec.hidden = !!query && !sec.textContent.toLowerCase().includes(query);
+      }
       const any = body.querySelector(".swc-section:not([hidden])");
       if (!any) body.appendChild(el("div", "swc-empty", 'No installed apps match "' + query + '".'));
     }
@@ -495,5 +598,5 @@
   }
 
   if (window.AppContent) window.AppContent["software-center"] = build;
-  window.SoftwareCenter = { build, loadAvailable, loadInstalled, loadCategories };
+  window.SoftwareCenter = { build, loadAvailable, loadInstalled, loadHidden, loadCategories };
 })();

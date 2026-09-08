@@ -143,6 +143,22 @@
   </div>
   <p class="note">Generate a hash in any browser: <code>await crypto.subtle.digest("SHA-256", new TextEncoder().encode("your-password")).then(b => Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2,"0")).join(""))</code> — paste the hex string as <code>RBAC_ADMIN_PASSWORD_SHA256</code>.</p>
 
+  <h3>Server-side API (inside the <code>text/x-server-plugin</code> block)</h3>
+  <div class="tblwrap">
+  <table>
+    <tr><th>Function</th><th>What it does</th></tr>
+    <tr><td><code>rbacInit()</code></td><td>Load durable state, rebuild the in-memory model — call once at boot</td></tr>
+    <tr><td><code>rbacBindIdentity(conn, userId)</code></td><td>Bind an authenticated connection — call from your own <code>login</code> handler only</td></tr>
+    <tr><td><code>rbacAllow(conn, perm, \{resource\})</code></td><td>Boolean check for a handler; the optional resource adds the <code>own.</code>/<code>share.</code> dimensions</td></tr>
+    <tr><td><code>rbacRequire(conn, perm, \{resource\})</code></td><td>Same check, but throws <code>"forbidden: missing permission …"</code> on denial</td></tr>
+    <tr><td><code>rbacIsAdmin(conn)</code> / <code>rbacRequireAdmin(conn)</code></td><td>Check / enforce admin status on a connection</td></tr>
+    <tr><td><code>rbacAuthenticateAdmin(conn, password)</code></td><td>Rate-limited (10/min/IP) password handshake against the SHA-256 hash</td></tr>
+    <tr><td><code>rbacKickUser(userId)</code></td><td>Revoke every live session — closes each with code <code>4001</code>, reason <code>"banned"</code></td></tr>
+    <tr><td><code>rbacAuditAdd(op, actor, detail)</code> / <code>rbacBump()</code></td><td>Write an audit entry / persist + notify <code>rbac:changed</code> after a mutation</td></tr>
+    <tr><td><code>rbacDb</code></td><td>The engine instance (define roles, grant, check) — same API as the client engine</td></tr>
+  </table>
+  </div>
+
   <h2>Client helper</h2>
   <p><code>rbac("server")</code> returns a helper mirroring the server RPCs. Call <code>login()</code> from <b>your own</b> authenticated flow — the server then binds the connection to a userId (identity binding is deliberately never exposed as an RPC):</p>
   <div id="code-client"></div>
@@ -183,6 +199,49 @@
   </table>
   </div>
   <p class="note">The core server RPCs are the same names under <code>rbac.*</code> (<code>rbac.me</code>, <code>rbac.can</code>, <code>rbac.hasRole</code>, <code>rbac.rolesOf</code>, <code>rbac.amAdmin</code>, <code>rbac.authenticateAdmin</code>, <code>rbac.adminLogout</code>, <code>rbac.adminSnapshot</code>, <code>rbac.adminAudit</code>, <code>rbac.canAs</code>, <code>rbac.defineRole</code>, <code>rbac.deleteRole</code>, <code>rbac.grantRole</code>, <code>rbac.revokeRole</code>, <code>rbac.setUserRoles</code>, <code>rbac.banUser</code>, <code>rbac.forgetUser</code>). Server-side, gate your own handlers with <code>rbacRequire(conn, "perm")</code> / <code>rbacAllow(conn, "perm")</code> — pass <code>\{resource: \{owner, sharedWith\}\}</code> for document-scoped checks — and bind identities after login with <code>rbacBindIdentity(conn, userId)</code>.</p>
+
+  <h2>How it works</h2>
+  <p>Permissions are dot-separated strings — <code>doc.edit</code>, <code>admin.users.ban</code> — and roles grant <b>patterns</b>. Matching walks both strings segment by segment:</p>
+  <div class="tblwrap">
+  <table>
+    <tr><th>pattern</th><th>grants</th></tr>
+    <tr><td><code>*</code></td><td>everything</td></tr>
+    <tr><td><code>doc.*</code></td><td><code>doc</code>, <code>doc.read</code>, <code>doc.a.b</code>, …</td></tr>
+    <tr><td><code>doc.edit</code></td><td>exactly <code>doc.edit</code> — never a sibling or a deeper permission</td></tr>
+    <tr><td><code>doc.edit.*</code></td><td><code>doc.edit</code> and anything below it</td></tr>
+  </table>
+  </div>
+  <p>A pattern never grants outside its own branch, and an exact pattern never grants deeper or sibling permissions.</p>
+
+  <h3>Grants, denies and the deny-overrides rule</h3>
+  <p>A role is <code>\{ perms, denies, inherits \}</code>. A request for permission <code>p</code> is allowed <b>iff</b> the user's whole role set (direct + every inherited role, transitively) contains a grant that matches <code>p</code> <b>and</b> contains no deny that matches <code>p</code>. Deny-overrides is <b>order-independent</b> — a deny reached through an inherited role or a sibling role always beats a grant anywhere in the set, so a grant can never shadow a deny.</p>
+
+  <h3>Role inheritance</h3>
+  <p>Roles inherit other roles transitively. <code>rolesOf(user)</code> returns the full closure, <code>hasRole</code> sees inherited roles, and <code>effectivePermissions</code> is the union of every granted pattern. Cycles (A inherits B inherits A) are handled with a visited set, so a self- or mutually-referential graph can never hang a check.</p>
+
+  <h3>Bans</h3>
+  <p>A banned user is denied everything — a ban overrides even a <code>*</code> grant — and is enforced at <b>every boundary</b>:</p>
+  <ol>
+    <li>the permission layer — <code>can()</code> returns <code>false</code>;</li>
+    <li>login — your handler should reject them (the demo does: "account banned");</li>
+    <li>live sessions — <code>banUser</code> revokes them via <code>rbacKickUser</code>, unbinding and closing each bound connection with code <code>4001</code>, reason <code>"banned"</code>.</li>
+  </ol>
+
+  <h3>Resource scoping</h3>
+  <p>A resource is <code>\{ owner, sharedWith \}</code>. <code>can(user, perm, resource)</code> runs up to <b>three</b> deny-aware checks and allows if any passes: the plain permission (global grant), <code>"own." + perm</code> (only when <code>resource.owner === user</code>), and <code>"share." + perm</code> (only when <code>resource.sharedWith</code> includes the user). Each dimension is a full grant+deny check. So grant <code>own.doc.*</code> to a baseline role ("members manage their own docs") and <code>share.doc.edit</code> to editors, and ownership/sharing work with no per-document ACL bookkeeping.</p>
+
+  <h3>The server layer</h3>
+  <p>The authoritative server runs inside a server-plugin socket. At boot it rebuilds its in-memory model from a <b>versioned binary layout</b> stored in the durable <code>state</code> Uint8Array — roles, user→role assignments, bans, and a ring of the last 200 audit entries. Corrupt or unknown-version state is discarded and rebuilt deny-by-default rather than crashing. Key mechanics:</p>
+  <ul>
+    <li><b>Identity binding</b> — <code>rbacBindIdentity(conn, userId)</code> is called <b>only</b> from your own authenticated <code>login</code> handler (it is deliberately not an RPC). <code>rbacAllow</code> / <code>rbacRequire</code> gate your handlers, optionally with <code>\{resource\}</code> for scoped checks.</li>
+    <li><b>Admin gate</b> — a connection is admin if it is bound to a userId in <code>RBAC_ADMIN_USERS</code>, or if it completed the rate-limited (10/min/IP) password handshake against <code>RBAC_ADMIN_PASSWORD_SHA256</code>. The script is public source, so only the SHA-256 <b>hash</b> of the admin password may live in it.</li>
+    <li><b>Mutations</b> — every admin mutation bumps a revision counter, persists to <code>state</code>, notifies subscribers on the <code>rbac:changed</code> pubsub channel, and is written to the audit ring.</li>
+    <li><b>Bans are live</b> — <code>banUser</code> kicks the user's current sessions on the spot (see Bans above).</li>
+  </ul>
+
+  <h2>Common patterns</h2>
+  <p>A few setups that recur in practice — baseline roles, deny-beats-star, and the admin flow — each as a short, copy-pasteable example:</p>
+  <div id="code-patterns"></div>
 
   <h2>Live demo</h2>
   <p class="note">This demo runs the plugin's real server core in a server-plugin socket. Log in as different users and watch the server deny what the UI let through — the textarea and buttons enable/disable from your <em>known</em> permissions (cosmetic), but every action is re-checked authoritatively. <b>Bans are enforced everywhere:</b> a banned user is rejected at login, and if they're online when banned, their live session is revoked on the spot (socket closed).</p>
@@ -1507,8 +1566,9 @@ self.onclose = function (ev) {
     { id: "code-engine", fname: "index.html", code: "const engine = root.rbac(\"engine\");          // or root.rbacCreateEngine()\nengine.defineRole(\"viewer\",  { perms: [\"doc.read\", \"own.doc.*\"] });\nengine.defineRole(\"editor\",  { perms: [\"doc.edit\"], inherits: [\"viewer\"] });\nengine.grant(\"carol\", \"viewer\");\nengine.grant(\"bob\", \"editor\");\nengine.can(\"bob\", \"doc.edit\");            // true  (global grant)\nengine.can(\"carol\", \"doc.edit\");          // false (viewer has no global doc.edit)\nconst doc = { owner: \"carol\", sharedWith: [\"bob\"] };\nengine.can(\"carol\", \"doc.edit\", doc);     // true  — she owns it (own.doc.*)\nengine.can(\"bob\", \"doc.edit\", doc);       // true  — shared with him\nengine.isOwner(\"carol\", doc);             // true" },
     { id: "code-check", fname: "main.pjs", code: "// from a list (square brackets render the boolean):\n[rbac(\"can\", { perms: rbacExamplePerms, permission: \"doc.edit\" })]\n[rbac(\"match\", { pattern: \"doc.*\", permission: \"doc.publish\" })]   // true\n\n// from a script — the same functions are root-level helpers:\nroot.rbacMatchPermission(\"doc.*\", \"doc.edit\")            // true\nroot.rbacPermissionsInclude([\"doc.read\"], \"doc.edit\")    // false" },
     { id: "code-owner", fname: "main.pjs", code: "// A resource is just { owner, sharedWith } — your app knows who owns what.\nconst doc = { owner: \"carol\", sharedWith: [\"bob\"] };\nengine.can(\"carol\", \"doc.edit\", doc);   // true  — owner path (own.doc.edit)\nengine.can(\"bob\",   \"doc.edit\", doc);   // true  — share path (share.doc.edit)\nengine.can(\"mallory\", \"doc.edit\", doc); // false — no global / own / share grant\n\n// $output convenience (works from lists too):\n[rbac(\"owns\",   { user: \"carol\", resource: doc })]    // true\n[rbac(\"shared\", { user: \"bob\",   resource: doc })]    // true" },
-    { id: "code-server", fname: "index.html", code: "<!-- THE authoritative layer. rbac(\"serverScript\") returns the whole rbac\n     server core — paste it where the comment says, set the two RBAC_ADMIN_*\n     constants at its top, then add YOUR handlers that gate with rbacRequire. -->\n<scr\" + \"ipt type=\"text/x-server-plugin\">\n  // ...rbac server core (paste rbac(\"serverScript\") output here)...\n  //   RBAC_ADMIN_USERS = [\"yourname\"];\n  //   RBAC_ADMIN_PASSWORD_SHA256 = \"<sha256-of-your-password>\";\n  //   rbacRequire(conn, \"doc.edit\");                       ← global gate\n  //   rbacRequire(conn, \"doc.edit\", { resource: res });   ← scoped gate\n</scr\" + \"ipt>" },
-    { id: "code-client", fname: "index.html", code: "const client = root.rbacServerCreate();        // or root.rbac(\"server\")\nawait client.opened;\nconst res = await client.login(\"bob\");         // YOUR auth, then the server binds identity\nconst canEdit = res.user.permissions.some(p => root.rbacMatchPermission(p, \"doc.edit\"));\ntry { await client.rpc(\"doc.edit\", { body }); }   // server re-checks authoritatively\ncatch (e) { /* \"forbidden: missing permission 'doc.edit'\" */ }" }
+    { id: "code-server", fname: "index.html", code: "<!-- rbac(\"serverScript\") returns the whole authoritative server core.\n     Paste it into this text/x-server-plugin block, set the two RBAC_ADMIN_*\n     constants at its top, then add YOUR handlers and gate them. -->\n<scr\" + \"ipt type=\"text/x-server-plugin\">\n  // ---- from rbac(\"serverScript\"): RBAC_ADMIN_USERS, RBAC_ADMIN_PASSWORD_SHA256,\n  //      rbacInit, rbacBindIdentity, rbacAllow, rbacRequire, rbacRpc, rbacDb ...\n\n  RBAC_ADMIN_USERS = [\"yourname\"];                 // trusted account(s)\n  RBAC_ADMIN_PASSWORD_SHA256 = \"<sha256-of-your-password>\";\n\n  rbacInit();                                       // load durable state\n  rbacDb.defineRole(\"editor\", { perms: [\"doc.edit\"], inherits: [\"viewer\"] });\n\n  // YOUR authenticated login — the ONLY place identity is bound:\n  \"login\": (ctx, data) => {\n    const userId = /* … from your credential check … */ \"bob\";\n    if (rbacDb.isBanned(userId)) throw new Error(\"account banned\");\n    rbacBindIdentity(ctx.conn, userId);\n    return JSON.stringify({ ok: true });\n  },\n\n  // YOUR gated handler — global gate, then resource-scoped gate:\n  \"doc.edit\": (ctx, data) => {\n    rbacRequire(ctx.conn, \"doc.edit\");                       // global\n    rbacRequire(ctx.conn, \"doc.edit\", { resource: res });  // owner/shared\n  },\n\n  self.rpc = Object.assign({}, rbacRpc, { login, \"doc.edit\": myDocEdit });\n  self.onclose = ({ conn }) => rbacForgetConn(conn);\n</scr\" + \"ipt>" },
+    { id: "code-client", fname: "index.html", code: "const client = root.rbacServerCreate();        // or root.rbac(\"server\")\nawait client.opened;\nconst res = await client.login(\"bob\");         // YOUR auth, then the server binds identity\nconst canEdit = res.user.permissions.some(p => root.rbacMatchPermission(p, \"doc.edit\"));\ntry { await client.rpc(\"doc.edit\", { body }); }   // server re-checks authoritatively\ncatch (e) { /* \"forbidden: missing permission 'doc.edit'\" */ }" },
+    { id: "code-patterns", fname: "main.pjs + index.html", code: "// Baseline: every member manages their OWN docs; editors also edit SHARED ones.\nengine.defineRole(\"member\", { perms: [\"doc.read\", \"own.doc.*\"] });\nengine.defineRole(\"editor\", { perms: [\"share.doc.edit\"], inherits: [\"member\"] });\n\n// A role that can do everything EXCEPT admin — the deny always wins.\nengine.defineRole(\"power\", { perms: [\"*\"], denies: [\"admin.*\"] });\n\n// Admin without a special account — rate-limited password handshake:\nawait client.adminAuth(\"high-entropy-password\");   // then admin RPCs work\nawait client.grantRole(\"carol\", \"moderator\");\nawait client.banUser(\"mallory\", true);             // kicks live sessions (4001 \"banned\")\n\n// Deny by default — and bans beat even a star grant:\nengine.can(\"nobody\", \"doc.read\");                 // false\nengine.grant(\"quinn\", \"power\"); engine.ban(\"quinn\");\nengine.can(\"quinn\", \"anything.at.all\");           // false" },
   ];
 
   function el(tag, cls, text) {

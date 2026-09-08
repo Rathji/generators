@@ -13,6 +13,21 @@
   const desktopEl = document.getElementById("desktop");
   const DESKTOP_PATH = "/home/user/Desktop";
   const SETTINGS_KEY = "webuntu.settings";
+  // Apps the user removed from the desktop (Software Center toggle). Removing a
+  // built-in shortcut is remembered here so boot-time re-seeding of the
+  // desktopDefaults doesn't resurrect it; the node itself is also deleted from
+  // the FS when it isn't a seed.
+  const DESK_REM_KEY = "webuntu.desktopRemoved";
+  function loadDesktopRemoved() {
+    try { return JSON.parse(localStorage.getItem(DESK_REM_KEY) || "[]"); }
+    catch (e) { return []; }
+  }
+  function saveDesktopRemoved(list) {
+    try { localStorage.setItem(DESK_REM_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+  function isRemovedFromDesktop(appId) {
+    return !!appId && loadDesktopRemoved().includes(appId);
+  }
 
   function loadSettings() {
     try { return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}"); }
@@ -389,7 +404,81 @@
   let selectedId = null;
 
   function loadItems() {
-    items = (window.FS && window.FS.list(DESKTOP_PATH)) || [];
+    const all = (window.FS && window.FS.list(DESKTOP_PATH)) || [];
+    // Uninstalled (hidden) built-in apps keep their desktop shortcut out of
+    // sight — AppStore.isHidden drives it, so it restores instantly. The same
+    // goes for apps the user removed via the Software Center toggle
+    // (webuntu.desktopRemoved), so re-seeded built-ins stay off the desktop.
+    const removed = new Set(loadDesktopRemoved());
+    items = (window.AppStore && window.AppStore.isHidden)
+      ? all.filter((it) => {
+          const id = it.meta && it.meta.appId;
+          if (window.AppStore.isHidden(id)) return false;
+          if (it.meta && it.meta.kind === "app" && removed.has(id)) return false;
+          return true;
+        })
+      : all.filter((it) => !(it.meta && it.meta.kind === "app" && removed.has(it.meta.appId)));
+  }
+
+  // The desktop's shortcut node for an app (kind:"app", meta.appId), or null.
+  function findDesktopShortcut(appId) {
+    if (!window.FS || !appId) return null;
+    return (window.FS.list(DESKTOP_PATH) || []).find((it) =>
+      window.FS.isShortcut(it) && it.meta && it.meta.kind === "app" && it.meta.appId === appId) || null;
+  }
+
+  // True when the app currently shows on the desktop (a shortcut exists and no
+  // "removed" override is in place).
+  function isOnDesktop(appId) {
+    if (isRemovedFromDesktop(appId)) return false;
+    return !!findDesktopShortcut(appId);
+  }
+
+  // Software Center's "move to desktop" action: creates a real desktop
+  // shortcut node for the app (persists in the FS tree like any desktop item)
+  // and clears any earlier removal override. Returns { ok } / { ok, error }.
+  function addToDesktop(app) {
+    if (!app || !app.id) return { ok: false, error: "No app to add." };
+    if (isOnDesktop(app.id)) return { ok: true, already: true };
+    // A (re-seeded) shortcut node may already exist even when the app isn't
+    // on the desktop — a removal override suppresses it. Reveal it instead of
+    // creating a second, duplicate shortcut.
+    if (findDesktopShortcut(app.id)) {
+      saveDesktopRemoved(loadDesktopRemoved().filter((x) => x !== app.id));
+      refresh();
+      return { ok: true, already: true };
+    }
+    saveDesktopRemoved(loadDesktopRemoved().filter((x) => x !== app.id));
+    const desktop = window.FS && window.FS.resolve(DESKTOP_PATH);
+    if (!desktop || !window.FS.isFolder(desktop)) return { ok: false, error: "The Desktop folder is missing." };
+    let name = app.name || app.id;
+    const taken = new Set(desktop.children.map((c) => c.name));
+    if (taken.has(name)) {
+      let i = 2;
+      while (taken.has(name + " (" + i + ")")) i++;
+      name = name + " (" + i + ")";
+    }
+    const node = window.FS.create(DESKTOP_PATH, {
+      name,
+      type: "shortcut",
+      icon: app.icon || "📦",
+      color: app.color || null,
+      meta: { kind: "app", appId: app.id, singleton: !!app.singleton, created: Date.now() },
+    });
+    refresh();
+    return node ? { ok: true } : { ok: false, error: "Couldn't create the shortcut." };
+  }
+
+  // Remove an app's desktop shortcut (the Software Center toggle off). The
+  // removal override keeps re-seeded built-ins from returning on next boot.
+  function removeFromDesktop(appId) {
+    if (!appId) return { ok: false, error: "No app id." };
+    const node = findDesktopShortcut(appId);
+    if (node && window.FS) window.FS.remove(window.FS.getPath(node));
+    const rm = loadDesktopRemoved();
+    if (!rm.includes(appId)) { rm.push(appId); saveDesktopRemoved(rm); }
+    refresh();
+    return { ok: true };
   }
 
   function tileStyle(color) {
@@ -498,6 +587,9 @@
     render,
     arrange,
     clearSelection,
+    isOnDesktop,
+    addToDesktop,
+    removeFromDesktop,
     setWallpaper: (source) => applyWallpaper(source, true),
     // Task 64 — apply a wallpaper without persisting it to the global setting
     // (workspaces use this for per-desktop overrides and for re-applying the

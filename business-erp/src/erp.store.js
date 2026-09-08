@@ -44,6 +44,7 @@
     index: "erp.store.v1.index",      // cached index JSON
     cache: "erp.store.v1.cache.",     // + docName → cached doc JSON
     keys: "erp.store.v1.keys.",       // + docName → edit key
+    alias: "erp.store.v1.alias.",     // + docName → recovered editable name (edit key lost)
     flushes: "erp.store.v1.flushes",  // doc names with pending canonical writes
     base: "erp.store.v1.base.",       // + docName → {rev, records|null} last-synced watermark (Task 3)
     conflicts: "erp.store.v1.conflicts", // JSON array of pending conflicts (Task 3)
@@ -77,7 +78,22 @@
     const ed = editable();
     if (!ed) return { error: "upload_plugin_unavailable", message: "The document store needs the upload plugin.", name };
     try {
-      const res = await ed.set(name, json, editKey ? { editKey: editKey } : undefined) || {};
+      const target = aliasGet(name) || name;
+      let res = await ed.set(target, json, editKey ? { editKey: editKey } : undefined) || {};
+      if (res.error === "edit_key_required") {
+        /* Self-heal: the canonical file exists but we no longer hold its
+           edit key (localStorage was cleared while the server copy stayed,
+           or the key was lost). Adopt a fresh editable name for this doc
+           and remember the alias so every later read/write routes through
+           it; the orphaned file is abandoned. */
+        const fresh = target + "-" + Math.random().toString(36).slice(2, 8);
+        const res2 = await ed.set(fresh, json) || {};
+        if (res2.error) return { error: res2.error, name, recovered: false };
+        if (res2.superseded) return Object.assign({}, res2, { name, recovered: true });
+        if (res2.editKey) { keyPut(fresh, res2.editKey); keyPut(name, res2.editKey); }
+        aliasPut(name, fresh);
+        return Object.assign({}, res2, { created: true, recovered: true, name });
+      }
       if (res.error) return { error: res.error, name };
       return res; // { created?, unchanged?, superseded?, editKey?, error? }
     } catch (e) {
@@ -89,7 +105,7 @@
     const ed = editable();
     if (!ed) return { error: "upload_plugin_unavailable", message: "The document store needs the upload plugin.", name };
     try {
-      return { name, text: await ed.get(name) }; // text is null when the file doesn't exist yet
+      return { name, text: await ed.get(aliasGet(name) || name) }; // text is null when the file doesn't exist yet
     } catch (e) {
       return { error: "editable_get_exception", message: (e && e.message) || String(e), name };
     }
@@ -171,6 +187,8 @@
   function cachePut(name, doc) { writeLS(LS.cache + name, serialize(doc)); }
   function keyGet(name) { return readLS(LS.keys + name); }
   function keyPut(name, k) { if (k) writeLS(LS.keys + name, k); }
+  function aliasGet(name) { return readLS(LS.alias + name); }
+  function aliasPut(name, alias) { if (alias && alias !== name) writeLS(LS.alias + name, alias); }
 
   /* ─────────────────── Task 3: sync watermark, conflicts, merges ─────────────────── */
 

@@ -34,8 +34,21 @@
   }
   function save(list) {
     try { localStorage.setItem(KEY, JSON.stringify(list)); } catch (e) {}
+    notifyChanged();
+  }
+
+  // Every install/uninstall/hide/restore funnels through here: the Start menu
+  // re-reads the catalog on open, the Software Center listens to the event,
+  // the taskbar re-renders its pins and the desktop re-filters its shortcuts.
+  function notifyChanged() {
     if (window.Apps && window.Apps.refresh) window.Apps.refresh();
+    if (window.SystemBar && window.SystemBar.refreshPins) window.SystemBar.refreshPins();
+    if (window.Desktop && window.Desktop.refresh) window.Desktop.refresh();
     document.dispatchEvent(new CustomEvent("webuntu-appschange"));
+  }
+  function saveHidden(list) {
+    try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(list)); } catch (e) {}
+    notifyChanged();
   }
 
   // ---------- helpers ----------
@@ -79,6 +92,39 @@
 
   function isInstalled(id) {
     return !!load().find((a) => a.id === id);
+  }
+
+  // ---------- hidden built-ins ----------
+  // "Uninstalling" a built-in Webuntu app (declared in main.pjs's appCatalog)
+  // hides it: the id is recorded in localStorage and every surface (Start
+  // menu, Software Center, taskbar pins, desktop shortcuts, Assistant search)
+  // filters it out. User-installed apps are TRUE uninstalls (see uninstall());
+  // hidden built-ins can always be restored from Software Center's Hidden-apps
+  // section. Core apps (the restore/control surfaces themselves) can't be
+  // hidden.
+  const HIDDEN_KEY = "webuntu.hiddenapps";
+  const CORE_IDS = new Set(["software-center", "settings"]);
+
+  function getHidden() {
+    try { return JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]"); }
+    catch (e) { return []; }
+  }
+  function isHidden(id) { return !!id && getHidden().includes(id); }
+  function isCore(id) { return CORE_IDS.has(id); }
+  function hideBuiltin(id) {
+    if (isCore(id)) return { ok: false, error: "This core system app can't be uninstalled." };
+    const list = getHidden();
+    if (!list.includes(id)) list.push(id);
+    saveHidden(list);
+    if (window.WM) {
+      const w = window.WM.findByAppId(id);
+      if (w && window.WM.close) window.WM.close(w.id);
+    }
+    return { ok: true };
+  }
+  function restoreBuiltin(id) {
+    saveHidden(getHidden().filter((x) => x !== id));
+    return { ok: true };
   }
 
   function uniqueId(base) {
@@ -213,7 +259,21 @@
     }
   }
 
+  function refreshSurfaces() {
+    if (window.Apps && window.Apps.refresh) window.Apps.refresh();
+    if (window.SystemBar && window.SystemBar.refreshPins) window.SystemBar.refreshPins();
+    if (window.Desktop && window.Desktop.refresh) window.Desktop.refresh();
+  }
+
   registerAll();
+  // appstore.js loads after apps.js, so re-merge user apps into the catalog
+  // now that the AppContent builders are registered.
+  refreshSurfaces();
+  // The taskbar pins and desktop icons were rendered by earlier scripts before
+  // this file loaded, so they can't have known about hidden built-ins. The
+  // perchance engine replays the load event once every script has finished —
+  // re-run the surface refresh then, so boot-time renders are filtered too.
+  window.addEventListener("load", refreshSurfaces);
 
   window.AppStore = {
     getApps: load,
@@ -221,6 +281,11 @@
     install,
     installFromCatalog,
     uninstall,
+    getHidden,
+    isHidden,
+    isCore,
+    hideBuiltin,
+    restoreBuiltin,
     parseSlug,
     normalizeUrl,
     prettyName: prettify,

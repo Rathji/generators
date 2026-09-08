@@ -147,6 +147,13 @@
     };
     list.push(journal);
     await fsave(list);
+    if (entry.source === "bank") {
+      await master.audit({ action: "bank_entry", targetType: "journal", targetId: journal.id, summary: (entry.memo || "Bank entry") + " posted (" + money(journal.totalDebit) + ")." });
+    } else if (entry.source === "reversal") {
+      await master.audit({ action: "reverse_journal", targetType: "journal", targetId: entry.refId != null ? entry.refId : journal.id, summary: "Reversed journal " + (entry.refNum || journal.num) + (entry.memo ? " — " + entry.memo : "") + "." });
+    } else {
+      await master.audit({ action: "post_journal", targetType: "journal", targetId: journal.id, summary: "Posted journal " + journal.num + " (" + money(journal.totalDebit) + ") to the ledger." });
+    }
     return journal;
   };
 
@@ -621,6 +628,7 @@
     j.bankCleared = !!cleared;
     j.bankStatementRef = statementRef || "";
     await fsave(list);
+    await master.audit({ action: "clear_bank", targetType: "journal", targetId: j.id, summary: "Bank register: journal " + j.num + " marked " + (cleared ? "cleared" : "uncleared") + (statementRef ? " (ref " + statementRef + ")" : "") + "." });
     return j;
   };
 

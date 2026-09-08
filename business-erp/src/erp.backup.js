@@ -147,6 +147,7 @@
       else written.push(name);
     }
     store.resetLocal(); // local cache now mirrors the restored canonical
+    await ERP.master.audit({ action: "restore_backup", targetType: "backup", targetId: 0, summary: "Restored " + written.length + " document(s) from a backup bundle" + (opts.docs ? " (selected)" : "") + "." });
     return { written, errors, partial: errors.length > 0 };
   };
 

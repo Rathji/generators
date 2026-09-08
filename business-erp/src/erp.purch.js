@@ -526,6 +526,7 @@
 
   /* Pay a supplier bill: posts the payment and clears the referenced bill. */
   P.payBill = async function (bill, amount, method, date, ref) {
+    if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("pay_bill");
     if (!bill || bill.kind !== "bill") throw new Error("Not a bill.");
     amount = Number(amount);
     if (!isFinite(amount) || amount <= 0) throw new Error("Enter a payment amount greater than zero.");

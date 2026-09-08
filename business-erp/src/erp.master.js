@@ -73,10 +73,25 @@
 
   master.saveParties = (r) => save(MASTER.parties, r);
   master.saveCatalog = (r) => save(MASTER.catalog, r);
-  master.saveChart = async (r) => { if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("chart_update"); return save(MASTER.chart, r); };
-  master.saveTaxes = async (r) => { if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("tax_update"); return save(MASTER.taxes, r); };
+  master.saveChart = async (r) => {
+    if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("chart_update");
+    const res = await save(MASTER.chart, r);
+    if (!res.error) await master.audit({ action: "chart_update", targetType: "config", targetId: 0, summary: "Chart of accounts updated — " + (r || []).length + " account(s)." });
+    return res;
+  };
+  master.saveTaxes = async (r) => {
+    if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("tax_update");
+    const res = await save(MASTER.taxes, r);
+    if (!res.error) await master.audit({ action: "tax_update", targetType: "config", targetId: 0, summary: "Tax rates updated — " + (r || []).length + " rate(s)." });
+    return res;
+  };
   master.saveDefaults = (r) => save(MASTER.defaults, r);
-  master.saveSettings = async (r) => { if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("settings_update"); return save(MASTER.settings, r); };
+  master.saveSettings = async (r) => {
+    if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("settings_update");
+    const res = await save(MASTER.settings, r);
+    if (!res.error) await master.audit({ action: "settings_update", targetType: "config", targetId: 0, summary: "Fiscal profile / numbering settings updated." });
+    return res;
+  };
 
   /* Convenience: the posting-defaults record as a map. */
   async function defaultsMap() {

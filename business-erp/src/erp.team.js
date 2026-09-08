@@ -80,6 +80,7 @@
   function roleLabel(r) { return r === 2 ? "owner" : r === 1 ? "manager" : "staff"; }
   function roleIndex(r) { return r === "owner" ? 2 : r === "manager" ? 1 : 0; }
   function roleBadge(r) { return '<span class="erp-badge tone-' + (r === 2 ? "danger" : r === 1 ? "info" : "muted") + '">' + roleLabel(r) + "</span>"; }
+  function shortId(id) { return '<code title="' + esc(id || "") + '">' + esc((id || "").slice(0, 8) + "…") + "</code>"; }
 
   /* ─────────────────── transport / socket ─────────────────── */
 
@@ -135,19 +136,17 @@
   function connect() {
     if (transport) return;
     if (socket && (socket.readyState === 0 || socket.readyState === 1)) return;
+    let s = null;
     try {
-      socket = makeSocket();
-    } catch (e) { socket = null; }
-    if (!socket) { setStatus("offline"); scheduleReconnect(); return; }
+      s = makeSocket();
+    } catch (e) { s = null; }
+    if (!s) { setStatus("offline"); scheduleReconnect(); return; }
+    socket = s;
     setStatus("connecting");
-    socket.addEventListener("open", () => { retryDelay = 1000; doHello(); });
-    socket.addEventListener("message", (ev) => {
-      try { onHubMessage(JSON.parse(ev.data)); } catch (e) {}
-    });
-    socket.addEventListener("close", (ev) => {
-      setStatus("offline");
-      scheduleReconnect(ev && ev.code);
-    });
+    const live = () => socket === s;
+    s.addEventListener("open", () => { if (!live()) return; retryDelay = 1000; doHello(); });
+    s.addEventListener("message", (ev) => { if (!live()) return; try { onHubMessage(JSON.parse(ev.data)); } catch (e) {} });
+    s.addEventListener("close", (ev) => { if (!live()) return; setStatus("offline"); scheduleReconnect(ev && ev.code); });
   }
 
   T.start = function () {
@@ -357,10 +356,11 @@
 
   function statusHtml(showAction) {
     const on = T.online;
-    const role = me ? roleLabel(me.role) : (ERP.role || "owner");
+    const r = me ? me.role : roleIndex(ERP.role || "owner");
+    const role = roleLabel(r);
     return (
       '<section class="erp-card">' +
-      '<header class="erp-card-head"><h3>Hub status</h3><div class="erp-card-actions">' + roleBadge(role) + "</div></header>" +
+      '<header class="erp-card-head"><h3>Hub status</h3><div class="erp-card-actions">' + roleBadge(r) + "</div></header>" +
       '<div class="erp-card-body">' +
       '<div class="erp-team-statusline"><span class="erp-team-dot ' + (on ? "green" : status === "connecting" ? "amber" : "gray") + '"></span>' +
       "<b>" + (on ? "Online — server-authorised mode" : status === "connecting" ? "Connecting…" : "Offline — local demo mode") + "</b></div>" +
@@ -436,7 +436,7 @@
   function usersHtml(users) {
     const rows = users.length
       ? users.map((u) =>
-        '<tr><td>' + esc(u.displayName || u.userId) + "</td><td><code>" + esc(u.userId) + "</code></td><td>" +
+        '<tr><td>' + esc(u.displayName || u.userId) + "</td><td>" + shortId(u.userId) + "</td><td>" +
         '<select data-act="tm-set-role" data-arg="' + esc(u.userId) + '" aria-label="Role for ' + esc(u.displayName) + '">' +
         '<option value="owner"' + (u.role === 2 ? " selected" : "") + ">Owner</option>" +
         '<option value="manager"' + (u.role === 1 ? " selected" : "") + ">Manager</option>" +
@@ -459,7 +459,7 @@
   function auditHtml(tail) {
     const rows = tail.length
       ? tail.map((a) =>
-        '<tr><td>' + a.seq + "</td><td>" + ui.dateTime(new Date((a.ts || 0) * 1000).toISOString()) + "</td><td>" + roleBadge(a.role) + "</td><td><code>" + esc(a.user) + "</code></td><td>" + esc(a.action) + "</td></tr>"
+        '<tr><td>' + a.seq + "</td><td>" + ui.dateTime(new Date((a.ts || 0) * 1000).toISOString()) + "</td><td>" + roleBadge(a.role) + "</td><td>" + shortId(a.user) + "</td><td>" + esc(a.action) + "</td></tr>"
       ).join("")
       : '<tr class="erp-empty-row"><td colspan="5">No server-signed actions yet. Sensitive changes (postings, payments, closes, chart/tax/settings edits, backups) are recorded here by the hub.</td></tr>';
     return (

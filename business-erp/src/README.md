@@ -52,6 +52,15 @@ tests, flip it to `[x]`, stop for review.
   `ERP.backup.backupBundle/downloadBackup/publishBackup/publishedBackup/
   validateBundle/restoreBundle`, `capacity()`, `archiveDoc/archivedDocs/
   viewArchived/restoreArchive`, and `renderPanel` (hosted under Reports).
+- `src/erp.team.js` — multi-user & realtime hub client (`ERP.team`, Tasks
+  41–44): connects to the server hub in index.html, exchanges a hello for a
+  server-authorised role, exposes `T.online/status/me`, `T.guard(action)`
+  (server-side role authorization), `T.authAdmin(password)` (owner unlock),
+  `T.setRole/removeUser/listUsers/peers/whoami/auditTail`, `T.signAudit`
+  (signed audit entries through `master.audit`), `T.announceChange` (committed
+  writes announce the new doc version) and `T.renderTeam` (Reports → "Team &
+  access" tab + topbar state + #teamBtn modal). `T.setTransport(t)` lets tests
+  swap in an in-memory hub.
 - `src/erp.crm.js` — CRM controller (`ERP.crm`, Tasks 10–13): party directory
   tab (typed customers/suppliers with contacts/terms/credit/merge), CRM
   records tab (source/owner/status/tags + activity timeline + reminders),
@@ -97,7 +106,12 @@ tests, flip it to `[x]`, stop for review.
   `await window.ERPReportTest()` (Tasks 33–36) and `await window.ERPQualityTest()`
   (Tasks 37–39, 71 checks — invariant checks, unbalanced-entry detection +
   recovery, auto re-check, error copy, fixtures, backup/restore, sync conflict,
-  system-health UI) in the live page.
+  system-health UI), `await window.ERPTeamTest()` (Tasks 41–44, 27 checks — hub
+  connect/role bootstrap, guard enforcement, admin unlock, registry management,
+  signed + denied audit through master, live-change re-sync, committed-write
+  announce, offline degradation) and `await window.ERPRecoveryTest()` (12 checks
+  — editable edit-key loss self-healing via the localStorage alias) in the live
+  page.
 - `src/template.css` — base design tokens + shared components (from
   business-template).
 - `src/erp.css` — shell styles (sidebar, topbar, states, KPI cards, responsive).
@@ -569,6 +583,64 @@ tests, flip it to `[x]`, stop for review.
   the system-health UI (dot turns green, Reports → System health table ≥ 7
   rows), and a save/load fixture round-trip for every module document.
 
+## Task 41+42+43+44 (done) — multi-user & realtime team hub
+
+- **Server hub** (in `index.html`, the `<script type="text/x-server-plugin">`
+  block): authoritative registry of users (hello → staff by default), roles
+  (0 staff / 1 manager / 2 owner), the SHA-256 of a single admin password
+  (`authAdmin`), server-side `authorize` per action (each sensitive action maps
+  to a minimum role), a signed audit ring (seq, ts, role, user, action) that
+  broadcasts `audit` events to managers+, an announce/index/`chg` fan-out for
+  document-version changes, `peers`/`listUsers`/`setRole`/`removeUser`
+  (owner-only), and coarse per-connection rate limiting grouped by network
+  signal. The hub holds *identity and version metadata only* — document
+  payloads stay in the editable store, so a compromised client cannot read or
+  write other users' data through the hub itself.
+- **Role & access model** (Task 41): the client's `ERP.role` is *overridden by
+  the server* on connect — the topbar "Acting as" selector is locked while the
+  hub is online. Every guarded action calls `T.guard(action)` before it runs;
+  the hub authorises by role, so hiding buttons is never the security boundary.
+  Guarded actions: `post_journal`, `reverse_journal`, `receive_payment`,
+  `bank_entry`, `clear_bank`, `close_period`, `reopen_period`, `chart_update`,
+  `tax_update`, `settings_update`, `pay_bill`, `restore_backup`,
+  `publish_backup`, `archive_doc` (all manager+); `credit_note`,
+  `invoice_from_order` (staff+).
+- **Signed audit** (Tasks 44): `master.audit` routes through `ERP.team.signAudit`
+  when online — the hub returns a signed `{id, actor, userId, role}` and the
+  entry is recorded as verified; denied actions are recorded as
+  `denied:<action>` with a "Rejected by the team server…" summary. The finance
+  and master mutators (`postJournal`, `markCleared`, `saveChart`, `saveTaxes`,
+  `saveSettings`, `payBill`, restore) now audit through the hub so the true
+  actor is captured even in multi-user mode.
+- **Realtime concurrency** (Tasks 42–43): committed writes call
+  `T.announceChange` → the hub records the new doc version and broadcasts
+  `chg`; every connected client re-syncs that document from the canonical
+  store (the same version-checked CAS layer as Task 3), so two users on the
+  same record see each other's saved changes live with a "changed" marker.
+  When the hub is unreachable the app degrades gracefully to local mode —
+  guards no-op, writes proceed unverified, and the sync/conflict machinery
+  handles convergence on reconnect.
+- **Admin unlock & first-time setup**: the owner authenticates once per
+  session via the Team modal ("Unlock as owner") with the admin password
+  (plaintext is given to the owner in chat and stored nowhere — only its
+  SHA-256 hash lives in the server block; the hash is acceptable because the
+  password is a long random string, not a human-chosen one). `authAdmin`
+  grants the *connection* owner rights and promotes the local role.
+- **Editable edit-key self-healing** (`ERPRecoveryTest`, 12 checks): if the
+  editable layer reports `edit_key_required` (the cached edit key was lost —
+  e.g. another device re-created the document), the store adopts a fresh
+  random editable name, keeps a `erp.store.v1.alias.<name>` → real-name map in
+  localStorage, and reads/writes resolve through the alias, so the app recovers
+  with no data loss. The real store namespace the alias points at is preserved.
+- **Tests**: `await window.ERPTeamTest()` (27 checks) runs the client against
+  an in-memory hub mirroring the index.html protocol — hello/role bootstrap,
+  staff-guard rejection vs owner pass, admin unlock + bad password, owner
+  registry management (demote/promote/remove), signed audit entry + server ring
+  + denied audit, live `chg` re-sync from canonical, committed-write announce
+  (a real, non-noop write), and offline degradation (guard no-op + journal
+  still posts locally). `await window.ERPRecoveryTest()` (12 checks) simulates
+  edit-key loss against a fake editable backend and verifies alias recovery.
+
 ## User workflow per module (the day-to-day playbook)
 
 **Dashboard** — the landing view. Read the KPI grid: cash, receivables,
@@ -626,6 +698,16 @@ bundle, restores it, archives closed fiscal years to keep documents under the
 ceiling, and shows capacity. **System health** runs the seven accounting
 invariant checks (also surfaced as the topbar dot) with recovery guidance per
 check.
+
+**Team & access** (Reports → Team & access, plus the topbar hub dot and
+#teamBtn modal) — the hub connects automatically; the dot shows online/amber/
+offline and the topbar "Acting as" role is server-authorised while online. The
+owner unlocks once per session with the admin password (Team modal), then can
+promote/demote staff↔manager↔owner and remove users; the access tab shows who's
+online, the identity, and the signed audit ring. Staff see their own status and
+identity; manager+ actions are authorised by the hub, denied actions are
+recorded as denied in the audit log, and remote edits to the same record appear
+live (with a changed marker) via the version-change fan-out.
 
 ## Adding a new ERP module (the full playbook)
 

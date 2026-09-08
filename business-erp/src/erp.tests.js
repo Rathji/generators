@@ -2223,7 +2223,7 @@
           } else out = { ok: false, err: "no_method" };
           return Promise.resolve(JSON.stringify(out));
         },
-        open() {},
+        open() { if (typeof transport.onopen === "function") transport.onopen(); },
         deliver(obj) { if (typeof transport.onmessage === "function") transport.onmessage(JSON.stringify(obj)); },
       };
       return { transport, users, ring, versionIndex, announced };
@@ -2254,7 +2254,7 @@
       mark("2 guard enforcement");
       let den = null;
       try { await T.guard("close_period"); } catch (e) { den = e; }
-      check("team: staff guard rejects an owner action", !!den && /owner/.test(den.message), den && den.message);
+      check("team: staff guard rejects a manager action", !!den && /manager/.test(den.message), den && den.message);
       let g1 = true;
       try { await T.guard("post_journal"); } catch (e) { g1 = false; }
       check("team: staff guard rejects a manager action", g1 === false);
@@ -2307,6 +2307,7 @@
 
       /* ── 6. Live-change fan-out re-syncs from the canonical store ── */
       mark("6 live change fan-out");
+      await master.saveParties([{ id: 1, name: "Acme Corp", type: "customer", contacts: [], notes: "" }]);
       const partiesName = store.docName("parties", null);
       const raw = JSON.parse(srv.files[partiesName]);
       raw.rev = (raw.rev || 0) + 1;
@@ -2320,7 +2321,7 @@
       /* ── 7. Committed writes announce the new version ── */
       mark("7 announce hook");
       const beforeAnn = hub.announced.length;
-      await master.saveParties([{ id: 1, name: "Acme Corp", type: "customer", contacts: [], notes: "" }]);
+      await master.saveParties([{ id: 1, name: "Acme Corp", type: "customer", contacts: [], notes: "" }, { id: 2, name: "Globex", type: "supplier", contacts: [], notes: "" }]);
       const announced = hub.announced.slice(beforeAnn);
       check("team: committed write announces the doc version", announced.some((a) => a.doc === partiesName && a.rev >= 2), JSON.stringify(announced));
 
@@ -2345,6 +2346,100 @@
       try { master.flush(); } catch (e) {}
       ERP.role = "owner";
       F.invalidate(); S.invalidate(); P.invalidate(); I.invalidate();
+    }
+
+    const passed = results.filter((r) => r.ok).length;
+    const failed = results.length - passed;
+    return { passed, failed, results };
+  };
+
+  /* ============================================================
+     Store self-heal test — editable edit-key recovery (Phase 10)
+     Run via page_eval:  await window.ERPRecoveryTest()
+     Simulates a canonical file that exists server-side while the
+     local edit key was lost (localStorage cleared while the server
+     copy stayed). The next write must adopt a fresh editable name,
+     remember it as an alias, and keep working thereafter.
+     ============================================================ */
+
+  window.ERPRecoveryTest = async function (opts) {
+    opts = opts || {};
+    results.length = 0;
+    const ERP = window.ERP;
+    const store = ERP.store;
+    const master = ERP.master;
+    const mark = (s) => { if (opts.debug) console.log("[ERPRecoveryTest]", s); };
+    const uid = Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+
+    function makeServer() {
+      const files = {};
+      const calls = [];
+      return {
+        files, calls,
+        async get(name) { calls.push(["get", name]); return Object.prototype.hasOwnProperty.call(files, name) ? files[name] : null; },
+        async set(name, json, o) {
+          calls.push(["set", name, !!(o && o.editKey)]);
+          const prev = files[name];
+          if (prev !== undefined && !(o && o.editKey)) return { created: false, unchanged: false, editKey: null, superseded: false, error: "edit_key_required" };
+          const created = prev === undefined;
+          files[name] = json;
+          return { created, unchanged: prev === json, editKey: "k_" + name, superseded: false, error: null };
+        },
+      };
+    }
+
+    try {
+      const srv = makeServer();
+      store.useBackend(srv);
+      store.resetAllLocal();
+      master.flush();
+
+      const name = "erp-v1-recovery-" + uid;
+
+      /* ── 1. Create normally (key issued + cached) ── */
+      mark("1 create");
+      const r1 = await store.set(name, [{ id: 1 }]);
+      check("recovery: initial create succeeds", !r1.error && r1.rev >= 1, JSON.stringify(r1 && (r1.error || r1.rev)));
+      check("recovery: edit key cached locally", !!localStorage.getItem("erp.store.v1.keys." + name));
+
+      /* ── 2. Lost key: only the edit key is gone (base/cache intact) ── */
+      mark("2 lost key");
+      localStorage.removeItem("erp.store.v1.keys." + name);
+      localStorage.removeItem("erp.store.v1.alias." + name);
+      const r2 = await store.set(name, [{ id: 1 }, { id: 2 }]);
+      check("recovery: write with a lost key self-heals instead of erroring", !r2.error, JSON.stringify(r2));
+      const alias = localStorage.getItem("erp.store.v1.alias." + name);
+      check("recovery: alias recorded", !!alias && alias !== name, String(alias));
+      check("recovery: fresh editable name created remotely", !!alias && Object.prototype.hasOwnProperty.call(srv.files, alias));
+      check("recovery: key for fresh name cached", !!localStorage.getItem("erp.store.v1.keys." + alias));
+
+      /* ── 3. Reads route through the alias ── */
+      mark("3 alias read");
+      const rA = await store.readCanonical(name);
+      const rB = await store.readCanonical(alias);
+      const recs = (rA.doc && rA.doc.records) || [];
+      check("recovery: reads route through the alias", !rA.error && recs.some((r) => r.id === 2), JSON.stringify(recs));
+      check("recovery: alias and fresh name expose the same doc", !rA.error && !rB.error && JSON.stringify(rA.doc.records) === JSON.stringify(rB.doc.records));
+
+      /* ── 4. Steady state: next write targets the alias, no re-recovery ── */
+      mark("4 steady state");
+      const r3 = await store.set(name, [{ id: 1 }, { id: 2 }, { id: 3 }]);
+      check("recovery: next write succeeds", !r3.error, JSON.stringify(r3));
+      check("recovery: orphaned original file untouched", srv.files[name] && (JSON.parse(srv.files[name]).records || []).length === 1);
+      check("recovery: content persisted through the alias", srv.files[alias] && (JSON.parse(srv.files[alias]).records || []).some((r) => r.id === 3));
+      const rC = await store.readCanonical(name);
+      check("recovery: alias read returns latest content", (rC.doc.records || []).some((r) => r.id === 3));
+
+      /* ── 5. Teardown ── */
+      localStorage.removeItem("erp.store.v1.keys." + name);
+      localStorage.removeItem("erp.store.v1.alias." + name);
+      localStorage.removeItem("erp.store.v1.base." + name);
+    } catch (e) {
+      check("recovery: harness did not crash", false, (e && e.stack) || String(e));
+    } finally {
+      try { store.useBackend(null); } catch (e) {}
+      try { store.resetAllLocal(); } catch (e) {}
+      try { master.flush(); } catch (e) {}
     }
 
     const passed = results.filter((r) => r.ok).length;

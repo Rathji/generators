@@ -93,10 +93,15 @@
 
   function renderCats() {
     catEl.textContent = "";
+    const apps = appList();
     const hasUserApps = !!(window.AppStore && window.AppStore.getApps().length);
+    const catsWithApps = new Set(apps.map((a) => a.category).filter(Boolean));
     for (const cat of CATEGORIES) {
       // "My Apps" (user-installed) only appears once something's installed.
       if (cat === "My Apps" && !hasUserApps) continue;
+      // A category with no visible apps (e.g. everything in it was
+      // uninstalled) is skipped rather than left as an empty heading.
+      if (cat !== "All apps" && !catsWithApps.has(cat)) continue;
       const b = document.createElement("button");
       b.type = "button";
       b.className = "sm-cat" + (cat === currentCat ? " active" : "");

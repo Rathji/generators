@@ -36,27 +36,53 @@
     }
     // User-installed apps (src/appstore.js) ride on top of the built-in
     // catalog so the Start menu, Software Center and Assistant see them too.
-    if (window.AppStore && window.AppStore.getApps) {
-      for (const u of window.AppStore.getApps()) {
-        if (catalog.some((a) => a.id === u.id)) continue;
-        catalog.push({
-          id: u.id,
-          name: u.name || u.id,
-          icon: u.icon || "📦",
-          color: u.color || null,
-          category: u.category || "My Apps",
-          blurb: u.blurb || "",
-          type: "app",
-          target: null,
-          singleton: false,
-          stub: false,
-          userInstalled: true,
-        });
-      }
+    mergeUserApps();
+  }
+
+  // Append user-installed apps (src/appstore.js) to `catalog`, skipping ids
+  // that already exist. Called by loadCatalog and by the live `catalog`
+  // getter, so user apps are visible no matter what order scripts load in.
+  // If a user app reuses a built-in's id (possible only after the built-in was
+  // hidden — see AppStore), the user's version replaces it: it's genuinely
+  // installed, not merely restored.
+  function userAppRecord(u) {
+    return {
+      id: u.id,
+      name: u.name || u.id,
+      icon: u.icon || "📦",
+      color: u.color || null,
+      category: u.category || "My Apps",
+      blurb: u.blurb || "",
+      type: "app",
+      target: null,
+      singleton: false,
+      stub: false,
+      userInstalled: true,
+    };
+  }
+  function mergeUserApps() {
+    if (!window.AppStore || !window.AppStore.getApps) return;
+    for (const u of window.AppStore.getApps()) {
+      const idx = catalog.findIndex((a) => a.id === u.id);
+      if (idx !== -1) catalog[idx] = userAppRecord(u);
+      else catalog.push(userAppRecord(u));
     }
   }
 
-  function getById(id) { return catalog.find((a) => a.id === id) || null; }
+  // The live, user-visible catalog: user-installed apps are always shown;
+  // built-in apps the user "uninstalled" (hidden via AppStore) are filtered
+  // out of every surface — Start menu, Software Center, taskbar pins,
+  // Assistant search, recent apps.
+  function visibleCatalog() {
+    mergeUserApps();
+    return catalog.filter((a) => {
+      if (a.userInstalled) return true;
+      if (window.AppStore && window.AppStore.isHidden && window.AppStore.isHidden(a.id)) return false;
+      return true;
+    });
+  }
+
+  function getById(id) { return visibleCatalog().find((a) => a.id === id) || null; }
 
   function getRecent() {
     try { return JSON.parse(localStorage.getItem(RECENT_KEY) || "[]").filter(Boolean); }
@@ -160,7 +186,7 @@
   window.Apps = {
     launch,
     getById,
-    get catalog() { return catalog; },
+    get catalog() { return visibleCatalog(); },
     getRecent,
     recordRecent,
     refresh: loadCatalog,
