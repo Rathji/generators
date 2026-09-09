@@ -39,13 +39,6 @@
   /* ─────────────────────────── low-level loaders ─────────────────────────── */
 
   const cache = {};
-  function memo(moduleId) {
-    return (async () => {
-      const r = await store.loadDoc(moduleId);
-      cache[moduleId] = r.error ? [] : r.records;
-      return cache[moduleId];
-    })();
-  }
   async function load(moduleId) {
     if (cache[moduleId] && cache[moduleId]._ts && Date.now() - cache[moduleId]._ts < 4000) return cache[moduleId];
     const r = await store.loadDoc(moduleId);
@@ -85,7 +78,12 @@
     if (!res.error) await master.audit({ action: "tax_update", targetType: "config", targetId: 0, summary: "Tax rates updated — " + (r || []).length + " rate(s)." });
     return res;
   };
-  master.saveDefaults = (r) => save(MASTER.defaults, r);
+  master.saveDefaults = async (r) => {
+    if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("defaults_update");
+    const res = await save(MASTER.defaults, r);
+    if (!res.error) await master.audit({ action: "defaults_update", targetType: "config", targetId: 0, summary: "Automatic-posting account defaults updated." });
+    return res;
+  };
   master.saveSettings = async (r) => {
     if (ERP.team && typeof ERP.team.guard === "function") await ERP.team.guard("settings_update");
     const res = await save(MASTER.settings, r);

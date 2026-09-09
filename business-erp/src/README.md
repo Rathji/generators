@@ -602,9 +602,9 @@ tests, flip it to `[x]`, stop for review.
   the hub authorises by role, so hiding buttons is never the security boundary.
   Guarded actions: `post_journal`, `reverse_journal`, `receive_payment`,
   `bank_entry`, `clear_bank`, `close_period`, `reopen_period`, `chart_update`,
-  `tax_update`, `settings_update`, `pay_bill`, `restore_backup`,
-  `publish_backup`, `archive_doc` (all manager+); `credit_note`,
-  `invoice_from_order` (staff+).
+  `tax_update`, `settings_update`, `defaults_update`, `pay_bill`,
+  `restore_backup`, `publish_backup`, `archive_doc` (all manager+);
+  `credit_note`, `invoice_from_order` (staff+).
 - **Signed audit** (Tasks 44): `master.audit` routes through `ERP.team.signAudit`
   when online — the hub returns a signed `{id, actor, userId, role}` and the
   entry is recorded as verified; denied actions are recorded as
