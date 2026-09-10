@@ -97,6 +97,34 @@ A category is **complete** only when 100% of its records are `status: verified`.
 
 ---
 
+## Phase 7 — Archive Integrity  (cross-cutting)
+
+Applies to the **whole archive**, not to one game: these steps make the stored data
+provably conform to `schema.json`. They are derived from the app's own capabilities
+(feature flags in `app.js`), not from any single game's data.
+
+| # | Step | Kind | Definition of done |
+|---|------|------|--------------------|
+| 7.1 | Validate enum values & unique ids | derived | Every `enum` field holds a legal option; no duplicate id within a game+category |
+| 7.2 | Surface an Integrity report | derived | The app lists missing-required, illegal-enum, duplicate-id and orphan-link issues |
+| 7.3 | Tighten derived roadmap steps | derived | A step cannot read "done" until its full definition of done holds |
+| 7.4 | Standalone validation script | derived | `src/data` can be validated without a browser |
+| 7.5 | Every ingested record verified | derived | For every game with data, `verifiedRatio === 1` (this finishes Morrowind's 40 drafts) |
+
+*The defect-fixing half of 7.5 is data work; the rest is app work. Both are tracked
+together because "the archive is trustworthy" is one promise.*
+
+## Phase 8 — Archive Experience  (cross-cutting)
+
+| # | Step | Kind | Definition of done |
+|---|------|------|--------------------|
+| 8.1 | Deep-linkable state | derived | Game, category and open record are encoded in the URL; back/forward work |
+| 8.2 | Search upgrade | derived | Debounced, ranked by name, matches highlighted, `/` focuses, result count shown |
+| 8.3 | Accessibility | derived | Dialog roles + focus trap/restore; keyboard-activatable cards; labelled search |
+| 8.4 | Share & export | derived | Copy a share link and download a record or the whole archive as JSON |
+
+---
+
 ## Status vocabulary
 
 `not-started` → no phases begun · `in-progress` → at least one step done ·
@@ -109,7 +137,17 @@ A category is **complete** only when 100% of its records are `status: verified`.
 | --- | --- | --- |
 | Arena | 0 | Registered; nothing ingested |
 | Daggerfall | 0 | Registered; nothing ingested |
-| **Morrowind** | 3 | All 9 categories populated from fandom. Spells 297v/40d · Books 101v · 63-record demo set in the rest |
+| **Morrowind** | 3 | All 9 categories populated from UESP & fandom. Spells 337v (all base-game spells incl. abilities & blessings) · Books 101v · Factions 24v (every Great House, guild, cult, legion, vampire clan and native faction) · Creatures 44v (every species: beasts, ash creatures, daedra, Dwemer centurions, kwama, undead, specials) · Locations 100v (every named region, town, village, fort, stronghold, Ashlander camp, landmark, foyada and body of water, plus Vivec's cantons) · demo set in the other four |
 | **Oblivion** | 3 | Spells 320v (incl. 20 Shivering Isles) · Books 109v (skill books), both fully verified from fandom; 7 categories open |
 | **Skyrim** | 3 | Spells 123v · Books 91v (skill books), both fully verified from fandom; 7 categories open |
 | Online | 0 | Registered; nothing ingested |
+
+## Cross-cutting upgrades (Phases 7–8)
+
+Tracked in the app's Roadmap tab under **Cross-cutting Upgrades**, and in `app.js` as
+`ARCHIVE_ROADMAP` + `CAPABILITIES`. These apply to the whole archive:
+
+| Phase | Done | Remaining |
+| --- | --- | --- |
+| P7 Archive Integrity | 7.1 enum/unique-id validation · 7.2 Integrity tab · 7.3 strict derived steps · 7.4 standalone validator (`src/validate.mjs`, shares `src/validate-core.js` with the app) · 7.5 Morrowind fully verified (every record across all ingesting categories) | — (Phase 7 complete) |
+| P8 Archive Experience | 8.1 deep links (game/category/record in the hash, back/forward) · 8.2 search (debounced, name-ranked, highlighted, “/” shortcut, result count) · 8.3 accessibility (dialog roles + focus trap/restore, keyboard-activatable cards, labelled search) · 8.4 share/export (copy a deep link, download a record or the whole archive as JSON) | — (Phase 8 complete) |

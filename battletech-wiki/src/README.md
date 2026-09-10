@@ -2,6 +2,8 @@
 
 An unofficial, editable fan wiki for the BattleTech universe & game system, built on the `custom-wiki-plugin`. Live at `https://perchance.org/battletech-wiki`.
 
+See `TODO.md` for planned/considered work that isn't built yet.
+
 ## How it's put together
 
 - **main.pjs** — imports the plugin: `wiki = {import:custom-wiki-plugin}` and `uploadPlugin = {import:upload-plugin}` (the wiki's storage dependency). Everything else lives in index.html.
@@ -21,6 +23,17 @@ An unofficial, editable fan wiki for the BattleTech universe & game system, buil
 ## Customizations (host-level, in the index.html `<style>` + init script)
 
 - **BattleTech HUD theme (adopted from the `battletech-theme` aesthetic)**: the wiki uses `skin:"classic"`, `theme:"dark"`, `accent:"#ff8a1e"` (amber), and the host `<style>` block re-themes the whole app to the battletech HUD look — dark navy-black radial glow background with a masked amber grid (`body::before`) and CRT scanlines (`body::after`); `--wiki-*` vars overridden to the battletech palette (`--wiki-bg:#0c1015`, `--wiki-fg:#cdd6de`, `--wiki-accent:#ff8a1e`, ...); fonts **Rajdhani** (UI/headings) + **Share Tech Mono** (mono bits) loaded from Google Fonts; amber **inset corner brackets** on all four panel corners (`.wiki-app::before/::after`, z-index 5); header as a status bar with amber diamond logo mark + uppercase letterspaced glow title; chamfered buttons via `clip-path:polygon(...)` with amber-gradient primary; amber nav-active state; amber content links; a fully-styled `.wiki-table` (dark header row, amber-tinted alternating rows — the plugin ships **no** base `.wiki-table` styles, so all table styling lives here); amber blockquote/category chips/tab underline; dark mono textarea; webkit scrollbars. Previous crimson/Wikipedia-skin overrides were removed when this theme was adopted.
+- **Animated header HUD** (injected by the init script after `ready()`): a blinking green "HPG Link" dot + live local clock appended to `.wiki-header`, and a "⟳ Random" button added to `.wiki-actions` (picks from `window._battleWiki.listPages()` and calls `navigate()`). The script also groups the title + tagline into a `.wiki-brand-copy` column so they stack instead of sitting inline.
+- **Grid on the panel**: `.wiki-app` carries a faint 5%-amber, 40px lattice (plus slight translucency) so the HUD grid continues across the panel rather than stopping at its edge.
+- **BattleTech infoboxes**: the init script overrides `root.wiki._wiki_templateDefs` to add `Infobox mech`, `Infobox faction`, and `Infobox character` on top of the plugin's `Infobox person`. They render as amber-titled HUD panels (CSS targets `.wiki-infobox`, `.wiki-infobox-title`, `.wiki-infobox-label`, `.wiki-infobox-data`). Usage in page body:
+  ```
+  {{Infobox mech
+  | model = MAD-3R Marauder
+  | manufacturer = General Motors
+  | class = Heavy
+  | mass = 75 tons
+  }}
+  ```
 - **Sticky sidebar**: the sidebar lists ~120 nav items and otherwise stretches the page to ~4000 px; on desktop (≥761px) it is `position:sticky` + `max-height:100vh` with its own scrollbar. On mobile it falls back to the plugin's standard stacked 32vh panel.
 - **Sidebar auto-scroll**: on load and on every `pageChange`, the sidebar scrolls the active page's nav entry into view.
 - **Table wikilink fix**: the plugin's `_wiki_splitRow` splits table rows on every `|`, breaking cells like `| [[Page|Label]] | more |`. The init script replaces it (on `root.wiki._wiki_splitRow`) with a pipe-aware splitter that ignores `|` inside `[[...]]`. This is plain JS in a `<script>` — it must stay there, not in main.pjs (pjs forbids dotted top-level names).

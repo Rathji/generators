@@ -18,8 +18,9 @@ in `src/data/schema.json` — the app renders every detail scroll and validates 
 ## Entity types (9)
 
 ### locations
-`name`, `aliases`, `province` (enum), `region`, `type` (city/town/village/fort/ruin/cave/
-mine/dungeon/temple/shrine/tower/farm/camp/landmark/quarter/plane), `description`, `lore`,
+`name`, `aliases`, `province` (enum), `region`, `type` (city/town/village/fort/stronghold/
+ruin/cave/mine/dungeon/temple/shrine/tower/farm/camp/landmark/quarter/region/water/plane),
+`description`, `lore`,
 `factions` (→factions), `notableCharacters` (→npcs), `quests` (→quests),
 `connectedTo` (→locations), `coordinates`, `status`.
 
