@@ -1,0 +1,1542 @@
+<!-- ====================================================================
+     IT-U — application shell
+     Static frame only: header, sidebar (station navigation), main view.
+     src/app.js boots the app: fills the header + station navigation,
+     starts the hash router, and renders each station into #kbMain.
+     ==================================================================== -->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="src/styles.css">
+
+<!-- Paint the saved theme before anything renders, so a dark-mode session
+     never flashes the light default. This mirrors src/framework/theme.js
+     bootScript() — if the storage key or payload shape changes, update both. -->
+<script>
+  (function () {
+    try {
+      var r = document.documentElement;
+      var t = JSON.parse(localStorage.getItem("kb:theme:v1") || "null");
+      if (t && t.resolved && t.resolved.tokens) {
+        var d = t.resolved;
+        for (var k in d.tokens) if (Object.prototype.hasOwnProperty.call(d.tokens, k)) r.style.setProperty(k, d.tokens[k]);
+        if (d.mode) { r.setAttribute("data-mode", d.mode); r.style.colorScheme = d.mode; }
+      }
+    } catch (e) {}
+  })();
+</script>
+
+<!-- ============================ header ============================ -->
+<header class="kb-header">
+  <div class="kb-header-left">
+    <button class="kb-icon-btn kb-menu-btn" id="menuBtn" aria-label="Toggle navigation" aria-expanded="false" aria-controls="kbSidebar">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>
+    </button>
+    <a class="kb-logo" href="#/organizations" id="kbLogo">
+      <span class="kb-logo-mark" id="kbLogoMark">KB</span>
+      <span class="kb-logo-text">
+        <span class="kb-logo-title" id="kbAppTitle">IT-U</span>
+        <span class="kb-logo-tag" id="kbTagline"></span>
+      </span>
+    </a>
+  </div>
+  <div class="kb-header-search">
+    <span class="kb-hs-icon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    </span>
+    <input id="quickSearchInput" type="search" placeholder="Search documentation…" autocomplete="off" aria-label="Search documentation">
+  </div>
+  <div class="kb-header-right">
+    <button class="kb-acct-btn kb-header-act" id="kbAcctBtn" type="button" title="Account / sign in">Sign in</button>
+    <button class="kb-icon-btn kb-header-act kb-theme-btn" id="kbThemeBtn" type="button" title="Toggle light / dark mode" aria-label="Toggle light / dark mode"></button>
+    <button class="kb-icon-btn kb-header-act" id="kbSettingsBtn" type="button" title="Settings" aria-label="Settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ============================ layout ============================ -->
+<div class="kb-layout">
+  <aside class="kb-sidebar" id="kbSidebar" aria-label="Sidebar">
+    <nav class="kb-nav-group" aria-label="Stations">
+      <div class="kb-nav-label">Stations</div>
+      <div id="moduleNav"></div>
+    </nav>
+    <div class="kb-sidebar-foot" id="sidebarFoot">
+      Cloud-synced document store
+    </div>
+  </aside>
+  <div class="kb-backdrop" id="kbBackdrop" hidden></div>
+  <main class="kb-main" id="kbMain" tabindex="-1"></main>
+</div>
+
+<div class="toast-ctn" id="toastCtn" aria-live="polite"></div>
+
+<script type="module" src="src/app.js"></script>
+
+<!-- ========================================================================
+     MULTI-USER SERVER (Phase 9 — roadmap tasks 38-41)
+     Roles & access (38), realtime change hub (39), concurrent-edit signals
+     (40), multi-user audit + rate control (41).
+
+     This server is the AUTHORIZATION GATE and CHANGE-NOTIFICATION BUS for
+     the collaboration layer. Article payloads live in the client-side
+     document store (upload-plugin editable files); the server keeps a
+     lightweight version index + audit ring in its durable `state` and
+     broadcasts change events per category topic, so open KB sessions learn
+     of updates within seconds.
+
+     SECURITY: this whole script is PUBLIC source — never put a secret here.
+     The bootstrap admin password is embedded ONLY as a SHA-256 hash (high
+     entropy, generated at build time; the plaintext is delivered to the
+     owner out-of-band). Any user who authenticates with that password
+     becomes an admin. Role decisions are re-checked server-side on every
+     privileged RPC; hiding controls in the UI is not authorization.
+     ======================================================================== -->
+<script type="text/x-server-plugin">
+"use strict";
+
+// ---- state layout (versioned, compact binary over the 50 MiB state) --------
+// v2 (task 54) adds the scoped-role table after the edit-key table.
+// v3 (task 56) widens each audit record so it carries the full action name.
+// v4 (task 58) adds the identity-provider (SSO) configuration blob, so the
+// server can VERIFY a directory-issued ID token against the provider's public
+// signing keys without any trusted backend of its own.
+var VERSION = 4;
+var HEADER_SIZE = 64;
+var USER_OFF = 64, USER_REC = 224, USERS_MAX = 256;
+// v2 (task 54) widens each change record so it can carry a scope string.
+var CHANGE_OFF = 57408, CHANGE_REC = 96, CHANGES_MAX = 850;
+// v3 (task 56) widens each audit record: at(8) + actor(24) + action(16) +
+// scope(16) + target(24) + seq(4) = 92, padded to 96. The full action name is
+// kept (not just its first letter) so the audit trail is readable.
+var AUDIT_OFF = 139328, AUDIT_REC = 96, AUDIT_MAX = 400;
+var TOKEN_OFF = 180288, TOKEN_REC = 64, TOKENS_MAX = 1024;
+var EDITKEY_OFF = 245824, EDITKEY_REC = 112, EDITKEY_MAX = 512;
+// Task 54 — scoped role assignments. Each record is: scope (64 bytes) +
+// username (24) + role byte + flags byte + updatedAt float64 = 98, padded to
+// 104. Resolution is most-specific-wins over the scope chain.
+var SCOPE_OFF = 303168, SCOPE_REC = 104, SCOPES_MAX = 4096;
+// A scope is "*", "client:<id>" or "service:<clientId>/<serviceId>".
+var SCOPE_RE = /^(\*|client:[a-z0-9][a-z0-9._-]*|service:[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*)$/;
+// Task 58 — the identity-provider (SSO) configuration, stored as one UTF-8 JSON
+// blob (issuer, endpoints, client id, claim mapping, group -> role rules and
+// the provider's PUBLIC signing keys). 64 KiB is far more than a handful of
+// providers plus an Entra JWKS needs. NOTHING SECRET is ever stored here: the
+// generator is public source, the client id and public keys are public, and the
+// flow is PKCE (no client secret exists to leak).
+var SSO_OFF = 729152, SSO_MAX = 65536;
+// The built-in simulator provider (task 58). It signs with HMAC-SHA256 using a
+// key that ships in this public source, so it is a DEMO and never a security
+// boundary — the UI labels it as such. Its only job is to exercise the real
+// verification path (and the whole flow) without a live directory.
+var SIM_PROVIDER = {
+  id: "simulator", name: "IT-U simulator", kind: "simulator", demo: true,
+  issuer: "https://simulator.itu.local", clientId: "itu-simulator",
+  scopes: "openid profile email", usernameClaim: "preferred_username",
+  nameClaim: "name", emailClaim: "email", groupsClaim: "groups", defaultRole: "viewer", rules: [],
+};
+var SIM_SECRET = "itu-simulator-demo-key-not-a-secret";
+
+// user flags / role bytes (task 54: viewer / technician / administrator).
+// R_REVIEWER is retained for legacy data; it names "technician" in IT-U terms.
+// v4 (task 58) adds FLAG_SSO: an account created/linked by an identity
+// provider. Such an account has no usable local password (its hash is random),
+// and an SSO sign-in may only adopt a name that is already flagged SSO — never
+// silently take over a local account.
+var FLAG_ADMIN = 1, FLAG_BANNED = 2, FLAG_SSO = 4;
+var R_VIEWER = 0, R_EDITOR = 1, R_REVIEWER = 2, R_ADMIN = 3;
+var ROLE_NAMES = ["viewer", "technician", "technician", "administrator"];
+var ROLE_IDS = { viewer: 0, technician: 1, editor: 1, reviewer: 2, administrator: 3, admin: 3 };
+function roleNameOf(r) { return ROLE_NAMES[r & 3] || "viewer"; }
+function roleIdOf(name) { var n = String(name == null ? "" : name).toLowerCase(); return ROLE_IDS[n] === undefined ? null : ROLE_IDS[n]; }
+
+// header offsets
+var H_VERSION = 0, H_USERS = 2, H_CHANGES = 4, H_AUDIT = 6, H_TOKENS = 8, H_EDITKEYS = 10, H_SEQ = 12, H_SCOPES = 16, H_SSOLEN = 20;
+
+var ADMIN_PASSWORD_SHA256 = "263b5bc5ca30a4a717da169bd704133365ce37167982877d9b422a76eaf59b5b";
+
+// ---- synchronous pure-JS SHA-256 (server has no crypto/TextEncoder) -------
+function sha256(input) {
+  var K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  var H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  var bytes = [], i, t;
+  for (i = 0; i < input.length; i++) bytes.push(input.charCodeAt(i) & 0xff);
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  var hi = Math.floor(bitLen / 4294967296), lo = bitLen >>> 0;
+  bytes.push((hi >>> 24) & 0xff, (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
+             (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff);
+  function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+  var w = new Array(64);
+  for (i = 0; i < bytes.length; i += 64) {
+    for (t = 0; t < 16; t++) w[t] = ((bytes[i + 4 * t] << 24) | (bytes[i + 4 * t + 1] << 16) | (bytes[i + 4 * t + 2] << 8) | bytes[i + 4 * t + 3]) >>> 0;
+    for (t = 16; t < 64; t++) {
+      var s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      var s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) >>> 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (t = 0; t < 64; t++) {
+      var S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      var ch = (e & f) ^ ((~e) & g);
+      var temp1 = (h + S1 + ch + K[t] + w[t]) >>> 0;
+      var S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0; d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+  var out = "", hex = "0123456789abcdef";
+  for (i = 0; i < 8; i++) {
+    var v = H[i];
+    for (t = 7; t >= 0; t--) out += hex[(v >>> (t * 4)) & 15];
+  }
+  return out;
+}
+
+// ---- low-level state access --------------------------------------------------
+var view = new DataView(state.buffer);
+var raw = new Uint8Array(state.buffer);
+
+function ensureInit() {
+  var v = view.getUint8(0);
+  if (v === VERSION) return;
+  if (v === 1) { upgradeV1(); return; }
+  if (v === 2) { upgradeV2(); return; }
+  if (v === 3) { upgradeV3(); return; }
+  view.setUint8(0, VERSION);
+  view.setUint16(H_USERS, 0, true);
+  view.setUint16(H_CHANGES, 0, true);
+  view.setUint16(H_AUDIT, 0, true);
+  view.setUint16(H_TOKENS, 0, true);
+  view.setUint16(H_EDITKEYS, 0, true);
+  view.setUint16(H_SCOPES, 0, true);
+  view.setUint32(H_SEQ, 1, true);
+  view.setUint32(H_SSOLEN, 0, true);
+}
+// v1 -> v2 (task 54). Carry every user's legacy per-category role slots into the
+// new scoped-role table (scope = the old category string, which resolves through
+// the same chain), then stamp v2. Users, audit, tokens and edit keys are
+// untouched, so a live server keeps its accounts and history across the upgrade.
+function upgradeV1() {
+  view.setUint16(H_SCOPES, 0, true);
+  // The v2 change record is wider, so the v1 ring is discarded (it is a
+  // transient notification index, not durable history — the audit ring holds
+  // the real record and is layout-compatible).
+  view.setUint16(H_CHANGES, 0, true);
+  var n = view.getUint16(H_USERS, true), i, list, j;
+  for (i = 0; i < n; i++) {
+    list = rolesOfLegacy(i);
+    for (j = 0; j < list.length; j++) setScopeRole(getStr(userRec(i), 24), list[j].cat, list[j].role);
+    raw[userRec(i) + 74] = 0; // legacy slot count retired
+  }
+  view.setUint32(H_SSOLEN, 0, true);
+  view.setUint8(0, VERSION);
+}
+// v2 -> v3 (task 56). Only the audit record layout changed (it now stores the
+// full action name), so the audit ring and the transient change ring are
+// discarded and re-begun; users, tokens, scoped roles and edit keys are
+// untouched, so a live server keeps its accounts and grants across the upgrade.
+function upgradeV2() {
+  view.setUint16(H_CHANGES, 0, true);
+  view.setUint16(H_AUDIT, 0, true);
+  view.setUint32(H_SEQ, 1, true);
+  view.setUint32(H_SSOLEN, 0, true);
+  view.setUint8(0, VERSION);
+}
+// v3 -> v4 (task 58). The SSO configuration blob is new, so nothing existing is
+// disturbed: every v3 table keeps its layout and contents; we only declare the
+// new region empty (no provider is configured until an administrator adds one).
+// A live server therefore keeps its accounts, grants, audit trail and tokens.
+function upgradeV3() {
+  view.setUint32(H_SSOLEN, 0, true);
+  view.setUint8(0, VERSION);
+}
+function putStr(off, max, s) {
+  for (var i = 0; i < max; i++) raw[off + i] = i < s.length ? (s.charCodeAt(i) & 0xff) : 0;
+}
+function getStr(off, max) {
+  var out = "", i, c;
+  for (i = 0; i < max; i++) { c = raw[off + i]; if (c === 0) break; out += String.fromCharCode(c); }
+  return out;
+}
+// SHA-256 hex (64 chars) → 32 raw bytes packed as chars, so the 32-byte
+// password-hash field holds the full digest without truncation.
+function hashToRaw(hex) {
+  var out = "", i;
+  for (i = 0; i < 32; i++) out += String.fromCharCode(parseInt(hex.substr(i * 2, 2), 16));
+  return out;
+}
+
+// ---- users table --------------------------------------------------------------
+function userRec(i) { return USER_OFF + i * USER_REC; }
+function findUser(username) {
+  var n = view.getUint16(H_USERS, true), i;
+  for (i = 0; i < n; i++) if (getStr(userRec(i), 24) === username) return i;
+  return -1;
+}
+function createUser(username, hashHex, isAdmin) {
+  var n = view.getUint16(H_USERS, true);
+  if (n >= USERS_MAX) return false;
+  var off = userRec(n);
+  putStr(off, 24, username);
+  putStr(off + 24, 32, hashToRaw(hashHex));
+  raw[off + 56] = isAdmin ? FLAG_ADMIN : 0;
+  view.setFloat64(off + 58, Date.now(), true);
+  view.setFloat64(off + 66, Date.now(), true);
+  raw[off + 74] = 0;
+  view.setUint16(H_USERS, n + 1, true);
+  return true;
+}
+function userHashHex(i) { return getStr(userRec(i) + 24, 32); }
+function setUserHash(i, hashHex) { putStr(userRec(i) + 24, 32, hashHex); }
+function getUserFlag(i, f) { return (raw[userRec(i) + 56] & f) !== 0; }
+function setUserFlag(i, f, on) {
+  var off = userRec(i) + 56;
+  raw[off] = on ? (raw[off] | f) : (raw[off] & ~f);
+}
+function setLastSeen(i) { view.setFloat64(userRec(i) + 66, Date.now(), true); }
+// ---- scoped role assignments (task 54) -----------------------------------------
+// A role is granted per SCOPE: "*" (whole repository), "client:<id>", or
+// "service:<clientId>/<serviceId>". Resolution is most-specific-wins over the
+// chain service -> client -> global; a user with no grant is a viewer.
+function scopeRec(i) { return SCOPE_OFF + i * SCOPE_REC; }
+function setScopeRole(target, scope, role) {
+  var n = view.getUint16(H_SCOPES, true), i, off;
+  if (!target || !scope) return false;
+  for (i = 0; i < n; i++) {
+    if (getStr(scopeRec(i), 64) === scope && getStr(scopeRec(i) + 64, 24) === target) {
+      raw[scopeRec(i) + 88] = role;
+      view.setFloat64(scopeRec(i) + 90, Date.now(), true);
+      return true;
+    }
+  }
+  if (n >= SCOPES_MAX) return false;
+  off = scopeRec(n);
+  putStr(off, 64, scope);
+  putStr(off + 64, 24, target);
+  raw[off + 88] = role;
+  raw[off + 89] = 0;
+  view.setFloat64(off + 90, Date.now(), true);
+  view.setUint16(H_SCOPES, n + 1, true);
+  return true;
+}
+function removeScopeRole(target, scope) {
+  var n = view.getUint16(H_SCOPES, true), i, j;
+  for (i = 0; i < n; i++) {
+    if (getStr(scopeRec(i), 64) === scope && getStr(scopeRec(i) + 64, 24) === target) {
+      for (j = i; j < n - 1; j++) {
+        putStr(scopeRec(j), 64, getStr(scopeRec(j + 1), 64));
+        putStr(scopeRec(j) + 64, 24, getStr(scopeRec(j + 1) + 64, 24));
+        raw[scopeRec(j) + 88] = raw[scopeRec(j + 1) + 88];
+        view.setFloat64(scopeRec(j) + 90, view.getFloat64(scopeRec(j + 1) + 90, true), true);
+      }
+      view.setUint16(H_SCOPES, n - 1, true);
+      return true;
+    }
+  }
+  return false;
+}
+// The scopes a request falls back through, most specific first.
+function scopeChain(scope) {
+  var s = String(scope || "");
+  if (!s || s === "*") return ["*"];
+  if (s.indexOf("service:") === 0) {
+    var rest = s.slice(8), i = rest.indexOf("/");
+    if (i > 0) return [s, "client:" + rest.slice(0, i), "*"];
+    return [s, "*"];
+  }
+  return [s, "*"];
+}
+function scopedRoleOf(target, scope) {
+  var chain = scopeChain(scope), i, j, n = view.getUint16(H_SCOPES, true);
+  for (i = 0; i < chain.length; i++) {
+    for (j = 0; j < n; j++) {
+      if (getStr(scopeRec(j), 64) === chain[i] && getStr(scopeRec(j) + 64, 24) === target) return raw[scopeRec(j) + 88];
+    }
+  }
+  return R_VIEWER;
+}
+function rolesOfUser(target) {
+  var n = view.getUint16(H_SCOPES, true), out = [], i;
+  for (i = 0; i < n; i++) {
+    if (getStr(scopeRec(i) + 64, 24) === target) {
+      var scope = getStr(scopeRec(i), 64);
+      out.push({ scope: scope, cat: scope, role: raw[scopeRec(i) + 88], roleName: roleNameOf(raw[scopeRec(i) + 88]), at: view.getFloat64(scopeRec(i) + 90, true) });
+    }
+  }
+  return out;
+}
+// Legacy v1 role slots — read-only, used only by the v1 -> v2 upgrade.
+function roleAtLegacy(i, slot) { return userRec(i) + 76 + slot * 17; }
+function rolesOfLegacy(i) {
+  var off = userRec(i);
+  var cnt = raw[off + 74], out = [], slot;
+  for (slot = 0; slot < cnt; slot++) out.push({ cat: getStr(roleAtLegacy(i, slot), 16), role: raw[roleAtLegacy(i, slot) + 16] });
+  return out;
+}
+function userSummary(i) {
+  var username = getStr(userRec(i), 24);
+  return {
+    username: username,
+    isAdmin: getUserFlag(i, FLAG_ADMIN),
+    banned: getUserFlag(i, FLAG_BANNED),
+    createdAt: view.getFloat64(userRec(i) + 58, true),
+    lastSeen: view.getFloat64(userRec(i) + 66, true),
+    roles: rolesOfUser(username),
+  };
+}
+
+// ---- change index (ring) -------------------------------------------------------
+function changeRec(i) { return CHANGE_OFF + i * CHANGE_REC; }
+function addChange(articleId, scope, version, by, updatedAt) {
+  var n = view.getUint16(H_CHANGES, true);
+  var idx = n % CHANGES_MAX;
+  var off = changeRec(idx);
+  var seq = view.getUint32(H_SEQ, true);
+  view.setUint32(H_SEQ, seq + 1, true);
+  putStr(off, 24, articleId);
+  putStr(off + 24, 32, scope);
+  view.setUint32(off + 56, version, true);
+  view.setFloat64(off + 60, updatedAt || Date.now(), true);
+  putStr(off + 68, 24, by);
+  view.setUint32(off + 92, seq, true);
+  if (n < CHANGES_MAX) view.setUint16(H_CHANGES, n + 1, true);
+  return { articleId: articleId, scope: scope, categoryId: scope, version: version, by: by, updatedAt: updatedAt, seq: seq };
+}
+function changesSince(sinceSeq, scope) {
+  var n = view.getUint16(H_CHANGES, true);
+  var cnt = Math.min(n, CHANGES_MAX);
+  var out = [], i, off, seq, s;
+  for (i = 0; i < cnt; i++) {
+    off = changeRec(i);
+    seq = view.getUint32(off + 92, true);
+    if (seq <= sinceSeq) continue;
+    s = getStr(off + 24, 32);
+    if (scope && s !== scope) continue;
+    out.push({ articleId: getStr(off, 24), scope: s, categoryId: s, version: view.getUint32(off + 56, true), updatedAt: view.getFloat64(off + 60, true), by: getStr(off + 68, 24), seq: seq });
+  }
+  return out;
+}
+
+// ---- audit ring ------------------------------------------------------------------
+// A compact, durable ring of who did what. Every mutating RPC records one entry;
+// the actor is taken from the SERVER session (never from client-supplied data),
+// so the trail names the true actor even for a remote change. Layout per record:
+// at(float64,8) + actor(24) + action(16) + scope(16) + target(24) + seq(uint32,4).
+function auditRec(i) { return AUDIT_OFF + i * AUDIT_REC; }
+function auditLog(action, actor, categoryId, articleId) {
+  var n = view.getUint16(H_AUDIT, true);
+  var idx = n % AUDIT_MAX;
+  var off = auditRec(idx);
+  var seq = view.getUint32(H_SEQ, true);
+  view.setUint32(H_SEQ, seq + 1, true);
+  view.setFloat64(off, Date.now(), true);
+  putStr(off + 8, 24, actor || "");
+  putStr(off + 32, 16, action || "");
+  putStr(off + 48, 16, categoryId || "");
+  putStr(off + 64, 24, articleId || "");
+  view.setUint32(off + 88, seq, true);
+  if (n < AUDIT_MAX) view.setUint16(H_AUDIT, n + 1, true);
+}
+// Read the audit ring newest-first. `limit` caps the count; `sinceSeq` (optional)
+// returns only entries newer than it, for incremental refresh.
+function readAudit(limit, sinceSeq) {
+  var n = view.getUint16(H_AUDIT, true);
+  var cnt = Math.min(n, AUDIT_MAX);
+  var out = [], i, off;
+  for (i = 0; i < cnt; i++) {
+    off = auditRec(i);
+    out.push({
+      seq: view.getUint32(off + 88, true),
+      at: view.getFloat64(off, true),
+      actor: getStr(off + 8, 24),
+      action: getStr(off + 32, 16),
+      scope: getStr(off + 48, 16),
+      target: getStr(off + 64, 24),
+    });
+  }
+  out.sort(function (a, b) { return b.seq - a.seq; });
+  if (sinceSeq) out = out.filter(function (r) { return r.seq > sinceSeq; });
+  if (limit && out.length > limit) out = out.slice(0, limit);
+  return out;
+}
+
+// ---- session tokens ----------------------------------------------------------------
+function tokenRec(i) { return TOKEN_OFF + i * TOKEN_REC; }
+function addToken(token, username) {
+  var n = view.getUint16(H_TOKENS, true);
+  var idx = n % TOKENS_MAX;
+  var off = tokenRec(idx);
+  putStr(off, 32, sha256(token));
+  putStr(off + 32, 24, username);
+  view.setFloat64(off + 56, Date.now(), true);
+  if (n < TOKENS_MAX) view.setUint16(H_TOKENS, n + 1, true);
+}
+function userForToken(token) {
+  var h = sha256(token);
+  var n = Math.min(view.getUint16(H_TOKENS, true), TOKENS_MAX), i;
+  for (i = 0; i < n; i++) {
+    if (getStr(tokenRec(i), 32) === h) return getStr(tokenRec(i) + 32, 24);
+  }
+  return null;
+}
+
+// ---- edit-key table (shared document-store write capability) -----------------------
+function editKeyRec(i) { return EDITKEY_OFF + i * EDITKEY_REC; }
+function setEditKey(name, key) {
+  var n = view.getUint16(H_EDITKEYS, true), i, off;
+  for (i = 0; i < n; i++) {
+    if (getStr(editKeyRec(i), 40) === name) {
+      putStr(editKeyRec(i) + 40, 64, key);
+      view.setFloat64(editKeyRec(i) + 104, Date.now(), true);
+      return;
+    }
+  }
+  if (n < EDITKEY_MAX) {
+    off = editKeyRec(n);
+    putStr(off, 40, name);
+    putStr(off + 40, 64, key);
+    view.setFloat64(off + 104, Date.now(), true);
+    view.setUint16(H_EDITKEYS, n + 1, true);
+  } else {
+    // full → overwrite the least recently updated entry
+    var oldest = 0, oldestAt = Infinity;
+    for (i = 0; i < n; i++) {
+      var at = view.getFloat64(editKeyRec(i) + 104, true);
+      if (at < oldestAt) { oldestAt = at; oldest = i; }
+    }
+    off = editKeyRec(oldest);
+    putStr(off, 40, name);
+    putStr(off + 40, 64, key);
+    view.setFloat64(off + 104, Date.now(), true);
+  }
+}
+function getEditKeyByName(name) {
+  var n = Math.min(view.getUint16(H_EDITKEYS, true), EDITKEY_MAX), i;
+  for (i = 0; i < n; i++) if (getStr(editKeyRec(i), 40) === name) return getStr(editKeyRec(i) + 40, 64);
+  return null;
+}
+
+// ---- rate limiting (ephemeral, rebuilt on restart) ------------------------------------
+var rl = new Map();
+function rateLimit(key, limit, windowMs) {
+  var nowMs = Date.now();
+  if (rl.size > 4000) {
+    rl.forEach(function (e, k) { if (nowMs - e.at > 600000) rl.delete(k); });
+  }
+  var e = rl.get(key);
+  if (!e || nowMs - e.at > windowMs) { rl.set(key, { at: nowMs, n: 1 }); return true; }
+  e.n++;
+  return e.n <= limit;
+}
+// A coarse network bucket the platform derives from the connection. Several
+// connections from one network share it, so per-network limits contain a noisy
+// client without exposing an IP address. Falls back to a single local bucket.
+function netGroup(conn) {
+  var net = conn && conn.net;
+  var s = net && net[2] != null ? String(net[2]) : "";
+  return s.slice(0, 12) || "local";
+}
+
+// ---- sessions (ephemeral: rebuilt via auth() on reconnect) ----------------------------
+var sessions = new Map();
+function openSession(conn, username) {
+  var idx = findUser(username);
+  if (idx < 0) return;
+  setLastSeen(idx);
+  var roles = new Map();
+  var list = rolesOfUser(username);
+  for (var i = 0; i < list.length; i++) roles.set(list[i].scope, list[i].role);
+  sessions.set(conn.id, {
+    username: username,
+    isAdmin: getUserFlag(idx, FLAG_ADMIN),
+    banned: getUserFlag(idx, FLAG_BANNED),
+    roles: roles,
+    lastSeen: Date.now(),
+    cat: "",
+    netKey: netGroup(conn),
+  });
+}
+function authUser(conn) { return sessions.get(conn.id) || null; }
+function hasWriteRole(s) {
+  if (s.isAdmin) return true;
+  var any = false;
+  s.roles.forEach(function (r) { if (r >= R_EDITOR) any = true; });
+  return any;
+}
+
+// ---- authorization matrix (task 54) -----------------------------------------------------
+// Every action maps to the MINIMUM IT-U role that may perform it; WHERE it may
+// be performed is decided by the scoped role resolved at the request's scope.
+var ACTION_MIN = {
+  view: R_VIEWER, feedback: R_VIEWER, read: R_VIEWER,
+  create: R_EDITOR, edit: R_EDITOR, delete: R_EDITOR, submit: R_EDITOR,
+  archive: R_EDITOR, restore: R_EDITOR, announce: R_EDITOR,
+  review: R_EDITOR, approve: R_EDITOR, return: R_EDITOR,
+  rotate: R_EDITOR, use: R_EDITOR, useCredential: R_EDITOR, rotateCredential: R_EDITOR,
+  share: R_ADMIN,
+  manageTemplates: R_ADMIN, manageGroups: R_ADMIN, manageCats: R_ADMIN,
+  manageSnippets: R_ADMIN, managePublication: R_ADMIN, publish: R_ADMIN,
+  manageUsers: R_ADMIN, administer: R_ADMIN, backup: R_ADMIN, restoreBackup: R_ADMIN,
+};
+// The IT-U role in force for a session at a scope (most-specific-wins).
+function sessionRoleFor(s, scope) {
+  var chain = scopeChain(scope), i, r;
+  for (i = 0; i < chain.length; i++) {
+    r = s.roles.get(chain[i]);
+    if (r !== undefined) return r;
+  }
+  return R_VIEWER;
+}
+function canDo(s, action, scope) {
+  if (s.banned) return { allow: false, reason: "account disabled" };
+  if (s.isAdmin) return { allow: true };
+  var need = ACTION_MIN[action];
+  if (need === undefined) return { allow: false, reason: "unknown action" };
+  var r = sessionRoleFor(s, scope);
+  if (r >= need) return { allow: true };
+  return { allow: false, reason: roleNameOf(need) + " role required at this scope" };
+}
+
+// ---- editing presence (task 55) ---------------------------------------------------------
+// Ephemeral: who has which record/runbook open right now. Rebuilt from live
+// connections, so deliberately NOT durable state. Keyed by record id, then by
+// connection; a disconnect releases every marker that connection held.
+var editing = new Map(); // recordId -> Map(connId -> {user, scope, label, at})
+function editorsOf(recordId) {
+  var m = editing.get(recordId), out = [];
+  if (m) m.forEach(function (e, connId) { out.push({ connId: connId, user: e.user, scope: e.scope, label: e.label, at: e.at }); });
+  out.sort(function (a, b) { return a.at - b.at; });
+  return out;
+}
+function editingInScope(scope) {
+  var out = [];
+  editing.forEach(function (m, recordId) {
+    m.forEach(function (e) {
+      if (!scope || e.scope === scope) out.push({ recordId: recordId, scope: e.scope, user: e.user, label: e.label, at: e.at });
+    });
+  });
+  out.sort(function (a, b) { return a.at - b.at; });
+  return out;
+}
+function publishEditors(scope, recordId) {
+  if (!scope) return;
+  pubsub.publish("cat:" + scope, JSON.stringify({ t: "edit", recordId: recordId, scope: scope, editors: editorsOf(recordId) }));
+}
+function releaseEdits(conn) {
+  var touched = [];
+  editing.forEach(function (m, recordId) {
+    if (m.has(conn.id)) { var e = m.get(conn.id); m.delete(conn.id); touched.push({ scope: e.scope, recordId: recordId }); }
+    if (!m.size) editing.delete(recordId);
+  });
+  for (var i = 0; i < touched.length; i++) publishEditors(touched[i].scope, touched[i].recordId);
+}
+
+// ---- helpers -----------------------------------------------------------------------------
+function jparse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+function jok(o) { o.ok = true; return JSON.stringify(o); }
+function jerr(msg) { return JSON.stringify({ ok: false, err: msg }); }
+function randHex(n) {
+  var out = "", i;
+  for (i = 0; i < n; i++) out += Math.floor(Math.random() * 16).toString(16);
+  return out;
+}
+var USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,23}$/;
+
+// ============================================================================
+// IDENTITY PROVIDERS / SSO (task 58)
+// ============================================================================
+// The server is the trust boundary for single sign-on. A client may COMPLETE an
+// OIDC flow, but it can never ASSERT an identity: the ID token it presents is
+// verified here — signature against the provider's public signing keys, then
+// issuer, audience, validity window and nonce — before any account is created
+// or anything is granted. Role grants derived from directory groups are written
+// server-side, exactly like an administrator's hand-made grant.
+//
+// NOTHING HERE IS SECRET AND NOTHING SECRET IS STORED. IT-U is public source
+// with no trusted backend of its own, so the client is an OIDC PUBLIC client
+// (Authorization Code + PKCE) and the only key material held is each provider's
+// PUBLIC JWKS. The built-in simulator signs with a key that ships in this file,
+// so it is a demo — the UI labels it as such and it must never guard real data.
+
+// ---- text / bytes -----------------------------------------------------------
+// The server has no TextEncoder/TextDecoder, so UTF-8 is coded by hand. `bin`
+// strings (one char per byte) are the currency for byte-level work.
+function utf8Encode(str) {
+  var out = "", i, c;
+  for (i = 0; i < str.length; i++) {
+    c = str.charCodeAt(i);
+    if (c < 0x80) out += String.fromCharCode(c);
+    else if (c < 0x800) out += String.fromCharCode(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < str.length) {
+      var c2 = str.charCodeAt(++i);
+      var cp = 0x10000 + ((c - 0xd800) << 10) + (c2 - 0xdc00);
+      out += String.fromCharCode(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    } else out += String.fromCharCode(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+  }
+  return out;
+}
+function utf8Decode(bin) {
+  var out = "", i = 0, c, c2, c3, c4;
+  while (i < bin.length) {
+    c = bin.charCodeAt(i++);
+    if (c < 0x80) out += String.fromCharCode(c);
+    else if (c > 0xbf && c < 0xe0) { c2 = bin.charCodeAt(i++); out += String.fromCharCode(((c & 0x1f) << 6) | (c2 & 0x3f)); }
+    else if (c > 0xdf && c < 0xf0) { c2 = bin.charCodeAt(i++); c3 = bin.charCodeAt(i++); out += String.fromCharCode(((c & 0x0f) << 12) | ((c2 & 0x3f) << 6) | (c3 & 0x3f)); }
+    else {
+      c2 = bin.charCodeAt(i++); c3 = bin.charCodeAt(i++); c4 = bin.charCodeAt(i++);
+      var cp = ((c & 0x07) << 18) | ((c2 & 0x3f) << 12) | ((c3 & 0x3f) << 6) | (c4 & 0x3f);
+      cp -= 0x10000;
+      out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+    }
+  }
+  return out;
+}
+function hexToBin(hex) {
+  var out = "", i;
+  for (i = 0; i + 1 < hex.length; i += 2) out += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+  return out;
+}
+// SHA-256 over a binary string, returned as a binary string (32 bytes).
+function sha256Bin(bin) { return hexToBin(sha256(bin)); }
+// base64 / base64url → binary string. No atob in the sandbox, so a small table.
+var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+var B64_MAP = null;
+function b64urlDecode(str) {
+  if (!B64_MAP) {
+    B64_MAP = {};
+    for (var m = 0; m < B64_CHARS.length; m++) B64_MAP[B64_CHARS.charAt(m)] = m;
+  }
+  var s = String(str == null ? "" : str).replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
+  var out = "", bits = 0, acc = 0, i, ch;
+  for (i = 0; i < s.length; i++) {
+    ch = B64_MAP[s.charAt(i)];
+    if (ch === undefined) continue;
+    acc = (acc << 6) | ch;
+    bits += 6;
+    if (bits >= 8) { bits -= 8; out += String.fromCharCode((acc >> bits) & 0xff); }
+  }
+  return out;
+}
+// Constant-time-ish compare (length + content), for signature/nonce checks.
+function ctEqual(a, b) {
+  if (a.length !== b.length) return false;
+  var d = 0, i;
+  for (i = 0; i < a.length; i++) d |= (a.charCodeAt(i) ^ b.charCodeAt(i));
+  return d === 0;
+}
+
+// ---- HMAC-SHA256 ------------------------------------------------------------
+// Only the built-in simulator uses this (a real provider signs RS256 with its
+// own private key). It exists so the whole verification path can be exercised.
+function hmacSha256(keyBin, msgBin) {
+  var key = keyBin;
+  if (key.length > 64) key = sha256Bin(key);
+  while (key.length < 64) key += "\x00";
+  var ipad = "", opad = "", i, kb;
+  for (i = 0; i < 64; i++) {
+    kb = key.charCodeAt(i) & 0xff;
+    ipad += String.fromCharCode(kb ^ 0x36);
+    opad += String.fromCharCode(kb ^ 0x5c);
+  }
+  return sha256Bin(opad + sha256Bin(ipad + msgBin));
+}
+
+// ---- RSA (RS256) ------------------------------------------------------------
+// BigInt is present in every modern engine (and QuickJS); if it is ever absent
+// the caller refuses RS256 with a clear reason rather than trusting anything.
+function bytesToBigInt(bin) {
+  var hex = "", i;
+  for (i = 0; i < bin.length; i++) hex += ("0" + bin.charCodeAt(i).toString(16)).slice(-2);
+  if (hex === "") return BigInt(0);
+  return BigInt("0x" + hex);
+}
+function bigIntToBytes(v, len) {
+  var hex = v.toString(16);
+  if (hex.length % 2) hex = "0" + hex;
+  var out = hex !== "" ? hexToBin(hex) : "";
+  if (len != null && out.length < len) {
+    var pad = "";
+    while (pad.length < len - out.length) pad += "\x00";
+    out = pad + out;
+  }
+  return out;
+}
+function modPow(base, exp, mod) {
+  if (typeof BigInt !== "function") return null;
+  var one = BigInt(1);
+  var result = one;
+  base = base % mod;
+  while (exp > BigInt(0)) {
+    if ((exp & one) === one) result = (result * base) % mod;
+    exp = exp >> one;
+    base = (base * base) % mod;
+  }
+  return result;
+}
+// The DigestInfo DER prefix for SHA-256 inside an RSASSA-PKCS1-v1_5 signature.
+var SHA256_DIGESTINFO = "3031300d060960864801650304020105000420";
+// Verify an RS256 signature. `nBin`/`eBin` are the base64url-decoded modulus and
+// exponent from the provider's JWKS; `sigBin` is the raw signature.
+function rsaVerifySha256(nBin, eBin, sigBin, signingInput) {
+  if (typeof BigInt !== "function") return { ok: false, reason: "this server engine has no BigInt" };
+  var n = bytesToBigInt(nBin), e = bytesToBigInt(eBin), s = bytesToBigInt(sigBin);
+  if (s >= n) return { ok: false, reason: "signature out of range" };
+  var m = modPow(s, e, n);
+  if (m === null) return { ok: false, reason: "no modular exponentiation" };
+  var k = (n.toString(16).length + 1) >> 1;
+  var em = bigIntToBytes(m, k);
+  if (em.length !== k || em.charCodeAt(0) !== 0 || em.charCodeAt(1) !== 1) return { ok: false, reason: "bad signature padding" };
+  var i = 2;
+  while (i < em.length && em.charCodeAt(i) === 0xff) i++;
+  if (i < 10 || em.charCodeAt(i) !== 0) return { ok: false, reason: "malformed signature padding" };
+  var expected = hexToBin(SHA256_DIGESTINFO) + sha256Bin(signingInput);
+  if (!ctEqual(em.slice(i + 1), expected)) return { ok: false, reason: "digest mismatch" };
+  return { ok: true };
+}
+// Pick the JWKS key that signed a token. Without a matching `kid`, accept the
+// lone RSA key (many small providers publish exactly one).
+function findJwksKey(jwks, kid) {
+  var keys = jwks && Array.isArray(jwks.keys) ? jwks.keys : [];
+  var i, usable = [];
+  for (i = 0; i < keys.length; i++) {
+    if (!keys[i] || keys[i].kty !== "RSA" || !keys[i].n || !keys[i].e) continue;
+    usable.push(keys[i]);
+    if (kid && keys[i].kid === kid) return keys[i];
+  }
+  return usable.length === 1 ? usable[0] : null;
+}
+// Validate + cap a provider's public JWKS before it is stored.
+function sanitizeJwks(j) {
+  if (!j || typeof j !== "object" || !Array.isArray(j.keys)) return null;
+  var out = [], i, k;
+  for (i = 0; i < j.keys.length && out.length < 16; i++) {
+    k = j.keys[i];
+    if (!k || typeof k !== "object" || k.kty !== "RSA") continue;
+    if (typeof k.n !== "string" || typeof k.e !== "string") continue;
+    if (k.n.length > 4000 || k.e.length > 32) continue;
+    out.push({ kty: "RSA", kid: k.kid ? String(k.kid).slice(0, 128) : undefined, n: k.n, e: k.e, use: k.use ? String(k.use).slice(0, 16) : undefined, alg: k.alg ? String(k.alg).slice(0, 16) : undefined });
+  }
+  return out.length ? { keys: out } : null;
+}
+
+// ---- JWT reading ------------------------------------------------------------
+function decodeJwtParts(token) {
+  var parts = String(token == null ? "" : token).split(".");
+  if (parts.length !== 3) return null;
+  var header = jparse(utf8Decode(b64urlDecode(parts[0])));
+  var payload = jparse(utf8Decode(b64urlDecode(parts[1])));
+  if (!header || !payload || typeof header !== "object" || typeof payload !== "object") return null;
+  return { header: header, payload: payload, sig: b64urlDecode(parts[2]), signingInput: parts[0] + "." + parts[1] };
+}
+function idpAudIncludes(aud, clientId) {
+  var i;
+  if (aud != null && typeof aud === "object" && aud.length != null) {
+    for (i = 0; i < aud.length; i++) if (String(aud[i]) === String(clientId)) return true;
+    return false;
+  }
+  return String(aud) === String(clientId);
+}
+function normIssuer(s) { return String(s == null ? "" : s).replace(/\/+$/, ""); }
+
+// Verify an ID token end-to-end. Returns {ok, claims, header, reason}.
+function verifyIdToken(provider, token, nonce) {
+  var p = provider || {};
+  var j = decodeJwtParts(token);
+  if (!j) return { ok: false, reason: "The ID token is not a well-formed JWT." };
+  var alg = String(j.header.alg || "");
+  if (!alg || alg === "none") return { ok: false, reason: "The ID token is unsigned — refusing it." };
+  if (p.kind === "simulator") {
+    if (alg !== "HS256") return { ok: false, reason: "The simulator signs with HS256." };
+    if (!ctEqual(hmacSha256(SIM_SECRET, j.signingInput), j.sig)) return { ok: false, reason: "ID-token signature check failed." };
+  } else {
+    if (alg !== "RS256") return { ok: false, reason: "Unsupported signing algorithm “" + alg + "” — IT-U verifies RS256 ID tokens." };
+    var key = findJwksKey(p.jwks, j.header.kid);
+    if (!key) return { ok: false, reason: "No public signing key matches this token — run Discover on the provider in Settings." };
+    var sig = rsaVerifySha256(b64urlDecode(key.n), b64urlDecode(key.e), j.sig, j.signingInput);
+    if (!sig.ok) return { ok: false, reason: "ID-token signature check failed (" + sig.reason + ")." };
+  }
+  var c = j.payload;
+  if (normIssuer(c.iss) !== normIssuer(p.issuer)) return { ok: false, reason: "The token issuer does not match the configured issuer." };
+  if (!idpAudIncludes(c.aud, p.clientId)) return { ok: false, reason: "The token audience does not include this application's client id." };
+  var now = Math.floor(Date.now() / 1000), skew = 120;
+  if (c.exp != null && Number(c.exp) + skew < now) return { ok: false, reason: "The ID token has expired." };
+  if (c.nbf != null && Number(c.nbf) - skew > now) return { ok: false, reason: "The ID token is not valid yet." };
+  if (c.iat != null && Number(c.iat) - 3600 > now) return { ok: false, reason: "The ID token was issued in the future." };
+  if (nonce && String(c.nonce == null ? "" : c.nonce) !== String(nonce)) return { ok: false, reason: "The ID token does not match this sign-in attempt (nonce)." };
+  return { ok: true, claims: c, header: j.header };
+}
+
+// ---- claims / identity (mirrors src/framework/idp.js) ------------------------
+function idpClaim(claims, path) {
+  if (claims == null || !path) return undefined;
+  var p = String(path);
+  if (p.charAt(0) === "_") return claims[p.slice(1)];
+  var parts = p.split("."), o = claims, i;
+  for (i = 0; i < parts.length; i++) { if (o == null) return undefined; o = o[parts[i]]; }
+  return o;
+}
+function idpClaimStr(claims, path) {
+  var v = idpClaim(claims, path);
+  if (v == null) return "";
+  if (v != null && typeof v === "object" && v.length != null) return v.length ? String(v[0]) : "";
+  if (typeof v === "object") return "";
+  return String(v);
+}
+function idpClaimList(claims, path) {
+  var v = idpClaim(claims, path), out = [], i;
+  if (v == null) return out;
+  if (typeof v === "string") {
+    var parts = v.split(/[\s,]+/);
+    for (i = 0; i < parts.length; i++) if (parts[i]) out.push(parts[i]);
+    return out;
+  }
+  if (v != null && typeof v === "object" && v.length != null) {
+    for (i = 0; i < v.length; i++) if (v[i] != null && String(v[i]) !== "") out.push(String(v[i]));
+    return out;
+  }
+  if (typeof v === "object") return out;
+  return [String(v)];
+}
+function fnvHex(str) {
+  var h = 2166136261 >>> 0, s = String(str == null ? "" : str), i;
+  for (i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h.toString(16);
+}
+var SSO_USER_RE = /^[a-z0-9][a-z0-9._-]{1,23}$/;
+function ssoSlug(raw, subject) {
+  var s = String(raw == null ? "" : raw).trim().toLowerCase();
+  if (s.indexOf("@") >= 0) s = s.split("@")[0];
+  s = s.replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").replace(/\.+/g, ".").slice(0, 24);
+  if (!SSO_USER_RE.test(s)) s = ("sso-" + fnvHex(subject || raw)).slice(0, 24);
+  if (!SSO_USER_RE.test(s)) s = ("sso-" + fnvHex(subject || raw)).replace(/[^a-z0-9]/g, "").slice(0, 24) + "aa";
+  return s.slice(0, 24);
+}
+// The IT-U username for an identity, plus whether it had to be adjusted to
+// avoid an existing LOCAL account. An existing SSO account with the same slug is
+// reused (the same person signing in again); a taken local password account is
+// NEVER adopted — a short subject hash makes a distinct account instead, and the
+// caller is told so it can say why.
+function idpIdentityName(provider, claims) {
+  var subject = idpClaimStr(claims, "sub") || idpClaimStr(claims, "oid") || idpClaimStr(claims, "objectId");
+  var raw = provider && provider.usernameClaim ? idpClaimStr(claims, provider.usernameClaim) : "";
+  var natural = ssoSlug(raw || idpClaimStr(claims, "email"), subject);
+  var idx = findUser(natural);
+  if (idx < 0 || getUserFlag(idx, FLAG_SSO)) return { username: natural, natural: natural, adjusted: false };
+  var tail = fnvHex(subject || raw || natural);
+  var cand = (natural.slice(0, 18) + "-" + tail.slice(0, 4)).slice(0, 24), n = 0;
+  while (findUser(cand) >= 0 && n < 60) { cand = (cand.slice(0, 16) + "-" + fnvHex(cand + ":" + n).slice(0, 4)).slice(0, 24); n++; }
+  return { username: cand, natural: natural, adjusted: true };
+}
+function idpGroups(provider, claims) {
+  var p = provider || {}, out = [], seen = {}, i, list;
+  function merge(path) {
+    list = path ? idpClaimList(claims, path) : [];
+    for (var k = 0; k < list.length; k++) { if (!seen[list[k]]) { seen[list[k]] = 1; out.push(list[k]); } }
+  }
+  merge(p.groupsClaim);
+  if (p.groupsClaim && p.groupsClaim !== "roles") merge("roles");
+  return out;
+}
+function idpGroupMatches(pattern, value) {
+  var p = String(pattern == null ? "" : pattern).trim();
+  var v = String(value == null ? "" : value).trim();
+  if (!p) return false;
+  if (p === "*") return true;
+  if (p.indexOf("*") < 0) return p.toLowerCase() === v.toLowerCase();
+  var rx = new RegExp("^" + p.split("*").map(function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join(".*") + "$", "i");
+  return rx.test(v);
+}
+// Directory groups → IT-U scoped grants. An empty/`*` match applies to everyone.
+function idpRoles(provider, groups) {
+  var out = [], seen = {}, i, j, p = provider || {};
+  var rules = Array.isArray(p.rules) ? p.rules : [];
+  function add(role, scope) {
+    var r = roleIdOf(role);
+    if (r === null) return;
+    var sc = scope || "*";
+    if (!SCOPE_RE.test(sc)) sc = "*";
+    var key = r + "@" + sc;
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push({ role: r, scope: sc });
+  }
+  for (i = 0; i < rules.length; i++) {
+    var rule = rules[i];
+    if (!rule || !rule.role) continue;
+    var match = rule.match == null ? "" : String(rule.match).trim();
+    var hit = (!match || match === "*");
+    if (!hit) for (j = 0; j < groups.length; j++) if (idpGroupMatches(match, groups[j])) { hit = true; break; }
+    if (hit) add(rule.role, rule.scope);
+  }
+  if (p.defaultRole && roleIdOf(p.defaultRole) !== null && roleIdOf(p.defaultRole) !== R_VIEWER) add(p.defaultRole, "*");
+  return out;
+}
+
+// ---- configuration storage --------------------------------------------------
+function readSsoRaw() {
+  var len = view.getUint32(H_SSOLEN, true);
+  if (!len) return "";
+  if (len > SSO_MAX) len = SSO_MAX;
+  var out = "", i, c;
+  for (i = 0; i < len; i++) { c = raw[SSO_OFF + i]; if (c === 0) break; out += String.fromCharCode(c); }
+  return utf8Decode(out);
+}
+function writeSsoRaw(str) {
+  var bin = utf8Encode(String(str == null ? "" : str));
+  if (bin.length > SSO_MAX) return false;
+  var i;
+  for (i = 0; i < SSO_MAX; i++) raw[SSO_OFF + i] = i < bin.length ? (bin.charCodeAt(i) & 0xff) : 0;
+  view.setUint32(H_SSOLEN, bin.length, true);
+  return true;
+}
+function readSsoConfig() {
+  var j = jparse(readSsoRaw());
+  if (!j || typeof j !== "object") j = {};
+  if (!Array.isArray(j.providers)) j.providers = [];
+  return j;
+}
+function findProvider(cfg, id) {
+  if (id === SIM_PROVIDER.id) return SIM_PROVIDER;
+  var list = cfg && cfg.providers ? cfg.providers : [], i;
+  for (i = 0; i < list.length; i++) if (list[i] && list[i].id === id) return list[i];
+  return null;
+}
+// The shape a client may see. Sign-in needs the public fields; only an
+// administrator sees the claim mapping, group rules and public JWKS.
+function ssoProviderView(p, full) {
+  var o = {
+    id: p.id, name: p.name, kind: p.kind, issuer: p.issuer || "", clientId: p.clientId || "",
+    scopes: p.scopes || "", authorizationEndpoint: p.authorizationEndpoint || "",
+    endSessionEndpoint: p.endSessionEndpoint || "", demo: !!p.demo,
+  };
+  if (full) {
+    o.discoveryUrl = p.discoveryUrl || "";
+    o.tokenEndpoint = p.tokenEndpoint || "";
+    o.jwksUri = p.jwksUri || "";
+    o.usernameClaim = p.usernameClaim || "";
+    o.nameClaim = p.nameClaim || "";
+    o.emailClaim = p.emailClaim || "";
+    o.groupsClaim = p.groupsClaim || "";
+    o.defaultRole = p.defaultRole || "viewer";
+    o.rules = Array.isArray(p.rules) ? p.rules : [];
+    o.jwks = p.jwks || null;
+  }
+  return o;
+}
+
+// ---- ephemeral sign-in attempts ---------------------------------------------
+// state -> { nonce, providerId, at }. Ephemeral by design: an attempt lives ten
+// minutes and a server restart simply loses in-flight attempts (the user starts
+// again). The state is one-shot, so a replayed callback cannot open a session.
+var ssoPending = new Map();
+var SSO_PENDING_MS = 600000, SSO_PENDING_MAX = 2000;
+function ssoPrunePending() {
+  var now = Date.now(), oldest = null, oldestAt = Infinity;
+  ssoPending.forEach(function (v, k) {
+    if (now - v.at > SSO_PENDING_MS) ssoPending.delete(k);
+    else if (v.at < oldestAt) { oldestAt = v.at; oldest = k; }
+  });
+  if (ssoPending.size >= SSO_PENDING_MAX && oldest != null) ssoPending.delete(oldest);
+}
+
+// ---- account provisioning ----------------------------------------------------
+function createUserSso(username) {
+  // A random, never-revealed password hash means the account has no usable
+  // local password at all; sign-in is only through the identity provider.
+  if (!createUser(username, sha256("sso\0" + username + "\0" + randHex(48)), false)) return false;
+  var idx = findUser(username);
+  if (idx >= 0) setUserFlag(idx, FLAG_SSO, true);
+  return true;
+}
+function removeAllScopeRoles(target) {
+  var n = view.getUint16(H_SCOPES, true), i = 0, j;
+  while (i < n) {
+    if (getStr(scopeRec(i) + 64, 24) === target) {
+      for (j = i; j < n - 1; j++) {
+        putStr(scopeRec(j), 64, getStr(scopeRec(j + 1), 64));
+        putStr(scopeRec(j) + 64, 24, getStr(scopeRec(j + 1) + 64, 24));
+        raw[scopeRec(j) + 88] = raw[scopeRec(j + 1) + 88];
+        raw[scopeRec(j) + 89] = raw[scopeRec(j + 1) + 89];
+        view.setFloat64(scopeRec(j) + 90, view.getFloat64(scopeRec(j + 1) + 90, true), true);
+      }
+      n--;
+      view.setUint16(H_SCOPES, n, true);
+    } else i++;
+  }
+}
+
+ensureInit();
+
+self.rpc = {
+  register: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.u || !d.p) return jerr("missing fields");
+    var u = String(d.u).toLowerCase().trim();
+    var p = String(d.p);
+    if (!USERNAME_RE.test(u)) return jerr("username: 2-24 chars, letters/digits/._- only");
+    if (p.length < 8) return jerr("password must be at least 8 characters");
+    if (findUser(u) >= 0) return jerr("username already taken");
+    if (!rateLimit("reg:" + conn.net[2], conn.isProxy ? 3 : 8, 86400000)) return jerr("too many registrations from this network — try later");
+    if (!rateLimit("reg:" + conn.net[2] + ":" + u, 3, 600000)) return jerr("slow down and try again");
+    var isAdmin = sha256(p) === ADMIN_PASSWORD_SHA256;
+    if (!createUser(u, sha256(p), isAdmin)) return jerr("user registry is full");
+    auditLog("register", u, "", "");
+    return jok({});
+  },
+  login: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.u || !d.p) return jerr("missing fields");
+    var u = String(d.u).toLowerCase().trim();
+    var p = String(d.p);
+    if (!rateLimit("login:" + conn.net[2], conn.isProxy ? 5 : 12, 300000)) return jerr("too many login attempts — try again later");
+    var idx = findUser(u);
+    if (idx < 0) return jerr("unknown user or wrong password");
+    if (hashToRaw(sha256(p)) !== userHashHex(idx)) return jerr("unknown user or wrong password");
+    if (getUserFlag(idx, FLAG_BANNED)) return jerr("this account is disabled");
+    var isAdmin = getUserFlag(idx, FLAG_ADMIN);
+    if (sha256(p) === ADMIN_PASSWORD_SHA256 && !isAdmin) { setUserFlag(idx, FLAG_ADMIN, true); isAdmin = true; }
+    var token = randHex(64);
+    addToken(token, u);
+    openSession(conn, u);
+    auditLog("login", u, "", "");
+    return jok({ token: token, username: u, isAdmin: isAdmin, roles: rolesOfUser(u) });
+  },
+  auth: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.token) return jerr("missing token");
+    var u = userForToken(String(d.token));
+    if (!u) return jerr("invalid token");
+    var idx = findUser(u);
+    if (idx < 0) return jerr("invalid token");
+    if (getUserFlag(idx, FLAG_BANNED)) return jerr("this account is disabled");
+    openSession(conn, u);
+    auditLog("auth", u, "", "");
+    return jok({ username: u, isAdmin: getUserFlag(idx, FLAG_ADMIN), roles: rolesOfUser(u) });
+  },
+  logout: function (params, data) {
+    var s = sessions.get(params.conn.id);
+    if (s) { auditLog("logout", s.username, "", ""); sessions.delete(params.conn.id); }
+    return jok({});
+  },
+  changePassword: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    var d = jparse(data || "");
+    if (!d || !d.p || String(d.p).length < 8) return jerr("password must be at least 8 characters");
+    var idx = findUser(s.username);
+    setUserHash(idx, hashToRaw(sha256(String(d.p))));
+    auditLog("change-password", s.username, "", "");
+    return jok({});
+  },
+  grantRole: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    if (!rateLimit("grant:" + params.conn.id, 60, 60000)) return jerr("slow down");
+    var d = jparse(data || "");
+    if (!d || !d.target || !d.role) return jerr("missing fields");
+    var target = String(d.target).toLowerCase().trim();
+    var scope = String(d.scope || d.cat || "*");
+    if (scope.length > 64 || !SCOPE_RE.test(scope)) return jerr("invalid scope — use *, client:<id> or service:<clientId>/<serviceId>");
+    var role = roleIdOf(d.role);
+    if (role === null) return jerr("invalid role — use viewer, technician or administrator");
+    var idx = findUser(target);
+    if (idx < 0) return jerr("no such user");
+    if (!setScopeRole(target, scope, role)) return jerr("role table is full");
+    auditLog("grant-role", s.username, scope, target);
+    return jok({ target: target, scope: scope, role: roleNameOf(role), roleId: role });
+  },
+  revokeRole: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    var d = jparse(data || "");
+    if (!d || !d.target) return jerr("missing fields");
+    var target = String(d.target).toLowerCase().trim();
+    var scope = String(d.scope || d.cat || "*");
+    if (scope.length > 64 || !SCOPE_RE.test(scope)) return jerr("invalid scope");
+    var idx = findUser(target);
+    if (idx < 0) return jerr("no such user");
+    removeScopeRole(target, scope);
+    auditLog("revoke-role", s.username, scope, target);
+    return jok({});
+  },
+  setBanned: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    var d = jparse(data || "");
+    var target = String((d && d.target) || "").toLowerCase().trim();
+    var idx = findUser(target);
+    if (idx < 0) return jerr("no such user");
+    setUserFlag(idx, FLAG_BANNED, !!(d && d.banned));
+    auditLog((d && d.banned) ? "ban" : "unban", s.username, "", target);
+    return jok({});
+  },
+  listUsers: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    var n = view.getUint16(H_USERS, true), out = [], i;
+    for (i = 0; i < n; i++) out.push(userSummary(i));
+    return jok({ users: out });
+  },
+  checkAction: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.action) return jerr("missing action");
+    var s = sessions.get(conn.id);
+    if (!s) return jok({ allow: false, reason: "not authenticated — sign in first" });
+    if (!rateLimit("act:" + conn.id, 240, 60000)) return jok({ allow: false, reason: "rate limited" });
+    if (!rateLimit("act:net:" + netGroup(conn), conn.isProxy ? 720 : 2400, 60000)) return jok({ allow: false, reason: "this network is rate limited" });
+    var scope = String(d.scope || d.categoryId || "");
+    var res = canDo(s, String(d.action), scope);
+    auditLog(res.allow ? ("action:" + d.action) : ("denied:" + d.action), s.username, scope, String(d.articleId || ""));
+    return jok({ allow: res.allow, reason: res.reason || "", scope: scope, role: roleNameOf(sessionRoleFor(s, scope)) });
+  },
+  announceChange: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    var scope = String((d && (d.scope || d.categoryId)) || "");
+    if (!d || !d.articleId || !scope) return jerr("missing fields");
+    var s = authUser(conn);
+    if (!s) return jerr("not authenticated");
+    if (!rateLimit("ann:" + conn.id, 60, 60000)) return jerr("rate limited");
+    if (!rateLimit("ann:net:" + netGroup(conn), conn.isProxy ? 180 : 600, 60000)) return jerr("this network is sending changes too quickly");
+    var res = canDo(s, "announce", scope);
+    if (!res.allow) return jerr("not allowed to announce at this scope");
+    var rec = addChange(String(d.articleId).slice(0, 24), scope.slice(0, 32), d.version | 0, s.username, Number(d.updatedAt) || Date.now());
+    var payload = JSON.stringify({ t: "change", articleId: rec.articleId, scope: rec.scope, categoryId: rec.categoryId, version: rec.version, by: rec.by, updatedAt: rec.updatedAt, seq: rec.seq });
+    pubsub.publish("cat:" + rec.scope, payload);
+    pubsub.publish("kb:all", payload);
+    auditLog("announce", s.username, rec.scope, rec.articleId);
+    return jok({ seq: rec.seq, scope: rec.scope });
+  },
+  getChanges: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!rateLimit("chg:" + params.conn.id, 60, 60000)) return jerr("rate limited");
+    var d = jparse(data || "");
+    var since = (d && d.since) || 0;
+    var scope = (d && (d.scope || d.categoryId)) || "";
+    return jok({ changes: changesSince(since, scope) });
+  },
+  subscribeCat: function (params, data) {
+    var d = jparse(data || "");
+    var scope = String((d && (d.scope || d.categoryId)) || "");
+    if (scope) {
+      var s = sessions.get(params.conn.id);
+      if (s) s.cat = scope;
+      if (params.conn.subscribe) params.conn.subscribe("cat:" + scope.slice(0, 32));
+    }
+    return jok({});
+  },
+  getPresence: function (params, data) {
+    var s = sessions.get(params.conn.id);
+    if (s) s.lastSeen = Date.now();
+    var d = jparse(data || "");
+    var topics = (d && d.topics) || [];
+    var counts = {}, i;
+    for (i = 0; i < topics.length; i++) counts[topics[i]] = pubsub.numSubscribers(String(topics[i]));
+    return jok({ online: sessions.size, counts: counts });
+  },
+  getOnlineUsers: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    var names = [], u;
+    sessions.forEach(function (v, k) { if (v.username) names.push(v.username); });
+    names.sort();
+    return jok({ users: names });
+  },
+  // ---- multi-user audit & rate control (task 56) -----------------------------
+  // Admin-only. `getAudit` returns the durable trail newest-first, with the
+  // server-recorded actor (the true actor of every change). `getSessions` lists
+  // who is connected right now, grouped by coarse network. `getRateStats` returns
+  // a summary of the live rate-limit buckets — no raw keys, so it never leaks an
+  // IP or a username-derived key.
+  getAudit: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    if (!rateLimit("aud:" + params.conn.id, 60, 60000)) return jerr("slow down");
+    var d = jparse(data || "");
+    var limit = d && d.limit ? Math.max(1, Math.min(AUDIT_MAX, d.limit | 0)) : 200;
+    var since = d && d.since ? d.since | 0 : 0;
+    return jok({ records: readAudit(limit, since), max: AUDIT_MAX });
+  },
+  getSessions: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    if (!rateLimit("ses:" + params.conn.id, 60, 60000)) return jerr("slow down");
+    var out = [];
+    sessions.forEach(function (v, k) {
+      out.push({
+        username: v.username,
+        role: roleNameOf(sessionRoleFor(v, v.cat)),
+        isAdmin: !!v.isAdmin,
+        cat: v.cat || "",
+        net: v.netKey || "local",
+        lastSeen: v.lastSeen || 0,
+      });
+    });
+    out.sort(function (a, b) { return (b.lastSeen || 0) - (a.lastSeen || 0); });
+    return jok({ sessions: out, online: sessions.size });
+  },
+  getRateStats: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    if (!rateLimit("rst:" + params.conn.id, 30, 60000)) return jerr("slow down");
+    var nowMs = Date.now(), buckets = 0, events = 0, byPrefix = {}, byNetwork = {};
+    rl.forEach(function (e, key) {
+      if (nowMs - e.at > 600000) return;
+      buckets++;
+      events += e.n;
+      var pfx = String(key).split(":")[0];
+      byPrefix[pfx] = (byPrefix[pfx] || 0) + e.n;
+      var parts = String(key).split(":");
+      if (pfx === "reg" || pfx === "login") {
+        var net = parts[1] || "local";
+        byNetwork[net] = (byNetwork[net] || 0) + e.n;
+      }
+    });
+    var openNetworks = {};
+    sessions.forEach(function (v, k) { var nk = v.netKey || "local"; openNetworks[nk] = (openNetworks[nk] || 0) + 1; });
+    return jok({ buckets: buckets, events: events, byPrefix: byPrefix, byNetwork: byNetwork, openNetworks: openNetworks });
+  },
+  claimEdit: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    var s = authUser(conn);
+    if (!s) return jerr("not authenticated");
+    if (!d || !d.recordId || !d.scope) return jerr("missing fields");
+    if (!rateLimit("ed:" + conn.id, 180, 60000)) return jerr("rate limited");
+    var scope = String(d.scope).slice(0, 32);
+    var recordId = String(d.recordId).slice(0, 64);
+    var res = canDo(s, "edit", scope);
+    if (!res.allow) return jerr("not allowed to edit at this scope");
+    var m = editing.get(recordId);
+    if (!m) { m = new Map(); editing.set(recordId, m); }
+    m.set(conn.id, { user: s.username, scope: scope, label: String(d.label || "").slice(0, 48), at: Date.now() });
+    publishEditors(scope, recordId);
+    return jok({ editors: editorsOf(recordId) });
+  },
+  releaseEdit: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.recordId) return jerr("missing fields");
+    var recordId = String(d.recordId).slice(0, 64);
+    var m = editing.get(recordId);
+    if (m && m.has(conn.id)) {
+      var e = m.get(conn.id); m.delete(conn.id);
+      if (!m.size) editing.delete(recordId);
+      publishEditors(e.scope, recordId);
+    }
+    return jok({});
+  },
+  getEditors: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    var d = jparse(data || "");
+    var scope = String((d && (d.scope || d.categoryId)) || "").slice(0, 32);
+    return jok({ editors: editingInScope(scope) });
+  },
+  storeEditKey: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!hasWriteRole(s)) return jerr("not allowed to write documents");
+    var d = jparse(data || "");
+    if (!d || !d.name || !d.key) return jerr("missing fields");
+    if (!/^[a-z0-9-]{1,120}$/.test(String(d.name))) return jerr("invalid name");
+    if (!rateLimit("ek:" + params.conn.id, 120, 60000)) return jerr("rate limited");
+    setEditKey(String(d.name).slice(0, 40), String(d.key).slice(0, 64));
+    return jok({});
+  },
+  getEditKey: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!hasWriteRole(s)) return jerr("not allowed to write documents");
+    if (!rateLimit("ekg:" + params.conn.id, 240, 60000)) return jerr("rate limited");
+    var d = jparse(data || "");
+    var name = String((d && d.name) || "");
+    if (!/^[a-z0-9-]{1,120}$/.test(name)) return jerr("invalid name");
+    return jok({ key: getEditKeyByName(name) });
+  },
+
+  // ---- identity providers / SSO (task 58) -----------------------------------
+  // `ssoGetConfig` — the providers a client may sign in with. Public fields are
+  // always returned (sign-in needs them); the claim mapping, group rules and
+  // public JWKS are included only for an administrator (the Settings editor).
+  ssoGetConfig: function (params, data) {
+    var conn = params.conn;
+    if (!rateLimit("ssocfg:" + conn.id, 120, 60000)) return jerr("slow down");
+    var s = sessions.get(conn.id);
+    var full = !!(s && s.isAdmin);
+    var cfg = readSsoConfig();
+    var out = [], i;
+    for (i = 0; i < cfg.providers.length; i++) out.push(ssoProviderView(cfg.providers[i], full));
+    return jok({
+      providers: out,
+      simulator: full ? SIM_PROVIDER : { id: SIM_PROVIDER.id, name: SIM_PROVIDER.name, kind: "simulator", demo: true },
+      canEdit: full,
+      updatedAt: cfg.updatedAt || 0,
+      updatedBy: cfg.updatedBy || "",
+      limits: { maxProviders: 20, maxRules: 64, maxBytes: SSO_MAX },
+    });
+  },
+  // `ssoBegin` — start an attempt: mint the one-shot state (replay guard) and the
+  // nonce the ID token must echo. Pre-auth and rate-limited.
+  ssoBegin: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.providerId) return jerr("missing provider");
+    if (!rateLimit("ssob:" + conn.id, 40, 60000)) return jerr("slow down and try again");
+    if (!rateLimit("ssob:net:" + netGroup(conn), conn.isProxy ? 80 : 240, 60000)) return jerr("too many sign-in attempts from this network — try later");
+    var providerId = String(d.providerId).slice(0, 32).toLowerCase();
+    var provider = findProvider(readSsoConfig(), providerId);
+    if (!provider) return jerr("unknown identity provider");
+    ssoPrunePending();
+    var state = randHex(32), nonce = randHex(32);
+    ssoPending.set(state, { nonce: nonce, providerId: providerId, at: Date.now() });
+    return jok({ state: state, nonce: nonce, providerId: providerId });
+  },
+  // `ssoSetConfig` — administrator only. Validates and caps every provider, then
+  // stores the config blob. Audited.
+  ssoSetConfig: function (params, data) {
+    var s = authUser(params.conn);
+    if (!s) return jerr("not authenticated");
+    if (!s.isAdmin) return jerr("admin only");
+    if (!rateLimit("ssoset:" + params.conn.id, 20, 60000)) return jerr("slow down");
+    var d = jparse(data || "");
+    if (!d || !Array.isArray(d.providers)) return jerr("missing providers");
+    if (d.providers.length > 20) return jerr("at most 20 providers");
+    var clean = [], i, j, p, id, rules, inRules, kind;
+    for (i = 0; i < d.providers.length; i++) {
+      p = d.providers[i];
+      if (!p || typeof p !== "object") continue;
+      id = String(p.id || "").trim().toLowerCase();
+      if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(id)) return jerr("invalid provider id “" + id + "”");
+      if (id === SIM_PROVIDER.id) return jerr("“" + SIM_PROVIDER.id + "” is reserved for the built-in simulator");
+      kind = p.kind === "simulator" ? "simulator" : "oidc";
+      if (kind === "oidc") {
+        if (!p.issuer || !/^https?:\/\//i.test(String(p.issuer))) return jerr("“" + id + "” needs an http(s) issuer URL");
+        if (!p.clientId) return jerr("“" + id + "” needs a client (application) id");
+        if (!p.authorizationEndpoint || !p.tokenEndpoint) return jerr("“" + id + "” needs its endpoints — run Discover");
+        if (!p.jwks || !p.jwks.keys || !p.jwks.keys.length) return jerr("“" + id + "” has no signing keys — run Discover");
+      }
+      rules = [];
+      inRules = Array.isArray(p.rules) ? p.rules : [];
+      if (inRules.length > 64) return jerr("at most 64 rules per provider");
+      for (j = 0; j < inRules.length; j++) {
+        var r = inRules[j];
+        if (!r || typeof r !== "object") continue;
+        var role = roleIdOf(r.role);
+        if (role === null) return jerr("invalid role in a rule: “" + r.role + "”");
+        var scope = String(r.scope || "*");
+        if (scope.length > 64 || !SCOPE_RE.test(scope)) return jerr("invalid scope in a rule: “" + scope + "”");
+        rules.push({ match: String(r.match == null ? "" : r.match).slice(0, 200), role: roleNameOf(role), scope: scope });
+      }
+      var defRole = roleIdOf(p.defaultRole);
+      clean.push({
+        id: id,
+        name: String(p.name || id).slice(0, 80),
+        kind: kind,
+        issuer: String(p.issuer || "").replace(/\/+$/, "").slice(0, 300),
+        discoveryUrl: String(p.discoveryUrl || "").slice(0, 300),
+        authorizationEndpoint: String(p.authorizationEndpoint || "").slice(0, 400),
+        tokenEndpoint: String(p.tokenEndpoint || "").slice(0, 400),
+        jwksUri: String(p.jwksUri || "").slice(0, 400),
+        endSessionEndpoint: String(p.endSessionEndpoint || "").slice(0, 400),
+        clientId: String(p.clientId || "").slice(0, 200),
+        scopes: String(p.scopes || "openid profile email").slice(0, 200),
+        usernameClaim: String(p.usernameClaim || "preferred_username").slice(0, 80),
+        nameClaim: String(p.nameClaim || "name").slice(0, 80),
+        emailClaim: String(p.emailClaim || "email").slice(0, 80),
+        groupsClaim: String(p.groupsClaim == null ? "groups" : p.groupsClaim).slice(0, 120),
+        defaultRole: roleNameOf(defRole === null ? R_VIEWER : defRole),
+        rules: rules,
+        jwks: sanitizeJwks(p.jwks),
+        demo: false,
+      });
+    }
+    var json = JSON.stringify({ providers: clean, updatedAt: Date.now(), updatedBy: s.username });
+    if (!writeSsoRaw(json)) return jerr("the provider configuration is larger than " + Math.floor(SSO_MAX / 1024) + " KiB");
+    auditLog("sso-config", s.username, "", clean.length + " providers");
+    var views = [], k;
+    for (k = 0; k < clean.length; k++) views.push(ssoProviderView(clean[k], true));
+    return jok({ providers: views, updatedAt: readSsoConfig().updatedAt });
+  },
+  // `ssoLogin` — the trust boundary. Consume the one-shot state, verify the ID
+  // token, provision/link the account, REPLACE its scoped grants from the
+  // provider's rules (the directory is the source of truth for an SSO user) and
+  // open a hub session. Pre-auth; rate-limited.
+  ssoLogin: function (params, data) {
+    var conn = params.conn, d = jparse(data || "");
+    if (!d || !d.idToken || !d.state) return jerr("missing fields");
+    if (!rateLimit("ssol:" + conn.id, 30, 60000)) return jerr("slow down and try again");
+    if (!rateLimit("ssol:net:" + netGroup(conn), conn.isProxy ? 60 : 180, 60000)) return jerr("too many sign-in attempts from this network — try later");
+    var state = String(d.state);
+    var pend = ssoPending.get(state);
+    if (!pend) return jerr("this sign-in attempt has expired — start again");
+    ssoPending.delete(state);
+    var provider = findProvider(readSsoConfig(), pend.providerId);
+    if (!provider) return jerr("unknown identity provider");
+    var token = String(d.idToken);
+    if (token.length > 20000) return jerr("the ID token is too large");
+    var res = verifyIdToken(provider, token, pend.nonce);
+    if (!res.ok) {
+      auditLog("sso-denied", "-", "", provider.id);
+      return jerr(res.reason);
+    }
+    var ident = idpIdentityName(provider, res.claims);
+    var username = ident.username;
+    var idx = findUser(username);
+    if (idx >= 0 && getUserFlag(idx, FLAG_BANNED)) return jerr("this account is disabled");
+    if (idx >= 0 && !getUserFlag(idx, FLAG_SSO)) {
+      // Safety net: `idpIdentityName` already avoids this, so reaching here means
+      // an unusual collision — never silently adopt a local password account.
+      return jerr("a local account named “" + username + "” already exists — ask an administrator to link it");
+    }
+    if (idx < 0) {
+      if (!createUserSso(username)) return jerr("the user registry is full");
+      idx = findUser(username);
+    }
+    var groups = idpGroups(provider, res.claims);
+    var grants = idpRoles(provider, groups);
+    removeAllScopeRoles(username);
+    var i;
+    for (i = 0; i < grants.length; i++) setScopeRole(username, grants[i].scope, grants[i].role);
+    var hubToken = randHex(64);
+    addToken(hubToken, username);
+    openSession(conn, username);
+    auditLog("sso-login", username, String(res.claims.iss || "").slice(0, 16), provider.id);
+    return jok({
+      token: hubToken, username: username,
+      naturalUsername: ident.natural, adjusted: ident.adjusted,
+      isAdmin: getUserFlag(idx, FLAG_ADMIN), roles: rolesOfUser(username),
+      provider: provider.id, groups: groups.length,
+    });
+  },
+};
+
+self.onopen = function (params) {
+  var conn = params.conn;
+  if (conn.subscribe) conn.subscribe("kb:all");
+};
+
+self.onclose = function (params, data) {
+  releaseEdits(params.conn);
+  sessions.delete(params.conn.id);
+};
+</script>

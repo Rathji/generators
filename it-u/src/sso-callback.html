@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IT-U sign-in</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #f4f6fb; color: #1b2333; text-align: center; padding: 24px;
+    }
+    @media (prefers-color-scheme: dark) { body { background: #12161f; color: #e6ebf5; } }
+    .card { max-width: 380px; }
+    .mark {
+      width: 44px; height: 44px; margin: 0 auto 14px; border-radius: 12px;
+      display: grid; place-items: center; font-weight: 700; letter-spacing: .5px;
+      background: #3b5bdb; color: #fff; font-size: 16px;
+    }
+    h1 { font-size: 17px; margin: 0 0 6px; }
+    p { margin: 0 0 8px; color: #5b6478; }
+    @media (prefers-color-scheme: dark) { p { color: #9aa4bb; } }
+    .spin {
+      width: 26px; height: 26px; margin: 14px auto 2px; border-radius: 50%;
+      border: 3px solid rgba(120,130,160,.25); border-top-color: #3b5bdb;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .err { color: #c92a2a; }
+    a.back { color: #3b5bdb; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="mark">IT</div>
+    <h1 id="head">Completing sign-in…</h1>
+    <p id="msg">You can close this window once it finishes.</p>
+    <div class="spin" id="spin"></div>
+  </main>
+  <script>
+    // src/sso-callback.html — the OIDC redirect lands here (in the popup opened
+    // by framework/sso.js). This page does one job: read ?code&state (or an
+    // error) out of its own URL and hand it back to the IT-U window that opened
+    // it, then close. It never sees a client secret and never decides who the
+    // user is — the main window exchanges the code and the SERVER verifies the
+    // resulting ID token.
+    (function () {
+      var head = document.getElementById("head");
+      var msg = document.getElementById("msg");
+      var spin = document.getElementById("spin");
+
+      function readParams() {
+        var out = { code: "", state: "", error: "", errorDescription: "" };
+        var search = String(location.search || "");
+        if (search.charAt(0) === "?") search = search.slice(1);
+        var hash = String(location.hash || "");
+        if (hash.charAt(0) === "#") hash = hash.slice(1);
+        var sections = [search, hash];
+        for (var s = 0; s < sections.length; s++) {
+          var pairs = String(sections[s]).split("&");
+          for (var i = 0; i < pairs.length; i++) {
+            if (!pairs[i]) continue;
+            var eq = pairs[i].indexOf("=");
+            var k = decodeURIComponent(eq < 0 ? pairs[i] : pairs[i].slice(0, eq));
+            var v = eq < 0 ? "" : decodeURIComponent(pairs[i].slice(eq + 1).replace(/\+/g, " "));
+            if (k === "code") out.code = v;
+            else if (k === "state") out.state = v;
+            else if (k === "error") out.error = v;
+            else if (k === "error_description") out.errorDescription = v;
+          }
+        }
+        return out;
+      }
+
+      function fail(text) {
+        spin.style.display = "none";
+        head.textContent = "Sign-in didn’t complete";
+        head.className = "err";
+        msg.innerHTML = "";
+        msg.appendChild(document.createTextNode(text + " "));
+        var a = document.createElement("a");
+        a.className = "back";
+        var back = "/";
+        try { if (window.opener && window.opener.location && window.opener.location.href) back = window.opener.location.href; } catch (e) {}
+        a.href = back;
+        a.textContent = "Return to IT-U";
+        msg.appendChild(a);
+      }
+
+      var p = readParams();
+      if (!window.opener || window.opener.closed) {
+        fail("This window was opened on its own, so there is nothing to hand the result back to.");
+        return;
+      }
+      try {
+        window.opener.postMessage(
+          { type: "itu-sso-callback", code: p.code, state: p.state, error: p.error, errorDescription: p.errorDescription, url: String(location.href) },
+          location.origin
+        );
+      } catch (e) {
+        fail("Couldn’t reach the IT-U window that opened this one.");
+        return;
+      }
+      head.textContent = p.error ? "Sign-in was cancelled" : "Sign-in complete";
+      msg.textContent = "You can close this window — IT-U is finishing up.";
+      spin.style.display = "none";
+      // Close after a moment so the user sees the confirmation.
+      setTimeout(function () {
+        try { window.close(); } catch (e) {}
+      }, 500);
+    })();
+  </script>
+</body>
+</html>

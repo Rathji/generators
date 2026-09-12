@@ -1,0 +1,488 @@
+// ============================================================================
+//  PSA-U — PROFESSIONAL SERVICES AUTOMATION  (project backlog)
+//  ----------------------------------------------------------------------------
+//  This generator was forked from the Business ERP scaffold (business-erp).
+//  The reusable PLATFORM LAYER is inherited, domain-agnostic, and carries over:
+//    • module shell, hash router, role model, states        src/erp.js
+//    • canonical document store (versioned docs, local      src/erp.store.js
+//      cache, edit keys, revisions, 4 MiB write ceiling)
+//    • sync & 3-way conflict resolution                      src/erp.sync.js
+//    • backup, restore, capacity measurement & archival      src/erp.backup.js
+//    • multi-user realtime team hub + server-side roles      index.html / erp.team.js
+//    • data-integrity linter & friendly error copy           src/psa.integrity.js / erp.js
+//    • shared UI toolkit                                     src/erp.ui.js
+//  The station set is PSA-U's own — fifteen stations across ten nav groups:
+//  Dashboard; Service Desk (service desk); Dispatch, Time & Expense (delivery);
+//  Agreements, Billing (revenue); Projects; Sales; Procurement, Products
+//  (supply); Knowledge; Companies, Client Portal (directory); Reports, Admin
+//  (insight & admin). Every station is now built; the shell, navigation, states
+//  and responsive behaviour have been complete since day one. The framework is
+//  inherited from
+//  Business ERP and keeps its internal names (window.ERP, the `erp-*` CSS
+//  classes and element ids) so the platform code stays compatible; PSA-U's own
+//  store documents live under the `psa-v1-*` namespace and the realtime hub
+//  uses the `psa` channel.
+//
+//  See src/README.md for the module map and src/SPEC.md for the product spec.
+//
+//  WORKFLOW & EXECUTION RULES  (as specified by the product owner)
+//   1. This root `.pjs` file (main.pjs) holds the structured TODO checklist of
+//      the tasks below.
+//   2. STRICT HOLD — do NOT write any implementation code, create source files,
+//      or execute any task until the owner explicitly says the backlog is
+//      complete.
+//   3. Once signalled, pick ONLY the first uncompleted [ ] task, in order.
+//   4. Implement that single task, write its corresponding validation tests,
+//      flip its [ ] to [x], then STOP and await review before the next task.
+//   5. Keep src/README.md and src/SPEC.md current as decisions land.
+//
+//  STATUS — the owner signalled the start of implementation ("do phase 1"),
+//  then "move onto phase 2", "move onto phase 3", "PHASE 4", "Phase 5",
+//  "Phase 6", then "Next phase" for each phase after that. Phases 1 through 13
+//  are now implemented and validated (run `await PSATest()` in the console:
+//  938 checks). The roadmap is complete — all 13 phases / 61 tasks are done.
+//  ----------------------------------------------------------------------------
+//  ROADMAP — PSA-U  (supplied by the product owner; 13 phases / 61 tasks)
+//
+//  You are building psa-u, a fully featured Professional Services Automation
+//  platform for Perchance — a single integrated application that runs a
+//  managed-services business end to end, modeled on the breadth of ConnectWise
+//  Manage. It covers the complete operational loop: a client/company hierarchy;
+//  a service desk with tickets, service boards, types/subtypes/items, statuses,
+//  priorities, and SLAs; dispatch and scheduling of technicians; time and
+//  expense capture; recurring and per-device managed-services agreements;
+//  invoicing and billing; projects; sales pipeline with quotes and
+//  opportunities; a product catalog with procurement and inventory; a knowledge
+//  base; configuration/asset records; a client portal; workflow automation; and
+//  operational and financial reporting. psa-u must be multi-tenant (one
+//  deployment serving many service providers), role- and record-level secure,
+//  event-driven where events run the business, and it must participate in the
+//  existing small-business pipeline as a first-class citizen — consuming
+//  company/asset records from the MSP documentation system, publishing
+//  tickets/agreements/invoice events to the knowledge base and reporting tools
+//  through a shared versioned envelope, and never assuming a human is watching
+//  a screen. Focus entirely on delivering robust, modular, and testable features
+//  based on the functional requirements provided.
+//  ----------------------------------------------------------------------------
+//
+//  ---- PHASE 1 — FOUNDATION: TENANCY, RECORDS & CONFIGURATION ----
+//  [x] 1. App shell & navigation — Provide the application frame with navigation across every station (Service Desk, Dispatch, Time & Expense, Agreements, Billing, Projects, Sales, Procurement, Products, Knowledge, Companies, Reports, Admin, Client Portal), with consistent empty/loading/error states and layouts that work at phone and desktop widths.
+//  [x] 2. Tenancy & data storage — Model each service provider (and each client company within it) as a versioned JSON document in psa-u's own storage namespace holding all of its records — companies, sites, contacts, tickets, time, expenses, agreements, invoices, projects, opportunities, quotes, purchase orders, configurations, and knowledge articles — with a locally cached edit key and a fast local cache so data survives across devices and reloads.
+//  [x] 3. Companies, sites & contacts — Implement the client hierarchy — a company record (with status, type, billing/site addresses, billing terms, tax, and account manager) containing sites (billing, shipping, service locations) and contacts (with roles, phone/email, site, and portal access) — and make the company the root of every other record.
+//  [x] 4. Members, teams & security — Implement member (technician/staff) records with roles, teams, skills, and business-hours calendars, plus role-based and record-level security that can restrict modules, boards, companies, and financial figures, and every permission is enforced in code rather than by hidden UI.
+//  [x] 5. Taxonomy & master configuration — Provide the system-wide configuration every other module depends on — service boards, ticket statuses (with closed/open and color), priorities, types/subtypes/items, sources, work types, roles, charge codes, billing terms, agreement types, project types, opportunity stages, and product classes/categories — editable in one admin console with change history.
+//  [x] 6. Sync, conflict, backup & versioning — Reconcile every document against its canonical copy on startup, offer keep-mine / keep-theirs / field-level-merge on a two-device edit before overwriting, provide one-click full backup (download plus a published backup document) with validated restore, keep a version history with restore, and report per-document size against the storage ceiling with guided archival.
+//
+//  ---- PHASE 2 — SERVICE DESK ----
+//  [x] 7. Tickets — Implement the ticket record with company, site, contact, board, type/subtype/item, status, priority, source, summary and detail, owner/team, an optional schedule, a required-by date, and a unique ticket number — with fast list views, board views, search, and saved filters.
+//  [x] 8. Notes, activity & attachments — Provide timestamped internal and customer-visible notes, an activity log of field changes, and attachments, with the distinction between a note and a customer-visible update enforced everywhere it is displayed.
+//  [x] 9. Service boards & routing — Configure service boards with their own defaults (status flow, priority set, ticket templates, team, auto-assign behavior), and route inbound tickets to the correct board and owner by rules.
+//  [x] 10. SLAs & business-hours calendars — Implement SLA policies with separate response and resolution targets per board/priority, business-hours calendars (opening hours, holidays, time zones), pause/resume and stop-clock rules (customer waiting, scheduled maintenance), a live breach/at-risk state per ticket, and a configurable breach escalation.
+//  [x] 11. Escalation & notification rules — Build the notification and escalation engine — template-driven email/in-app notifications on status changes, assignment, breach, and aging — with per-recipient preferences, digests, and a suppression/dedup rule so a ticket cannot spam a recipient.
+//  [x] 12. Workflow / rules engine — Provide a general event-driven rules engine (trigger on ticket/agreement/project/invoice events; conditions; actions such as assign, set status/priority, notify, create a task, add a note, escalate) that both the service desk and later modules use, with a dry-run/preview mode and a log of every rule firing.
+//  [x] 13. Templates & recurring tickets — Support ticket templates (prefilled fields, checklists, and attached procedures) and recurring/scheduled tickets that regenerate on a calendar or by agreement coverage, including skip-ahead and catch-up behavior.
+//  [x] 14. Ticket relationships & merging — Link tickets as parent/child, related, duplicate, or knowledge-linked; support merging duplicates with a record of the merge and a redirect from the merged ticket; and add a lightweight ticket relationship map.
+//
+//  ---- PHASE 3 — DISPATCH & SCHEDULING ----
+//  [x] 15. Technician calendars & availability — Model each member's working hours, shifts, time off, and skills, compute actual availability against business-hours and existing commitments, and surface it wherever a ticket or appointment is scheduled.
+//  [x] 16. Dispatch board — Provide a live dispatch board with technician rows and time columns, drag-and-drop scheduling and rescheduling, an unassigned queue, capacity/overload indicators, conflict detection (double-booking, skill mismatch, outside hours), and keyboard-accessible fallbacks for the drag interactions.
+//  [x] 17. Appointments & on-site service calls — Model scheduled appointments/service calls (window, site, contact, assigned technician, travel, on-site notes and sign-off) distinct from the ticket they serve, and keep the ticket's status/schedule in sync with the appointment.
+//  [x] 18. Routing & scheduling assistant — Recommend an assignee and time slot from skills, territory, availability, current load, and SLA risk — as a suggestion a dispatcher can override, with the reasoning shown.
+//
+//  ---- PHASE 4 — TIME & EXPENSE ----
+//  [x] 19. Time entry capture — Capture billable and non-billable time entries (work type, role, charge code, start/end or duration, notes) against tickets, projects, or general work, with quick timers and a day/week entry grid.
+//  [x] 20. Timesheets & approval — Provide weekly timesheets with submission, a manager approval queue, rejection with comments, a locked/write-off state, and totals per member and per client.
+//  [x] 21. Expenses — Capture expense entries with category, amount, date, billable flag, receipt attachment, and reimbursement/markup status, plus an approval queue and a client-billable expense roll-up.
+//  [x] 22. Billing-rate resolution — Resolve the applicable billable rate from a documented precedence (agreement overrides, work type/role, priority, client-specific rate, then default) and expose which rule produced the rate on every time entry — so invoice math is explainable and testable.
+//
+//  ---- PHASE 5 — AGREEMENTS & RECURRING SERVICES ----
+//  [x] 23. Agreements — Model agreements with a type (managed/recurring service, per-device, per-user, block-of-hours, or one-off), term and billing cycle, automatic renewal and price-escalation rules, status, and links to the company and its covered services.
+//  [x] 24. Coverage & additions — Define exactly what an agreement covers (which configurations, services, or users), add tracked additions/exclusions/quantities with effective dates, support mid-term adds and cancellations with proration, and warn when a covered device is missing from the configuration records.
+//  [x] 25. Agreement billing — Generate recurring agreement charges (base, per-unit additions, minimums, overage above included hours/quantities, proration and mid-cycle adjustments) and post them to invoicing, with a preview showing the derived charge and its inputs before it posts.
+//  [x] 26. Agreement profitability & utilization — Report agreement revenue against the cost of servicing it (labor at burdened cost, parts, third-party costs), showing margin per agreement/company, included-hours consumed vs remaining, and overage or unprofitable agreements.
+//  [x] 27. Renewal & agreement lifecycle — Drive renewals — upcoming expiry queue with lead time, renewal/upsell actions, auto-renew vs explicit-renewal handling, and an archived history of expired/terminated agreements that keeps prior coverage intact for reporting.
+//
+//  ---- PHASE 6 — BILLING & INVOICING ----
+//  [x] 28. Billing setup — Configure billing terms, invoice templates and numbering, tax codes/rates, currencies, and invoice cycles per company, with a default that can be overridden per company.
+//  [x] 29. Invoice assembly — Assemble invoice lines from the correct sources — agreement recurring charges, billable time (from the rate resolution in Phase 4), billable expenses with markup, project milestones, and products/services — grouped per the invoice template, with every line traceable back to its source record.
+//  [x] 30. Invoice generation runs — Run billing on a cycle with a pre-invoice review stage (draft invoices, review and correct, approve/post), a dry-run that shows what would be invoiced before anything is posted, and readiness gates that catch unbilled time or unapproved expenses before a client is billed.
+//  [x] 31. Payments, credits & adjustments — Record payments against invoices, apply credits and adjustments with an audit trail, support partial payments and write-offs, and post these back to the company's balance and financial reports.
+//  [x] 32. Billing configuration safety — Ensure a posted invoice is immutable (changes go through a credit/adjustment), that re-running billing cannot double-bill a period, and that every billing action is idempotent and audited.
+//  [x] 33. Financial reporting — Provide AR aging, revenue by client/service, billing backlog (unbilled WIP), and invoice/payment summaries, with CSV/PDF export.
+//
+//  ---- PHASE 7 — PROJECTS ----
+//  [x] 34. Project templates & phases — Provide project templates composed of phases and predefined tickets/tasks, so a standard deployment or onboarding project can be instantiated for a client with all phases, owners, and checklists in place.
+//  [x] 35. Project tasks & scheduling — Manage project tickets/phases with owners, start/due dates, dependencies, and a schedule view; roll phase status up to project status and surface overdue or blocked phases.
+//  [x] 36. Project budget, cost & profitability — Track estimated vs actual hours and expenses per phase and project, compute project cost and margin, and warn when a project exceeds its budget or is trending over.
+//  [x] 37. Project billing — Bill projects by milestone, fixed fee, or time-and-materials, converting approved project work into invoice lines, and reconcile project billing against project cost.
+//
+//  ---- PHASE 8 — SALES & CRM ----
+//  [x] 38. Opportunities & pipeline — Model opportunities (value, expected close, stage, probability, source, owner) with a pipeline board, stage-change history, win/loss reasons, and forecast roll-ups.
+//  [x] 39. Quotes & proposals — Build quotes from catalog products and services with quantities, cost/sell pricing, discounts, margin visibility, and a proposal/PDF output, and convert an accepted quote into a project, an agreement, and/or a set of procurement records.
+//  [x] 40. Activities & forecasting — Log sales activities (calls, meetings, follow-ups) against companies/opportunities, schedule next steps, and produce a forecast by stage/owner/period.
+//  [x] 41. Lead capture & conversion — Capture leads, deduplicate against existing companies/contacts, and convert a qualified lead into a company + opportunity with the original lead history preserved.
+//
+//  ---- PHASE 9 — PRODUCTS, PROCUREMENT & INVENTORY ----
+//  [x] 42. Product & service catalog — Maintain a catalog of products and services (cost price, sell price, class/category, vendor, tax, unit) with pricing rules and per-client overrides, used by quotes, tickets, projects, and invoices.
+//  [x] 43. Purchase orders & vendors — Raise purchase orders against vendors (with line items, approvals, and status), link them to the sales opportunity/project/ticket that needs the goods, and track expected vs received dates.
+//  [x] 44. Receiving, drop-ship & inventory — Record receiving (full/partial) and drop-ship fulfillment, keep inventory quantities per warehouse/location where tracked, and reconcile discrepancies.
+//  [x] 45. Procurement approvals & margin rules — Apply configurable approval thresholds to purchase orders and enforce margin/markup rules so a quote or PO cannot be submitted below a floor without an explicit, recorded override.
+//
+//  ---- PHASE 10 — KNOWLEDGE, CONFIGURATION & CLIENT PORTAL ----
+//  [x] 46. Knowledge base — Author knowledge articles with categories, tags, versions, and internal/public visibility, surface relevant articles on tickets (and allow an article to be linked into a ticket reply), and support turning a resolved ticket into a draft article.
+//  [x] 47. Configuration & asset records — Maintain configuration/asset records (device, type, serial, location, warranty/support dates, relationships) in psa-u, synchronized with the company's MSP documentation system so the two remain consistent, with clear ownership of each field and drift detection rather than silent overwrite.
+//  [x] 48. RMM/monitoring integration — Ingest device/alert events from a monitoring system, auto-create or update tickets from alerts with de-duplication and auto-resolution rules, and relate the alerting device to its configuration record.
+//  [x] 49. Client portal & self-service — Provide a client-facing portal where a contact can submit and track tickets, see published KB articles, view and download invoices, and approve quotes/tickets that require approval — scoped strictly to that contact's company.
+//  [x] 50. Approval workflows — Implement approval requests (client approval of quotes, tickets, or change requests; internal approval of POs and invoices) with routing, expiry, reminders, an audit trail, and a workflow-rule hook to proceed or halt on the decision.
+//
+//  ---- PHASE 11 — REPORTING & ANALYTICS ----
+//  [x] 51. Report builder & scheduling — Provide a report builder over the core entities with filters, grouping, and saved report definitions, plus scheduled report delivery (email/link) so recurring operational reports arrive without anyone asking.
+//  [x] 52. Operational dashboards — Deliver the service-desk and business KPIs a PSA is bought for — SLA compliance and breaches, ticket aging/backlog by board and priority, technician utilization, first-response/resolution times, agreement profitability, billing backlog, and revenue trend — as live dashboards with drill-down.
+//  [x] 53. Data export & BI handoff — Export a clean, schema-stable analytics extract (fact/dimension-shaped) for the separate BI/reporting tool through the shared envelope, so reporting can be done outside psa-u without coupling the two.
+//
+//  ---- PHASE 12 — INTEGRATIONS, EXTENSIBILITY & QUALITY ----
+//  [x] 54. Integration framework — Build a documented integration framework for the common connectors — email (inbound ticket creation and outbound replies), accounting (invoice/payment sync), calendar, identity/SSO, RMM (Phase 10), and the MSP documentation system — with per-integration direction and field-ownership rules, retry/backoff, and a sync log.
+//  [x] 55. Public API, webhooks & pipeline bus — Expose a versioned API and outbound webhooks for key events (ticket created/closed, agreement renewed, invoice posted, SLA breached), and publish/consume the pipeline's shared JSON envelope so the other tools in the small-business pipeline can subscribe to psa-u events and vice versa.
+//  [x] 56. Data-integrity linter — Audit for the failures a PSA accumulates over time — tickets never assigned or never closed, agreements covering devices that no longer exist, billable time never invoiced, invoices posted without source lines, SLA policies that reference missing statuses, and companies missing billing terms — and report each with the offending record.
+//  [x] 57. Test fixtures & integrity suite — Provide seed/fixture data (a service provider with companies, boards, agreements, and a billing cycle) and automated tests that exercise the full loop — ticket → time → agreement → invoice → payment — plus integrity assertions (no double-billing, posted invoices immutable, security scopes enforced, exports parse).
+//  [x] 58. README & playbook — Document the architecture, the modules and how they interlock, the billing and SLA resolution rules, the shared envelope and integration ownership model, how psa-u relates to the MSP documentation and BI tools, and the checklist for adding a new module, rule action, or report.
+//
+//  ---- PHASE 13 — OPTIONAL: MULTI-USER & REALTIME COLLABORATION ----
+//  [x] 59. Role & access model — Extend the security model for realtime use — roles (dispatcher / technician / account manager / finance / admin) scoped by company, board, and financial visibility — with every action authorized server-side rather than only hidden in the UI.
+//  [x] 60. Realtime hub & collaborative dispatch — An optional companion hub broadcasts per-company change events so the dispatch board, ticket lists, and time entries update within seconds across open sessions, shows who else is editing a record, and degrades gracefully to polling refresh when the hub is unreachable.
+//  [x] 61. Multi-user audit & rate control — Users authenticate to the hub with their role, connections are rate-limited and grouped by coarse network signals against abuse, and every remote change flows through the same idempotent version-checked document layer so the audit trail records the true actor.
+// ============================================================================
+$meta
+  title = PSA-U
+  description = PSA-U — professional services automation: engagements and delivery, resourcing and utilisation, time and expenses, and billing in one system.
+  image = https://user.uploads.dev/file/2ae7aade766d2ceb4effdd9f079186b5.jpg
+  tags = professional services, psa, resource management, projects, timesheets, billing, utilization
+  header 
+    mode = minimal
+
+superFetch = {import:super-fetch-plugin}
+charts = {import:data-visualization-plugin}
+uploadPlugin = {import:upload-plugin}
+generateText = {import:ai-text-plugin}
+createServerSocket = {import:server-plugin}
+
+// ============================================================================
+//  PSA-U  —  CONFIGURATION
+// ============================================================================
+//
+//  Everything the page shows lives in the `config` list below — this is the
+//  place to fill in YOUR company and product details. The page renders
+//  entirely from it, and the settings panel (gear button, bottom-right)
+//  can also be used to preview colors, scan a website for brand-matching
+//  color schemes, and import/export the whole configuration as JSON.
+//
+//  ── JSON import/export format ─────────────────────────────────────────────
+//  The exported JSON mirrors this structure exactly. Imports may be PARTIAL —
+//  any missing field falls back to these defaults. The full field-by-field
+//  guide with types lives in the settings panel → "Import & Export".
+//
+//  {
+//    schemaVersion: "1.0.0",
+//    branding:  { companyName, companyShortName, companyUrl, logoGlyph, logoUrl,
+//                 tagline, contactEmail, contactPhone, address, footerText },
+//    theme:     { mode: "light"|"dark", accentStyle: "gradient"|"solid", radius,
+//                 fontSize (15–18), fontFamily, reduceMotion (true|false) },
+//    colors:    { primary, secondary, accent, background, surface,
+//                 text, textMuted },                     // hex colors
+//    product:   { name, badge, headline, headlineAccent, subheadline,
+//                 primaryCta, primaryCtaUrl, secondaryCta, secondaryCtaUrl,
+//                 status },
+//    trustedBy: [ "Client name", ... ],
+//    features:  [ { icon, title, description }, ... ],
+//    stats:     [ { value, suffix, label }, ... ],
+//    how:       [ { title, description }, ... ],
+//    showcase:  { heading, description, points: [ ... ] },
+//    testimonials: [ { quote, name, role, company }, ... ],
+//    cta:       { heading, description, buttonText, buttonUrl },
+//    manual:    { heading, description, chapters: [ { title, body }, ... ] },
+//    faq:       [ { question, answer }, ... ],
+//    footer:    { columns: [ { heading, links: [ { label, url }, ... ] }, ... ] },
+//    admin:     { showSettingsButton }
+//  }
+//
+//  Editing tips:
+//  • Add or remove list items in any `…` list (features, stats, faq …) —
+//    just add/remove numbered items like f1, f2, …
+//  • Strings are written raw (no quotes). Numbers and true/false are kept
+//    as numbers/booleans automatically.
+//  • In footerText, \{year\} and \{companyName\} are placeholders that get
+//    filled in automatically.
+// ============================================================================
+
+config
+  schemaVersion = 1.0.0
+
+  // ── Company / brand identity ─────────────────────────────────────────────
+  branding
+    companyName = PSA-U                // ← your company name (header, footer, copyright)
+    companyShortName = PSA-U           // compact variant for narrow screens (optional)
+    companyUrl = #                     // ← your website (links the logo & footer)
+    logoGlyph = P                      // single letter/monogram in the logo mark
+    logoUrl =                          // optional square logo image — upload it in the
+                                       //   settings panel (Branding → Logo image) to get a
+                                       //   hosted URL; shown instead of the letter mark
+    tagline = Professional services automation — engagements, resourcing, time and billing in one system
+    contactEmail = hello@your-company.com
+    contactPhone = +1 (555) 010-0000
+    address = 123 Main Street, Suite 100, Anytown, USA
+    footerText = © \{year\} \{companyName\}. All rights reserved.
+
+  // ── Visual theme ─────────────────────────────────────────────────────────
+  theme
+    mode = light                      // light | dark
+    accentStyle = gradient            // gradient | solid (how CTAs & highlights are filled)
+    radius = 16                       // corner radius in px
+    fontSize = 16                     // base text size in px (15 = small, 16 = normal, 18 = large)
+    fontFamily = lato                 // font pairing: lato | inter | roboto | open-sans | source-sans |
+                                      //   ibm-plex | dm-sans | manrope | montserrat-lato |
+                                      //   playfair-lato | merriweather-inter
+    reduceMotion = false              // true disables animations & transitions
+
+  // ── Brand palette (hex colors) ───────────────────────────────────────────
+  colors
+    primary = #0a58ca                 // trust blue — main brand color, buttons, links, highlights
+    secondary = #6ea8fe               // soft blue — gradients, charts, avatars
+    accent = #084298                  // deep blue — stars, badges, small details
+    background = #f8f9fa              // page background
+    surface = #ffffff                 // cards & section backgrounds
+    text = #212529                    // main text
+    textMuted = #6c757d               // secondary text
+
+  // ── Product / project — the hero section ──────────────────────────────────
+  product
+    name = PSA-U
+    badge = Professional services automation
+    headline = Deliver every engagement on time and on budget.
+    headlineAccent = on budget.       // word(s) highlighted in the brand gradient
+    subheadline = Pipeline to proposal to project to invoice — resource planning, timesheets, expenses and billing that keep every engagement profitable.
+    primaryCta = Get started
+    primaryCtaUrl = #
+    secondaryCta = See how it works
+    secondaryCtaUrl = #how
+    status = PSA-U · foundation ready   // small status chip under the CTAs (empty to hide)
+
+  // ── "Trusted by" strip ────────────────────────────────────────────────────
+  trustedBy = [["Acme Corp","Globex Industries","Initech","Umbrella Systems","Stark Enterprises","Wayne Group"]]
+
+  // ── Feature grid (3–8 cards) ──────────────────────────────────────────────
+  features
+    f1
+      icon = zap
+      title = Instant deployments
+      description = Ship updates in seconds with automated build and release pipelines baked in from day one.
+    f2
+      icon = shield
+      title = Enterprise-grade security
+      description = Role-based access, audit logs, and encryption at rest keep your data protected at every layer.
+    f3
+      icon = globe
+      title = Global by default
+      description = Run in regions worldwide with automatic failover and a 99.99% uptime guarantee.
+    f4
+      icon = chart
+      title = Actionable analytics
+      description = Real-time dashboards and reports give your team the visibility it needs to make confident decisions.
+    f5
+      icon = layers
+      title = Modular architecture
+      description = Clean, documented APIs and pluggable components make the system easy to extend and maintain.
+    f6
+      icon = code
+      title = Developer friendly
+      description = Comprehensive docs, typed SDKs, and a CLI that fits naturally into your existing workflow.
+
+  // ── Stats band ────────────────────────────────────────────────────────────
+  stats
+    s1
+      value = 99.99
+      suffix = %
+      label = Uptime SLA
+    s2
+      value = 12
+      suffix = k+
+      label = Active users
+    s3
+      value = 40
+      suffix = +
+      label = Countries served
+    s4
+      value = 24
+      suffix = /7
+      label = Dedicated support
+
+  // ── Analytics charts (business graphs) ───────────────────────────────────
+  // Rendered with the data-visualization-plugin. Three charts: revenue (line),
+  // leads (bars) and channels (donut). In pjs list syntax, single arrays are
+  // wrapped in one extra [ ] — so labels = [["Jan","Feb",…]] etc.
+  charts
+    enabled = true
+    heading = Performance at a glance
+    description = A live look at the metrics your team cares about most — revenue, pipeline and where your traffic comes from.
+    revenue
+      title = Monthly revenue
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      series
+        s1
+          name = This year
+          data = [[42,48,45,52,58,63,70,74,82,90,95,112]]
+        s2
+          name = Last year
+          data = [[30,34,38,41,45,49,54,58,61,66,70,78]]
+    leads
+      title = New leads per month
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      values = [[120,135,128,150,168,182,205,198,226,248,270,305]]
+    channels
+      title = Traffic sources
+      values = [[["Organic search",38],["Paid ads",24],["Referrals",18],["Social media",12],["Direct",8]]]
+
+  // ── "How it works" steps (3) ──────────────────────────────────────────────
+  how
+    h1
+      title = Connect
+      description = Bring your existing tools and data. Step-by-step migration guides make the switch painless.
+    h2
+      title = Configure
+      description = Set up roles, branding, and workflows in minutes with guided, zero-code onboarding.
+    h3
+      title = Launch
+      description = Go live with confidence. We monitor, scale, and support you around the clock.
+
+  // ── Showcase section (left column) ────────────────────────────────────────
+  showcase
+    heading = Built to be dependable
+    description = Under the hood, everything is engineered for transparency and control — so your team can move fast without surprises.
+    points = [["A single source of truth for your team's workflow","Integrates with the tools you already use","Scales from a small team to the whole enterprise"]]
+
+  // ── Testimonials (3) ──────────────────────────────────────────────────────
+  testimonials
+    t1
+      quote = We rolled this out to our entire team in a day — the smoothest onboarding we've experienced with any platform.
+      name = Sarah Chen
+      role = Head of Operations
+      company = Acme Corp
+    t2
+      quote = The reliability speaks for itself: zero downtime across six months of heavy production use.
+      name = Marcus Reid
+      role = CTO
+      company = Globex Industries
+    t3
+      quote = It replaced three separate tools and paid for itself within the first quarter. Our teams love it.
+      name = Amara Okafor
+      role = Product Lead
+      company = Initech
+
+  // ── Final call-to-action band ─────────────────────────────────────────────
+  cta
+    heading = Ready to take the next step?
+    description = Join the teams that ship with confidence. Set up your workspace today — no credit card required.
+    buttonText = Get started today
+    buttonUrl = #
+
+  // ── Product manual (documentation chapters) ──────────────────────────────
+  // A docs-style section with a contents sidebar. Each chapter renders as a
+  // numbered card with a title and body text. Add/remove chapters like m1, m2…
+  // (body is a single string — use the settings panel or a JSON import if you
+  // want real paragraph breaks).
+  manual
+    heading = Product manual
+    description = A guided walkthrough of the product — from first log-in to everyday workflows, admin and support.
+    chapters
+      m1
+        title = Getting started
+        body = Create your account, invite teammates, and complete your first project from template to launch in under an hour.
+      m2
+        title = Installation & setup
+        body = Guided onboarding covers roles, integrations and branding, with step-by-step migration guides that make switching from your existing tools painless.
+      m3
+        title = Everyday workflows
+        body = Build, review and ship from one workspace. Dashboards, notifications and automations keep the whole team aligned.
+      m4
+        title = Admin, billing & support
+        body = Manage users and permissions, review usage and invoices, and reach our 24/7 support team from the help center.
+
+  // ── FAQ accordion ─────────────────────────────────────────────────────────
+  faq
+    q1
+      question = How long does it take to get started?
+      answer = Most teams are up and running within a day. Guided onboarding covers setup, team invites, and integration with your existing tools.
+    q2
+      question = Can we use our existing tools and data?
+      answer = Yes. Migration guides and adapters cover the most common tools and formats, and our team can assist with custom integrations.
+    q3
+      question = Is our data secure?
+      answer = Data is encrypted in transit and at rest, access is role-based and audited, and deployments run in regions of your choice.
+    q4
+      question = What does it cost?
+      answer = Pricing scales with your team and usage. Contact us for a tailored quote — most teams start small and grow with the platform.
+    q5
+      question = What kind of support do we get?
+      answer = Every plan includes access to documentation and community support. Priority plans add a 24/7 support line with guaranteed response times.
+
+  // ── Footer link columns ───────────────────────────────────────────────────
+  footer
+    columns
+      col1
+        heading = Product
+        links
+          l1
+            label = Features
+            url = #features
+          l2
+            label = How it works
+            url = #how
+          l3
+            label = Pricing
+            url = #cta
+          l4
+            label = FAQ
+            url = #faq
+      col2
+        heading = Company
+        links
+          l1
+            label = About
+            url = #
+          l2
+            label = Careers
+            url = #
+          l3
+            label = Contact
+            url = #
+          l4
+            label = Press kit
+            url = #
+      col3
+        heading = Resources
+        links
+          l1
+            label = Documentation
+            url = #
+          l2
+            label = API reference
+            url = #
+          l3
+            label = System status
+            url = #
+          l4
+            label = Community
+            url = #
+
+  // ── Editor / admin behavior ───────────────────────────────────────────────
+  admin
+    showSettingsButton = true         // shows the ⚙ panel used to configure, scan & export
+
+  // ── PSA-U application settings ────────────────────────────────────────────
+  // Read by src/erp.js at boot. Role-aware module visibility (Task 1) uses
+  // roleDefault until the server-authorised role model lands in Phase 10.
+  psa
+    version = 0.1.0
+    roleDefault = owner               // owner | manager | staff
+    defaultCurrency = USD             // ISO 4217 code applied to a new service provider
+    defaultTimezone = UTC             // IANA zone applied to a new service provider
+    fiscalYearStartMonth = 1          // 1 = January; drives fiscal-year document splits

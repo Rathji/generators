@@ -112,8 +112,10 @@
 
   .panel label { display: block; font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 14px 0 6px; }
   .panel label .opt { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .panel label.checkRow { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-weight: 500; font-size: .82rem; color: var(--text); cursor: pointer; margin-top: 10px; }
+  .panel label.checkRow input { width: auto; margin: 0; accent-color: var(--accent2); }
 
-  textarea, input[type="number"], select {
+  textarea, input[type="text"], input[type="number"], select {
     width: 100%; background: var(--code-bg); color: var(--text);
     border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
     font-size: .88rem; line-height: 1.55; resize: vertical;
@@ -132,6 +134,8 @@
 
   .codeblock { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--card-soft); }
   .codebar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: rgba(255,255,255,.03); flex-wrap: wrap; }
+  .codebar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .badgePC { display: inline-flex; align-items: center; font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--accent2); border: 1px solid color-mix(in srgb, var(--accent2) 40%, transparent); background: color-mix(in srgb, var(--accent2) 12%, transparent); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
   .fname { font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace; font-size: .74rem; color: var(--muted); letter-spacing: .04em; word-break: break-all; }
   .codebar-btns { display: flex; gap: 6px; flex-wrap: wrap; }
   .copyBtn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 7px; padding: 3px 10px; font-size: .72rem; font-weight: 700; cursor: pointer; transition: color .15s, border-color .15s; font-family: inherit; }
@@ -260,8 +264,8 @@
       </div>
 
       <div id="expandFields" hidden>
-        <label>Current backlog (.pjs) <span class="opt">for context / numbering</span></label>
-        <textarea id="backlogInput" rows="7" placeholder="Paste the existing .pjs checklist so new phases continue numbering from the current total."></textarea>
+        <label>Current backlog <span class="opt">for context / numbering</span></label>
+        <textarea id="backlogInput" rows="7" placeholder="Paste the existing checklist so new phases continue numbering from the current total."></textarea>
         <label>Highest task number so far <span class="opt">optional fallback</span></label>
         <input id="lastNumInput" type="number" min="0" placeholder="e.g. 12">
       </div>
@@ -299,23 +303,33 @@
 
       <label>Target AI coding agent</label>
       <select id="agentSelect">
-        <option value="AI coding agent">Generic AI coding agent</option>
         <option value="Perchance AI Helper">Perchance AI Helper</option>
+        <option value="AI coding agent">Generic AI coding agent</option>
         <option value="Claude Code">Claude Code</option>
         <option value="Cursor">Cursor</option>
         <option value="GitHub Copilot">GitHub Copilot</option>
         <option value="Cline">Cline</option>
         <option value="Aider">Aider</option>
       </select>
+      <label class="checkRow"><input type="checkbox" id="agentDefaultToggle"> <span>Always use this agent by default</span></label>
+
+      <div id="refTemplateFields" hidden>
+        <label>Reference template <span class="opt">optional</span></label>
+        <input id="refTemplateInput" type="text" placeholder="e.g. rathji-template or perchance.org/minimal — leave blank to let the agent choose">
+        <p class="note">Optional starting point for the Perchance AI Helper. Saved locally, so it becomes your default.</p>
+      </div>
 
       <button id="generateBtn" class="primary-btn">Generate Roadmap</button>
-      <p class="note" style="margin-top:12px;">The generated kickoff prompt tells your agent to write the <code>.pjs</code> checklist and stay completely idle until you approve the backlog. <b>Starter Prompt</b> mode turns a roadmap into a ready-to-paste build prompt for your chosen template. Press <b>R</b> or <b>Ctrl/⌘+Enter</b> to regenerate.</p>
+      <p class="note" style="margin-top:12px;">The generated kickoff prompt tells your agent to persist the reviewable checklist in durable storage (e.g. a <code>CLAUDE.md</code> or a file under <code>src/</code>) and stay completely idle until you approve the backlog. <b>Starter Prompt</b> mode turns a roadmap into a ready-to-paste build prompt for your chosen template. Press <b>R</b> or <b>Ctrl/⌘+Enter</b> to regenerate.</p>
     </section>
 
     <section class="panel outpanel" id="outPanel">
       <div class="codeblock">
         <div class="codebar">
-          <span class="fname" id="fnameEl">roadmap-output.markdown</span>
+          <div class="codebar-left">
+            <span class="badgePC" id="agentBadge" hidden>Perchance AI Helper</span>
+            <span class="fname" id="fnameEl">roadmap-output.markdown</span>
+          </div>
           <div class="codebar-btns">
             <button id="copyBtn" class="copyBtn" disabled>Copy</button>
             <button id="mdBtn" class="copyBtn" disabled>⬇ .markdown</button>
@@ -445,8 +459,13 @@
       var m = document.querySelector("#modeSeg button.on").dataset.mode;
       u.searchParams.set("mode", m);
       var agent = document.getElementById("agentSelect").value;
-      if (agent && agent !== "AI coding agent") u.searchParams.set("agent", agent);
+      var defaultAgent = "Perchance AI Helper";
+      try { defaultAgent = localStorage.getItem("atomicRoadmapDefaultAgent") || defaultAgent; } catch (e) {}
+      if (agent && agent !== defaultAgent) u.searchParams.set("agent", agent);
       else u.searchParams.delete("agent");
+      var refTpl = document.getElementById("refTemplateInput").value.trim();
+      if (agent === "Perchance AI Helper" && refTpl && refTpl.length <= 200) u.searchParams.set("ref", refTpl);
+      else u.searchParams.delete("ref");
       if (m === "starter") {
         var nm = document.getElementById("genNameInput").value.trim();
         var sb = document.getElementById("genStubInput").value.trim();
@@ -493,9 +512,14 @@
     const txtBtn = document.getElementById("txtBtn");
     const promptTypeSeg = document.getElementById("promptTypeSeg");
     const buildOnlyFields = document.getElementById("buildOnlyFields");
+    const agentDefaultToggle = document.getElementById("agentDefaultToggle");
+    const refTemplateFields = document.getElementById("refTemplateFields");
+    const refTemplateInput = document.getElementById("refTemplateInput");
+    const agentBadge = document.getElementById("agentBadge");
 
     let mode = "kickoff";
     let activeGen = null;
+    let genToken = 0;
     let fullOutput = "";
     let currentFileBase = "";
     let lastRoadmap = "";
@@ -525,6 +549,46 @@
       }
     };
 
+    const AGENT_DEFAULT_KEY = "atomicRoadmapDefaultAgent";
+    const REF_TEMPLATE_KEY = "atomicRoadmapRefTemplate";
+    const BUILTIN_DEFAULT_AGENT = "Perchance AI Helper";
+
+    function savedDefaultAgent() {
+      try { return localStorage.getItem(AGENT_DEFAULT_KEY) || BUILTIN_DEFAULT_AGENT; }
+      catch (e) { return BUILTIN_DEFAULT_AGENT; }
+    }
+    function updateAgentDefaultToggle() {
+      agentDefaultToggle.checked = savedDefaultAgent() === agentSelect.value;
+    }
+    function updateAgentUi() {
+      const isPerchance = agentSelect.value === "Perchance AI Helper";
+      refTemplateFields.hidden = !(isPerchance && mode !== "starter");
+      agentBadge.hidden = !isPerchance;
+    }
+
+    agentSelect.value = savedDefaultAgent();
+    try { refTemplateInput.value = localStorage.getItem(REF_TEMPLATE_KEY) || ""; } catch (e) {}
+
+    agentSelect.addEventListener("change", () => { updateAgentDefaultToggle(); updateAgentUi(); });
+    agentDefaultToggle.addEventListener("change", () => {
+      try {
+        if (agentDefaultToggle.checked) {
+          localStorage.setItem(AGENT_DEFAULT_KEY, agentSelect.value);
+          showToast(agentSelect.value + " is now the default agent");
+        } else if (localStorage.getItem(AGENT_DEFAULT_KEY) === agentSelect.value) {
+          localStorage.removeItem(AGENT_DEFAULT_KEY);
+          showToast("Reverted to the built-in default agent");
+        }
+      } catch (e) {}
+      updateAgentDefaultToggle();
+    });
+    refTemplateInput.addEventListener("input", () => {
+      try {
+        const v = refTemplateInput.value.trim();
+        if (v) localStorage.setItem(REF_TEMPLATE_KEY, v); else localStorage.removeItem(REF_TEMPLATE_KEY);
+      } catch (e) {}
+    });
+
     // Restore shared inputs from the URL (?concept=&mode=&agent=).
     (function () {
       const qp = new URLSearchParams(location.search);
@@ -551,7 +615,12 @@
         document.querySelectorAll("#promptTypeSeg button").forEach(b => b.classList.toggle("on", b.dataset.ptype === pt));
         buildOnlyFields.hidden = pt !== "build";
       }
+      const rf = qp.get("ref");
+      if (rf && agentSelect.value === "Perchance AI Helper") refTemplateInput.value = rf;
     })();
+
+    updateAgentDefaultToggle();
+    updateAgentUi();
 
     document.querySelectorAll("#modeSeg button").forEach(btn => {
       btn.addEventListener("click", () => {
@@ -559,6 +628,7 @@
         document.querySelectorAll("#modeSeg button").forEach(b => b.classList.toggle("on", b === btn));
         expandFields.hidden = mode !== "expand";
         starterFields.hidden = mode !== "starter";
+        updateAgentUi();
       });
     });
 
@@ -634,6 +704,7 @@
           mode: "starter",
           promptType: promptType,
           generator: "atomic-roadmap",
+          agent: agentSelect.value,
           name: genNameInput.value.trim(),
           stub: genStubInput.value.trim(),
           template: templateSelect.value,
@@ -644,6 +715,8 @@
         json = JSON.stringify({
           project: slugifyProject(conceptInput.value),
           generator: "atomic-roadmap",
+          agent: agentSelect.value,
+          template: refTemplateInput.value.trim() || null,
           phaseRange: phaseRangeString(phases),
           phases: phases
         }, null, 2);
@@ -667,6 +740,7 @@
     }
 
     async function generate() {
+      const myToken = ++genToken;
       if (activeGen) { try { activeGen.stop(); } catch (e) {} activeGen = null; }
       if (mode === "starter") { generateStarter(); return; }
       const concept = conceptInput.value.trim();
@@ -674,20 +748,25 @@
       const backlog = backlogInput.value.trim();
       const lastNum = lastNumInput.value.trim();
       const agent = agentSelect.value;
+      const isPerchance = agent === "Perchance AI Helper";
+      const refTemplate = refTemplateInput.value.trim();
+      const refLine = (isPerchance && refTemplate) ? ("\n\nReference template: " + refTemplate) : "";
 
       let request;
       if (mode === "kickoff") {
         request = "USER REQUEST (Mode 1 - Initial Concept / Kickoff Request)\nTarget AI coding agent: " + agent +
-          "\n\nProject concept:\n" + concept +
-          "\n\nRespond with ONLY the complete Mode 1 output: a single self-contained markdown copy block containing the kickoff prompt and the Core Framework Tasks for the .pjs file, exactly following the Response Structure above.";
+          "\n\nProject concept:\n" + concept + refLine +
+          "\n\nRespond with ONLY the complete Mode 1 output: a single self-contained markdown copy block containing the kickoff prompt and the Core Framework Tasks, exactly following the Response Structure above.";
       } else {
         request = "USER REQUEST (Mode 2 - Expansion)\nTarget AI coding agent: " + agent + "\n\nExpansion request:\n" + concept;
-        if (backlog) request += "\n\nCurrent .pjs backlog (continue numbering from its total):\n" + backlog;
+        if (backlog) request += "\n\nCurrent backlog (continue numbering from its total):\n" + backlog;
         if (lastNum) request += "\n\nHighest task number so far: " + lastNum;
-        request += "\n\nRespond with ONLY the new Phase blocks, continuing sequential task numbering from the previous total, formatted to append directly into the existing .pjs checklist.";
+        request += refLine;
+        request += "\n\nRespond with ONLY the new Phase blocks, continuing sequential task numbering from the previous total, formatted to append directly into the existing checklist.";
       }
 
-      const instruction = window.atomicRoadmapSystemPrompt + "\n\n===\n\n" + request;
+      const addendum = isPerchance ? ("\n\n" + window.atomicRoadmapPerchanceAddendum) : "";
+      const instruction = window.atomicRoadmapSystemPrompt + addendum + "\n\n===\n\n" + request;
 
       fullOutput = "";
       outputEl.innerHTML = '<div class="spinner" aria-hidden="true"></div>';
@@ -699,24 +778,81 @@
       txtBtn.disabled = true;
       jsonBtn.disabled = true;
 
-      const p = root.generateText({
-        instruction: instruction,
-        onChunk: (d) => { outputEl.textContent = d.fullTextSoFar; },
-        onFinish: (d) => { finish(d.text); }
+      runGeneration(instruction, mode, myToken);
+    }
+
+    const MAX_PARTS = 8;
+
+    async function runGeneration(instruction, genMode, myToken) {
+      let combined = "";
+      let part = 0;
+      try {
+        while (part < MAX_PARTS) {
+          part++;
+          const startWith = part > 1 ? combined : "";
+          if (part > 1) statusEl.textContent = "Continuing the backlog (part " + part + ") — this can take up to a minute.";
+          const piece = await generatePart(instruction, startWith);
+          if (myToken !== genToken) return;
+          if (part > 1 && piece.replace(/\s+$/g, "").length <= combined.replace(/\s+$/g, "").length) break;
+          combined = piece;
+          fullOutput = combined;
+          outputEl.textContent = combined;
+          if (looksComplete(combined, genMode)) break;
+        }
+      } catch (err) {
+        if (myToken !== genToken) return;
+        if (!combined) {
+          activeGen = null;
+          outputEl.textContent = "";
+          fnameEl.textContent = "roadmap-output.markdown";
+          statusEl.textContent = "Generation stopped.";
+          generateBtn.disabled = false;
+          return;
+        }
+      }
+      if (myToken !== genToken) return;
+      finish(normalizeRoadmap(combined, genMode));
+    }
+
+    function generatePart(instruction, startWith) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const opts = {
+          instruction: instruction,
+          onChunk: (d) => { outputEl.textContent = startWith + d.fullTextSoFar; },
+          onFinish: (d) => { if (!settled) { settled = true; resolve(d.text); } }
+        };
+        if (startWith) opts.startWith = startWith;
+        const p = root.generateText(opts);
+        activeGen = p;
+        p.then(t => { if (!settled) { settled = true; resolve(t.text); } })
+         .catch(err => { if (!settled) { settled = true; reject(err); } });
       });
-      activeGen = p;
-      p.then(t => { if (activeGen === p) finish(t.text); })
-       .catch(err => {
-         if (activeGen !== p) return;
-         activeGen = null;
-         outputEl.textContent = "";
-         fnameEl.textContent = "roadmap-output.markdown";
-         statusEl.textContent = "Generation stopped.";
-         generateBtn.disabled = false;
-       });
+    }
+
+    function looksComplete(text, genMode) {
+      if (!text) return false;
+      if (genMode === "kickoff") {
+        const m = text.search(/\[Polish pass\]/i);
+        if (m < 0) return false;
+        const tail = text.slice(m);
+        if (/feels finished/i.test(tail)) return true;
+        const body = tail.replace(/```[\s\S]*$/, "").replace(/\s+$/, "");
+        return tail.replace(/\s+$/, "").endsWith("```") && body.length > 60;
+      }
+      const body = text.replace(/```[\s\S]*$/, "").replace(/\s+$/, "");
+      const last = body.split("\n").map(s => s.trim()).filter(Boolean).pop() || "";
+      return /[.!?`)\]]$/.test(last);
+    }
+
+    function normalizeRoadmap(text, genMode) {
+      let out = (text || "").replace(/\s+$/, "");
+      if (genMode === "kickoff" && /^```/.test(out) && !/```$/.test(out)) out += "\n```";
+      return out;
     }
 
     function generateStarter() {
+      genToken++;
       if (activeGen) { try { activeGen.stop(); } catch (e) {} activeGen = null; }
       const name = genNameInput.value.trim();
       let stub = (genStubInput.value.trim() || genNameInput.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")).toLowerCase();
@@ -765,7 +901,7 @@
         "You are a Perchance coding agent. Your job: build the generator \"" + o.name + "\" (stub: " + o.stub + ") by working through the atomic roadmap attached at the end of this prompt.",
         "",
         "## Step 1 — Persist the roadmap",
-        "Using the atomic roadmap that I have attached (see \"THE ROADMAP\" below), add the roadmap to the main.pjs file so that it is durable — keep it as a structured checklist in the code (e.g. a commented TODO list) so the plan and its progress survive across sessions.",
+        "Using the atomic roadmap that I have attached (see \"THE ROADMAP\" below), persist it as a structured checklist in the project's durable src/ file tree (e.g. src/ROADMAP.md) so the plan and its progress survive across sessions — never in ephemeral scratch storage.",
         "",
         "## Step 2 — Generator identity",
         "- This generator's name is: " + o.name,
@@ -786,7 +922,7 @@
         "",
         "## Step 5 — Final cleanup & polish",
         "Once all roadmap items are done, perform this final step:",
-        "- Get rid of the atomic roadmap in the main.pjs file — remove the checklist entirely so the shipped generator is clean.",
+        "- Remove the persisted roadmap checklist (e.g. src/ROADMAP.md) entirely so the raw, completed checklist does not ship with the generator — keep any genuine documentation it produced.",
         "- Provide a final polish pass on the generator: check it at phone and desktop sizes, confirm the console is error-free, smooth out any rough edges, and make sure it feels finished.",
         "",
         "---",
@@ -809,7 +945,7 @@
       const phases = extractPhases(text);
       const tasks = phases.reduce((n, p) => n + p.tasks.length, 0);
       const slug = slugifyProject(conceptInput.value);
-      currentFileBase = slug + "-" + phaseRangeString(phases);
+      currentFileBase = slug + "-" + phaseRangeString(phases) + (agentSelect.value === "Perchance AI Helper" ? "-perchance" : "");
       fnameEl.textContent = currentFileBase + ".markdown";
       let msg = "Done — " + text.length.toLocaleString() + " chars";
       if (tasks > 0) msg = "Done — " + tasks + " tasks across " + phases.length + " phase" + (phases.length === 1 ? "" : "s");

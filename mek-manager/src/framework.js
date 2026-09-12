@@ -48,8 +48,35 @@
     setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 320); }, 2800);
   }
 
-  function openModal(backEl) { if (backEl) backEl.hidden = false; }
-  function closeModal(backEl) { if (backEl) backEl.hidden = true; }
+  function rememberFocus(backEl) { if (backEl) backEl._prevFocus = document.activeElement; }
+  function restoreFocus(backEl) {
+    const pf = backEl && backEl._prevFocus;
+    if (pf && pf.focus && document.contains(pf)) pf.focus();
+  }
+  function autofocusIn(backEl) {
+    if (!backEl) return;
+    let target = backEl.querySelector("[data-autofocus]");
+    if (!target) target = backEl.querySelector(".modal[tabindex]");
+    if (!target) target = backEl.querySelector("button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]");
+    if (!target) target = backEl.querySelector(".modal");
+    if (target && typeof target.focus === "function") target.focus();
+  }
+  function topModal() {
+    const backs = $$(".modal-back").filter((m) => !m.hidden);
+    return backs.length ? backs[backs.length - 1] : null;
+  }
+  function openModal(backEl) {
+    if (!backEl) return;
+    rememberFocus(backEl);
+    backEl.hidden = false;
+    autofocusIn(backEl);
+  }
+  function closeModal(backEl) {
+    if (!backEl) return;
+    if (backEl.dataset.modalStatic === "1") backEl.hidden = true;
+    else backEl.remove();
+    restoreFocus(backEl);
+  }
   function initModals() {
     $$("[data-modal-open]").forEach((btn) => on(btn, "click", () => openModal($(btn.dataset.modalOpen))));
     $$("[data-modal-close]").forEach((btn) => on(btn, "click", () => {
@@ -57,7 +84,7 @@
       if (back) closeModal(back);
     }));
     $$(".modal-back").forEach((back) => on(back, "click", (e) => { if (e.target === back) closeModal(back); }));
-    on(document, "keydown", (e) => { if (e.key === "Escape") $$(".modal-back").forEach((m) => { if (!m.hidden) closeModal(m); }); });
+    on(document, "keydown", (e) => { if (e.key === "Escape") closeModal(topModal()); });
   }
   function initTabs() {
     $$(".tabs").forEach((bar) => {
@@ -192,8 +219,22 @@
     4: "Mission Market & Contract Logic",
     5: "AI Battle Simulation & Reporting",
     6: "Salvage & Discovery",
-    7: "Company Growth & Loop"
+    7: "Company Growth & Loop",
+    8: "Personnel Development",
+    9: "Combat & Simulation Depth",
+    10: "Economy & Logistics",
+    11: "World, Era & Factions",
+    12: "Interface & Characterization",
+    13: "Meta, Saves & Sharing",
+    14: "Solaris Arena Mode"
   };
+
+  function maxPhase(feats) {
+    let m = 1;
+    feats.forEach((f) => { if (f.phase > m) m = f.phase; });
+    Object.keys(PHASES).forEach((k) => { if (Number(k) > m) m = Number(k); });
+    return m;
+  }
 
   function applyTheme(cfg) {
     const t = cfg.theme, c = cfg.colors;
@@ -271,7 +312,8 @@
       byPhase.get(f.phase).push(f);
     });
     let html = "";
-    for (let p = 1; p <= 7; p++) {
+    const lastPhase = maxPhase(feats);
+    for (let p = 1; p <= lastPhase; p++) {
       const list = byPhase.get(p) || [];
       const done = list.filter((f) => f.done).length;
       const name = PHASES[p] || ("Phase " + p);
@@ -293,11 +335,11 @@
     const totalDone = feats.filter((f) => f.done).length;
     const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
     setText("systemsOnline", totalDone + " / " + feats.length);
-    setText("phasesCleared", countClearedPhases(feats) + " / 7");
+    setText("phasesCleared", countClearedPhases(feats) + " / " + lastPhase);
     const meters = $("#phaseMeters");
     if (meters) {
       let mhtml = "";
-      for (let p = 1; p <= 7; p++) {
+      for (let p = 1; p <= lastPhase; p++) {
         const list = byPhase.get(p) || [];
         const done = list.filter((f) => f.done).length;
         const pct = list.length ? Math.round((done / list.length) * 100) : 0;
@@ -355,6 +397,7 @@
       refreshFeatures: () => { features = readFeatures(); renderRoadmap(features); return features; },
       $: $, $$: $$, esc: esc, toast: toast,
       openModal: openModal, closeModal: closeModal,
+      rememberFocus: rememberFocus, restoreFocus: restoreFocus, focusModal: autofocusIn,
       fmtInt: fmtInt, fmtMoney: fmtMoney,
       phases: PHASES
     };

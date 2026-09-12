@@ -1,0 +1,490 @@
+export const CONCEPTS = [
+  {
+    term: "Canonical identity",
+    detail: "Every company, customer, device, ticket and invoice gets one stable ID derived from its natural keys. Different tools' spellings converge on the same record instead of forking it.",
+  },
+  {
+    term: "Integration registry",
+    detail: "The single declaration of who owns what. For every entity type and field the registry records the owning connector, whether that value is authoritative, and which way it synchronises.",
+  },
+  {
+    term: "Field ownership",
+    detail: "Each field has exactly one owner. Only the owner writes it; every other tool reads it. This is what lets the hub settle disagreements without guessing.",
+  },
+  {
+    term: "Reference, don't copy",
+    detail: "Shared values are fetched from their owning tool on demand rather than duplicated. Where a copy does exist, the hub checks it for drift.",
+  },
+  {
+    term: "Event envelope",
+    detail: "The only way tools communicate. Every envelope carries its type, version, source, monotonic sequence number and a validated payload.",
+  },
+  {
+    term: "Subscription",
+    detail: "A connector's declaration of the event topics it cares about. The manager persists subscriptions and delivers matching events; registering or removing one is itself an event.",
+  },
+  {
+    term: "Idempotent sync job",
+    detail: "Cross-tool work runs as a keyed job with an effect ledger. Retries, replays and duplicate submissions apply a change exactly once.",
+  },
+  {
+    term: "Conflict & settlement rule",
+    detail: "When two tools disagree about a field, the registry maps the field's sync direction to a settlement rule (owner-authoritative, owner-wins-two-way, hub-derivation or hub-local) and resolves it deterministically.",
+  },
+  {
+    term: "Drift",
+    detail: "A linked value that no longer matches its authoritative source. Drift is recorded in a ledger, grouped into an alert, and offered a one-click fix.",
+  },
+  {
+    term: "Alert",
+    detail: "One administrator notification per entity and kind of problem. Repeats escalate the same alert instead of piling up, and can be acknowledged or cleared.",
+  },
+  {
+    term: "Bundle",
+    detail: "A frozen, redacted snapshot of the linked directory — with a content fingerprint — packaged as JSON or CSV for an AI assistant, knowledge base, warehouse or backup.",
+  },
+  {
+    term: "Audit chain",
+    detail: "An immutable ledger where each entry hashes the one before it. Re-verifying the chain proves no stored entry was edited, reordered or removed.",
+  },
+  {
+    term: "Connector",
+    detail: "A Project U member tool the hub integrates with (IT-U, CRM-U, PSA-U, RMM-U). Each connector declares its fields, roles and subscriptions once in the registry.",
+  },
+  {
+    term: "OpenRPA connector",
+    detail: "The OpenRPA / OpenFlow endpoint registered as a first-class connector. It speaks the OpenRPA wire protocol — id / reply-to / command / JSON data — so the hub can drive workflows, queues, work items and documents, either live or against an offline emulator.",
+  },
+  {
+    term: "Correlated invocation",
+    detail: "A workflow trigger that carries a correlation id. The hub registers a reply route for that id, waits for the matching completion (or times out), and records the payload, result, error and duration for audit.",
+  },
+  {
+    term: "Robot presence",
+    detail: "A robot's liveness deduced from its last heartbeat: online, stale, or offline, alongside its version and load metrics. Presence is derived from timestamps, so it stays accurate without the robot pushing a state change.",
+  },
+  {
+    term: "Role-based access control",
+    detail: "Five canonical roles — Administrator, Integration Manager, Operator, Auditor and Viewer — ranked by what they may do. A person's Entra ID app-role or group claims resolve to one or more of them.",
+  },
+  {
+    term: "Permission matrix",
+    detail: "One central declaration of the minimum role each resource and action requires. Screens, buttons and back-end mutation guards all read the same matrix, so an access question has a single answer.",
+  },
+  {
+    term: "Read-only role",
+    detail: "The Auditor and Viewer roles can read dashboards and the audit trail but may not change anything. The hub disables mutation controls and rejects guarded writes for these roles.",
+  },
+  {
+    term: "Tenant guard",
+    detail: "A sign-in is rejected unless the token's tenant id belongs to the authorised Entra ID tenant. A token from another tenant lands in the Wrong Tenant state instead of opening the hub.",
+  },
+  {
+    term: "Client-side boundary",
+    detail: "Browser role checks shape the interface and stop honest mistakes, but a determined user can edit the page. Only a trusted backend can enforce security that matters; the hub itself holds no secrets.",
+  },
+];
+
+export const OPENRPA_HELP = [
+  {
+    id: "connect",
+    title: "Connect to OpenFlow",
+    summary: "Point the hub at an OpenFlow endpoint, or explore everything offline against the built-in emulator before you touch production.",
+    route: "openrpa",
+    steps: [
+      "Open the OpenRPA connector screen and, in Connection profiles, describe the endpoint: give it a name and either a full ws:// or wss:// URL or a scheme, host, port and optional path.",
+      "Press Validate, correct anything the field list flags, then Add profile. The first profile you create becomes the active one.",
+      "In Connection choose the offline emulator or the live endpoint, press Connect, then Ping to confirm a round trip before signing in.",
+    ],
+  },
+  {
+    id: "collections",
+    title: "Choose collections & documents",
+    summary: "OpenFlow is a document store: workflows, queues, work items, robots, Node-RED instances and files all live in collections you can browse and edit.",
+    route: "openrpa-data",
+    steps: [
+      "On the Collections & documents screen pick a Collection and a Named query, or write your own JSON query and an Order by expression, then press Run query.",
+      "Press Open on a row to read its typed fields, any unmapped fields, the workflow definition and the raw JSON behind a disclosure.",
+      "Use Write documents to Insert, Upsert by a uniqueness key, Update (carrying the version, so a stale write is reported as a conflict) or Delete.",
+    ],
+  },
+  {
+    id: "queues",
+    title: "Manage queues & work items",
+    summary: "A queue binds a workflow to a retry policy; work items move through the lifecycle from new to processing to a success or failure outcome.",
+    route: "openrpa-work",
+    steps: [
+      "In Queues create a queue with its workflow binding, robot and AMQP names, retry policy and success/failed routing queues.",
+      "In Enqueue work add one item with a JSON payload, priority and optional next-run, or Bulk enqueue a JSON array and read the per-item result.",
+      "Choose the queue and a worker name, press Claim next, then Inspect the item to edit it, move it through an allowed state, or complete it as success or failure.",
+    ],
+  },
+  {
+    id: "invoke",
+    title: "Invoke workflows",
+    summary: "Every invocation is correlated: the hub registers the reply for a correlation id, waits for the terminal push, and records the outcome.",
+    route: "openrpa-automation",
+    steps: [
+      "In Invoke a workflow choose a workflow id or a queue (the hint shows its parameters), then edit the JSON payload.",
+      "Optionally set a dispatcher, timeout, correlation id and a simulated failure, then press Invoke & await — or Dispatch only to fire and forget.",
+      "Read Results & correlation for the state, duration and outcome of each invocation, and cancel a pending one from the list above the table.",
+    ],
+  },
+  {
+    id: "events",
+    title: "Read events",
+    summary: "The event bridge turns OpenFlow's real-time pushes into normalized, versioned hub events you can watch, replay and audit.",
+    route: "openrpa-events",
+    steps: [
+      "Press Enable bridge to register the exchange and every queue and start streaming, or Register now to re-register after a reconnect.",
+      "In Document change streams pick a collection, optionally add a JSON filter, and press Watch collection; Unwatch a subscription when it is no longer needed.",
+      "In Bridged event stream filter the journal by topic, type, correlation id, from, to and limit, then Replay to bus to re-publish the matching events.",
+    ],
+  },
+  {
+    id: "ownership",
+    title: "Own fields & reconcile",
+    summary: "OpenRPA owns part of every mapped entity; when the hub and OpenFlow disagree, the ownership rules decide and every applied change is logged.",
+    route: "openrpa-sync",
+    steps: [
+      "On the Sync & conflicts screen press Refresh targets to read the live workflows, queues, work items, robots and Node-RED instances.",
+      "Press Auto-link to bind the entities whose automation fields or work-item payloads reference them, or link one manually with the entity and target pickers.",
+      "Choose a policy (Manual review, Prefer hub or Prefer OpenRPA), press Scan for drift, then Approve or Reject each proposal — or Reconcile now to apply every automatic proposal.",
+    ],
+  },
+  {
+    id: "bundles",
+    title: "Export & import bundles",
+    summary: "A bundle is a versioned, secret-free snapshot of an OpenRPA integration that another hub can validate, dry-run and import.",
+    route: "openrpa-bundles",
+    steps: [
+      "On the Export & import screen name the bundle, tick the sections to include (profiles, ownership, links, documents, assets), then press Build & preview.",
+      "Download the JSON or Publish it to this hub, and read the warnings — any credential-like profile field is stripped and reported rather than exported.",
+      "To import, paste a bundle or choose a file, press Validate, then Dry run to see exactly what would change before you press Import.",
+    ],
+  },
+  {
+    id: "troubleshooting",
+    title: "Troubleshooting a failed connection",
+    summary: "A connection can fail at the profile, transport, authentication or authorisation layer. Work down these checks in order.",
+    route: "openrpa",
+    steps: [
+      "Check the profile: a ws:// endpoint on port 443 or a wss:// endpoint on port 80 will be refused, so validate the URL and port and make sure the path begins with a slash.",
+      "Check the transport: the Connection panel and the protocol stats show the state, the last error and the retry count, and the hub retries with backoff while the endpoint is unreachable.",
+      "Check authentication: sign in with a username and password or a pasted JWT and read the token user, its roles and the expiry — an expired token is refreshed automatically, a rejected one must be replaced.",
+      "Check authorisation: the mapped canonical roles and the granted capabilities show what the session may do, so a feature that silently refuses is usually a missing OpenFlow role on the account.",
+      "If a self-signed certificate is blocking a development endpoint, turn on Allow insecure TLS on the profile — and only for a trusted network.",
+    ],
+  },
+];
+
+export const GUIDES = [
+  {
+    id: "home",
+    title: "Overview",
+    purpose: "The landing screen: the live size of the hub, a card per capability, the Project U family, and a pointer to the guide.",
+    steps: [
+      "Read the four stat cards — directory records and links, events logged, subscribers, and canonical roles — to gauge the hub at a glance.",
+      "Select any capability card to jump to the screen that implements it.",
+      "If you are new, open Help & about for a five-step orientation and a guide to every screen.",
+    ],
+    tip: "The stat cards read straight from the live hub, so they update as you work elsewhere.",
+  },
+  {
+    id: "identity",
+    title: "Canonical identity",
+    purpose: "The single directory of companies, customers, devices, tickets and invoices — one canonical record per real-world thing.",
+    steps: [
+      "Switch between the Companies, Customers, Devices, Tickets and Invoices tabs.",
+      "Select a record to expand its field values, natural keys, references, aliases and merge history.",
+      "Check Possible duplicates at the top; press Merge to fold one record into another (the weaker ID is kept as an alias).",
+      "Use Re-run demo import to reload the demo directory, or Reset hub data for a clean baseline. Both ask for confirmation.",
+    ],
+    tip: "A field marked “awaiting owner value” has no value yet from the connector that owns it — that is a gap to resolve, not a copy you can edit here.",
+  },
+  {
+    id: "registry",
+    title: "Integration registry",
+    purpose: "The declaration of who owns what: every connector's fields, their authoritative source and their sync direction.",
+    steps: [
+      "Pick an entity type tab (Companies, Customers, Devices, Tickets, Invoices).",
+      "Read the connector cards down the field-ownership table columns to see which tool owns each field and how the value reaches the hub.",
+      "Scroll to Registry validation: a green row means every field has exactly one owner, that owner declares the entity type, and the direction is valid.",
+    ],
+    tip: "If validation ever turns red, fix the declaration in src/core/catalog.js — everything downstream trusts it.",
+  },
+  {
+    id: "permissions",
+    title: "Permission mapping",
+    purpose: "One permission model for the whole family: connector-specific roles translated into shared canonical roles.",
+    steps: [
+      "Read the canonical role columns (Owner, Administrator, Dispatcher, Technician, Account manager, Billing, Auditor, Viewer).",
+      "Scan the Tool role mapping table to see how each tool's own role names translate.",
+      "Use the Permission checker: choose a connector, one of its tool roles, and an action, then read the answer.",
+    ],
+    tip: "Because translation is centralised, an access question has one answer everywhere rather than one per tool.",
+  },
+  {
+    id: "links",
+    title: "Entity links",
+    purpose: "The graph that connects records across tools — a device in RMM-U to a ticket in PSA-U, a ticket to its company, and so on.",
+    steps: [
+      "Review the Link types table: every reference the hub understands, the direction, and how many edges are resolved.",
+      "Open Unresolved references and pick the correct target for a reference that could not be matched, or Rebuild link graph after the source data is fixed.",
+      "Use the Link explorer to follow a record's outgoing references and the incoming references that point back at it.",
+    ],
+    tip: "Links are derived, not hand-maintained. Rebuilding the graph re-resolves every declared reference from scratch while keeping your manual overrides.",
+  },
+  {
+    id: "search",
+    title: "Cross-tool search",
+    purpose: "One query across every connector, showing which tools know about a record and what it links to.",
+    steps: [
+      "Type a company name, person, device, ticket or invoice ID — or select one of the sample queries.",
+      "Narrow the results with the entity-type, connector and link-state filters.",
+      "Expand a result to see its connector references, canonical record and outgoing/incoming links.",
+    ],
+    tip: "Search spans connectors even when a record is unresolved or unlinked, so it doubles as a cleanup finder.",
+  },
+  {
+    id: "sync",
+    title: "Sync jobs",
+    purpose: "The idempotent work queue: every cross-tool change runs as a keyed job so retries never double-apply.",
+    steps: [
+      "Queue a job: choose its kind, entity type, record and (for field work) the field, then press Queue job.",
+      "Use Queue jobs for open drift to enqueue a fix for every open drift signal in one go.",
+      "Press Run pending to drain the queue, or Run on a single row. Remove succeeds / Remove clears individual rows.",
+      "Open a job to inspect its effect ledger — the record of what each attempt actually changed.",
+    ],
+    tip: "Submitting the same job twice is safe by design: the second submission is recognised as a duplicate and returns the first attempt's effect.",
+  },
+  {
+    id: "reconcile",
+    title: "Reconciliation",
+    purpose: "Where the tools disagree, this screen says so and offers a one-click way to put it right.",
+    steps: [
+      "In Field resolution, choose an entity and read each field's status; use Fetch from owner to pull the authoritative value, then Adopt owner value to take it.",
+      "Work down the Findings list — stale values, unresolved references, copy drift and possible duplicates — each with its own action (Link, Merge, Adopt, Prune or Dismiss).",
+      "Check Copy hygiene for duplicated values, and restore any Dismissed findings if you change your mind.",
+    ],
+    tip: "Dismissing a finding hides it without touching the underlying data, so it is always safe to dismiss and revisit.",
+  },
+  {
+    id: "conflicts",
+    title: "Conflict resolution",
+    purpose: "The rules that decide which value wins when two tools write the same field.",
+    steps: [
+      "Read the Settlement rules table: each field's sync direction maps to the rule that will settle it.",
+      "Use Simulate a competing write to write a value from a non-owning tool and watch the conflict appear.",
+      "In Open conflicts, read what the hub holds beside what the owner reports, then adopt the winning value or Resolve all automatic.",
+      "Review the Settlement history to see every conflict the hub has resolved.",
+    ],
+    tip: "The hub never guesses and never lets the last writer win by default — the registry's ownership rules always decide.",
+  },
+  {
+    id: "drift",
+    title: "Drift & alerts",
+    purpose: "Continuous checking for linked data that has stopped matching its authoritative source, and the alert inbox.",
+    steps: [
+      "Press Scan now to sweep the graph for stale values, field conflicts and link drift.",
+      "For each Detected drift row press Queue & run fix, or use Run all suggested fixes for the whole ledger.",
+      "In the Alert inbox, press Acknowledge to record that someone is on it, or Clear to dismiss it early.",
+      "Check the Resolved log for signals that have converged or been cleared.",
+    ],
+    tip: "Repeated scans of the same problem escalate one alert rather than raising duplicates, so the inbox stays quiet and meaningful.",
+  },
+  {
+    id: "bundles",
+    title: "Data bundles",
+    purpose: "Package the linked directory into a redacted, fingerprinted snapshot for downstream consumers.",
+    steps: [
+      "In Build a bundle, choose a Target, Scope and Format, name it, and decide whether to include links, registry metadata, sensitive and hub-private fields.",
+      "Press Refresh preview to inspect the payload, then Download preview to save it, or Publish bundle to freeze it.",
+      "In Published bundles, expand any entry to Copy JSON or Download it again as JSON, CSV or link CSV; Delete removes a snapshot.",
+    ],
+    tip: "Sensitive and hub-private fields are stripped unless you explicitly opt in, so a default bundle is safe to hand to an external assistant.",
+  },
+  {
+    id: "audit",
+    title: "Audit log",
+    purpose: "The immutable, hash-chained record of every cross-tool movement and modification.",
+    steps: [
+      "Use Filter the ledger (free text plus action, connector, entity type, direction and order) to isolate entries; Reset filters clears them.",
+      "Press Details on a row to expand its actor, subject, field movement and payload.",
+      "Use Entity lifecycle to trace one record across every tool that touched it.",
+      "Press Verify chain to re-hash the ledger and prove nothing was edited, reordered or removed; Record note appends an operator entry.",
+    ],
+    tip: "Each entry hashes the one before it, so the chain stays verifiable even after the short-term event log prunes old events.",
+  },
+  {
+    id: "monitor",
+    title: "Connector monitor",
+    purpose: "Live health for every connector, plus latency and a single aggregator for every failure.",
+    steps: [
+      "Read the stat row, then press Send heartbeat for a one-off sweep or Start auto heartbeat and choose an Interval for continuous checks.",
+      "In the Connectivity dashboard, press Simulate outage on a connector to see the dashboard, latency and error aggregator react; press Restore connector to recover.",
+      "Review the three Latency tracking tables — event bus publishes, sync jobs and connector probes.",
+      "Filter the Error aggregator by category and severity; repeated failures are collapsed into one counted row.",
+    ],
+    tip: "Heartbeats, latency and aggregated errors are derived from the durable event log, so a page reload never double-counts them.",
+  },
+  {
+    id: "openrpa",
+    title: "OpenRPA connector",
+    purpose: "Connect the hub to OpenRPA / OpenFlow: manage connection profiles, sign in and map roles, speak the wire protocol, and explore every feature against an offline emulator.",
+    steps: [
+      "Read the stat row: connection state, mode, profile count, session and the emulator's collections.",
+      "In Connection profiles, describe an endpoint — a name plus a ws:// or wss:// URL, or a scheme, host, port and path — press Validate to check it, then Add profile.",
+      "In Connection, choose the offline emulator or a live endpoint, press Connect, and use Ping to measure a round trip; the protocol stats show retries, timeouts and the last reply.",
+      "In Authentication & session, sign in with a username and password, or paste a JWT; read the token user, its OpenFlow roles, the mapped canonical roles, the granted capabilities and the expiry.",
+      "In Offline emulator, probe the seeded collections, simulate an unreachable endpoint to exercise retries, inject a failing command, apply latency, or reset the fixtures.",
+    ],
+    tip: "The emulator is a full stand-in, not a stub: it answers the same commands and document model, so you can build and test every screen before pointing the hub at a real robot.",
+  },
+  {
+    id: "openrpa-data",
+    title: "Collections & documents",
+    purpose: "Browse, query and edit OpenFlow's documents — the typed records behind workflows, queues, work items, robots and stored files — together with the users, roles and ACL that govern them.",
+    steps: [
+      "Pick a Collection and a Named query, or type your own JSON query and an Order by expression, then press Run query; the pager shows how much matched.",
+      "Press Open on a row to inspect its typed fields, its unmapped fields, the workflow definition (queue binding, RPA/web flags, parameters) and its raw JSON.",
+      "Use Write documents to Insert a new record, Upsert it by a uniqueness key, or Update and Delete the selected one — updates carry the version, so a stale write comes back as a distinct conflict.",
+      "Read Users, roles & access to see the mirrored OpenFlow directory, the chosen document's ACL entries and the effective rights computed for the signed-in user or any user you pick; a blocked action is flagged before you attempt it.",
+    ],
+    tip: "Workflow XAML is never dumped by default — the detail view shows its size and only reveals the source when you ask, and only the fields the hub models are typed while everything else round-trips untouched.",
+  },
+  {
+    id: "openrpa-work",
+    title: "Work board & queues",
+    purpose: "The operational side of OpenRPA: define work-item queues and their retry/routing policy, enqueue and claim work, drive the item lifecycle, and store the files a job carries.",
+    steps: [
+      "In Work board, filter by queue, state, priority and free text, or click a state count chip; every matching item shows its queue, state, priority, retries and last-run time.",
+      "Choose a queue, type a worker name and press Claim next to pop the next due item — claiming honours the queue's priority order and skips items whose next-run time is still in the future.",
+      "Press Inspect on a row to open the item inspector: edit the payload, priority, retries and error detail, move the item through an allowed state, complete it as success or failure, and use Retry, Requeue, Cancel or Delete.",
+      "In Enqueue work, add a single item with a JSON payload, priority, optional next-run, a max-retries override and any stored files to attach, or open Bulk enqueue and submit a JSON array that reports a per-item result.",
+      "In Queues, create or edit a queue's workflow binding, robot/AMQP names, retry policy and success/failed routing queues, and delete a queue — optionally purging its items first.",
+      "In File storage, upload a file with its metadata, download or verify it, delete it, or attach it to the work item currently selected on the board.",
+    ],
+    tip: "A failed item obeying the retry policy returns to new with a next-run delay, and only moves to the failure queue once the queue's max retries are exhausted — watch the retries column for the count.",
+  },
+  {
+    id: "openrpa-automation",
+    title: "Automation & monitoring",
+    purpose: "Invoke OpenFlow workflows with a correlated reply, watch the robot fleet, manage Node-RED instances, and read the live health of the connector.",
+    steps: [
+      "In Invoke a workflow, pick a workflow id or a queue (the hint shows its parameters), type a JSON payload, optionally set a dispatcher, timeout, correlation id and a simulated failure, then press Invoke & await — or Dispatch only to fire and forget.",
+      "Read Results & correlation: every invocation is listed with its correlation id, state, duration and outcome; pending invocations can be cancelled from the list above the table.",
+      "In Robot registry & presence, press Refresh to rediscover robots, or Heartbeat a single robot / Heartbeat all to see online, stale and offline states update with their last-seen time, version and load.",
+      "In Node-RED instances, name an instance and press Ensure instance to create it, then Restart, Delete or Link it to this hub connector.",
+      "In Connector monitoring, read the state, latency, reconnect count, queue depths and error rate, press Probe now for an immediate sweep, and use Simulate outage / Restore connector to watch the thresholds and error list react.",
+    ],
+    tip: "A timed-out invocation is still recorded with its correlation id, so a late completion can be matched back to the request that started it.",
+  },
+  {
+    id: "openrpa-events",
+    title: "Event bus bridge",
+    purpose: "Bridge OpenFlow's real-time surface onto the hub: register exchanges and queues, subscribe to document change streams, and turn work-item, robot and collection notifications into normalized, versioned bus events.",
+    steps: [
+      "Read the stat row for the bridge state, the registered exchange and queues, the watch count and the size of the journal.",
+      "Press Enable bridge to register the exchange and every queue at once and start streaming, or use Register now to re-register after a reconnect; choose a Backpressure policy to decide how a full buffer behaves.",
+      "In Document change streams, pick a Collection, optionally type a JSON Filter, and press Watch collection — or Watch all defaults — then Unwatch a subscription when it is no longer needed.",
+      "In Bridged event stream, filter the journal by Topic, Type, Correlation id, From, To and Limit, then press Filter journal to audit it or Replay to bus to re-publish the matching events onto the hub.",
+      "Check OpenRPA event taxonomy to confirm every workitem, workflow, robot and collection type is registered against the bus catalog at the current schema version.",
+    ],
+    tip: "Ordering is preserved per correlation id and the buffer is bounded — under load the chosen policy drops the oldest, refuses the newest, or coalesces repeated heartbeats so the UI thread stays responsive.",
+  },
+  {
+    id: "openrpa-sync",
+    title: "Sync & conflicts",
+    purpose: "Own the OpenRPA-backed fields, link hub entities to the OpenRPA workflows, queues and work items that automate them, detect drift, and reconcile it under an ownership policy with a decision history.",
+    steps: [
+      "Read Field ownership to see which fields OpenRPA owns on each entity type, their sync direction and their conflict priority.",
+      "Press Refresh targets to read the live OpenRPA workflows, queues, work items, robots and Node-RED instances, then press Auto-link to bind the entities whose automation fields or work-item payloads reference them — or link one manually with the entity/target pickers.",
+      "Choose a Policy — Manual review, Prefer hub or Prefer OpenRPA — then press Scan for drift to compare the hub snapshot against the linked OpenFlow document versions and values.",
+      "In Reconciliation proposals, review the hub-vs-OpenRPA diff and each proposal's winner and action, then Approve or Reject it; pressing Reconcile now applies every automatic proposal at once.",
+      "Use Capture baseline to accept the current OpenRPA versions as the comparison point, and read Change & decision history to audit every applied change and every approve/reject decision.",
+    ],
+    tip: "Field drift compares values directly, record drift compares document versions to the captured baseline, and relationship drift flags links whose OpenRPA record is gone or work items pointing at unknown entities.",
+  },
+  {
+    id: "openrpa-bundles",
+    title: "Export & import",
+    purpose: "Package an OpenRPA integration into a versioned, secret-free bundle that any hub can validate, dry-run and import.",
+    steps: [
+      "Name the bundle, tick the sections to include — connection profiles, field ownership, entity links, document snapshots and workflow assets — then press Build & preview.",
+      "Download the JSON or Publish it to this hub, and read the warnings: any credential-like profile field is stripped and reported, never exported.",
+      "To import, paste a bundle or choose a file, press Validate, then Dry run to see exactly what would change before you press Import.",
+    ],
+    tip: "A bundle carries connection settings, not credentials, and its fingerprint plus manifest let you compare two exports of the same integration.",
+  },
+  {
+    id: "openrpa-guide",
+    title: "OpenRPA guide",
+    purpose: "A single walkthrough of the connector: connect, browse collections, run queues, invoke workflows, read events, reconcile and troubleshoot.",
+    steps: [
+      "Work down the connection checklist to create a profile, connect, ping and sign in, then read the live state, mode and profile counts.",
+      "Follow the topic section for whatever you need — collections, queues and work items, workflow invocation, the event bridge, ownership, or export & import — and press Open this screen to jump there.",
+      "When a connection fails, use the troubleshooting list to check the profile, the transport, authentication and authorisation in order.",
+    ],
+    tip: "The offline emulator answers the same commands as a real endpoint, so you can walk this whole guide before you have OpenFlow access.",
+  },
+  {
+    id: "events",
+    title: "Event bus",
+    purpose: "The messaging surface: publish validated envelopes, watch the stream, and manage subscriptions.",
+    steps: [
+      "In Publish an event, choose the event type and source, edit the JSON payload, and press Publish. Reset to sample restores the sample payload.",
+      "An invalid payload is rejected before any subscriber sees it — read the rejection message to correct it.",
+      "Use the Event stream (filter by topic, Clear log) to watch envelopes arrive newest-first.",
+      "In Subscriptions, Register subscription for a connector and topic, or Remove one you no longer need.",
+    ],
+    tip: "Registering or removing a subscription is itself an event, so subscription changes show up in the stream and the audit ledger.",
+  },
+  {
+    id: "tests",
+    title: "Validation tests",
+    purpose: "The in-browser test suite that proves the hub behaves after every change.",
+    steps: [
+      "Press Run all tests and wait for the suite to finish.",
+      "Read the per-suite results; any failure shows the test name and the assertion message.",
+      "You can also run them from the browser console with await window.puTests.run().",
+    ],
+    tip: "The suite runs entirely in your browser against an in-memory hub, so it never disturbs your saved data.",
+  },
+  {
+    id: "help",
+    title: "Help & about",
+    purpose: "This screen: a quick-start orientation, a guide for every screen, the shared vocabulary and deployment details.",
+    steps: [
+      "Read the five quick-start steps to get oriented in under a minute.",
+      "Select a screen in What each screen is for to jump to it, or open its step-by-step guide below.",
+      "Check Key concepts if a term in another screen is unfamiliar, and About for the version, maintainer and storage mode.",
+    ],
+    tip: "Every screen also carries a collapsible “How to use this screen” panel at the bottom, with the same steps.",
+  },
+  {
+    id: "access",
+    title: "Identity & access",
+    purpose: "Your resolved identity, the roles your Entra ID token granted, the central permission matrix, the identity debugger and the guide to assigning roles.",
+    steps: [
+      "Read Current session to confirm who you are signed in as, from which tenant, when the token expires and whether you hold a read-only role.",
+      "In Roles resolved from your token, check which app-role or group claims matched and which arrived unmapped; the default role applies when nothing matches.",
+      "Scan the Permission matrix to see the minimum role for every resource and action, and which of them your current roles allow.",
+      "An Administrator can open the Identity debugger to inspect raw token claims, and the Role management guide to wire Entra ID app roles and groups to the hub roles.",
+      "If the provider shows Degraded or Offline, press Check now in Identity provider connectivity to re-probe the discovery endpoint.",
+    ],
+    tip: "Add a claim to the appRoles or groups block in main.pjs when the Unmapped claims list shows a role you expected to grant access.",
+  },
+  {
+    id: "oversight",
+    title: "Auditor oversight",
+    purpose: "A read-only command view for auditors: connector health, sync drift, open findings and the integrity of the audit chain, with no mutation controls.",
+    steps: [
+      "Read the four stat cards for connectors up, open drift, average latency and the audit chain status at a glance.",
+      "Work down the Connector status table to spot a tool that is degraded or down, and note its last recorded error.",
+      "Review Sync drift for linked values that no longer match their source; the fixes themselves are made on the Reconciliation and Drift & alerts screens by an authorised role.",
+      "Press Verify audit chain to prove the ledger has not been edited, reordered or removed, then open the Audit log to trace a specific record.",
+    ],
+    tip: "The dashboard is deliberately read-only: an auditor can observe everything and change nothing.",
+  },
+];

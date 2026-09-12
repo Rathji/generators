@@ -1,0 +1,2394 @@
+<!-- ====================================================================
+     RMM-U — application shell
+     The frame every module renders inside: header + side navigation
+     (Dashboard, Devices, Groups, Policies, Monitors, Alerts, Automations,
+     Patches, Software, Security, Reports, Integrations, Admin), role-aware
+     module visibility, consistent loading / empty / error states,
+     responsive phone & desktop layouts.
+     Shell logic: src/erp.js · shell styles: src/erp.css
+     Base design tokens & shared components: src/template.css
+     ==================================================================== -->
+
+<script type="text/x-server-plugin">
+// ==========================================================================
+//  BUSINESS ERP — TEAM HUB (Tasks 41–44)
+//  Realtime companion: role/access enforcement, presence, document-version
+//  index & change fan-out, and the authoritative multi-user audit ring.
+//
+//  SECURITY MODEL — everything in this block is PUBLIC source. The runtime
+//  executes it authoritatively, but clients can read it. Only the SHA-256
+//  hash of the first-time owner password lives here (never the plaintext).
+//  Roles are enforced HERE, not by hiding UI. The document payloads
+//  themselves stay in the client document store (upload-plugin editable
+//  files); this hub only indexes their versions and signs audit entries, so
+//  a hacked client can always write directly to its own store — that
+//  boundary is documented in src/README.md.
+//
+//  DURABLE STATE LAYOUT (binary, versioned; derive caps from state.length)
+//    0        VERSION byte (1)
+//    1..7     reserved
+//    8        user table — 64-byte slots:
+//      0..31    userId (32 hex chars)
+//      32..55   displayName (24 ASCII, null-padded)
+//      56       role (0 staff, 1 manager, 2 owner)
+//      57       flags (reserved)
+//      58..61   lastSeen (u32 epoch seconds)
+//      62..63   reserved
+//    USER_END = 8 + 256*64 = 16392
+//    16392     audit header: u32 count, u32 next (8 bytes)
+//    AUD_OFF = 16400  — audit ring, 64-byte entries:
+//      0..3    seq (u32, monotonic)
+//      4..7    ts (u32 epoch seconds)
+//      8       role
+//      9..40   userId (32 hex)
+//      41..63  action (23 ASCII)
+//    ring size derived from remaining state, capped at 4096 (256 KiB)
+// ==========================================================================
+var ADMIN_PASSWORD_SHA256 = "35292c3c6370ff63b343a51c3b6e86635f310719edce4843a400f0be2e1b22fd";
+
+var VERSION = 1;
+var USER_BASE = 8, USER_LEN = 64;
+var MAX_USERS = 256;
+var AUD_HDR = USER_BASE + MAX_USERS * USER_LEN; // 16392
+var AUD_OFF = AUD_HDR + 8;                      // 16400
+var AUD_LEN = 64;
+var MAX_AUDIT = Math.min(4096, Math.floor((state.length - AUD_OFF) / AUD_LEN));
+
+// ---- ephemeral per-connection state (rebuilt on rebuild; never trusted as durable) ----
+var conns = new Map();      // conn.id -> {conn, info}
+var userConns = new Map();  // userId -> Set(conn.id)
+var versionIndex = new Map(); // docName -> {rev, u, n, ts}
+var rate = {};              // rate-limit buckets
+
+if (state.length < AUD_OFF || MAX_AUDIT < 8) {
+  // state was unexpectedly small — refuse to run rather than corrupt
+  throw new Error("ERP team hub: state too small");
+}
+if (state[0] !== VERSION) {
+  state.fill(0);
+  state[0] = VERSION;
+  writeU32(AUD_HDR, 0);
+  writeU32(AUD_HDR + 4, 0);
+}
+
+// ---------------- helpers ----------------
+function writeU32(off, v) {
+  v = v >>> 0;
+  state[off] = v & 255; state[off + 1] = (v >>> 8) & 255;
+  state[off + 2] = (v >>> 16) & 255; state[off + 3] = (v >>> 24) & 255;
+}
+function readU32(off) {
+  return state[off] | (state[off + 1] << 8) | (state[off + 2] << 16) | (state[off + 3] << 24);
+}
+function writeAscii(arr, off, s, max) {
+  for (var i = 0; i < max; i++) arr[off + i] = 0;
+  for (var j = 0; j < s.length && j < max; j++) {
+    var c = s.charCodeAt(j) & 0x7f;
+    arr[off + j] = c ? c : 0;
+  }
+}
+function readAscii(arr, off, max) {
+  var s = "";
+  for (var i = 0; i < max; i++) { var c = arr[off + i]; if (!c) break; s += String.fromCharCode(c); }
+  return s;
+}
+function asciiName(s, max) {
+  s = String(s || "").replace(/[^\x20-\x7e]/g, "").trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+function userSlot(userId) {
+  for (var i = 0; i < MAX_USERS; i++) {
+    var off = USER_BASE + i * USER_LEN;
+    if (readAscii(state, off, 32) === userId) return off;
+  }
+  for (var j = 0; j < MAX_USERS; j++) {
+    var o = USER_BASE + j * USER_LEN;
+    if (readAscii(state, o, 32) === "") return o;
+  }
+  return -1;
+}
+function userCount() {
+  var n = 0;
+  for (var i = 0; i < MAX_USERS; i++) if (readAscii(state, USER_BASE + i * USER_LEN, 32) !== "") n++;
+  return n;
+}
+function userList(withOnline) {
+  var out = [];
+  for (var i = 0; i < MAX_USERS; i++) {
+    var off = USER_BASE + i * USER_LEN;
+    var id = readAscii(state, off, 32);
+    if (!id) continue;
+    var rec = { userId: id, displayName: readAscii(state, off + 32, 24), role: state[off + 56], lastSeen: readU32(off + 58) };
+    if (withOnline) rec.online = userConns.has(id);
+    out.push(rec);
+  }
+  return out;
+}
+function infoOf(conn) {
+  var e = conns.get(conn.id);
+  return e && e.info ? e.info : null;
+}
+function rateLimit(key, max, windowMs) {
+  var now = Date.now();
+  var r = rate[key];
+  if (!r || now - r.t > windowMs) { rate[key] = { t: now, c: 1 }; return true; }
+  r.c++;
+  return r.c <= max;
+}
+function roleName(r) { return r === 2 ? "owner" : r === 1 ? "manager" : "staff"; }
+
+// role required for each guarded action (fail-closed: unknown => owner)
+var ACT_ROLES = {
+  post_journal: 1, reverse_journal: 1, receive_payment: 1, bank_entry: 1,
+  clear_bank: 1, close_period: 1, reopen_period: 1, chart_update: 1,
+  pay_bill: 1, restore_backup: 1, publish_backup: 1, archive_doc: 1,
+  settings_update: 1, tax_update: 1, defaults_update: 1,
+  credit_note: 0, invoice_from_order: 0,
+};
+function classify(action) {
+  var r = ACT_ROLES[action];
+  return r === undefined ? 2 : r;
+}
+
+function auditAppend(userId, role, action) {
+  var next = readU32(AUD_HDR + 4);
+  var off = AUD_OFF + (next % MAX_AUDIT) * AUD_LEN;
+  var seq = next + 1;
+  writeU32(off, seq);
+  writeU32(off + 4, (Date.now() / 1000) | 0);
+  state[off + 8] = role;
+  writeAscii(state, off + 9, userId, 32);
+  writeAscii(state, off + 41, action, 23);
+  writeU32(AUD_HDR, Math.min(readU32(AUD_HDR) + 1, MAX_AUDIT));
+  writeU32(AUD_HDR + 4, seq);
+  return { seq: seq, ts: readU32(off + 4), role: role, userId: userId, action: action };
+}
+
+// ---------------- SHA-256 (pure sync JS — no crypto/TextEncoder on server) ----------------
+function sha256Hex(input) {
+  var bytes = [];
+  for (var i = 0; i < input.length; i++) {
+    var c = input.charCodeAt(i);
+    if (c < 128) bytes.push(c);
+    else if (c < 2048) bytes.push(192 | c >> 6, 128 | c & 63);
+    else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < input.length) {
+      var c2 = input.charCodeAt(i + 1);
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+        var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+        bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
+        i++;
+      } else bytes.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+    } else bytes.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+  }
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (var k = 7; k >= 0; k--) bytes.push((bitLen / Math.pow(2, 8 * k)) & 255);
+  var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  var K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  var w = new Array(64);
+  for (var blk = 0; blk < bytes.length; blk += 64) {
+    for (var t = 0; t < 16; t++) w[t] = ((bytes[blk + t * 4] << 24) | (bytes[blk + t * 4 + 1] << 16) | (bytes[blk + t * 4 + 2] << 8) | bytes[blk + t * 4 + 3]) >>> 0;
+    for (var t2 = 16; t2 < 64; t2++) {
+      var w15 = w[t2 - 15], w2 = w[t2 - 2];
+      var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+      var s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+      w[t2] = (w[t2 - 16] + s0 + w[t2 - 7] + s1) >>> 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (var i = 0; i < 64; i++) {
+      var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      var ch = (e & f) ^ (~e & g);
+      var t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+      var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+  var hex = "";
+  function hx(v) { v = v & 255; return (v < 16 ? "0" : "") + v.toString(16); }
+  for (var j = 0; j < 8; j++) { var v = H[j]; hex += hx(v >>> 24) + hx(v >>> 16) + hx(v >>> 8) + hx(v); }
+  return hex;
+}
+
+/* ── Task 49/50: connection registry, console presence & rate control ──
+   Every socket is tagged at open time with its network group (conn.net[1],
+   the provider/allocation bucket) and proxy flag. Authenticated console
+   sessions are grouped by that bucket so one network cannot open an
+   unbounded number of technician sessions, and the same bucket keys the
+   rate-limit buckets used by the console RPCs below.
+
+   Presence (Task 49): a session that is viewing a device announces it with
+   `rmmFocus`, and the hub fans out the viewer list for that device so every
+   other technician sees who else is on it.
+
+   Document claims (Task 50): a hub-mediated, ephemeral reservation. Two
+   technicians editing the same records cannot silently clobber each other —
+   the second claimant is told who holds it, and a write that announces a
+   stale revision is refused and broadcast as a conflict. */
+var MAX_SESSIONS_PER_NET = 10;
+var CLAIM_TTL_MS = 15 * 60 * 1000;
+var AUDIT_REMOTE_ACTIONS = true;
+
+function netKey(conn) { return String(conn.net[1]) + (conn.isProxy ? ":p" : ""); }
+function sessionsForNet(conn) {
+  var k = netKey(conn), n = 0;
+  conns.forEach(function (e) { if (e.info && e.netKey === k) n++; });
+  return n;
+}
+function rateLimitNet(conn, kind, max, windowMs) { return rateLimit(kind + ":" + netKey(conn), max, windowMs); }
+
+function viewersOf(deviceId) {
+  var out = [];
+  conns.forEach(function (e) {
+    if (e.info && e.focus && e.focus.deviceId === deviceId) out.push({ userId: e.info.userId, displayName: e.info.displayName, role: e.info.role, admin: !!e.info.admin, at: e.focus.at });
+  });
+  return out;
+}
+function publishViewers(deviceId) {
+  if (!deviceId) return;
+  try { pubsub.publish("erp", JSON.stringify({ t: "viewers", d: deviceId, users: viewersOf(deviceId) })); } catch (e) {}
+}
+function setFocus(conn, deviceId, providerId) {
+  var e = conns.get(conn.id);
+  if (!e) return;
+  var prev = e.focus && e.focus.deviceId ? e.focus.deviceId : "";
+  var did = deviceId == null ? "" : String(deviceId).slice(0, 80);
+  e.focus = did ? { deviceId: did, providerId: providerId == null ? "" : String(providerId).slice(0, 80), at: (Date.now() / 1000) | 0 } : null;
+  if (prev && prev !== did) publishViewers(prev);
+  if (did) publishViewers(did);
+}
+
+var docClaims = new Map();
+function claimActive(c) { return !!(c && (Date.now() - c.at) < CLAIM_TTL_MS); }
+function claimOf(doc) { var c = docClaims.get(doc); if (!claimActive(c)) { if (c) docClaims.delete(doc); return null; } return c; }
+function releaseClaim(doc, userId) { var c = claimOf(doc); if (c && (!userId || c.userId === userId)) { docClaims.delete(doc); return c; } return null; }
+
+// ---------------- lifecycle ----------------
+self.onopen = function ({ conn }) {
+  conn.subscribe("erp");
+  conn.subscribe("rmm");
+  conns.set(conn.id, { conn: conn, info: null, netKey: netKey(conn), isProxy: !!conn.isProxy, joinedAt: (Date.now() / 1000) | 0, focus: null });
+};
+self.onclose = function ({ conn }) {
+  var e = conns.get(conn.id);
+  if (e) {
+    if (e.info) {
+      var ids = userConns.get(e.info.userId);
+      if (ids) { ids.delete(conn.id); if (ids.size === 0) userConns.delete(e.info.userId); }
+      pubsub.publish("erp", JSON.stringify({ t: "pres", u: e.info.userId, n: e.info.displayName, r: e.info.role, on: false }));
+    }
+    if (e.focus && e.focus.deviceId) publishViewers(e.focus.deviceId);
+    conns.delete(conn.id);
+  }
+};
+
+  /* ==RMM-COLLECTOR-CORE-START==
+     The shared collector core. It is intentionally dependency-free and
+     synchronous: the server runtime has no crypto, no TextEncoder, no
+     atob/btoa, no imports and no async, so everything it needs — UTF-8,
+     base64 and SHA-256 — is implemented here. Editing this block without
+     editing the copy in index.html will fail RMMCollectorTest.
+     ================================================================= */
+  function createCollectorCore(opts) {
+    opts = opts || {};
+    var CORE_VERSION = 1;
+    var now = typeof opts.now === "function" ? opts.now : function () { return new Date().toISOString(); };
+    var limits = Object.assign({
+      maxDevices: 2000,
+      maxJobsPerDevice: 200,
+      maxJobScriptBytes: 262144,
+      maxJobOutputBytes: 65536,
+      maxInventoryBytes: 524288,
+      maxMetricsSamples: 720,
+      maxLogBytes: 262144,
+      maxLogKeep: 10,
+      maxSelfTestKeep: 20,
+      maxUpdatesKeep: 20,
+      heartbeatSeconds: 300,
+      staleAfterMinutes: 15,
+      jobDeliveryLimit: 5,
+      deviceOpsPerMinute: 900,
+      maxBatchOps: 32,
+      rawMetricsMax: 720,
+      hourlyMetricsMax: 168,
+      dailyMetricsMax: 90,
+      correlationMaxBytes: 400,
+      jobReapLimit: 500
+    }, opts.limits || {});
+
+    /* ── UTF-8 ── */
+    function utf8Encode(str) {
+      str = String(str == null ? "" : str);
+      var out = [];
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        if (c < 128) out.push(c);
+        else if (c < 2048) out.push(192 | (c >> 6), 128 | (c & 63));
+        else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+          var c2 = str.charCodeAt(i + 1);
+          if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+            var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+            out.push(240 | (cp >> 18), 128 | ((cp >> 12) & 63), 128 | ((cp >> 6) & 63), 128 | (cp & 63));
+            i++;
+          } else out.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+        } else out.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+      }
+      return typeof Uint8Array !== "undefined" ? new Uint8Array(out) : out;
+    }
+    function utf8Decode(bytes) {
+      var s = "";
+      for (var i = 0; i < bytes.length;) {
+        var b = bytes[i++];
+        if (b < 128) s += String.fromCharCode(b);
+        else if (b < 224) s += String.fromCharCode(((b & 31) << 6) | (bytes[i++] & 63));
+        else if (b < 240) s += String.fromCharCode(((b & 15) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63));
+        else {
+          var cp = ((b & 7) << 18) | ((bytes[i++] & 63) << 12) | ((bytes[i++] & 63) << 6) | (bytes[i++] & 63);
+          cp -= 0x10000;
+          s += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 1023));
+        }
+      }
+      return s;
+    }
+
+    /* ── base64 (server has no btoa/atob) ── */
+    var B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    function b64encode(str) {
+      var bytes = utf8Encode(str), out = "";
+      for (var i = 0; i < bytes.length; i += 3) {
+        var b0 = bytes[i], b1 = i + 1 < bytes.length ? bytes[i + 1] : 0, b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+        out += B64[b0 >> 2] + B64[((b0 & 3) << 4) | (b1 >> 4)];
+        out += i + 1 < bytes.length ? B64[((b1 & 15) << 2) | (b2 >> 6)] : "=";
+        out += i + 2 < bytes.length ? B64[b2 & 63] : "=";
+      }
+      return out;
+    }
+    function b64decode(b64) {
+      var s = String(b64 == null ? "" : b64).replace(/[^A-Za-z0-9+/=]/g, "");
+      var bytes = [];
+      for (var i = 0; i < s.length; i += 4) {
+        var c0 = B64.indexOf(s.charAt(i)), c1 = B64.indexOf(s.charAt(i + 1));
+        var c2 = s.charAt(i + 2) === "=" ? -1 : B64.indexOf(s.charAt(i + 2));
+        var c3 = s.charAt(i + 3) === "=" ? -1 : B64.indexOf(s.charAt(i + 3));
+        if (c0 < 0 || c1 < 0) break;
+        bytes.push((c0 << 2) | (c1 >> 4));
+        if (c2 >= 0) bytes.push(((c1 & 15) << 4) | (c2 >> 2));
+        if (c3 >= 0) bytes.push(((c2 & 3) << 6) | c3);
+      }
+      return utf8Decode(bytes);
+    }
+
+    /* ── SHA-256 (pure sync JS) ── */
+    function sha256Hex(input) {
+      var bytes = [];
+      for (var i = 0; i < input.length; i++) {
+        var c = input.charCodeAt(i);
+        if (c < 128) bytes.push(c);
+        else if (c < 2048) bytes.push(192 | (c >> 6), 128 | (c & 63));
+        else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < input.length) {
+          var c2 = input.charCodeAt(i + 1);
+          if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+            var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+            bytes.push(240 | (cp >> 18), 128 | ((cp >> 12) & 63), 128 | ((cp >> 6) & 63), 128 | (cp & 63));
+            i++;
+          } else bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+        } else bytes.push(224 | (c >> 12), 128 | ((c >> 6) & 63), 128 | (c & 63));
+      }
+      var bitLen = bytes.length * 8;
+      bytes.push(0x80);
+      while (bytes.length % 64 !== 56) bytes.push(0);
+      for (var k = 7; k >= 0; k--) bytes.push((bitLen / Math.pow(2, 8 * k)) & 255);
+      var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+      var K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+      var w = new Array(64);
+      for (var blk = 0; blk < bytes.length; blk += 64) {
+        for (var t = 0; t < 16; t++) w[t] = ((bytes[blk + t * 4] << 24) | (bytes[blk + t * 4 + 1] << 16) | (bytes[blk + t * 4 + 2] << 8) | bytes[blk + t * 4 + 3]) >>> 0;
+        for (var t2 = 16; t2 < 64; t2++) {
+          var w15 = w[t2 - 15], w2 = w[t2 - 2];
+          var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+          var s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+          w[t2] = (w[t2 - 16] + s0 + w[t2 - 7] + s1) >>> 0;
+        }
+        var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+        for (var j = 0; j < 64; j++) {
+          var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+          var ch = (e & f) ^ (~e & g);
+          var t1 = (h + S1 + ch + K[j] + w[j]) >>> 0;
+          var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+          var maj = (a & b) ^ (a & c) ^ (b & c);
+          var t22 = (S0 + maj) >>> 0;
+          h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t22) >>> 0;
+        }
+        H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+        H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+      }
+      var hex = "";
+      function hx(v) { v = v & 255; return (v < 16 ? "0" : "") + v.toString(16); }
+      for (var q = 0; q < 8; q++) { var v2 = H[q]; hex += hx(v2 >>> 24) + hx(v2 >>> 16) + hx(v2 >>> 8) + hx(v2); }
+      return hex;
+    }
+    function ctEqual(a, b) {
+      a = String(a || ""); b = String(b || "");
+      if (a.length !== b.length) return false;
+      var diff = 0;
+      for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+      return diff === 0;
+    }
+
+    /* ── payload codec (Task 17) ──
+       A tiny, dependency-free, exactly-reversible packer for JSON text.
+       It replaces every *quoted string literal* that occurs more than once
+       (object keys and repeated values — the bulk of an inventory or metric
+       payload) with a two-character code, and prepends a dictionary. The
+       server has no zlib/atob, so this is the collector's compression: the
+       agent/hub may send a packed body and the receiver unpacks it here.
+       Output never contains a raw 0x01 unless it is one of our codes. */
+    var PACK_MARK = "\u0001";
+    var PACK_SEP = "\u0002";
+    var PACK_END = "\u0003";
+    var PACK_CAP = 220;
+    function packText(text) {
+      text = String(text == null ? "" : text);
+      if (text.length < 64) return text;
+      var re = /"((?:[^"\\]|\\.)*)"/g;
+      var counts = {}, m;
+      while ((m = re.exec(text))) {
+        var tok = m[0];
+        if (tok.length < 5) continue;
+        counts[tok] = (counts[tok] || 0) + 1;
+      }
+      var cands = [];
+      for (var t in counts) if (counts[t] > 1) cands.push(t);
+      if (!cands.length) return text;
+      cands.sort(function (a, b) { return b.length - a.length; });
+      cands = cands.slice(0, PACK_CAP);
+      var map = {}, entries = [];
+      for (var i = 0; i < cands.length; i++) {
+        var code = PACK_MARK + String.fromCharCode(0x40 + i);
+        map[cands[i]] = code;
+        entries.push(code + cands[i]);
+      }
+      var body = text.replace(re, function (s) { return map[s] || s; });
+      if (body.length >= text.length) return text;
+      return PACK_MARK + entries.join(PACK_SEP) + PACK_END + body;
+    }
+    function unpackText(text) {
+      text = String(text == null ? "" : text);
+      if (text.charAt(0) !== PACK_MARK) return text;
+      var end = text.indexOf(PACK_END, 1);
+      if (end === -1) return text;
+      var dict = text.slice(1, end).split(PACK_SEP);
+      var map = {};
+      for (var i = 0; i < dict.length; i++) {
+        if (dict[i].length < 3) continue;
+        map[dict[i].slice(0, 2)] = dict[i].slice(2);
+      }
+      var src = text.slice(end + 1), out = "";
+      for (var j = 0; j < src.length;) {
+        if (src.charAt(j) === PACK_MARK && j + 1 < src.length) {
+          var code = src.substr(j, 2), rep = map[code];
+          if (rep != null) { out += rep; j += 2; continue; }
+        }
+        out += src.charAt(j); j++;
+      }
+      return out;
+    }
+
+    /* ── ids & entropy ──
+       The server runtime has no crypto, so the console tops up an entropy
+       pool (admin seedEntropy) and this mixes it with time + Math.random.
+       The pool is the difference between "unguessable" and "annoying". */
+    var counter = 0;
+    var entropy = String(opts.entropy || "");
+    function seedEntropy(s) { entropy = (String(s || "") + entropy).slice(0, 8192); }
+    function randomToken(n) {
+      var alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      var out = "";
+      for (var i = 0; i < n; i++) {
+        var m = (Math.random() * 4294967296) >>> 0;
+        var e = entropy.length ? entropy.charCodeAt((counter + i) % entropy.length) : 0;
+        var idx = ((m ^ (e * 7) ^ (counter * 13)) >>> 0) % alpha.length;
+        out += alpha[idx];
+      }
+      counter++;
+      return out;
+    }
+    function newId(prefix) { return prefix + "-" + Date.now().toString(36) + randomToken(6).toLowerCase(); }
+    function newDeviceId() { return "dev-" + randomToken(10).toLowerCase(); }
+    function newCredential() { return "cred_" + randomToken(40); }
+    function newJobId() { return "job-" + randomToken(8).toLowerCase(); }
+
+    /* ── state ── */
+    var state = {
+      v: CORE_VERSION,
+      createdAt: now(),
+      devices: {},
+      creds: {},
+      tokens: {},
+      jobs: {},
+      inventory: {},
+      metrics: {},
+      logs: {},
+      diagnostics: {},
+      updates: {},
+      config: {},
+      rate: {},
+      lastStatus: {},
+      access: {},
+      accessLog: [],
+      counters: { enrollments: 0, heartbeats: 0, inventory: 0, metrics: 0, jobResults: 0, rejected: 0, rateLimited: 0 },
+    };
+    function load(obj) {
+      if (obj && typeof obj === "object") {
+        state = Object.assign({ v: CORE_VERSION, createdAt: now(), devices: {}, creds: {}, tokens: {}, jobs: {}, inventory: {}, metrics: {}, logs: {}, diagnostics: {}, updates: {}, config: {}, rate: {}, lastStatus: {}, access: {}, accessLog: [], counters: {} }, obj);
+        state.v = CORE_VERSION;
+      }
+      return state;
+    }
+    function dump() { return state; }
+
+    /* ── helpers ── */
+    function isStr(x) { return typeof x === "string"; }
+    function trim(x, cap) { x = x == null ? "" : String(x); return cap && x.length > cap ? x.slice(0, cap) : x; }
+    function num(v, d) { var n = Number(v); return isFinite(n) ? n : (d == null ? 0 : d); }
+    function bool(v) { return v === true || v === "true"; }
+    function arr(v) { return Array.isArray(v) ? v : []; }
+
+    /* ── role & access model (Task 48) ──
+       Four console roles — read-only, technician, dispatcher and
+       security-admin — each a fixed set of capabilities. A capability may
+       also be granted or revoked per user, so the four destructive actions
+       (script execution, patch denial, remote shell, file transfer) are
+       gated individually rather than as one undifferentiated "admin" bit.
+       Every grant is further bounded to a set of sites and/or devices.
+       `authorize` is the single rule engine: the hub calls it from its
+       admin RPC (`guardAdmin`), so a crafted client that skips the UI is
+       still refused by the server. */
+    var RMM_ROLES = ["read-only", "technician", "dispatcher", "security-admin"];
+    var ROLE_DESC = {
+      "read-only": "Sees the fleet, devices, inventory and metrics. Changes nothing.",
+      "technician": "Works devices: diagnostics, alert work, approved scripts and patch deployment.",
+      "dispatcher": "Runs the desk: schedules, routing, dispatch, config pushes and agent updates.",
+      "security-admin": "Full control, including the destructive remote actions and access management."
+    };
+    var CAPS = {
+      "fleet.view": { label: "View the fleet & devices", group: "view" },
+      "device.diagnose": { label: "Request diagnostics, logs & self-tests", group: "operate" },
+      "alert.work": { label: "Acknowledge, assign & resolve alerts", group: "operate" },
+      "job.run": { label: "Run approved scripts & monitors", group: "operate" },
+      "job.manage": { label: "Retry, cancel & requeue jobs", group: "operate" },
+      "dispatch.manage": { label: "Manage schedules, routing & dispatch", group: "operate" },
+      "patch.deploy": { label: "Approve & deploy patches", group: "deploy" },
+      "config.push": { label: "Push agent config & queue updates", group: "deploy" },
+      "enrollment.manage": { label: "Mint & revoke enrollment tokens", group: "security" },
+      "device.revoke": { label: "Revoke device credentials", group: "security" },
+      "script.execute": { label: "Execute arbitrary scripts & commands", group: "destructive", destructive: true },
+      "patch.deny": { label: "Deny & block patches", group: "destructive", destructive: true },
+      "remote.shell": { label: "Open an interactive remote shell", group: "destructive", destructive: true },
+      "remote.file": { label: "Transfer files to & from devices", group: "destructive", destructive: true },
+      "access.manage": { label: "Manage roles, scopes & capabilities", group: "admin" }
+    };
+    var DESTRUCTIVE_CAPS = ["script.execute", "patch.deny", "remote.shell", "remote.file"];
+    var ROLE_CAPS = {
+      "read-only": ["fleet.view"],
+      "technician": ["fleet.view", "device.diagnose", "alert.work", "job.run", "patch.deploy"],
+      "dispatcher": ["fleet.view", "device.diagnose", "alert.work", "job.run", "job.manage", "dispatch.manage", "patch.deploy", "config.push"],
+      "security-admin": ["fleet.view", "device.diagnose", "alert.work", "job.run", "job.manage", "dispatch.manage", "patch.deploy", "config.push", "enrollment.manage", "device.revoke", "script.execute", "patch.deny", "remote.shell", "remote.file", "access.manage"]
+    };
+    function roleIndex(r) { return RMM_ROLES.indexOf(String(r)); }
+    function baseCaps(role) {
+      var list = ROLE_CAPS[role] || ROLE_CAPS["read-only"], out = {};
+      for (var i = 0; i < list.length; i++) out[list[i]] = true;
+      return out;
+    }
+    function capsFor(role, rec) {
+      var out = baseCaps(role), k;
+      if (rec && arr(rec.allow).length) { var a = arr(rec.allow); for (k = 0; k < a.length; k++) if (CAPS[a[k]]) out[a[k]] = true; }
+      if (rec && arr(rec.deny).length) { var d = arr(rec.deny); for (k = 0; k < d.length; k++) delete out[d[k]]; }
+      return out;
+    }
+    function derivedRole(teamRole) {
+      teamRole = Number(teamRole);
+      if (teamRole === 2) return "security-admin";
+      if (teamRole === 1) return "dispatcher";
+      return "read-only";
+    }
+    function resolveRole(userId, teamRole, rec) {
+      if (Number(teamRole) === 2) return "security-admin"; // the owner can never be locked out
+      rec = rec || state.access[String(userId || "")] || null;
+      if (rec && roleIndex(rec.role) >= 0) return rec.role;
+      return derivedRole(teamRole);
+    }
+    function scopeOf(userId, teamRole, rec) {
+      if (Number(teamRole) === 2) return { all: true, sites: [], devices: [] };
+      rec = rec || state.access[String(userId || "")] || null;
+      if (!rec || !rec.scopes) return { all: true, sites: [], devices: [] };
+      return rec.scopes;
+    }
+    function normalizeScopes(input) {
+      input = input || {};
+      if (input.all === true || (!arr(input.sites).length && !arr(input.devices).length)) return { all: true, sites: [], devices: [] };
+      var seenS = {}, seenD = {}, sites = [], devices = [], i;
+      var rawS = arr(input.sites);
+      for (i = 0; i < rawS.length && sites.length < 200; i++) { var s1 = trim(rawS[i], 80); if (s1 && !seenS[s1]) { seenS[s1] = 1; sites.push(s1); } }
+      var rawD = arr(input.devices);
+      for (i = 0; i < rawD.length && devices.length < 500; i++) { var d1 = trim(rawD[i], 80); if (d1 && !seenD[d1]) { seenD[d1] = 1; devices.push(d1); } }
+      return { all: false, sites: sites, devices: devices };
+    }
+    function inScope(scope, siteId, deviceId) {
+      if (!scope || scope.all) return true;
+      var sid = siteId == null ? "" : String(siteId), did = deviceId == null ? "" : String(deviceId);
+      if (did && arr(scope.devices).indexOf(did) !== -1) return true;
+      if (sid && arr(scope.sites).indexOf(sid) !== -1) return true;
+      return false;
+    }
+    function minRoleFor(action) {
+      for (var i = 0; i < RMM_ROLES.length; i++) if (ROLE_CAPS[RMM_ROLES[i]].indexOf(action) !== -1) return RMM_ROLES[i];
+      return "security-admin";
+    }
+    function capForJobSource(source, explicit) {
+      if (explicit && CAPS[explicit]) return explicit;
+      source = String(source == null ? "" : source).toLowerCase();
+      if (source.indexOf("remote-shell") === 0) return "remote.shell";
+      if (source.indexOf("remote-transfer") === 0) return "remote.file";
+      if (source.indexOf("patch") === 0) return "patch.deploy";
+      if (source === "console" || source === "adhoc" || source === "command") return "script.execute";
+      return "job.run";
+    }
+    function authorize(opts) {
+      opts = opts || {};
+      var userId = String(opts.userId == null ? "" : opts.userId);
+      var action = String(opts.action == null ? "" : opts.action);
+      var deviceId = opts.deviceId == null ? "" : String(opts.deviceId);
+      var siteId = opts.siteId == null ? "" : String(opts.siteId);
+      var teamRole = opts.teamRole == null ? -1 : Number(opts.teamRole);
+      var rec = state.access[userId] || null;
+      var role = resolveRole(userId, teamRole, rec);
+      var out = { ok: false, userId: userId, role: role, action: action, deviceId: deviceId, siteId: siteId, requiredRole: null, destructive: false, reason: "" };
+      if (!userId) { out.reason = "no_user"; return out; }
+      if (!CAPS[action]) { out.reason = "unknown_action"; return out; }
+      out.destructive = !!CAPS[action].destructive;
+      if (!inScope(scopeOf(userId, teamRole, rec), siteId, deviceId)) { out.reason = "out_of_scope"; out.requiredRole = minRoleFor(action); return out; }
+      if (!capsFor(role, Number(teamRole) === 2 ? null : rec)[action]) { out.reason = "forbidden"; out.requiredRole = minRoleFor(action); return out; }
+      out.ok = true;
+      return out;
+    }
+    function describeAuth(r) {
+      if (!r) return "Not permitted.";
+      if (r.ok) return "Permitted as " + r.role + ".";
+      if (r.reason === "out_of_scope") return "This device or site is outside your assigned scope.";
+      if (r.reason === "forbidden") return "The " + r.role + " role may not " + (CAPS[r.action] ? CAPS[r.action].label.toLowerCase() : r.action) + ".";
+      if (r.reason === "no_user") return "No console identity — connect to the team hub first.";
+      if (r.reason === "unknown_action") return "Unknown action.";
+      return "Not permitted.";
+    }
+    /* Maps every collector admin action to the capability it needs. Ops that
+       target devices resolve the device's site so a site-scoped grant works. */
+    var ADMIN_CAP = {
+      registerToken: "enrollment.manage", revokeToken: "enrollment.manage",
+      pushJob: "job.run", pushJobs: "job.run", pushConfig: "config.push",
+      requestLogs: "device.diagnose", requestSelfTest: "device.diagnose", queueUpdate: "config.push",
+      revokeDevice: "device.revoke", retryJob: "job.manage", cancelJob: "job.manage", reapJobs: "job.manage",
+      applyRetention: "config.push", seedEntropy: "config.push",
+      fleet: "fleet.view", device: "fleet.view", job: "fleet.view", jobs: "fleet.view",
+      inventory: "fleet.view", metrics: "fleet.view", logs: "fleet.view", diagnostics: "fleet.view",
+      setAccessRole: "access.manage", setAccessScopes: "access.manage", setAccessCaps: "access.manage",
+      removeAccess: "access.manage", listAccess: "access.manage", accessCheck: "fleet.view", accessCatalog: "fleet.view"
+    };
+    var ADMIN_DEVICE = { device: "deviceId", pushJob: "deviceId", pushConfig: "deviceId", revokeDevice: "deviceId", inventory: "deviceId", metrics: "deviceId", logs: "deviceId", diagnostics: "deviceId", accessCheck: "deviceId" };
+    var ADMIN_DEVICES = { requestLogs: "deviceIds", requestSelfTest: "deviceIds", queueUpdate: "deviceIds", pushJobs: "deviceIds" };
+    function guardAdmin(acting, action, payload) {
+      acting = acting || {}; payload = payload || {};
+      action = String(action || "");
+      var base = ADMIN_CAP[action];
+      if (!base) return { ok: false, error: "unknown_action", reason: "unknown_action" };
+      var cap = base;
+      if (action === "pushJob" || action === "pushJobs") { var job = payload.job || {}; cap = capForJobSource(job.source, job.requiredCap); }
+      var targets = [], i, checked = false;
+      if (ADMIN_DEVICE[action]) targets.push(String(payload[ADMIN_DEVICE[action]] || ""));
+      if (ADMIN_DEVICES[action]) { var list = arr(payload[ADMIN_DEVICES[action]]); for (i = 0; i < list.length; i++) targets.push(String(list[i])); }
+      for (i = 0; i < targets.length; i++) {
+        var devId = targets[i];
+        if (!devId) continue;
+        checked = true;
+        var dev = state.devices[devId];
+        var r = authorize({ userId: acting.userId, teamRole: acting.teamRole, action: cap, siteId: (dev && dev.siteId) || "", deviceId: devId });
+        if (!r.ok) return { ok: false, error: r.reason === "out_of_scope" ? "out_of_scope" : "forbidden", reason: r.reason, capability: cap, requiredRole: r.requiredRole, deviceId: devId, message: describeAuth(r) };
+      }
+      if (!checked) {
+        var rr = authorize({ userId: acting.userId, teamRole: acting.teamRole, action: cap, siteId: payload.siteId, deviceId: payload.deviceId });
+        if (!rr.ok) return { ok: false, error: rr.reason === "out_of_scope" ? "out_of_scope" : "forbidden", reason: rr.reason, capability: cap, requiredRole: rr.requiredRole, message: describeAuth(rr) };
+      }
+      return { ok: true, capability: cap, role: resolveRole(acting.userId, acting.teamRole) };
+    }
+    function accessRecord(userId) {
+      var r = state.access[userId] || {};
+      return { userId: userId, role: roleIndex(r.role) >= 0 ? r.role : null, scopes: r.scopes || { all: true, sites: [], devices: [] }, allow: arr(r.allow), deny: arr(r.deny), updatedAt: r.updatedAt || "" };
+    }
+    function logAccess(kind, userId, detail) {
+      state.accessLog = arr(state.accessLog);
+      state.accessLog.push({ at: now(), kind: String(kind || ""), userId: trim(userId, 64), detail: trim(detail, 160) });
+      while (state.accessLog.length > 200) state.accessLog.shift();
+    }
+    function roleCatalog() {
+      var out = [];
+      for (var i = 0; i < RMM_ROLES.length; i++) out.push({ id: RMM_ROLES[i], label: RMM_ROLES[i], rank: i, description: ROLE_DESC[RMM_ROLES[i]] || "", capabilities: ROLE_CAPS[RMM_ROLES[i]].slice() });
+      return out;
+    }
+    function capCatalog() {
+      var out = [];
+      for (var id in CAPS) out.push({ id: id, label: CAPS[id].label, group: CAPS[id].group, destructive: !!CAPS[id].destructive });
+      return out;
+    }
+
+    /* ── per-device rate cap (Task 17) ──
+       A compromised or misbehaving endpoint must not be able to exhaust the
+       collector. Each device gets a bounded number of check-ins per minute. */
+    function rateAllow(deviceId) {
+      if (!deviceId) return true;
+      var t = Date.now();
+      var r = state.rate[deviceId];
+      if (!r || t - r.t > 60000) { state.rate[deviceId] = { t: t, c: 1 }; return true; }
+      r.c++;
+      return r.c <= limits.deviceOpsPerMinute;
+    }
+
+    /* ── metric roll-ups (Task 17) ──
+       Raw samples are bounded; each sample also folds into a running hourly
+       and daily average so the collector keeps long history in a bounded
+       amount of durable state. */
+    function bucketKey(at, unit) {
+      var t = at ? Date.parse(at) : NaN;
+      var d = new Date(isFinite(t) ? t : Date.now());
+      d.setUTCMinutes(0, 0, 0);
+      if (unit === "day") d.setUTCHours(0, 0, 0, 0);
+      return d.toISOString();
+    }
+    function foldAvg(entry, sample) {
+      var key = entry.at;
+      entry.n = num(entry.n, 0) + 1;
+      for (var k in sample) {
+        if (k === "at" || k === "n") continue;
+        var v = sample[k];
+        if (typeof v === "number" && isFinite(v)) entry[k] = entry[k] == null ? v : entry[k] + (v - entry[k]) / entry.n;
+      }
+      entry.at = key;
+      return entry;
+    }
+    function foldTier(list, sample, unit, cap) {
+      var key = bucketKey(sample.at || sample.t || sample.time || sample.timestamp, unit);
+      var last = list.length ? list[list.length - 1] : null;
+      if (last && last.at === key) foldAvg(last, sample);
+      else list.push(foldAvg({ at: key, n: 0 }, sample));
+      while (list.length > cap) list.shift();
+      return list;
+    }
+
+    function activeCreds(deviceId) {
+      var out = [];
+      for (var id in state.creds) {
+        var c = state.creds[id];
+        if (String(c.deviceId) === String(deviceId) && !c.revokedAt) out.push(c);
+      }
+      return out;
+    }
+    function allCreds(deviceId) {
+      var out = [];
+      for (var id in state.creds) if (String(state.creds[id].deviceId) === String(deviceId)) out.push(state.creds[id]);
+      return out;
+    }
+    function authenticate(deviceId, credential) {
+      if (!deviceId) return { ok: false, reason: "no_device" };
+      var all = allCreds(deviceId);
+      if (!all.length) return { ok: false, reason: "no_credential", deviceId: deviceId };
+      var active = activeCreds(deviceId);
+      if (!active.length) return { ok: false, reason: "revoked", deviceId: deviceId };
+      var h = sha256Hex(String(credential == null ? "" : credential));
+      for (var i = 0; i < active.length; i++) {
+        if (ctEqual(active[i].credentialHash, h)) {
+          active[i].lastAuthAt = now();
+          return { ok: true, deviceId: deviceId, providerId: active[i].providerId, credentialId: active[i].id };
+        }
+      }
+      return { ok: false, reason: "invalid_credential", deviceId: deviceId };
+    }
+
+    function capJobOutput(text) {
+      text = text == null ? "" : String(text);
+      var cap = limits.maxJobOutputBytes;
+      if (text.length <= cap) return text;
+      return text.slice(0, cap) + "\n…[truncated " + (text.length - cap) + " chars]";
+    }
+    function commandLine(job) {
+      var lang = job.language;
+      var dir = job.workingDir || "/tmp";
+      var file = "job" + (lang === "powershell" ? ".ps1" : lang === "cmd" ? ".cmd" : lang === "python" ? ".py" : ".sh");
+      if (lang === "powershell") return "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + dir + "\\" + file + "\"";
+      if (lang === "cmd") return "cmd.exe /d /s /c \"" + dir + "\\" + file + "\"";
+      if (lang === "bash") return "/bin/bash \"" + dir + "/" + file + "\"";
+      if (lang === "sh") return "/bin/sh \"" + dir + "/" + file + "\"";
+      if (lang === "python") return "python3 \"" + dir + "/" + file + "\"";
+      return "\"" + dir + "/" + file + "\"";
+    }
+
+    /* ── device operations ── */
+
+    function opPing() {
+      return { ok: true, protocol: CORE_VERSION, serverTime: now(), core: "rmm-collector" };
+    }
+
+    function opEnroll(body) {
+      body = body || {};
+      var hash = sha256Hex(String(body.token == null ? "" : body.token));
+      var tok = null, tokId = "";
+      for (var id in state.tokens) {
+        var t = state.tokens[id];
+        if (ctEqual(t.tokenHash, hash)) { tok = t; tokId = id; break; }
+      }
+      if (!tok) return { ok: false, error: "invalid_token", message: "That enrollment token is not recognised." };
+      if (tok.revokedAt) return { ok: false, error: "revoked_token", message: "That enrollment token has been revoked." };
+      if (tok.expiresAt && Date.parse(tok.expiresAt) < Date.now()) return { ok: false, error: "expired_token", message: "That enrollment token has expired." };
+      if (num(tok.uses, 0) >= num(tok.maxUses, 1)) return { ok: false, error: "used_token", message: "That enrollment token has already been used." };
+      var providerId = String(body.providerId || tok.providerId || "");
+      if (!providerId) return { ok: false, error: "no_provider", message: "The token is not bound to a provider." };
+
+      tok.uses = num(tok.uses, 0) + 1;
+      tok.usedAt = now();
+      tok.status = tok.uses >= num(tok.maxUses, 1) ? "used" : "active";
+
+      var deviceId = tok.deviceId || "";
+      var reenroll = false;
+      if (deviceId && state.devices[deviceId]) {
+        reenroll = true;
+        var all = allCreds(deviceId);
+        for (var i = 0; i < all.length; i++) if (!all[i].revokedAt) { all[i].revokedAt = now(); all[i].status = "rotated"; }
+      }
+      if (!deviceId) {
+        if (Object.keys(state.devices).length >= limits.maxDevices) return { ok: false, error: "at_capacity", message: "The collector is at its device capacity." };
+        deviceId = newDeviceId();
+      }
+      var incoming = body.device && typeof body.device === "object" ? body.device : {};
+      var prev = state.devices[deviceId] || {};
+      var at = now();
+      state.devices[deviceId] = Object.assign({}, prev, {
+        deviceId: deviceId,
+        providerId: providerId,
+        hostname: trim(body.hostname || incoming.hostname || prev.hostname || deviceId, 200),
+        siteId: tok.siteId || prev.siteId || "",
+        groupIds: arr(tok.groupIds).length ? arr(tok.groupIds) : arr(prev.groupIds),
+        agentVersion: trim(body.agentVersion || prev.agentVersion || "", 40),
+        capabilities: arr(body.capabilities).length ? arr(body.capabilities) : arr(prev.capabilities),
+        os: incoming.os || prev.os || {},
+        interfaces: incoming.interfaces || prev.interfaces || [],
+        listedAt: at,
+        firstSeenAt: prev.firstSeenAt || at,
+        enrolledAt: prev.enrolledAt || at,
+        lastSeenAt: at,
+        reenrolledAt: reenroll ? at : (prev.reenrolledAt || ""),
+        revokedAt: "",
+        uninstalledAt: "",
+      });
+      var plaintext = newCredential();
+      var credId = newId("cred");
+      state.creds[credId] = {
+        id: credId, deviceId: deviceId, providerId: providerId,
+        credentialHash: sha256Hex(plaintext), tokenId: tokId,
+        issuedAt: at, revokedAt: "", status: "active", lastAuthAt: "",
+      };
+      state.counters.enrollments = num(state.counters.enrollments, 0) + 1;
+      return {
+        ok: true, deviceId: deviceId, providerId: providerId,
+        siteId: state.devices[deviceId].siteId || null,
+        groupIds: arr(state.devices[deviceId].groupIds),
+        credential: plaintext, credentialId: credId, tokenId: tokId,
+        reenrolled: reenroll, serverTime: at,
+      };
+    }
+
+    function staleState(dev) {
+      if (dev.uninstalledAt) return "retired";
+      if (dev.revokedAt) return "offline";
+      var last = dev.lastSeenAt ? Date.parse(dev.lastSeenAt) : 0;
+      var age = Date.now() - last;
+      var staleMs = limits.staleAfterMinutes * 60000;
+      if (!last) return "offline";
+      if (age <= staleMs) return "online";
+      if (age <= staleMs * 3) return "stale";
+      return "offline";
+    }
+
+    function opHeartbeat(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason, message: auth.reason }; }
+      var dev = state.devices[auth.deviceId];
+      var payload = body.payload && typeof body.payload === "object" ? body.payload : {};
+      var at = now();
+      var serverMs = Date.parse(at);
+      var interval = Math.max(30, num(payload.intervalSeconds, limits.heartbeatSeconds));
+      var skew = null;
+      if (payload.clientTime) { var t = Date.parse(payload.clientTime); if (isFinite(t)) skew = Math.round(((t - serverMs) / 1000) * 10) / 10; }
+      var prevFp = dev.networkFingerprint || "";
+      var interfaces = payload.interfaces ? arr(payload.interfaces) : dev.interfaces;
+      var nextFp = fingerprint(interfaces);
+      var networkChanged = !!(payload.interfaces && prevFp && nextFp && prevFp !== nextFp);
+
+      dev.lastSeenAt = at;
+      dev.status = "online";
+      dev.clockSkewSeconds = skew;
+      dev.agentVersion = payload.agentVersion ? trim(payload.agentVersion, 40) : dev.agentVersion;
+      if (payload.capabilities) dev.capabilities = arr(payload.capabilities);
+      if (payload.capabilities) dev.capabilities = arr(payload.capabilities);
+      if (payload.interfaces) dev.interfaces = interfaces;
+      if (payload.hostname) dev.hostname = trim(payload.hostname, 200);
+      if (payload.spool && typeof payload.spool === "object") dev.spool = { pending: num(payload.spool.pending, 0), bytes: num(payload.spool.bytes, 0), oldestAt: trim(payload.spool.oldestAt, 40), updatedAt: at };
+      if (nextFp) dev.networkFingerprint = nextFp;
+      if (networkChanged) { dev.networkChanges = num(dev.networkChanges, 0) + 1; dev.lastNetworkChangeAt = at; }
+
+      var cfg = Object.assign({}, state.config[auth.deviceId] || {}, {
+        heartbeatSeconds: interval,
+        staleAfterMinutes: limits.staleAfterMinutes,
+        metricsSampleSeconds: limits.metricsSampleSeconds || 60,
+      });
+      var requests = dev.requests && typeof dev.requests === "object" ? dev.requests : {};
+      var collectInventory = !!requests.collectInventory;
+      var collectMetrics = !!requests.collectMetrics;
+      if (collectInventory) requests.collectInventory = false;
+      if (collectMetrics) requests.collectMetrics = false;
+      var collectLogs = null;
+      if (requests.collectLogs) {
+        collectLogs = { requestId: requests.collectLogs.requestId, lines: num(requests.collectLogs.lines, 400) };
+        delete requests.collectLogs;
+      }
+      var selfTest = null;
+      if (requests.selfTest) { selfTest = { requestId: requests.selfTest.requestId }; delete requests.selfTest; }
+      var update = requests.update ? Object.assign({}, requests.update) : null;
+      if (update) delete requests.update;
+      dev.requests = requests;
+
+      var jobs = [];
+      var jobIds = dev.jobIds || [];
+      for (var i = 0; i < jobIds.length && jobs.length < limits.jobDeliveryLimit; i++) {
+        var job = state.jobs[jobIds[i]];
+        if (!job || job.state !== "queued") continue;
+        if (job.expiresAt && Date.parse(job.expiresAt) < Date.now()) { job.state = "expired"; continue; }
+        job.state = "delivered";
+        job.deliveredAt = at;
+        job.attempts = num(job.attempts, 0) + 1;
+        jobs.push({
+          jobId: job.id, name: job.name, language: job.language,
+          script: job.script, scriptB64: b64encode(job.script), argsB64: b64encode(arr(job.args).join("\n")),
+          timeoutSeconds: num(job.timeoutSeconds, 300), workingDir: job.workingDir || "",
+          command: commandLine(job), attempt: job.attempts, maxAttempts: num(job.maxAttempts, 1),
+        });
+      }
+
+      state.counters.heartbeats = num(state.counters.heartbeats, 0) + 1;
+      return {
+        ok: true, deviceId: auth.deviceId, providerId: auth.providerId,
+        serverTime: at, intervalSeconds: interval,
+        nextHeartbeatAt: new Date(serverMs + interval * 1000).toISOString(),
+        clockSkewSeconds: skew, networkChanged: networkChanged,
+        agentVersion: dev.agentVersion, capabilities: arr(dev.capabilities),
+        status: staleState(dev), jobs: jobs,
+        collectInventory: collectInventory, collectMetrics: collectMetrics,
+        collectLogs: collectLogs, selfTest: selfTest, update: update,
+        config: cfg,
+      };
+    }
+
+    function fingerprint(interfaces) {
+      if (!interfaces || !interfaces.length) return "";
+      var parts = [];
+      for (var i = 0; i < interfaces.length; i++) {
+        var o = interfaces[i] || {};
+        parts.push(String(o.mac || "").toLowerCase() + ":" + arr(o.ip4).map(String).sort().join("|") + ":" + (o.gateway || ""));
+      }
+      parts.sort();
+      return parts.join(";");
+    }
+
+    function opInventory(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var payload = body.payload || {};
+      var size = JSON.stringify(payload).length;
+      if (size > limits.maxInventoryBytes) return { ok: false, error: "too_large", message: "The inventory payload exceeds the limit." };
+      var prev = state.inventory[auth.deviceId] || { revision: 0 };
+      var rec = { deviceId: auth.deviceId, providerId: auth.providerId, revision: num(prev.revision, 0) + 1, receivedAt: now(), mode: trim(payload.mode || "full", 16), collectedAt: trim(payload.collectedAt || "", 40), payload: payload };
+      state.inventory[auth.deviceId] = rec;
+      var dev = state.devices[auth.deviceId];
+      if (dev) { dev.lastInventoryAt = rec.receivedAt; dev.inventoryRevision = rec.revision; }
+      state.counters.inventory = num(state.counters.inventory, 0) + 1;
+      return { ok: true, revision: rec.revision, receivedAt: rec.receivedAt };
+    }
+
+    function opMetrics(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var payload = body.payload || {};
+      var samples = arr(payload.samples).slice(0, limits.maxMetricsSamples);
+      var store = state.metrics[auth.deviceId] || { samples: [] };
+      if (!arr(store.samples).length) store.samples = [];
+      if (!arr(store.hourly).length) store.hourly = [];
+      if (!arr(store.daily).length) store.daily = [];
+      var accepted = 0;
+      for (var i = 0; i < samples.length; i++) {
+        var s = samples[i];
+        if (!s || typeof s !== "object") continue;
+        store.samples.push(s);
+        foldTier(store.hourly, s, "hour", limits.hourlyMetricsMax);
+        foldTier(store.daily, s, "day", limits.dailyMetricsMax);
+        accepted++;
+      }
+      while (store.samples.length > limits.rawMetricsMax) store.samples.shift();
+      store.latest = store.samples.length ? store.samples[store.samples.length - 1] : null;
+      store.updatedAt = now();
+      state.metrics[auth.deviceId] = store;
+      var dev = state.devices[auth.deviceId];
+      if (dev) dev.lastMetricsAt = store.updatedAt;
+      state.counters.metrics = num(state.counters.metrics, 0) + 1;
+      return { ok: true, accepted: accepted, stored: store.samples.length, hourly: store.hourly.length, daily: store.daily.length };
+    }
+
+    function opJobResult(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var job = state.jobs[body.jobId];
+      if (!job) return { ok: false, error: "not_found" };
+      if (String(job.deviceId) !== String(auth.deviceId)) return { ok: false, error: "wrong_device" };
+      if (job.state === "succeeded" || job.state === "failed" || job.state === "timed-out") return { ok: true, duplicate: true };
+      var timedOut = body.timedOut === true || body.state === "timed-out";
+      var ok = body.ok === true || (body.exitCode != null && num(body.exitCode, -1) === 0);
+      job.state = timedOut ? "timed-out" : (ok ? "succeeded" : "failed");
+      job.exitCode = body.exitCode == null ? null : num(body.exitCode, 0);
+      job.stdout = capJobOutput(body.stdoutB64 ? b64decode(body.stdoutB64) : (body.stdout || ""));
+      job.stderr = capJobOutput(body.stderrB64 ? b64decode(body.stderrB64) : (body.stderr || ""));
+      job.error = trim(body.error || "", 400);
+      job.startedAt = trim(body.startedAt || job.startedAt || "", 40);
+      job.endedAt = trim(body.endedAt || now(), 40);
+      job.durationMs = job.startedAt ? Math.max(0, Date.parse(job.endedAt) - Date.parse(job.startedAt)) : num(body.durationMs, 0);
+      state.counters.jobResults = num(state.counters.jobResults, 0) + 1;
+      var dev = state.devices[auth.deviceId];
+      if (dev) {
+        dev.lastJobAt = now();
+        var hist = arr(dev.jobHistory); hist.push({ jobId: job.id, state: job.state, at: job.endedAt }); dev.jobHistory = hist.slice(-50);
+      }
+      return { ok: true, jobId: job.id, state: job.state, duplicate: false };
+    }
+
+    /* The agent reports it has begun running a job (Task 15). This makes
+       `running` a real, observable state rather than an inference. */
+    function opJobStart(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var job = state.jobs[body.jobId];
+      if (!job) return { ok: false, error: "not_found" };
+      if (String(job.deviceId) !== String(auth.deviceId)) return { ok: false, error: "wrong_device" };
+      if (job.state === "running") return { ok: true, jobId: job.id, state: job.state, duplicate: true };
+      if (job.state !== "queued" && job.state !== "delivered") return { ok: false, error: "wrong_state", state: job.state };
+      job.state = "running";
+      job.startedAt = trim(body.startedAt || now(), 40);
+      var dev = state.devices[auth.deviceId];
+      if (dev) dev.runningJobs = num(dev.runningJobs, 0) + 1;
+      return { ok: true, jobId: job.id, state: job.state };
+    }
+
+    /* A batch of device ops in one authenticated round-trip (Task 17), so a
+       check-in can carry inventory + metrics + finished job results without
+       three separate posts. Each inner op is authenticated and rate-checked
+       exactly as if it arrived on its own. */
+    function opBatch(body) {
+      body = body || {};
+      var ops = arr(body.ops);
+      if (!ops.length) return { ok: false, error: "empty_batch" };
+      if (ops.length > limits.maxBatchOps) return { ok: false, error: "batch_too_large" };
+      var results = [];
+      for (var i = 0; i < ops.length; i++) {
+        var one = ops[i] || {};
+        var op = String(one.op || "");
+        if (!op || op === "batch") { results.push({ ok: false, error: "bad_op" }); continue; }
+        if (!rateAllow((one.body && one.body.deviceId) || "")) { state.counters.rateLimited = num(state.counters.rateLimited, 0) + 1; results.push({ ok: false, error: "rate_limited" }); continue; }
+        results.push(handle(op, one.body || {}));
+      }
+      return { ok: true, count: results.length, results: results };
+    }
+
+    function opLogs(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var text = body.textB64 ? b64decode(body.textB64) : (body.text || "");
+      text = String(text);
+      if (text.length > limits.maxLogBytes) text = "…[earlier lines omitted]…\n" + text.slice(text.length - limits.maxLogBytes);
+      var list = state.logs[auth.deviceId] || [];
+      list.push({ requestId: trim(body.requestId || "", 60), receivedAt: now(), lines: num(body.lines, text.split("\n").length), bytes: text.length, truncated: !!body.truncated || text.length >= limits.maxLogBytes, text: text });
+      while (list.length > limits.maxLogKeep) list.shift();
+      state.logs[auth.deviceId] = list;
+      var dev = state.devices[auth.deviceId];
+      if (dev) dev.lastLogAt = now();
+      return { ok: true, stored: list.length };
+    }
+
+    function opDiagnostics(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var checks = arr(body.checks).map(function (c) { return { id: trim(c && c.id, 40), name: trim(c && c.name, 80), ok: !!(c && c.ok), detail: trim(c && c.detail, 300) }; }).slice(0, 32);
+      var rec = { requestId: trim(body.requestId || "", 60), receivedAt: now(), ok: checks.length ? checks.every(function (c) { return c.ok; }) : body.ok === true, agentVersion: trim(body.agentVersion || "", 40), checks: checks, context: body.context || {} };
+      var list = state.diagnostics[auth.deviceId] || [];
+      list.push(rec);
+      while (list.length > limits.maxSelfTestKeep) list.shift();
+      state.diagnostics[auth.deviceId] = list;
+      var dev = state.devices[auth.deviceId];
+      if (dev) { dev.lastSelfTestAt = rec.receivedAt; dev.lastSelfTestOk = rec.ok; }
+      return { ok: true, passed: rec.ok };
+    }
+
+    function opUpdateResult(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) { state.counters.rejected = num(state.counters.rejected, 0) + 1; return { ok: false, error: auth.reason }; }
+      var dev = state.devices[auth.deviceId];
+      var at = now();
+      var fromVersion = trim(body.fromVersion || (dev && dev.agentVersion) || "", 40);
+      var version = trim(body.version || fromVersion, 40);
+      var ok = body.ok !== false;
+      var rolledBack = body.rolledBack === true || (!ok && body.rolledBack !== false);
+      var entry = { at: at, fromVersion: fromVersion, version: rolledBack ? fromVersion : version, targetVersion: trim(body.targetVersion || "", 40), ok: ok, rolledBack: rolledBack, error: trim(body.error || "", 300) };
+      if (dev) {
+        if (ok && !rolledBack && version) dev.agentVersion = version;
+        var hist = arr(dev.updateHistory); hist.push(entry); dev.updateHistory = hist.slice(-limits.maxUpdatesKeep);
+        dev.lastUpdate = entry;
+        dev.updatedAt = at;
+      }
+      state.updates[auth.deviceId] = entry;
+      return { ok: true, state: rolledBack ? "rolled-back" : (ok ? "updated" : "failed") };
+    }
+
+    function opUninstall(body) {
+      body = body || {};
+      var auth = authenticate(body.deviceId, body.credential);
+      if (!auth.ok) return { ok: false, error: auth.reason };
+      var all = allCreds(auth.deviceId);
+      for (var i = 0; i < all.length; i++) if (!all[i].revokedAt) { all[i].revokedAt = now(); all[i].status = "revoked"; }
+      var dev = state.devices[auth.deviceId];
+      if (dev) { dev.uninstalledAt = now(); dev.status = "uninstalled"; }
+      return { ok: true, deviceId: auth.deviceId };
+    }
+
+    function handle(op, body) {
+      if (op === "ping") return opPing();
+      if (op === "enroll") return opEnroll(body);
+      if (op === "batch") return opBatch(body);
+      var deviceId = body && body.deviceId;
+      if (op !== "ping" && !rateAllow(deviceId)) { state.counters.rateLimited = num(state.counters.rateLimited, 0) + 1; return { ok: false, error: "rate_limited", message: "This device is checking in too often." }; }
+      if (op === "heartbeat") return opHeartbeat(body);
+      if (op === "inventory") return opInventory(body);
+      if (op === "metrics") return opMetrics(body);
+      if (op === "job-result") return opJobResult(body);
+      if (op === "job-start") return opJobStart(body);
+      if (op === "logs") return opLogs(body);
+      if (op === "diagnostics") return opDiagnostics(body);
+      if (op === "update-result") return opUpdateResult(body);
+      if (op === "uninstall") return opUninstall(body);
+      return { ok: false, error: "unknown_op", message: "Unknown collector operation: " + op };
+    }
+
+    /* ── presence transitions (Task 16) ──
+       Recompute every device's liveness and return any that changed since the
+       last tick, so the hub can broadcast device-state changes (and an
+       agent-offline alert) to open console sessions. The first tick after a
+       fresh start establishes a baseline without emitting. */
+    function tick() {
+      var transitions = [];
+      for (var id in state.devices) {
+        var dev = state.devices[id];
+        var status = staleState(dev);
+        var prev = state.lastStatus[id];
+        if (prev === undefined) { state.lastStatus[id] = status; continue; }
+        if (prev !== status) {
+          state.lastStatus[id] = status;
+          transitions.push({ deviceId: id, providerId: dev.providerId, hostname: dev.hostname, from: prev, to: status, at: now() });
+        }
+      }
+      return transitions;
+    }
+
+    /* ── console (admin) operations ──
+       The server adapter is responsible for authenticating the admin; the
+       core only enforces binding and caps. */
+
+    function deviceSummary(dev) {
+      return {
+        deviceId: dev.deviceId, providerId: dev.providerId, hostname: dev.hostname,
+        siteId: dev.siteId, groupIds: arr(dev.groupIds), agentVersion: dev.agentVersion,
+        capabilities: arr(dev.capabilities), os: dev.os,
+        firstSeenAt: dev.firstSeenAt, lastSeenAt: dev.lastSeenAt, enrolledAt: dev.enrolledAt,
+        status: staleState(dev), spool: dev.spool || null,
+        lastInventoryAt: dev.lastInventoryAt || "", lastMetricsAt: dev.lastMetricsAt || "",
+        lastSelfTestAt: dev.lastSelfTestAt || "", lastSelfTestOk: dev.lastSelfTestOk === true,
+        lastUpdate: dev.lastUpdate || null, uninstalledAt: dev.uninstalledAt || "",
+      };
+    }
+
+    var admin = {
+      registerToken: function (body) {
+        body = body || {};
+        if (!body.tokenHash) return { ok: false, error: "no_hash" };
+        var id = body.id || newId("tok");
+        state.tokens[id] = {
+          id: id, tokenHash: String(body.tokenHash),
+          providerId: String(body.providerId || ""), siteId: body.siteId ? String(body.siteId) : null,
+          groupIds: arr(body.groupIds).map(String), deviceId: body.deviceId ? String(body.deviceId) : "",
+          label: trim(body.label || "", 160), createdAt: now(),
+          expiresAt: trim(body.expiresAt || "", 40), maxUses: Math.max(1, num(body.maxUses, 1)),
+          uses: 0, revokedAt: "", status: "active",
+        };
+        return { ok: true, tokenId: id };
+      },
+      revokeToken: function (body) {
+        var t = state.tokens[body && body.tokenId];
+        if (!t) return { ok: false, error: "not_found" };
+        t.revokedAt = now(); t.status = "revoked";
+        return { ok: true };
+      },
+      pushJob: function (body) {
+        body = body || {};
+        var deviceId = String(body.deviceId || "");
+        var dev = state.devices[deviceId];
+        if (!dev) return { ok: false, error: "unknown_device" };
+        var input = body.job || {};
+        var script = String(input.script == null ? "" : input.script);
+        if (!script.trim()) return { ok: false, error: "empty_script" };
+        if (script.length > limits.maxJobScriptBytes) return { ok: false, error: "script_too_large" };
+        var ids = dev.jobIds || [];
+        if (ids.length >= limits.maxJobsPerDevice) return { ok: false, error: "at_capacity" };
+        var id = input.id || newJobId();
+        state.jobs[id] = {
+          id: id, deviceId: deviceId, providerId: dev.providerId,
+          name: trim(input.name || "Ad-hoc command", 160), language: trim(input.language || "powershell", 24),
+          script: script, args: arr(input.args).map(function (a) { return trim(a, 200); }),
+          timeoutSeconds: Math.max(10, num(input.timeoutSeconds, 300)), workingDir: trim(input.workingDir || "", 240),
+          state: "queued", attempts: 0, maxAttempts: Math.max(1, num(input.maxAttempts, 2)),
+          createdAt: now(), deliveredAt: "", startedAt: "", endedAt: "",
+          expiresAt: trim(input.expiresAt || new Date(Date.now() + 1440 * 60000).toISOString(), 40),
+          source: trim(input.source || "console", 80),
+          ref: trim(input.ref || "", 80),
+          correlation: trim(input.correlation || "", limits.correlationMaxBytes),
+        };
+        ids.push(id); dev.jobIds = ids;
+        return { ok: true, jobId: id };
+      },
+      pushJobs: function (body) {
+        body = body || {};
+        var deviceIds = arr(body.deviceIds);
+        if (!deviceIds.length) return { ok: false, error: "no_targets" };
+        var results = [], queued = 0;
+        for (var i = 0; i < deviceIds.length; i++) {
+          var one = this.pushJob({ deviceId: deviceIds[i], job: body.job || {} });
+          if (one.ok) queued++;
+          results.push({ deviceId: String(deviceIds[i]), ok: one.ok === true, jobId: one.jobId || "", error: one.error || "" });
+        }
+        return { ok: true, queued: queued, skipped: results.length - queued, results: results };
+      },
+      pushConfig: function (body) {
+        body = body || {};
+        if (!body.deviceId) return { ok: false, error: "no_device" };
+        state.config[String(body.deviceId)] = Object.assign({}, state.config[String(body.deviceId)] || {}, body.config || {});
+        return { ok: true };
+      },
+      requestLogs: function (body) {
+        body = body || {};
+        var n = 0;
+        for (var i = 0; i < arr(body.deviceIds).length; i++) {
+          var dev = state.devices[String(body.deviceIds[i])];
+          if (!dev) continue;
+          dev.requests = dev.requests || {};
+          dev.requests.collectLogs = { requestId: body.requestId || newId("log"), lines: Math.max(20, num(body.lines, 400)), requestedAt: now() };
+          n++;
+        }
+        return { ok: true, queued: n };
+      },
+      requestSelfTest: function (body) {
+        body = body || {};
+        var n = 0;
+        for (var i = 0; i < arr(body.deviceIds).length; i++) {
+          var dev = state.devices[String(body.deviceIds[i])];
+          if (!dev) continue;
+          dev.requests = dev.requests || {};
+          dev.requests.selfTest = { requestId: body.requestId || newId("st"), requestedAt: now() };
+          n++;
+        }
+        return { ok: true, queued: n };
+      },
+      queueUpdate: function (body) {
+        body = body || {};
+        var n = 0;
+        for (var i = 0; i < arr(body.deviceIds).length; i++) {
+          var dev = state.devices[String(body.deviceIds[i])];
+          if (!dev) continue;
+          dev.requests = dev.requests || {};
+          dev.requests.update = Object.assign({ requestId: newId("upd"), requestedAt: now() }, body.update || {});
+          n++;
+        }
+        return { ok: true, queued: n };
+      },
+      revokeDevice: function (body) {
+        body = body || {};
+        var deviceId = String(body.deviceId || "");
+        var all = allCreds(deviceId);
+        for (var i = 0; i < all.length; i++) if (!all[i].revokedAt) { all[i].revokedAt = now(); all[i].status = "revoked"; }
+        var dev = state.devices[deviceId];
+        if (dev) dev.revokedAt = now();
+        return { ok: true, revoked: all.length };
+      },
+
+      /* ── job queue & dispatch (Task 15) ── */
+
+      retryJob: function (body) {
+        body = body || {};
+        var job = state.jobs[body.jobId];
+        if (!job) return { ok: false, error: "not_found" };
+        var terminal = ["succeeded", "failed", "timed-out", "expired", "cancelled"];
+        if (terminal.indexOf(job.state) === -1) return { ok: false, error: "not_terminal", state: job.state };
+        if (num(job.attempts, 0) >= num(job.maxAttempts, 1)) return { ok: false, error: "attempts_exhausted" };
+        job.state = "queued";
+        job.deliveredAt = ""; job.startedAt = ""; job.endedAt = "";
+        job.exitCode = null; job.stdout = ""; job.stderr = ""; job.error = "";
+        job.retriedAt = now();
+        job.expiresAt = new Date(Date.now() + 1440 * 60000).toISOString();
+        var dev = state.devices[job.deviceId];
+        if (dev) { var ids = dev.jobIds || []; if (ids.indexOf(job.id) === -1) { ids.push(job.id); dev.jobIds = ids; } }
+        return { ok: true, jobId: job.id, state: job.state };
+      },
+
+      cancelJob: function (body) {
+        body = body || {};
+        var job = state.jobs[body.jobId];
+        if (!job) return { ok: false, error: "not_found" };
+        var terminal = ["succeeded", "failed", "timed-out", "expired", "cancelled"];
+        if (terminal.indexOf(job.state) === -1) { job.state = "cancelled"; job.cancelledAt = now(); job.endedAt = now(); job.error = "Cancelled from the console."; }
+        return { ok: true, jobId: job.id, state: job.state };
+      },
+
+      /* Requeue delivered-but-never-started runs, time out over-runners,
+         expire stale queues and prune past-retention terminal jobs. */
+      reapJobs: function (body) {
+        body = body || {};
+        var providerId = body.providerId ? String(body.providerId) : "";
+        var nowMs = Date.now();
+        var deliveryMs = Math.max(1, num(body.deliveryTimeoutMinutes, 30)) * 60000;
+        var retentionMs = Math.max(1, num(body.retentionHours, 168)) * 3600000;
+        var out = { requeued: 0, timedOut: 0, expired: 0, pruned: 0, scanned: 0 };
+        for (var id in state.jobs) {
+          var job = state.jobs[id];
+          if (providerId && String(job.providerId) !== providerId) continue;
+          out.scanned++;
+          if (job.state === "delivered" && job.deliveredAt && nowMs - Date.parse(job.deliveredAt) > deliveryMs) {
+            if (num(job.attempts, 0) < num(job.maxAttempts, 1)) { job.state = "queued"; job.deliveredAt = ""; out.requeued++; }
+            else { job.state = "timed-out"; job.endedAt = now(); job.error = "The agent did not start the job before the delivery window closed."; out.timedOut++; }
+          } else if (job.state === "running" && job.startedAt && nowMs - Date.parse(job.startedAt) > num(job.timeoutSeconds, 300) * 2000) {
+            job.state = "timed-out"; job.endedAt = now(); job.error = "The job exceeded its timeout and was abandoned."; out.timedOut++;
+          } else if (job.state === "queued" && job.expiresAt && Date.parse(job.expiresAt) < nowMs) {
+            job.state = "expired"; job.endedAt = now(); job.error = "The job expired before it was delivered."; out.expired++;
+          } else if (["succeeded", "failed", "timed-out", "expired", "cancelled"].indexOf(job.state) !== -1 && job.endedAt && nowMs - Date.parse(job.endedAt) > retentionMs) {
+            delete state.jobs[id];
+            for (var d in state.devices) { var ids = state.devices[d].jobIds; if (ids) { var i = ids.indexOf(id); if (i >= 0) ids.splice(i, 1); } }
+            out.pruned++;
+            continue;
+          }
+        }
+        return Object.assign({ ok: true }, out);
+      },
+
+      /* Retention & scale (Task 17): bound every durable per-device region. */
+      applyRetention: function (body) {
+        body = body || {};
+        var p = {
+          rawMax: Math.max(1, num(body.rawMax, limits.rawMetricsMax)),
+          hourlyMax: Math.max(1, num(body.hourlyMax, limits.hourlyMetricsMax)),
+          dailyMax: Math.max(1, num(body.dailyMax, limits.dailyMetricsMax)),
+          logKeep: Math.max(1, num(body.logKeep, limits.maxLogKeep)),
+          selfTestKeep: Math.max(1, num(body.selfTestKeep, limits.maxSelfTestKeep)),
+          updateKeep: Math.max(1, num(body.updateKeep, limits.maxUpdatesKeep)),
+          historyKeep: Math.max(1, num(body.historyKeep, 50)),
+          jobRetentionMs: Math.max(1, num(body.jobRetentionHours, 168)) * 3600000
+        };
+        var out = { metrics: 0, logs: 0, diagnostics: 0, updates: 0, jobs: 0, history: 0, inventory: 0 };
+        for (var m in state.metrics) {
+          var store = state.metrics[m];
+          if (arr(store.samples).length > p.rawMax) { store.samples.splice(0, store.samples.length - p.rawMax); out.metrics++; }
+          if (arr(store.hourly).length > p.hourlyMax) { store.hourly.splice(0, store.hourly.length - p.hourlyMax); out.metrics++; }
+          if (arr(store.daily).length > p.dailyMax) { store.daily.splice(0, store.daily.length - p.dailyMax); out.metrics++; }
+        }
+        for (var l in state.logs) { var before = arr(state.logs[l]).length; if (before > p.logKeep) { state.logs[l] = state.logs[l].slice(before - p.logKeep); out.logs += before - p.logKeep; } }
+        for (var g in state.diagnostics) { var b2 = arr(state.diagnostics[g]).length; if (b2 > p.selfTestKeep) { state.diagnostics[g] = state.diagnostics[g].slice(b2 - p.selfTestKeep); out.diagnostics += b2 - p.selfTestKeep; } }
+        var nowMs = Date.now();
+        for (var id in state.devices) {
+          var dev = state.devices[id];
+          if (arr(dev.jobHistory).length > p.historyKeep) { dev.jobHistory = dev.jobHistory.slice(-p.historyKeep); out.history++; }
+          if (arr(dev.updateHistory).length > p.updateKeep) { dev.updateHistory = dev.updateHistory.slice(-p.updateKeep); out.updates++; }
+          if (arr(dev.custom && dev.custom.networkHistory).length > p.historyKeep) { dev.custom.networkHistory = dev.custom.networkHistory.slice(-p.historyKeep); out.history++; }
+          if (dev.uninstalledAt && nowMs - Date.parse(dev.uninstalledAt) > p.jobRetentionMs) { delete state.inventory[id]; delete state.metrics[id]; out.inventory++; }
+        }
+        for (var jid in state.jobs) {
+          var job = state.jobs[jid];
+          if (["succeeded", "failed", "timed-out", "expired", "cancelled"].indexOf(job.state) !== -1 && job.endedAt && nowMs - Date.parse(job.endedAt) > p.jobRetentionMs) { delete state.jobs[jid]; out.jobs++; }
+        }
+        return Object.assign({ ok: true }, out);
+      },
+
+      job: function (body) {
+        var job = state.jobs[body && body.jobId];
+        return job ? { ok: true, job: job } : { ok: false, error: "not_found" };
+      },
+      fleet: function (body) {
+        body = body || {};
+        var out = [];
+        for (var id in state.devices) {
+          var dev = state.devices[id];
+          if (body.providerId && String(dev.providerId) !== String(body.providerId)) continue;
+          out.push(deviceSummary(dev));
+        }
+        var counts = { total: out.length, online: 0, stale: 0, offline: 0, retired: 0 };
+        for (var i = 0; i < out.length; i++) if (counts[out[i].status] != null) counts[out[i].status]++;
+        return { ok: true, devices: out, counts: counts };
+      },
+      device: function (body) {
+        var dev = state.devices[body && body.deviceId];
+        if (!dev) return { ok: false, error: "not_found" };
+        return { ok: true, device: deviceSummary(dev), requests: dev.requests || {}, jobIds: arr(dev.jobIds), updateHistory: arr(dev.updateHistory) };
+      },
+      jobs: function (body) {
+        body = body || {};
+        var out = [];
+        for (var id in state.jobs) {
+          var j = state.jobs[id];
+          if (body.deviceId && String(j.deviceId) !== String(body.deviceId)) continue;
+          if (body.providerId && String(j.providerId) !== String(body.providerId)) continue;
+          if (body.state && j.state !== body.state) continue;
+          if (body.correlation && String(j.correlation) !== String(body.correlation)) continue;
+          if (body.ref && String(j.ref) !== String(body.ref)) continue;
+          out.push(j);
+        }
+        out.sort(function (a, b) { return (b.createdAt || "").localeCompare(a.createdAt || ""); });
+        return { ok: true, jobs: out.slice(0, 500) };
+      },
+      inventory: function (body) {
+        var rec = state.inventory[body && body.deviceId];
+        return rec ? { ok: true, inventory: rec } : { ok: false, error: "not_found" };
+      },
+      metrics: function (body) {
+        var rec = state.metrics[body && body.deviceId];
+        return rec ? { ok: true, metrics: rec } : { ok: false, error: "not_found" };
+      },
+      logs: function (body) {
+        return { ok: true, logs: state.logs[body && body.deviceId] || [] };
+      },
+      diagnostics: function (body) {
+        return { ok: true, diagnostics: state.diagnostics[body && body.deviceId] || [] };
+      },
+      seedEntropy: function (body) {
+        seedEntropy(body && body.entropy);
+        return { ok: true, pool: entropy.length };
+      },
+
+      /* ── role & access (Task 48) ── */
+
+      setAccessRole: function (body) {
+        body = body || {};
+        var userId = trim(body.userId, 64);
+        if (!userId) return { ok: false, error: "no_user" };
+        if (roleIndex(body.role) < 0) return { ok: false, error: "bad_role" };
+        var rec = state.access[userId] || (state.access[userId] = { userId: userId, createdAt: now() });
+        rec.role = String(body.role);
+        rec.updatedAt = now();
+        logAccess("role", userId, rec.role);
+        return { ok: true, userId: userId, role: rec.role };
+      },
+      setAccessScopes: function (body) {
+        body = body || {};
+        var userId = trim(body.userId, 64);
+        if (!userId) return { ok: false, error: "no_user" };
+        var rec = state.access[userId] || (state.access[userId] = { userId: userId, createdAt: now() });
+        rec.scopes = normalizeScopes(body.scopes);
+        rec.updatedAt = now();
+        logAccess("scopes", userId, rec.scopes.all ? "all sites & devices" : rec.scopes.sites.length + " site(s), " + rec.scopes.devices.length + " device(s)");
+        return { ok: true, userId: userId, scopes: rec.scopes };
+      },
+      setAccessCaps: function (body) {
+        body = body || {};
+        var userId = trim(body.userId, 64);
+        if (!userId) return { ok: false, error: "no_user" };
+        var rec = state.access[userId] || (state.access[userId] = { userId: userId, createdAt: now() });
+        var allow = [], deny = [], i;
+        var rawA = arr(body.allow);
+        for (i = 0; i < rawA.length; i++) { var a = String(rawA[i]); if (CAPS[a] && allow.indexOf(a) === -1) allow.push(a); }
+        var rawD = arr(body.deny);
+        for (i = 0; i < rawD.length; i++) { var d = String(rawD[i]); if (CAPS[d] && allow.indexOf(d) === -1 && deny.indexOf(d) === -1) deny.push(d); }
+        rec.allow = allow; rec.deny = deny;
+        rec.updatedAt = now();
+        logAccess("capabilities", userId, "+" + allow.length + " / -" + deny.length);
+        return { ok: true, userId: userId, allow: allow, deny: deny };
+      },
+      removeAccess: function (body) {
+        var userId = trim((body || {}).userId, 64);
+        if (!userId) return { ok: false, error: "no_user" };
+        if (state.access[userId]) { delete state.access[userId]; logAccess("remove", userId, ""); return { ok: true, userId: userId, removed: true }; }
+        return { ok: true, userId: userId, removed: false };
+      },
+      listAccess: function () {
+        var users = [], id;
+        for (id in state.access) users.push(accessRecord(id));
+        users.sort(function (a, b) { return String(a.userId).localeCompare(String(b.userId)); });
+        return { ok: true, users: users, roles: roleCatalog(), log: arr(state.accessLog).slice(-50) };
+      },
+      accessCatalog: function () { return { ok: true, roles: roleCatalog(), capabilities: capCatalog(), destructive: DESTRUCTIVE_CAPS.slice() }; },
+      accessCheck: function (body) {
+        var r = authorize(body || {});
+        return Object.assign({ error: r.ok ? "" : r.reason, message: describeAuth(r) }, r);
+      },
+    };
+
+    return {
+      CORE_VERSION: CORE_VERSION,
+      handle: handle,
+      admin: admin,
+      load: load,
+      dump: dump,
+      state: function () { return state; },
+      limits: limits,
+      seedEntropy: seedEntropy,
+      sha256Hex: sha256Hex,
+      b64encode: b64encode,
+      b64decode: b64decode,
+      utf8Encode: utf8Encode,
+      utf8Decode: utf8Decode,
+      packText: packText,
+      unpackText: unpackText,
+      staleState: staleState,
+      summary: function (deviceId) { var d = state.devices[deviceId]; return d ? deviceSummary(d) : null; },
+      tick: tick,
+      /* role & access (Task 48) */
+      authorize: authorize,
+      guardAdmin: guardAdmin,
+      resolveRole: resolveRole,
+      capsFor: capsFor,
+      scopeOf: scopeOf,
+      inScope: inScope,
+      capForJobSource: capForJobSource,
+      roles: RMM_ROLES.slice(),
+      roleCaps: ROLE_CAPS,
+      rolesCatalog: roleCatalog,
+      capabilities: capCatalog,
+      caps: CAPS,
+      destructiveCaps: DESTRUCTIVE_CAPS.slice(),
+      minRoleFor: minRoleFor,
+      describeAuth: describeAuth,
+    };
+  }
+  /* ==RMM-COLLECTOR-CORE-END== */
+
+/* ==========================================================================
+   RMM-U COLLECTOR HUB (Tasks 14–17)
+   The authoritative agent-facing collector. Every device check-in is
+   authenticated against the stored credential HASH; inventory, metrics,
+   job results, logs and self-tests are persisted into a reserved region at
+   the END of `state`; last-seen is tracked; and the response to a heartbeat
+   carries any queued jobs + configuration. Console (admin) operations
+   require a password whose SHA-256 is embedded below — the whole script is
+   public, so no device secret is ever stored in plaintext here.
+
+   Task 15: the core owns the job lifecycle (queued → delivered → running →
+   succeeded/failed/timed-out, with retry/expiry/reap) with a `ref` +
+   `correlation` carried on every job. Task 16: the hub recomputes presence
+   on every check-in and publishes device-state / alert / job events on the
+   "rmm" pub/sub topic. Task 17: packed bodies are inflated here and the
+   core enforces retention, roll-ups and the per-device rate cap.
+   ========================================================================== */
+var COLLECTOR_ADMIN_SHA256 = "a769d9db04e9a79e7ce937075ab9b843bdbc292e6bfe075ba888a14c02829b5a";
+var COLLECTOR_RESERVE = 16 * 1024 * 1024;
+var COLLECTOR_OFF = Math.max(AUD_OFF + MAX_AUDIT * AUD_LEN, state.length - COLLECTOR_RESERVE);
+var collectorAdminConns = new Set();
+var collectorCore = createCollectorCore({ limits: { staleAfterMinutes: 15, heartbeatSeconds: 300 } });
+
+function collectorLoad() {
+  try {
+    var region = state.subarray(COLLECTOR_OFF);
+    var len = region[0] | (region[1] << 8) | (region[2] << 16) | (region[3] << 24);
+    if (!len || len + 4 > region.length) return;
+    collectorCore.load(JSON.parse(collectorCore.utf8Decode(region.subarray(4, 4 + len))));
+  } catch (e) { collectorCore.load({}); }
+}
+function collectorPrune(core) {
+  var st = core.state();
+  var oldestStamp = null, oldestJob = null;
+  for (var id in st.jobs) {
+    var j = st.jobs[id];
+    if (j.state === "queued" || j.state === "delivered" || j.state === "running") continue;
+    var stamp = j.endedAt || j.createdAt || "";
+    if (oldestStamp === null || stamp < oldestStamp) { oldestStamp = stamp; oldestJob = id; }
+  }
+  if (oldestJob) {
+    delete st.jobs[oldestJob];
+    for (var d in st.devices) {
+      var ids = st.devices[d].jobIds;
+      if (ids) { var i = ids.indexOf(oldestJob); if (i >= 0) ids.splice(i, 1); }
+    }
+    return true;
+  }
+  for (var lk in st.logs) if (st.logs[lk] && st.logs[lk].length) { st.logs[lk].shift(); return true; }
+  for (var dk in st.diagnostics) if (st.diagnostics[dk] && st.diagnostics[dk].length) { st.diagnostics[dk].shift(); return true; }
+  for (var mk in st.metrics) if (st.metrics[mk] && st.metrics[mk].samples && st.metrics[mk].samples.length) { st.metrics[mk].samples.shift(); return true; }
+  for (var ik in st.inventory) { delete st.inventory[ik]; return true; }
+  return false;
+}
+function collectorSave(core) {
+  var region = state.subarray(COLLECTOR_OFF);
+  for (var attempt = 0; attempt < 12; attempt++) {
+    var bytes = core.utf8Encode(JSON.stringify(core.dump()));
+    if (bytes.length + 4 <= region.length) {
+      region[0] = bytes.length & 255;
+      region[1] = (bytes.length >>> 8) & 255;
+      region[2] = (bytes.length >>> 16) & 255;
+      region[3] = (bytes.length >>> 24) & 255;
+      region.set(bytes, 4);
+      return true;
+    }
+    if (!collectorPrune(core)) return false;
+  }
+  return false;
+}
+function collectorBroadcast(evt) {
+  var msg = JSON.stringify(evt);
+  collectorAdminConns.forEach(function (cid) {
+    var e = conns.get(cid);
+    if (e && e.conn) { try { e.conn.send(msg); } catch (err) {} }
+  });
+}
+
+/* ── Task 16/17 hub plumbing ── */
+var PACK_MARK = "\u0001";
+function collectorParseBody(v) {
+  if (typeof v !== "string") return v && typeof v === "object" ? v : {};
+  var raw = v.charAt(0) === PACK_MARK ? collectorCore.unpackText(v) : v;
+  try { return JSON.parse(raw) || {}; } catch (e) { return {}; }
+}
+function collectorPublish(evt) {
+  try { pubsub.publish("rmm", JSON.stringify(evt)); } catch (e) {}
+}
+/* Recompute presence and fan out any device-state transitions. Watching a
+   device go offline/stale also raises the agent-offline alert event — the
+   first real producer feeding the stream until Phase 5's alert engine. */
+function collectorTick() {
+  var transitions = collectorCore.tick();
+  for (var i = 0; i < transitions.length; i++) {
+    var tr = transitions[i];
+    collectorPublish({ t: "evt", kind: "device-state", deviceId: tr.deviceId, providerId: tr.providerId, hostname: tr.hostname, from: tr.from, to: tr.to, at: tr.at });
+    if (tr.to === "offline" || tr.to === "stale") {
+      collectorPublish({ t: "evt", kind: "alert", alert: tr.to === "offline" ? "agent-offline" : "agent-stale", severity: tr.to === "offline" ? "critical" : "warning", deviceId: tr.deviceId, providerId: tr.providerId, hostname: tr.hostname, at: tr.at });
+    }
+  }
+  return transitions;
+}
+function collectorJobEvent(job) {
+  if (!job) return;
+  collectorPublish({ t: "evt", kind: "job", jobId: job.id, deviceId: job.deviceId, providerId: job.providerId, state: job.state, ref: job.ref || "", correlation: job.correlation || "", at: new Date().toISOString() });
+}
+function collectorAuth(conn, password) {
+  if (!rateLimit("cadmin:" + conn.id, 8, 60000)) return false;
+  if (!rateLimit("cadminNet:" + conn.net[1] + (conn.isProxy ? ":p" : ""), 30, 60000)) return false;
+  var h = sha256Hex(String(password || ""));
+  return h === COLLECTOR_ADMIN_SHA256 || h === ADMIN_PASSWORD_SHA256;
+}
+collectorLoad();
+
+/* ── Task 48: role & access enforcement ──
+   The collector holds a per-user registry of role, site/device scopes and
+   capability overrides. Every admin op passes the core's `guardAdmin` rule
+   engine before it runs, so a client that skips the UI is still refused.
+   Managing the registry itself needs `access.manage`; the collector master
+   password is the owner credential, so an unidentified master unlock acts
+   as the owner. */
+function rmmActing(conn) {
+  var info = infoOf(conn);
+  return info ? { userId: info.userId, teamRole: info.role } : null;
+}
+function collectorScopeFilter(acting, action, res) {
+  var scope = collectorCore.scopeOf(acting.userId, acting.teamRole);
+  if (!scope || scope.all || !res) return res;
+  var st = collectorCore.state();
+  if (action === "fleet" && Array.isArray(res.devices)) {
+    var kept = [];
+    for (var i = 0; i < res.devices.length; i++) {
+      var s = res.devices[i], did = s.deviceId || s.id, dev = st.devices[did];
+      if (collectorCore.inScope(scope, dev && dev.siteId, did)) kept.push(s);
+    }
+    var counts = { total: kept.length, online: 0, stale: 0, offline: 0, retired: 0 };
+    for (var c = 0; c < kept.length; c++) if (counts[kept[c].status] != null) counts[kept[c].status]++;
+    return { ok: true, devices: kept, counts: counts, scoped: true };
+  }
+  if (action === "jobs" && Array.isArray(res.jobs)) {
+    var js = [];
+    for (var k = 0; k < res.jobs.length; k++) {
+      var jb = res.jobs[k], didj = jb.deviceId, dv = didj && st.devices[didj];
+      if (didj && collectorCore.inScope(scope, dv && dv.siteId, didj)) js.push(jb);
+    }
+    return { ok: true, jobs: js, scoped: true };
+  }
+  if (action === "job" && res.job) {
+    var dj = res.job.deviceId, dvj = dj && st.devices[dj];
+    if (dj && !collectorCore.inScope(scope, dvj && dvj.siteId, dj)) return { ok: false, error: "out_of_scope", message: "This job belongs to a device outside your assigned scope." };
+  }
+  return res;
+}
+function rmmManage(conn) {
+  var acting = rmmActing(conn);
+  if (!acting) return { error: "hello_first" };
+  var r = collectorCore.authorize({ userId: acting.userId, teamRole: acting.teamRole, action: "access.manage" });
+  if (!r.ok) return { error: "forbidden", message: collectorCore.describeAuth(r), requiredRole: r.requiredRole };
+  return { acting: acting };
+}
+/* Task 50: every remote (device-affecting) action is written to the server
+   audit ring against the TRUE actor — the hub-resolved console identity, not
+   anything the client claims — whether it succeeded or was refused. */
+function auditRemote(acting, action, ok) {
+  if (!AUDIT_REMOTE_ACTIONS) return;
+  try {
+    var role = Number(acting.teamRole) === 2 ? 2 : (Number(acting.teamRole) || 0);
+    var tag = (ok ? "rmm:" : "deny:") + String(action || "unknown").slice(0, 18);
+    var e = auditAppend(String(acting.userId || "unknown"), role, tag);
+    pubsub.publish("erp", JSON.stringify({ t: "audit", s: e.seq }));
+  } catch (e2) {}
+}
+
+self.rpc = {
+  hello({ conn }, data) {
+    var d = JSON.parse(data);
+    var userId = String(d.userId || "");
+    if (!/^[0-9a-f]{32}$/.test(userId)) return JSON.stringify({ ok: false, err: "bad_id" });
+    if (!rateLimit("hello:" + conn.net[1], 40, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    if (!infoOf(conn) && sessionsForNet(conn) >= MAX_SESSIONS_PER_NET) return JSON.stringify({ ok: false, err: "net_full", message: "Too many console sessions from this network — close another tab and try again." });
+    var displayName = asciiName(d.displayName, 24);
+    var off = userSlot(userId);
+    if (off < 0) return JSON.stringify({ ok: false, err: "users_full" });
+    var role = state[off + 56];
+    if (readAscii(state, off, 32) === "") {
+      role = userCount() === 0 ? 2 : 0; // very first registrant becomes owner
+      writeAscii(state, off, userId, 32);
+      state[off + 56] = role;
+    }
+    writeAscii(state, off + 32, displayName, 24);
+    writeU32(off + 58, (Date.now() / 1000) | 0);
+    var info = { userId: userId, displayName: displayName, role: role, admin: false };
+    conns.set(conn.id, { conn: conn, info: info });
+    if (!userConns.has(userId)) userConns.set(userId, new Set());
+    userConns.get(userId).add(conn.id);
+    pubsub.publish("erp", JSON.stringify({ t: "pres", u: userId, n: displayName, r: role, on: true }));
+    return JSON.stringify({ ok: true, userId: userId, displayName: displayName, role: role, users: userList(false) });
+  },
+
+  whoami({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    return JSON.stringify({ ok: true, userId: info.userId, displayName: info.displayName, role: info.role, admin: !!info.admin });
+  },
+
+  peers({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    conns.forEach(function (e) { if (e.info) out.push({ userId: e.info.userId, displayName: e.info.displayName, role: e.info.role, admin: !!e.info.admin }); });
+    return JSON.stringify({ ok: true, peers: out });
+  },
+
+  authAdmin({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("admin:" + conn.id, 6, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    if (!rateLimit("adminNet:" + conn.net[1] + (conn.isProxy ? ":p" : ""), 20, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data);
+    if (sha256Hex(String(d.password || "")) !== ADMIN_PASSWORD_SHA256) return JSON.stringify({ ok: false, err: "bad_password" });
+    info.admin = true;
+    info.role = 2;
+    var off = userSlot(info.userId);
+    if (off >= 0) { state[off + 56] = 2; writeU32(off + 58, (Date.now() / 1000) | 0); }
+    pubsub.publish("erp", JSON.stringify({ t: "role", u: info.userId, r: 2, n: info.displayName, on: true }));
+    return JSON.stringify({ ok: true, role: 2, admin: true });
+  },
+
+  setRole({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (info.role !== 2) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var d = JSON.parse(data);
+    var userId = String(d.userId || "");
+    var role = Number(d.role);
+    if (role !== 0 && role !== 1 && role !== 2) return JSON.stringify({ ok: false, err: "bad_role" });
+    var off = userSlot(userId);
+    if (off < 0 || readAscii(state, off, 32) === "") return JSON.stringify({ ok: false, err: "no_user" });
+    state[off + 56] = role;
+    var ids = userConns.get(userId);
+    if (ids) ids.forEach(function (cid) { var e = conns.get(cid); if (e && e.info) { e.info.role = role; } });
+    pubsub.publish("erp", JSON.stringify({ t: "role", u: userId, r: role }));
+    return JSON.stringify({ ok: true });
+  },
+
+  removeUser({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (info.role !== 2) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var userId = String((JSON.parse(data) || {}).userId || "");
+    if (userId === info.userId) return JSON.stringify({ ok: false, err: "self" });
+    var off = userSlot(userId);
+    if (off < 0 || readAscii(state, off, 32) === "") return JSON.stringify({ ok: false, err: "no_user" });
+    for (var i = 0; i < USER_LEN; i++) state[off + i] = 0;
+    var ids = userConns.get(userId);
+    if (ids) ids.forEach(function (cid) { var e = conns.get(cid); if (e) { try { e.conn.close(4400, "removed"); } catch (er) {} } });
+    return JSON.stringify({ ok: true });
+  },
+
+  listUsers({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (info.role !== 2) return JSON.stringify({ ok: false, err: "unauthorized" });
+    return JSON.stringify({ ok: true, users: userList(true) });
+  },
+
+  authorize({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("auth:" + conn.id, 300, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var action = String((JSON.parse(data) || {}).action || "");
+    var need = classify(action);
+    if (info.role < need) return JSON.stringify({ ok: false, required: need, requiredRole: roleName(need) });
+    return JSON.stringify({ ok: true });
+  },
+
+  approve({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("auth:" + conn.id, 300, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data) || {};
+    var action = String(d.action || "");
+    var need = classify(action);
+    if (info.role < need) {
+      return JSON.stringify({ ok: false, denied: true, reason: "requires the " + roleName(need) + " role", requiredRole: roleName(need) });
+    }
+    var e = auditAppend(info.userId, info.role, action);
+    if (need >= 1) pubsub.publish("erp", JSON.stringify({ t: "audit", s: e.seq }));
+    return JSON.stringify({
+      ok: true,
+      entry: {
+        id: e.seq,
+        ts: new Date(e.ts * 1000).toISOString(),
+        actor: info.displayName,
+        userId: info.userId,
+        role: info.role,
+        action: action,
+        summary: String(d.summary || "").slice(0, 500),
+        targetType: String(d.targetType || ""),
+        targetId: d.targetId == null ? null : String(d.targetId),
+      },
+    });
+  },
+
+  announce({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("ann:" + conn.id, 120, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data) || {};
+    var doc = String(d.doc || "");
+    if (doc.length > 64 || !/^rmm-v1-[a-z0-9-]+$/.test(doc)) return JSON.stringify({ ok: false, err: "bad_doc" });
+    var rev = Number(d.rev) || 0;
+    var ts = (Date.now() / 1000) | 0;
+    var holder = claimOf(doc);
+    if (holder && holder.userId !== info.userId) {
+      return JSON.stringify({ ok: false, conflict: true, holder: { userId: holder.userId, displayName: holder.displayName }, message: (holder.displayName || "Another user") + " is editing this document — sync before saving." });
+    }
+    var prev = versionIndex.get(doc);
+    if (prev && rev <= prev.rev && prev.u !== info.userId) {
+      docClaims.delete(doc);
+      var payload = JSON.stringify({ t: "conflict", d: doc, mine: rev, theirs: prev.rev, u: prev.u, n: prev.n, ts: ts });
+      try { pubsub.publish("erp", payload); } catch (e) {}
+      return JSON.stringify({ ok: false, conflict: true, current: { rev: prev.rev, u: prev.u, n: prev.n, ts: prev.ts }, message: (prev.n || "Another user") + " saved a newer version of this document — nothing was overwritten." });
+    }
+    versionIndex.set(doc, { rev: rev, u: info.userId, n: info.displayName, ts: ts });
+    docClaims.delete(doc);
+    pubsub.publish("erp", JSON.stringify({ t: "chg", d: doc, r: rev, u: info.userId, n: info.displayName, ts: ts }));
+    return JSON.stringify({ ok: true });
+  },
+
+  /* ── Task 49: console presence ("who else is on this device") ── */
+  rmmFocus({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("focus:" + conn.id, 240, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data) || {};
+    setFocus(conn, d.deviceId, d.providerId);
+    var did = d.deviceId == null ? "" : String(d.deviceId);
+    return JSON.stringify({ ok: true, deviceId: did, viewers: did ? viewersOf(did) : [] });
+  },
+
+  rmmViewers({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var did = String((JSON.parse(data) || {}).deviceId || "");
+    return JSON.stringify({ ok: true, deviceId: did, viewers: viewersOf(did) });
+  },
+
+  rmmPresenceList({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    conns.forEach(function (e) {
+      if (e.info) out.push({ userId: e.info.userId, displayName: e.info.displayName, role: e.info.role, admin: !!e.info.admin, focus: e.focus || null, joinedAt: e.joinedAt || 0 });
+    });
+    return JSON.stringify({ ok: true, sessions: out, online: userConns.size });
+  },
+
+  /* ── Task 50: grouped connection stats, rate control & document claims ── */
+  rmmConnStats({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var groups = {};
+    conns.forEach(function (e) {
+      var k = e.netKey || "?";
+      var g = groups[k] || (groups[k] = { net: k, sessions: 0, users: 0, proxy: false });
+      g.sessions++; if (e.info) g.users++;
+      g.proxy = g.proxy || !!e.isProxy;
+    });
+    var out = [];
+    for (var k in groups) out.push(groups[k]);
+    out.sort(function (a, b) { return b.sessions - a.sessions; });
+    return JSON.stringify({ ok: true, groups: out, cap: MAX_SESSIONS_PER_NET, sockets: conns.size, sessions: userConns.size });
+  },
+
+  rmmClaim({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimitNet(conn, "claim", 180, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data) || {};
+    var doc = String(d.doc || "");
+    if (!doc || doc.length > 64) return JSON.stringify({ ok: false, err: "bad_doc" });
+    var existing = claimOf(doc);
+    if (existing && existing.userId !== info.userId) {
+      return JSON.stringify({ ok: false, conflict: true, holder: { userId: existing.userId, displayName: existing.displayName, role: existing.role, at: existing.at }, message: (existing.displayName || "Another user") + " is editing this document." });
+    }
+    var rec = { userId: info.userId, displayName: info.displayName, role: info.role, baseRev: Number(d.baseRev) || 0, at: Date.now() };
+    docClaims.set(doc, rec);
+    return JSON.stringify({ ok: true, claim: { userId: rec.userId, displayName: rec.displayName, role: rec.role, baseRev: rec.baseRev } });
+  },
+
+  rmmRelease({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var doc = String((JSON.parse(data) || {}).doc || "");
+    if (!doc) return JSON.stringify({ ok: false, err: "bad_doc" });
+    var rel = releaseClaim(doc, info.userId);
+    return JSON.stringify({ ok: true, released: !!rel });
+  },
+
+  rmmClaims({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    docClaims.forEach(function (c, k) {
+      if (claimActive(c)) out.push({ doc: k, userId: c.userId, displayName: c.displayName, role: c.role, baseRev: c.baseRev, ageSeconds: Math.round((Date.now() - c.at) / 1000) });
+    });
+    return JSON.stringify({ ok: true, claims: out });
+  },
+
+  /* Log a console action (one that does not pass through collectorAdmin) to
+     the true actor's audit trail. The hub stamps the identity — a client can
+     never claim to be someone else. */
+  rmmAudit({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimitNet(conn, "audit", 300, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data) || {};
+    var action = String(d.action || "").replace(/[^\x20-\x7e]/g, "").trim().slice(0, 18);
+    if (!action) return JSON.stringify({ ok: false, err: "bad_action" });
+    var e = auditAppend(info.userId, info.role, "act:" + action);
+    pubsub.publish("erp", JSON.stringify({ t: "audit", s: e.seq }));
+    return JSON.stringify({ ok: true, entry: { seq: e.seq, ts: new Date(e.ts * 1000).toISOString(), userId: info.userId, displayName: info.displayName, role: info.role, action: action } });
+  },
+
+  index({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    versionIndex.forEach(function (v, k) { out.push({ d: k, r: v.rev, u: v.u, n: v.n, ts: v.ts }); });
+    return JSON.stringify({ ok: true, index: out });
+  },
+
+  auditTail({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (info.role !== 2) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var limit = Math.min(Number((JSON.parse(data) || {}).limit) || 50, 500);
+    var next = readU32(AUD_HDR + 4);
+    var n = Math.min(limit, next);
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      var seq = next - i;
+      var off = AUD_OFF + (((seq - 1) % MAX_AUDIT) + MAX_AUDIT) % MAX_AUDIT * AUD_LEN;
+      out.push({
+        seq: readU32(off), ts: readU32(off + 4), role: state[off + 8],
+        user: readAscii(state, off + 9, 32), action: readAscii(state, off + 41, 23),
+      });
+    }
+    return JSON.stringify({ ok: true, entries: out });
+  },
+};
+
+/* ---- RMM-U collector hub RPC (Task 14): device ops + admin ops ---- */
+self.rpc.collectorAuth = function ({ conn }, data) {
+  try {
+    var pw = String((JSON.parse(data) || {}).password || "");
+    if (!collectorAuth(conn, pw)) return JSON.stringify({ ok: false, error: "unauthorized", message: "Wrong collector password (or too many attempts)." });
+    collectorAdminConns.add(conn.id);
+    return JSON.stringify({ ok: true });
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+
+self.rpc.collectorDevice = function ({ conn }, data) {
+  try {
+    if (!rateLimit("cdev:" + conn.net[2], 1200, 60000)) return JSON.stringify({ ok: false, error: "rate" });
+    var d = JSON.parse(data) || {};
+    var op = String(d.op || "");
+    var body = collectorParseBody(d.body);
+    var res = collectorCore.handle(op, body);
+    collectorSave(collectorCore);
+    collectorTick();
+    if (op !== "ping") {
+      collectorPublish({ t: "evt", kind: "device-op", op: op, deviceId: (res && res.deviceId) || body.deviceId || "", providerId: (res && res.providerId) || body.providerId || "", ok: !!(res && res.ok), at: new Date().toISOString() });
+      if (op === "job-result" || op === "job-start") collectorJobEvent(collectorCore.state().jobs[body.jobId]);
+      if (op === "batch") collectorPublish({ t: "evt", kind: "device-op", op: "batch", count: (res && res.count) || 0, ok: !!(res && res.ok), at: new Date().toISOString() });
+    }
+    if (op === "enroll" || op === "heartbeat" || op === "uninstall") {
+      collectorBroadcast({ t: "rmm-device", op: op, deviceId: (res && res.deviceId) || body.deviceId || "", ok: !!(res && res.ok) });
+    }
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request", message: String(e && e.message || e) }); }
+};
+
+self.rpc.collectorAdmin = function ({ conn }, data) {
+  try {
+    if (!collectorAdminConns.has(conn.id)) return JSON.stringify({ ok: false, error: "unauthorized", message: "Unlock the collector first." });
+    if (!rateLimit("cadm:" + conn.id, 900, 60000)) return JSON.stringify({ ok: false, error: "rate" });
+    var d = JSON.parse(data) || {};
+    var action = String(d.action || "");
+    var fn = collectorCore.admin[action];
+    if (typeof fn !== "function") return JSON.stringify({ ok: false, error: "unknown_action" });
+    var body = collectorParseBody(d.payload) || {};
+    var uinfo = infoOf(conn);
+    var acting = uinfo ? { userId: uinfo.userId, teamRole: uinfo.role } : { userId: "collector-master", teamRole: 2 };
+    var guard = collectorCore.guardAdmin(acting, action, body);
+    if (!guard || !guard.ok) {
+      auditRemote(acting, action, false);
+      collectorPublish({ t: "evt", kind: "access-denied", action: action, userId: acting.userId, error: (guard && guard.error) || "forbidden", capability: (guard && guard.capability) || "", at: new Date().toISOString() });
+      return JSON.stringify(guard || { ok: false, error: "forbidden" });
+    }
+    var res = fn(body);
+    if (res && res.ok) res = collectorScopeFilter(acting, action, res);
+    collectorSave(collectorCore);
+    collectorTick();
+    auditRemote(acting, action, !!(res && res.ok));
+    if ((action === "pushJob" || action === "retryJob") && res && res.jobId) collectorJobEvent(collectorCore.state().jobs[res.jobId]);
+    collectorPublish({ t: "evt", kind: "admin", action: action, ok: !!(res && res.ok), at: new Date().toISOString() });
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request", message: String(e && e.message || e) }); }
+};
+
+/* ── Task 48: team-hub access RPCs ──
+   The console manages the collector's access registry through these. They
+   share the collector core that lives in this same server, so no collector
+   password is needed — the team identity plus `access.manage` is the gate. */
+self.rpc.rmmCatalog = function ({ conn }) {
+  try {
+    var acting = rmmActing(conn);
+    if (!acting) return JSON.stringify({ ok: false, error: "hello_first" });
+    var rec = collectorCore.state().access[acting.userId] || null;
+    var role = collectorCore.resolveRole(acting.userId, acting.teamRole, rec);
+    var caps = Object.keys(collectorCore.capsFor(role, Number(acting.teamRole) === 2 ? null : rec));
+    var manage = collectorCore.authorize({ userId: acting.userId, teamRole: acting.teamRole, action: "access.manage" }).ok;
+    return JSON.stringify({ ok: true, access: manage ? collectorCore.listAccess() : null, catalog: collectorCore.accessCatalog(), me: { userId: acting.userId, teamRole: acting.teamRole, role: role, caps: caps, scope: collectorCore.scopeOf(acting.userId, acting.teamRole, rec), canManage: manage } });
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmAuthorize = function ({ conn }, data) {
+  try {
+    var acting = rmmActing(conn);
+    if (!acting) return JSON.stringify({ ok: false, error: "hello_first" });
+    if (!rateLimit("rauth:" + conn.id, 600, 60000)) return JSON.stringify({ ok: false, error: "rate" });
+    var d = JSON.parse(data) || {};
+    var deviceId = d.deviceId == null ? "" : String(d.deviceId);
+    var siteId = d.siteId == null ? "" : String(d.siteId);
+    if (deviceId && !siteId) { var dev = collectorCore.state().devices[deviceId]; if (dev) siteId = dev.siteId || ""; }
+    var r = collectorCore.authorize({ userId: acting.userId, teamRole: acting.teamRole, action: String(d.action || ""), deviceId: deviceId, siteId: siteId });
+    return JSON.stringify({ ok: r.ok, allowed: r.ok, reason: r.reason, message: collectorCore.describeAuth(r), role: r.role, requiredRole: r.requiredRole, destructive: r.destructive, action: r.action });
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmListAccess = function ({ conn }) {
+  try {
+    var m = rmmManage(conn);
+    if (m.error) return JSON.stringify({ ok: false, error: m.error, message: m.message });
+    return JSON.stringify({ ok: true, access: collectorCore.listAccess() });
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmSetRole = function ({ conn }, data) {
+  try {
+    var m = rmmManage(conn);
+    if (m.error) return JSON.stringify({ ok: false, error: m.error, message: m.message });
+    var d = JSON.parse(data) || {};
+    if (String(d.userId) === m.acting.userId && Number(m.acting.teamRole) === 2) return JSON.stringify({ ok: false, error: "owner_locked", message: "The owner is always a security-admin and cannot be demoted." });
+    var res = collectorCore.admin.setAccessRole(d);
+    if (res && res.ok) { collectorSave(collectorCore); collectorPublish({ t: "evt", kind: "access", action: "role", userId: res.userId, at: new Date().toISOString() }); }
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmSetScopes = function ({ conn }, data) {
+  try {
+    var m = rmmManage(conn);
+    if (m.error) return JSON.stringify({ ok: false, error: m.error, message: m.message });
+    var d = JSON.parse(data) || {};
+    if (String(d.userId) === m.acting.userId && Number(m.acting.teamRole) === 2) return JSON.stringify({ ok: false, error: "owner_locked", message: "The owner always has full scope." });
+    var res = collectorCore.admin.setAccessScopes(d);
+    if (res && res.ok) { collectorSave(collectorCore); collectorPublish({ t: "evt", kind: "access", action: "scopes", userId: res.userId, at: new Date().toISOString() }); }
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmSetCaps = function ({ conn }, data) {
+  try {
+    var m = rmmManage(conn);
+    if (m.error) return JSON.stringify({ ok: false, error: m.error, message: m.message });
+    var d = JSON.parse(data) || {};
+    if (String(d.userId) === m.acting.userId && Number(m.acting.teamRole) === 2) return JSON.stringify({ ok: false, error: "owner_locked", message: "The owner's capabilities cannot be reduced." });
+    var res = collectorCore.admin.setAccessCaps(d);
+    if (res && res.ok) { collectorSave(collectorCore); collectorPublish({ t: "evt", kind: "access", action: "capabilities", userId: res.userId, at: new Date().toISOString() }); }
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+self.rpc.rmmRemoveAccess = function ({ conn }, data) {
+  try {
+    var m = rmmManage(conn);
+    if (m.error) return JSON.stringify({ ok: false, error: m.error, message: m.message });
+    var d = JSON.parse(data) || {};
+    if (String(d.userId) === m.acting.userId) return JSON.stringify({ ok: false, error: "self", message: "You cannot remove your own access." });
+    var res = collectorCore.admin.removeAccess(d);
+    if (res && res.ok) { collectorSave(collectorCore); collectorPublish({ t: "evt", kind: "access", action: "remove", userId: res.userId, at: new Date().toISOString() }); }
+    return JSON.stringify(res);
+  } catch (e) { return JSON.stringify({ ok: false, error: "bad_request" }); }
+};
+
+var collectorPrevOnclose = self.onclose;
+self.onclose = function (ev) {
+  try { if (collectorPrevOnclose) collectorPrevOnclose(ev); } catch (e) {}
+  collectorAdminConns.delete(ev.conn.id);
+};
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="src/template.css">
+<link rel="stylesheet" href="src/erp.css">
+
+<div class="progress-bar" id="progressBar"></div>
+
+<div class="erp-app" id="app">
+
+  <!-- ============================ sidebar ============================ -->
+  <aside class="erp-sidebar" id="sidebar" aria-label="ERP modules">
+    <div class="erp-brand">
+      <a class="erp-logo" href="#/dashboard">
+        <span class="erp-logo-mark" id="logoMark">B</span>
+        <span class="erp-logo-text">
+          <span class="erp-logo-name" id="brandName">RMM-U</span>
+          <span class="erp-logo-sub">Remote monitoring &amp; management</span>
+        </span>
+      </a>
+    </div>
+    <nav class="erp-nav" id="nav" aria-label="Modules"></nav>
+    <div class="erp-sidebar-foot">
+      <span class="erp-role-chip" id="roleChip">owner</span>
+      <span class="erp-version">RMM-U core · v<span id="versionText">0.1.0</span></span>
+    </div>
+  </aside>
+
+  <div class="erp-overlay" id="overlay" hidden></div>
+
+  <!-- ============================ main ============================ -->
+  <div class="erp-main">
+    <header class="erp-topbar">
+      <button class="icon-btn erp-hamburger" id="hamburgerBtn" aria-label="Open menu" aria-expanded="false">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>
+      </button>
+      <div class="erp-title">
+        <h1 id="pageTitle">Dashboard</h1>
+        <p id="pageSubtitle"></p>
+      </div>
+      <div class="erp-topbar-actions">
+        <span class="erp-team-state" id="teamState" title="Realtime team hub">
+          <span class="erp-team-dot gray" id="teamDot"></span>
+          <span class="erp-team-text" id="teamStateText">offline</span>
+        </span>
+        <span class="erp-team-state" id="rmmStream" title="Device event stream">
+          <span class="erp-team-dot gray" id="rmmStreamDot"></span>
+          <span class="erp-team-text" id="rmmStreamText">offline</span>
+        </span>
+        <span class="erp-team-state" id="rmmLive" title="Realtime console">
+          <span class="erp-team-dot gray" id="rmmLiveDot"></span>
+          <span class="erp-team-text" id="rmmLiveText">offline</span>
+        </span>
+        <label class="erp-role-select" id="roleSelectWrap" title="Local role demo — when the team hub is online the server role overrides this">
+          <span class="erp-role-label">Acting as</span>
+          <select id="roleSelect" aria-label="Current role">
+            <option value="owner">Owner</option>
+            <option value="manager">Manager</option>
+            <option value="staff">Staff</option>
+          </select>
+        </label>
+        <button class="icon-btn erp-team-btn" id="teamBtn" aria-label="Team hub" title="Team, roles &amp; access">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </button>
+        <button class="icon-btn erp-sync-btn" id="syncBtn" aria-label="Sync & conflicts" title="Sync documents">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+          <span class="erp-badge" id="syncBadge" hidden></span>
+        </button>
+        <button class="icon-btn erp-health-btn" id="healthBtn" aria-label="System health" title="System health — not checked yet">
+          <span class="erp-health-dot gray" id="healthDot"></span>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </button>
+        <button class="icon-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode"><span id="themeToggleIcon"></span></button>
+      </div>
+    </header>
+
+    <div class="erp-sync-banner" id="syncBanner" hidden role="status">
+      <span class="erp-sync-banner-mark" aria-hidden="true">!</span>
+      <span class="erp-sync-banner-text" id="syncBannerText"></span>
+      <button class="btn btn-sm btn-primary" id="syncBannerBtn">Review</button>
+    </div>
+
+    <main class="erp-content" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div class="toast-ctn" id="toastCtn"></div>
+
+<!-- Shared modal for forms/editors/confirms -->
+<div class="modal-back" id="uiModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="uiModalTitle">
+    <div class="modal-head">
+      <h2 class="modal-title" id="uiModalTitle"></h2>
+      <button class="icon-btn" data-ui-close aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
+    <div class="modal-body" id="uiModalBody"></div>
+    <div class="modal-foot" id="uiModalFoot"></div>
+  </div>
+</div>
+
+<!-- Sync & conflicts resolution modal -->
+<div class="modal-back" id="syncModal" aria-hidden="true">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="syncModalTitle">
+    <div class="modal-head">
+      <h2 class="modal-title" id="syncModalTitle">Sync &amp; conflicts</h2>
+      <button class="icon-btn" data-sync-close aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
+    <div class="modal-body" id="syncModalBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="syncNowBtn">Sync now</button>
+      <button class="btn btn-ghost" data-sync-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="src/erp.js"></script>
+<script src="src/erp.ui.js"></script>
+<script src="src/erp.modules.js"></script>
+<script src="src/erp.store.js"></script>
+<script src="src/erp.sync.js"></script>
+<script src="src/erp.master.js"></script>
+<script src="src/erp.backup.js"></script>
+<script src="src/rmm.tenancy.js"></script>
+<script src="src/rmm.devices.js"></script>
+<script src="src/rmm.master.js"></script>
+<script src="src/rmm.continuity.js"></script>
+<script src="src/rmm.enrollment.js"></script>
+<script src="src/rmm.heartbeat.js"></script>
+<script src="src/rmm.inventory.js"></script>
+<script src="src/rmm.metrics.js"></script>
+<script src="src/rmm.jobs.js"></script>
+<script src="src/rmm.agent.js"></script>
+<script src="src/rmm.resilience.js"></script>
+<script src="src/rmm.diagnostics.js"></script>
+<script src="src/rmm.collector.js"></script>
+<script src="src/rmm.dispatch.js"></script>
+<script src="src/rmm.events.js"></script>
+<script src="src/rmm.retention.js"></script>
+<script src="src/rmm.groups.js"></script>
+<script src="src/rmm.policies.js"></script>
+<script src="src/rmm.monitors.js"></script>
+<script src="src/rmm.notify.js"></script>
+<script src="src/rmm.schedules.js"></script>
+<script src="src/rmm.scripts.js"></script>
+<script src="src/rmm.automations.js"></script>
+<script src="src/rmm.alerts.js"></script>
+<script src="src/rmm.routing.js"></script>
+<script src="src/rmm.psa.js"></script>
+<script src="src/rmm.triage.js"></script>
+<script src="src/rmm.patch.js"></script>
+<script src="src/rmm.software.js"></script>
+<script src="src/rmm.security.js"></script>
+<script src="src/rmm.remote.js"></script>
+<script src="src/rmm.dashboard.js"></script>
+<script src="src/rmm.reporting.js"></script>
+<script src="src/rmm.integrations.js"></script>
+<script src="src/rmm.dataquality.js"></script>
+<script src="src/rmm.simulator.js"></script>
+<script src="src/erp.team.js"></script>
+<script src="src/rmm.access.js"></script>
+<script src="src/rmm.live.js"></script>
+<script src="src/rmm.multiuser.js"></script>
+<script>
+(function () {
+  var DEV_ONLY = [
+    "src/erp.tests.js"
+  ];
+  window.rmmLoadTests = function () {
+    if (document.querySelector("script[data-rmm-tests]")) return;
+    DEV_ONLY.forEach(function (src, i) {
+      var s = document.createElement("script");
+      s.src = src;
+      s.async = false;
+      if (i === DEV_ONLY.length - 1) s.setAttribute("data-rmm-tests", "1");
+      document.head.appendChild(s);
+    });
+  };
+  if (window.generatorIsUnsaved || (location.search || "").indexOf("tests") !== -1) window.rmmLoadTests();
+})();
+</script>

@@ -1,0 +1,197 @@
+$meta
+  title = quote-u
+  description = quote-u is the quoting system of record for the small-business pipeline — an internal quote builder plus a tokenized client approval portal and an approval orchestrator. Quotes are immutable versions made of line items (one-time and MRR) and option groups; every price is captured as an immutable snapshot; a sent version is frozen and never re-priced. The client opens a tokenized link, toggles options and approves; approval recomputes totals from frozen data and drives idempotent external writes (opportunity, note, revenue line, invoice). All money is integer cents, the portal never exposes cost or margin, and every transition is append-only audited.
+  tags = quotes, quoting, cpq, proposal, approval, esign, portal, crm, pipeline, invoicing, margin, mrr, quote builder
+  header
+    mode = minimal
+
+kv = {import:kv-plugin}
+uploadPlugin = {import:upload-plugin}
+createServerSocket = {import:server-plugin}
+superFetch = {import:super-fetch-plugin}
+
+// Configurable quote-number scheme (roadmap task 7). Tokens: {YYYY} {YY} {MM}
+// {DD} and exactly one {#...} sequence (width = number of #). The sequence is
+// bucketed by the rendered prefix, so including {YYYY} resets it each year.
+// Numbers are unique, stable and never reused. Override this object to rebrand
+// (existing numbers are unaffected).
+quoteNumberScheme = [({ pattern: "QU-{YYYY}-{####}", description: "Quote number: QU-<year>-<sequence>" })]
+
+// Account access scope (roadmap task 9). The IDOR guard: internal users can
+// only see quotes/companies/contacts/opportunities for the accounts listed
+// here. "*" is the explicit all-accounts sentinel. Phase 12 keeps this as the
+// default account scope; per-member scopes can pin a narrower list below.
+quoteAccessScope = [["*"]]
+
+// Role & access policy (roadmap task 68). Phase 12 replaces "every local user is
+// the owner" with a real internal identity model: `default_role` is the role a
+// user has before the hub authenticates them (owner = the single-operator
+// default; the hub overrides it with the authenticated member's role),
+// `discount_floor_bp` is the margin floor in basis points of sell-vs-cost
+// (1500 = 15%) below which only an owner may price a line, and `members` seeds
+// named members with a pinned role and optional per-member account scope.
+// Client-portal visitors always hold a token, never an internal role. Override
+// this object to change who may create, price, discount, send and revoke.
+quoteRolePolicy = [({ default_role: "owner", discount_floor_bp: 1500, members: [] })]
+
+// Send / expiry / staleness policy (roadmap tasks 18–19). `expiry_days` is the
+// default portal-link lifetime from send; `stale_cost_days` is the age beyond
+// which a captured cost snapshot is flagged at send (the send is refused unless
+// the rep explicitly acknowledges stale pricing); `default_from_mailbox` is the
+// fallback sender when a rep can't be resolved from the mailbox directory.
+// Override this object to change the policy (existing sent quotes are
+// unaffected — their expiry is stamped on the quote at send time).
+quoteSendPolicy = [({ expiry_days: 30, stale_cost_days: 7, default_from_mailbox: "alex.rivera@example.com" })]
+
+// Indicative tax display policy (roadmap task 20). quote-u NEVER asserts an
+// authoritative tax figure: the invoicing/accounting system owns the real
+// computation. `gst_rate_bp` (basis points) drives a clearly-labelled indicative
+// GST line on the client-facing surfaces, `gst_label` names the tax, and
+// `disclaimer` is shown beside it. Set `show: false` to omit the line entirely.
+// Override this object to change the rate.
+quoteTaxPolicy = [({ gst_rate_bp: 500, gst_label: "GST", show: true, disclaimer: "Tax is shown as an indicative estimate only. The invoicing/accounting system computes the authoritative tax on the final invoice." })]
+
+// Approval orchestrator policy (roadmap tasks 30–33). `auto_close` decides
+// whether an accepted quote auto-closes the linked opportunity as Won
+// (`won_stage`) or, when disabled, writes the deal value but leaves the stage
+// at `fallback_stage` for a human to close. `write_note` and `write_revenue`
+// enable the products/costs/part-numbers note (task 32) and the
+// revenue/product-line write (task 33) on approval. `max_attempts` and the
+// backoff bounds configure the idempotent outbox's retry schedule. Override this
+// object to change the policy (existing decisions are unaffected).
+quoteApprovalPolicy = [({ auto_close: true, won_stage: "won", fallback_stage: "closed_pending", write_note: true, write_revenue: true, max_attempts: 5, base_backoff_ms: 2000, max_backoff_ms: 300000 })]
+
+// Invoice-intent policy (roadmap task 34). The double-billing guard records the
+// chosen invoicing path before any external call; `default_path` is used when an
+// attempt does not name one, and `paths` is the allowlist of known paths
+// (`direct` = direct accounting invoice, `psa` = the PSA produces the invoice).
+// Path selection is refined in task 37.
+quoteInvoicePolicy = [({ default_path: "psa", paths: ["direct", "psa"] })]
+
+// Direct-accounting invoice policy (roadmap task 35). The DIRECT path upserts
+// the accounting customer and creates the invoice from the approved selection.
+// `enabled`/`write_invoice` gate the whole path; `tax_rate_bp` is the rate
+// handed to the accounting system (which owns the authoritative tax figure).
+quoteAccountingPolicy = [({ enabled: true, write_invoice: true, tax_rate_bp: 500, source: "quote-u" })]
+
+// PSA invoice policy (roadmap task 36). The PSA path hands the approved
+// selection's product/revenue records to the PSA (CRM-U) and the PSA's own
+// accounting sync produces the invoice. `enabled`/`write_invoice` gate the path;
+// `tax_rate_bp` is the rate handed to the PSA (which owns the authoritative tax
+// figure); `source` tags the records with their origin.
+quotePsaInvoicingPolicy = [({ enabled: true, write_invoice: true, tax_rate_bp: 500, source: "quote-u" })]
+
+// Distributor pricing policy (roadmap tasks 42–44). `default_markup_bp` is the
+// basis-point markup applied over a captured distributor cost to propose a sell
+// price (2400 = 24%) — a rep can override it per line. `default_kind` is the
+// line kind a searched part is added as (one_time | mrr). `stale_cost_days` is
+// the age past which a captured cost is shown with a staleness badge and the
+// send pipeline warns. Change this object to change pricing behaviour.
+quoteDistributorPolicy = [({ default_markup_bp: 2400, default_kind: "one_time", stale_cost_days: 7 })]
+
+// Operational flags & data mode (roadmap task 38). The single control surface
+// over every external effect: `kill_switch` blocks ALL external writes;
+// `write_flags` sets per-feature write flags (keys from QU_FEATURES.FEATURES —
+// opp_create, opp_update, note_write, revenue_write, email_send, invoice_direct,
+// invoice_psa, distributor_read); `data_mode` is live | mock | lockdown (mock
+// refuses live calls, lockdown blocks all writes); `require_internal_review`
+// gates sends on the version having passed through internal_review. An empty
+// `write_flags` means "use each feature's default" (all on). Editable at runtime
+// from the Admin station (persisted in the `feature_flags` document).
+quoteFeaturePolicy = [({ kill_switch: false, data_mode: "live", require_internal_review: false, write_flags: {} })]
+
+// Connector-gateway identity policy (roadmap task 46). The gateway holds only
+// KEY NAMES — never a credential (the fleet secret store holds the credential
+// and the host injects it as `window.QU_KEYSTORE`, resolved by name at call
+// time). `gateway_keys` names the key each live connector uses; `roles` assigns
+// which connectors an identity role may use and whether it may write. A
+// connector may additionally restrict its own permitted roles. Editable at
+// runtime from the Connectors station.
+quoteGatewayPolicy = [({ gateway_keys: { distributor_a: "distributor_a_api", distributor_b: "distributor_b_api" }, roles: { owner: { connectors: "*", writes: true }, manager: { connectors: "*", writes: true }, viewer: { connectors: "*", writes: false } } })]
+
+// Gated-writes policy (roadmap task 47). Every external WRITE must be named here
+// and APPROVED before it may leave the app — an unlisted write is refused
+// (fail closed), and an approved write still requires an explicit confirmation
+// from the actor performing it. `require_confirmation` toggles that second
+// check. Each approval records who approved it, when and why. Editable at
+// runtime from the Connectors station (persisted in the `write_policy`
+// document); this seed is the reviewed set of writes the app performs.
+quoteWritePolicy = [({ require_confirmation: true, functions: { "psa.createOpportunity": { approved: true, approved_by: "platform review", note: "quote creation links a PSA opportunity" }, "psa.updateOpportunity": { approved: true, approved_by: "platform review", note: "approval orchestrator writes the deal value/stage (task 31)" }, "psa.writeNote": { approved: true, approved_by: "platform review", note: "approval writes the products/costs/part-numbers note (task 32)" }, "psa.writeRevenueLines": { approved: true, approved_by: "platform review", note: "approval writes the revenue/product lines (task 33)" }, "psa.requestInvoice": { approved: true, approved_by: "platform review", note: "PSA invoicing path hands the records to the PSA sync (task 36)" }, "mail.send": { approved: true, approved_by: "platform review", note: "quote-link delivery as the rep own mailbox (task 18)" }, "accounting.upsertCustomer": { approved: true, approved_by: "platform review", note: "direct path upserts the accounting customer (task 35)" }, "accounting.createInvoice": { approved: true, approved_by: "platform review", note: "direct path creates the accounting invoice (task 35)" }, "bus.publish": { approved: true, approved_by: "platform review", note: "quote and approval events published to the pipeline bus (task 50)" }, "bus.webhookPost": { approved: true, approved_by: "platform review", note: "outbound webhook delivery of published events (task 50)" } } })]
+
+// Product-content policy (roadmap task 45). `default_provider` is "none" (the
+// catalog stays self-contained); the two free/open sources (wikidata,
+// openfoodfacts) are always registered. ESCALATION records the paid options and
+// the trigger for adopting one — reviewed deliberately, never wired in here.
+quoteContentPolicy = [({ default_provider: "none" })]
+
+// Mail send-as-rep policy (roadmap task 48). Quote-link delivery is sent AS THE
+// REP'S OWN MAILBOX: the app is granted one APPLICATION permission ("Mail.Send")
+// scoped to the sales-users group, so only a member of that group may send, and
+// only as their OWN mailbox. A shared mailbox (sales@, info@, ...) can never be
+// the sender and there is no additional mailbox license — delivery runs through
+// the user's own client (the `mailto` transport) or the connector gateway.
+// `shared_mailboxes` is a comma-separated list of the known shared addresses.
+quoteMailPolicy = [({ permission: "Mail.Send", scope_group: "sales", send_as: "own_mailbox", allow_shared: false, shared_mailboxes: "sales@example.com,info@example.com,quotes@example.com,noreply@example.com" })]
+
+// Event-publication policy (roadmap task 50). quote/approval events are
+// published to the shared pipeline bus as the versioned `bus-quote-events`
+// stream, and the same envelopes are delivered to the outbound webhook so an
+// external consumer can subscribe without polling. `webhook_url` is the
+// subscriber endpoint and `webhook_events` is a comma-separated allowlist of
+// event types (created/sent/viewed/approved/declined/expired/invoiced).
+quoteBusPolicy = [({ stream: "bus-quote-events", source: "quote-u", webhook_url: "https://example.com/hooks/quote-u", webhook_events: "quote.approved,quote.declined,quote.invoiced" })]
+
+// Typed-name e-signature policy (roadmap task 51). Typed-name acceptance is
+// GATED: it is only produced when `enabled` AND an explicit scope sign-off has
+// been recorded (the sign-off is written to the `esignature` document by the
+// Admin station). `require_signature` makes an unsigned approval impossible —
+// if the capability is not enabled, approval is refused rather than silently
+// unsigned. `consent_text` is the exact wording the client agrees to (kept
+// verbatim in the sealed signature, so the record proves WHAT was agreed).
+quoteSignaturePolicy = [({ enabled: true, require_signature: false, scope: "sales", consent_text: "By typing my name I agree that my electronic signature is the legal equivalent of my handwritten signature, and I accept this quote." })]
+
+// Advisory send-time checks policy (roadmap task 55). Advisory checks are
+// NON-BLOCKING: they warn a rep about incomplete lines (missing description or
+// part number), zero quantities, unpriced optional items, uncaptured costs and
+// cost snapshots older than `stale_cost_days`. A deliberate send is never
+// prevented; the rep is simply informed.
+quoteAdvisoryPolicy = [({ stale_cost_days: 7 })]
+
+// Prospect-mode policy (roadmap task 57). Prospect quotes reuse the send,
+// portal, e-signature and acceptance-artifact spine; only the mode flag and the
+// bound-template / bespoke authoring flow are new. `default_section` names the
+// section bespoke lines land in.
+// Reports & analytics policy (roadmap tasks 58–61). The dashboards are pure
+// reads over the system of record. The analytics extract is published to the
+// `stream` on the pipeline bus as the versioned `pipeline.analytics-extract`
+// envelope (a gated `bus.publish` write). The legacy migration adapter reads a
+// CSV/JSON source and never writes back to it (`legacy_system` labels the
+// origin). `reports_timezone` is reserved for period bucketing.
+quoteReportsPolicy = [({ default_period_days: 90 })]
+quoteAnalyticsPolicy = [({ stream: "bus-quote-analytics", source: "quote-u" })]
+quoteLegacyPolicy = [({ legacy_system: "legacy" })]
+
+quoteProspectPolicy = [({ default_section: "Bespoke" })]
+
+// Live verification policy (roadmap task 64). Every external integration is
+// probed through the connector gateway and must be PROVEN with recorded
+// evidence before it is trusted. `require_evidence` (default true) means a
+// probe alone can never mark a gate verified; `scope` is the gateway scope the
+// probe runs under. The gate list itself is declared in src/verification.js.
+quoteVerificationPolicy = [({ require_evidence: true, scope: "*" })]
+
+// Observability policy (roadmap task 65). Thresholds for the health probes and
+// bounds for the structured ops log. `token_age_alert_days` alerts on an
+// outstanding portal link older than that; `token_expiry_warn_days` warns on a
+// link expiring within that window; `outbox_backlog_alert` warns when pending +
+// failed jobs reach it; `outbox_stale_running_ms` flags a job stuck running;
+// `rate_limit_alert_pct` warns when a portal limiter is that busy; `log_cap` is
+// the in-memory ring size; `log_doc_cap` is how many records flush() persists.
+quoteObservabilityPolicy = [({ token_age_alert_days: 30, token_expiry_warn_days: 7, outbox_backlog_alert: 25, outbox_stale_running_ms: 300000, rate_limit_alert_pct: 80 })]
+
+// Bundled pipeline catalog (roadmap task 12). Installed exactly once into the
+// `catalog_items` document by QU_CATALOG.seedIfEmpty on boot. Category ids match
+// the CRM-U service categories; unit_cost_cents and default_markup_bp (basis
+// points over cost) propose a sell price that a rep can override. This is the
+// starting book of sellable things — edit the catalog station to change it.
+catalogSeed = [[{ id: "cat-hw-ap-mr46", sku: "HW-AP-MR46", manufacturer_part_number: "MR46", description: "Meraki MR46 Wi-Fi 6 access point", category: "hardware", default_kind: "one_time", unit_cost_cents: 95000, default_markup_bp: 2400, content_provider: "none", content_ref: null }, { id: "cat-hw-sw-ms1208", sku: "HW-SW-MS1208", manufacturer_part_number: "MS120-8", description: "Meraki MS120-8 8-port Gigabit switch", category: "hardware", default_kind: "one_time", unit_cost_cents: 68000, default_markup_bp: 2400, content_provider: "none", content_ref: null }, { id: "cat-hw-sw-sw24p", sku: "HW-SW-SW24P", manufacturer_part_number: "SW24P", description: "24-port Gigabit PoE+ switch", category: "hardware", default_kind: "one_time", unit_cost_cents: 145000, default_markup_bp: 2200, content_provider: "none", content_ref: null }, { id: "cat-hw-fw-fg60f", sku: "HW-FW-FG60F", manufacturer_part_number: "FG-60F", description: "FortiGate 60F next-gen firewall", category: "hardware", default_kind: "one_time", unit_cost_cents: 78000, default_markup_bp: 2600, content_provider: "none", content_ref: null }, { id: "cat-hw-ap-u6pro", sku: "HW-AP-U6PRO", manufacturer_part_number: "U6-Pro", description: "Ubiquiti UniFi U6-Pro access point", category: "hardware", default_kind: "one_time", unit_cost_cents: 32000, default_markup_bp: 2800, content_provider: "none", content_ref: null }, { id: "cat-hw-ph-t54w", sku: "HW-PH-T54W", manufacturer_part_number: "T54W", description: "Yealink T54W SIP desk phone", category: "hardware", default_kind: "one_time", unit_cost_cents: 21000, default_markup_bp: 3000, content_provider: "none", content_ref: null }, { id: "cat-hw-cbl-cat6", sku: "HW-CBL-CAT6", manufacturer_part_number: "CAT6-3M", description: "CAT6 patch cable 3m (10-pack)", category: "hardware", default_kind: "one_time", unit_cost_cents: 4500, default_markup_bp: 3500, content_provider: "none", content_ref: null }, { id: "cat-int-fib500", sku: "INT-FIB500", manufacturer_part_number: "FIB500", description: "Business Fibre 500/500 Mbps circuit", category: "internet", default_kind: "mrr", unit_cost_cents: 95000, default_markup_bp: 3500, content_provider: "none", content_ref: null }, { id: "cat-int-fib1000", sku: "INT-FIB1000", manufacturer_part_number: "FIB1000", description: "Business Fibre 1000/1000 Mbps circuit", category: "internet", default_kind: "mrr", unit_cost_cents: 145000, default_markup_bp: 3000, content_provider: "none", content_ref: null }, { id: "cat-int-lte-bak", sku: "INT-LTE-BAK", manufacturer_part_number: "LTE-FB", description: "LTE failover backup circuit (per site)", category: "internet", default_kind: "mrr", unit_cost_cents: 4500, default_markup_bp: 5000, content_provider: "none", content_ref: null }, { id: "cat-int-star-bak", sku: "INT-STAR-BAK", manufacturer_part_number: "STARBIZ", description: "Starlink business standby service", category: "internet", default_kind: "mrr", unit_cost_cents: 12000, default_markup_bp: 3000, content_provider: "none", content_ref: null }, { id: "cat-voip-seat", sku: "VOIP-SEAT", manufacturer_part_number: "SEAT", description: "Hosted PBX seat", category: "voip", default_kind: "mrr", unit_cost_cents: 1200, default_markup_bp: 4500, content_provider: "none", content_ref: null }, { id: "cat-voip-ivr", sku: "VOIP-IVR", manufacturer_part_number: "IVR", description: "Auto-attendant / IVR script", category: "voip", default_kind: "mrr", unit_cost_cents: 2500, default_markup_bp: 5000, content_provider: "none", content_ref: null }, { id: "cat-voip-did", sku: "VOIP-DID", manufacturer_part_number: "DID", description: "Direct inward dial number", category: "voip", default_kind: "mrr", unit_cost_cents: 200, default_markup_bp: 6000, content_provider: "none", content_ref: null }, { id: "cat-sip-trunk10", sku: "SIP-TRUNK10", manufacturer_part_number: "SIP10", description: "SIP trunk — 10 concurrent channels", category: "sip-trunk", default_kind: "mrr", unit_cost_cents: 6000, default_markup_bp: 4000, content_provider: "none", content_ref: null }, { id: "cat-mit-workstation", sku: "MIT-WS", manufacturer_part_number: "MITWS", description: "Managed IT — per workstation", category: "managed-it", default_kind: "mrr", unit_cost_cents: 1500, default_markup_bp: 5500, content_provider: "none", content_ref: null }, { id: "cat-mit-server", sku: "MIT-SRV", manufacturer_part_number: "MITSRV", description: "Managed IT — per server", category: "managed-it", default_kind: "mrr", unit_cost_cents: 9500, default_markup_bp: 4500, content_provider: "none", content_ref: null }, { id: "cat-mit-backup", sku: "MIT-BKUP", manufacturer_part_number: "MITBKUP", description: "Backup & disaster recovery — per workstation", category: "managed-it", default_kind: "mrr", unit_cost_cents: 800, default_markup_bp: 6000, content_provider: "none", content_ref: null }, { id: "cat-cld-m365bp", sku: "CLD-M365BP", manufacturer_part_number: "M365BP", description: "Microsoft 365 Business Premium — per seat", category: "cloud", default_kind: "mrr", unit_cost_cents: 2200, default_markup_bp: 3000, content_provider: "none", content_ref: null }, { id: "cat-cld-bk100", sku: "CLD-BK100", manufacturer_part_number: "CLDBK100", description: "Cloud backup — 100 GB pool", category: "cloud", default_kind: "mrr", unit_cost_cents: 1200, default_markup_bp: 5000, content_provider: "none", content_ref: null }, { id: "cat-col-1u", sku: "COL-1U", manufacturer_part_number: "COL1U", description: "Colocation — 1U rack unit (powered)", category: "colocation", default_kind: "mrr", unit_cost_cents: 8500, default_markup_bp: 3500, content_provider: "none", content_ref: null }, { id: "cat-mob-line", sku: "MOB-LINE", manufacturer_part_number: "MOBLINE", description: "Mobile line — voice + data", category: "mobile", default_kind: "mrr", unit_cost_cents: 3500, default_markup_bp: 3000, content_provider: "none", content_ref: null }, { id: "cat-svc-labor", sku: "SVC-LABOR", manufacturer_part_number: "LABORHR", description: "Onsite labour — per hour", category: "other", default_kind: "one_time", unit_cost_cents: 9000, default_markup_bp: 4000, content_provider: "none", content_ref: null }, { id: "cat-svc-pm", sku: "SVC-PM", manufacturer_part_number: "PMHR", description: "Project management — per hour", category: "other", default_kind: "one_time", unit_cost_cents: 11000, default_markup_bp: 3000, content_provider: "none", content_ref: null }]]

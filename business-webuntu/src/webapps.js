@@ -31,6 +31,7 @@
     "business-crm":          { chip: "customers · leads · deals · pipelines" },
     "business-documentation":{ chip: "docs · wikis · knowledge base" },
     "business-psa":          { chip: "projects · time · billing · services" },
+    "business-office-web":   { chip: "documents · spreadsheets · slides · mail" },
   };
 
   function el(tag, cls, text) {

@@ -1,0 +1,817 @@
+// ============================================================================
+//  RMM-U — PROJECT BACKLOG  (structured TODO checklist)
+//  ----------------------------------------------------------------------------
+//  WORKFLOW RULES (from the rmm-u spec):
+//   • Implement ONLY the first uncompleted [ ] task below, in order.
+//   • After implementing a task: write its validation tests, then flip its
+//     [ ] to [x], then STOP and await review before starting the next task.
+//   • Do NOT begin implementation work until the backlog is declared complete
+//     and the go-ahead is given.
+//  ----------------------------------------------------------------------------
+//  SPEC: the full roadmap is mirrored verbatim in src/SPEC.md.
+//  GENERATOR: RMM-U (generator slug: rmm-u) — a Remote Monitoring & Management platform for
+//  Perchance, built on the Business ERP framework (module shell & navigation,
+//  canonical versioned document store, sync / conflict / backup & archival,
+//  master configuration, and the server-plugin realtime hub). Each managed-
+//  service provider is a tenant; the pipeline partners this RMM reads from /
+//  writes to are psa-u (PSA tickets) and the documentation tool (device
+//  configuration records). The collector is the optional server-plugin hub and
+//  the agent is a real per-provider PowerShell / shell program — so no static
+//  secret may ever live in the public collector source.
+//
+//  PHASE 1 — FOUNDATION: TENANCY, CONSOLE & DATA MODEL
+//  [x] 1. App shell & navigation — console frame with navigation across every
+//         station (Dashboard, Devices, Groups, Policies, Monitors, Alerts,
+//         Automations, Patches, Software, Security, Reports, Integrations,
+//         Admin), with consistent empty/loading/error states and layouts that
+//         work at phone and desktop widths.
+//  [x] 2. Tenancy & data storage — model each managed-service provider as a
+//         versioned JSON document in rmm-u's own storage namespace containing
+//         its sites, device groups, devices, policies, monitor definitions,
+//         alert history, script library, patch/software state and automation
+//         rules — with a locally cached edit key and a fast local cache so the
+//         console survives across devices and reloads.
+//  [x] 3. Device hierarchy & inventory record — implement the provider →
+//         site(s) → device-group → device hierarchy and a rich device record
+//         (hostname, display name, OS and version, architecture, manufacturer/
+//         model, serial, domain/workgroup, CPU, RAM, disks, IP/MAC, logged-in
+//         users, tags, warranty/support dates, agent version and last-seen,
+//         linked configuration record in the documentation tool) that is the
+//         anchor every other feature attaches to.
+//  [x] 4. Master configuration — the system-wide configuration the rest of the
+//         platform depends on: monitor types, severity levels, notification
+//         channels, schedules and business-hours calendars, maintenance-window
+//         definitions, patch classifications, software categories, tag/group
+//         taxonomies and script categories — editable in one admin console with
+//         change history.
+//  [x] 5. Sync, conflict, backup & versioning — reconcile every document
+//         against its canonical copy on startup, offer keep-mine / keep-theirs /
+//         field-level-merge on a two-console edit before overwriting, provide
+//         one-click full backup (download plus a published backup document)
+//         with validated restore, keep a version history with restore, and
+//         report per-document size against the storage ceiling with guided
+//         archival.
+//
+//  PHASE 2 — THE AGENT: INSTALL, ENROLL, REPORT, ACT
+//  [x] 6. Agent packaging & installer generator — generate a per-provider
+//         installer (a Windows PowerShell script and a macOS/Linux shell script)
+//         that embeds the collector address, provider identity, assigned
+//         site/group and a one-time enrollment token, installs the agent
+//         (scheduled task / systemd / launchd service), registers it to start
+//         on boot, and prints a clear success/failure status with the device's
+//         initial ID.
+//  [x] 7. Enrollment & device identity — the enroll handshake: the one-time
+//         token is exchanged for a durable per-device credential, the collector
+//         stores only the hash of that credential and never the plaintext, the
+//         installer token is single-use, re-enrollment/credential rotation is
+//         supported for a legitimate reinstall, and a revoked device is refused
+//         on reconnect.
+//  [x] 8. Heartbeat, presence & capabilities — heartbeat with a configurable
+//         interval, device liveness/offline/stale detection on the collector
+//         side, clock-skew and network-change reporting, agent-version
+//         reporting, and a capabilities report (which collectors, commands and
+//         features this agent supports) so the console can adapt per device.
+//  [x] 9. System inventory collection — collect and send hardware inventory, OS
+//         details, installed software, services, patches, disks/volumes,
+//         network interfaces, local users and groups, security/AV status and
+//         backup status — as deltas against the last known state rather than
+//         full resends, so the collector and console stay current without
+//         flooding the channel.
+//  [x] 10. Performance metrics collection — collect CPU, memory, disk space and
+//          I/O, network throughput/latency, uptime and any custom performance
+//          counters on a configurable sampling interval, aggregate locally, and
+//          send summarized samples with configurable retention so metric volume
+//          is bounded by design.
+//  [x] 11. Command & script execution — the job path: the collector queues a job
+//          for a device, the agent fetches it on its next check-in, executes the
+//          supplied PowerShell/bash/cmd script with parameters, timeout and
+//          working directory, captures exit code plus stdout/stderr, and returns
+//          an authenticated result — with per-OS command compatibility and a
+//          clear failure result when a job is unsupported on that OS.
+//  [x] 12. Agent resilience, self-update & safety — buffer results offline and
+//          resume on reconnect, retry with exponential backoff and jitter to
+//          avoid reconnect storms, verify the collector's TLS/identity, support
+//          self-update with rollback to the prior version, enforce resource caps
+//          so the agent never materially impacts the endpoint, and provide clean
+//          uninstall/self-remove.
+//  [x] 13. Agent diagnostics & support — a local rotating log, an agent
+//          self-test (can it reach the collector; is it enrolled and
+//          heartbeating), a console action to pull the agent's recent logs, and
+//          documented troubleshooting for an installed agent that cannot reach
+//          the collector.
+//
+//  PHASE 3 — COLLECTOR & REALTIME BACKEND
+//  [x] 14. Collector service — build the collector as the optional server-plugin
+//          hub: authenticate each device's check-in against its stored
+//          credential hash, accept inventory/metric/job-result payloads into
+//          durable state, track last-seen, and return any queued jobs and
+//          configuration in the same response.
+//  [x] 15. Job queue & dispatch — jobs enqueued from the console for one device
+//          or many, delivered to each agent on its next check-in, with per-job
+//          state (queued/delivered/running/succeeded/failed/timed-out), retry
+//          and expiry policy, and result correlation back to the originating
+//          console action or automation.
+//  [x] 16. Event stream & degraded mode — broadcast device state changes, new
+//          alerts and job results to open console sessions in realtime, and
+//          degrade gracefully to polling refresh when the realtime connection is
+//          unavailable — including clear UI that tells the user which mode it is
+//          in.
+//  [x] 17. Retention, batching & scale — define and enforce retention (raw
+//          metrics window, roll-ups to hourly/daily, job and log retention,
+//          alert history), batch and compress payloads, and bound per-device
+//          rate and connection counts so one misbehaving or compromised device
+//          cannot exhaust the collector.
+//
+//  PHASE 4 — POLICIES, MONITORING & AUTOMATION
+//  [x] 18. Device groups & tags — static groups and rule-based dynamic groups
+//          (by OS, tag, site, installed software or attribute), with tags as the
+//          primary way to target policies and automate actions.
+//  [x] 19. Policy engine — a policy is a named collection of monitoring, patch,
+//          software and automation settings applied to one or more groups;
+//          support multiple policies with a defined inheritance/precedence
+//          order, and provide an effective-policy preview showing exactly what a
+//          given device will receive and from which policy each setting came.
+//  [x] 20. Monitor types — the monitor catalogue: up/down, CPU/memory/disk
+//          threshold, service/process state, Windows event log (by
+//          source/EventID/level), application/port/web check, custom script
+//          monitor returning a status/value, SNMP/network-device monitor,
+//          agent-offline/stale, and patch/AV/backup monitors — each with
+//          thresholds, a "for N minutes" duration before firing, severity, and
+//          per-device or per-group overrides.
+//  [x] 21. Schedules & maintenance windows — schedules (business hours,
+//          after-hours, weekends, per-client timezone) and maintenance/blackout
+//          windows that suppress alerts and defer non-essential jobs while still
+//          recording what was suppressed for audit.
+//  [x] 22. Automation engine — trigger → condition → action automation (triggers:
+//          alert fired/cleared, monitor state change, device online/offline,
+//          schedule, manual or inbound webhook; actions: run script/component,
+//          restart a service, deploy a patch or package, send a notification,
+//          create or update a psa-u ticket, call a webhook), with dry-run/
+//          preview, approval gating for destructive actions, and a full run
+//          history and audit trail.
+//  [x] 23. Script & component library — a reusable library of scripts/components
+//          with typed parameters, per-OS variants, versioning, category tags and
+//          an import/export format; validate parameters before execution so a
+//          library script cannot be used to run unsafe input on an endpoint.
+//
+//  PHASE 5 — ALERTING & RESPONSE
+//  [x] 24. Alert lifecycle — the alert record and its lifecycle (fired →
+//          acknowledged → resolved/auto-cleared), with de-duplication and
+//          flapping suppression, snooze, severity mapping, root device/site/
+//          group context, and a link to the monitor and policy that produced it.
+//  [x] 25. Notification routing & escalation — route notifications by severity
+//          and site to email/in-app/webhook with escalation paths
+//          (unacknowledged alert escalates after N minutes, on-call rotation),
+//          per-recipient quiet hours and digests, and strict de-duplication so a
+//          flapping device cannot spam a recipient.
+//  [x] 26. PSA ticket integration — turn alerts into tickets and back: create a
+//          psa-u ticket on alert (de-duplicated so a recurring alert updates the
+//          existing ticket instead of opening a new one), link the ticket to the
+//          device and its configuration record, update the ticket as the alert
+//          changes, auto-resolve the ticket when the alert clears, and reflect
+//          ticket status back on the alert.
+//  [x] 27. Alert triage workspace — a prioritized triage queue with grouping by
+//          device/site/monitor, bulk acknowledge/assign/resolve, and metrics
+//          such as alert volume, mean time to acknowledge and mean time to
+//          resolve.
+//
+//  PHASE 6 — PATCH MANAGEMENT
+//  [x] 28. Patch policy — configure patch policy per OS and patch classification
+//          (approve/deny/defer with deadlines, maintenance-window installation,
+//          reboot behaviour and reboot-window, deadline enforcement) with a
+//          clearly stated default and per-group overrides.
+//  [x] 29. Patch scanning & compliance — scan devices via the agent for missing
+//          patches, track per-device compliance against the applicable policy,
+//          age missing patches (how long a device has been non-compliant), and
+//          expose it per device, group, site and provider.
+//  [x] 30. Patch deployment & audit — deploy approved patches as agent jobs,
+//          handle failures with retry and reporting, schedule and track required
+//          reboots, capture before/after compliance, and produce an auditable
+//          patch-compliance report per client.
+//
+//  PHASE 7 — SOFTWARE DEPLOYMENT & INVENTORY
+//  [x] 31. Software catalog & deployment packages — a catalog of deployable
+//          software with silent install/uninstall/update command templates,
+//          per-OS variants, detection rules (so already-installed devices are
+//          skipped), parameters, source location and checksum.
+//  [x] 32. Software deployment & detection — assign packages to devices or
+//          groups, report installed / not-installed / pending / failed per
+//          device, target specific versions, support downgrade/rollback where the
+//          package defines it, and log every deployment action to the device's
+//          audit trail.
+//  [x] 33. License & inventory reconciliation — reconcile installed software
+//          against owned licences per client, flag expired, over-deployed or
+//          unsanctioned software, and export an inventory/licence report per
+//          client.
+//
+//  PHASE 8 — SECURITY, COMPLIANCE & BACKUP MONITORING
+//  [x] 34. Security posture monitoring — monitor and report endpoint security
+//          state: AV/EDR present and up to date, firewall enabled, disk
+//          encryption (BitLocker/FileVault) state, OS patch currency, local
+//          admin/account changes and other configurable baseline items — per
+//          device and per client.
+//  [x] 35. Compliance baselines & drift — define compliance baselines as a
+//          policy, detect drift from the baseline, report non-compliant devices
+//          with the exact failing checks, and offer remediation through the
+//          automation engine.
+//  [x] 36. Backup verification monitoring — ingest backup job status from common
+//          backup products, track last-successful-backup and missed-backup per
+//          device, escalate backup failures through the alert pipeline, and
+//          prompt periodic recovery-test confirmation with an auditable record.
+//
+//  PHASE 9 — REMOTE ACCESS & FIELD ACTIONS
+//  [x] 37. Remote shell/console — a browser-based remote terminal that runs
+//          commands through the collector → agent path, with session logging
+//          (who ran what, when, on which device), permission gating, a
+//          confirmation step and deny-list for dangerous commands, and clear
+//          no-output/timeout handling.
+//  [x] 38. Remote-tool integration & session handoff — integrate with (rather
+//          than pretend to replace) third-party remote-control and tunnel tools:
+//          launch a session pre-targeted at the device, or generate a per-device
+//          handoff link, with the launch and resulting session recorded against
+//          the device.
+//  [x] 39. File transfer — push and pull files to a device through the agent
+//          with integrity checks, size limits, a quarantine/permission check on
+//          uploads, and full audit of every transfer.
+//
+//  PHASE 10 — REPORTING, DASHBOARDS & INTEGRATIONS
+//  [x] 40. Operational dashboards — live dashboards for devices
+//          up/down/offline/stale, agent health/version spread, alert counts by
+//          severity and age, patch compliance, security/backup compliance and
+//          job success rate, with drill-down from every tile to the affected
+//          devices.
+//  [x] 41. Reporting — scheduled and on-demand reports per client (device health
+//          summary, patch and monitor compliance, alert summary and response
+//          times, asset inventory, backup status) delivered by email or link,
+//          with a stable export format.
+//  [x] 42. Integrations & bus publication — integrate with the rest of the
+//          pipeline: consume company/site/configuration records from psa-u and
+//          the documentation tool (with explicit field ownership and drift
+//          detection), publish device health and alert events through the shared
+//          versioned envelope, expose an API and outbound webhooks, and produce
+//          a schema-stable analytics extract for the BI tool.
+//  [x] 43. Data-quality linter — audit for the rot a real RMM accumulates:
+//          agents offline or stale beyond a threshold, devices with no policy,
+//          monitors with no notification route, duplicate device records,
+//          devices missing a site/owner, orphaned groups, alerts that can never
+//          auto-clear, and scripts with unsafe parameters — and report each with
+//          the offending record.
+//
+//  PHASE 11 — QUALITY, TESTING & OPERATIONS
+//  [x] 44. Agent simulator & end-to-end suite — an agent simulator (enrols,
+//          heartbeats, sends inventory/metrics, fetches and answers jobs) plus
+//          fixture data for a provider with sites and devices, and tests that
+//          exercise the full loop — enroll → monitor → alert → automate →
+//          psa-u ticket → resolve.
+//  [x] 45. Agent security tests — assert that only correctly enrolled, currently
+//          valid devices can post data or fetch jobs; that an enrollment token
+//          is single-use; that a revoked device is refused; that replayed or
+//          tampered job results are rejected; and that the collector source
+//          itself contains no secret material.
+//  [x] 46. Failure, storm & scale tests — exercise collector timeouts, reconnect
+//          storms, alert flapping, large metric payloads, bulk job dispatch and
+//          retention/pruning, and confirm the system stays responsive and does
+//          not lose acknowledged alerts or queued jobs.
+//  [x] 47. README & playbook — document the architecture, the agent lifecycle
+//          (install → enroll → heartbeat → collect → act → update → uninstall),
+//          the credential/token security model and the rule that the public
+//          collector script holds no static secret, how to add a monitor type,
+//          script, patch policy or automation action, the integration ownership
+//          model with psa-u and the documentation tool, and the operating
+//          runbook for agents that go dark.
+//
+//  PHASE 12 — OPTIONAL: MULTI-USER & REALTIME COLLABORATION
+//  [x] 48. Role & access model — roles (technician / dispatcher / security-admin
+//          / read-only) scoped per site and per device, with destructive actions
+//          (script execution, patch denial, remote shell, file transfer) gated
+//          separately, and every restriction enforced server-side rather than
+//          only hidden in the UI.
+//  [x] 49. Realtime console — stream live device state, alerts and job progress
+//          to all connected console sessions so multiple technicians see the
+//          same reality within seconds, with presence ("who else is on this
+//          device") and a graceful fallback to polling.
+//  [x] 50. Multi-user audit & rate control — authenticate console users to the
+//          hub with their role, rate-limit and group connections against abuse,
+//          log every remote action to the true actor's audit trail, and ensure a
+//          change made by one user is never silently overwritten by another.
+// ============================================================================
+$meta
+  title = RMM-U
+  description = An RMM (Remote Monitoring and Management) platform for Perchance — a multi-tenant provider/site/device console, a real per-provider agent (PowerShell/shell) that enrolls, heartbeats, collects inventory & metrics, runs jobs and self-updates, a monitoring/policy/automation engine, alerting, patch & software deployment, security/compliance/backup monitoring, reporting, and integration with the pipeline's PSA (psa-u) and documentation tools.
+  image = https://user.uploads.dev/file/2ae7aade766d2ceb4effdd9f079186b5.jpg
+  tags = rmm, remote-monitoring, remote-management, agent, it-operations, msp, alerts, patching, inventory
+  header 
+    mode = minimal
+
+superFetch = {import:super-fetch-plugin}
+charts = {import:data-visualization-plugin}
+uploadPlugin = {import:upload-plugin}
+generateText = {import:ai-text-plugin}
+createServerSocket = {import:server-plugin}
+
+// ============================================================================
+//  BUSINESS TEMPLATE  —  CONFIGURATION
+// ============================================================================
+//
+//  Everything the page shows lives in the `config` list below — this is the
+//  place to fill in YOUR company and product details. The page renders
+//  entirely from it, and the settings panel (gear button, bottom-right)
+//  can also be used to preview colors, scan a website for brand-matching
+//  color schemes, and import/export the whole configuration as JSON.
+//
+//  ── JSON import/export format ─────────────────────────────────────────────
+//  The exported JSON mirrors this structure exactly. Imports may be PARTIAL —
+//  any missing field falls back to these defaults. The full field-by-field
+//  guide with types lives in the settings panel → "Import & Export".
+//
+//  {
+//    schemaVersion: "1.0.0",
+//    branding:  { companyName, companyShortName, companyUrl, logoGlyph, logoUrl,
+//                 tagline, contactEmail, contactPhone, address, footerText },
+//    theme:     { mode: "light"|"dark", accentStyle: "gradient"|"solid", radius,
+//                 fontSize (15–18), fontFamily, reduceMotion (true|false) },
+//    colors:    { primary, secondary, accent, background, surface,
+//                 text, textMuted },                     // hex colors
+//    product:   { name, badge, headline, headlineAccent, subheadline,
+//                 primaryCta, primaryCtaUrl, secondaryCta, secondaryCtaUrl,
+//                 status },
+//    trustedBy: [ "Client name", ... ],
+//    features:  [ { icon, title, description }, ... ],
+//    stats:     [ { value, suffix, label }, ... ],
+//    how:       [ { title, description }, ... ],
+//    showcase:  { heading, description, points: [ ... ] },
+//    testimonials: [ { quote, name, role, company }, ... ],
+//    cta:       { heading, description, buttonText, buttonUrl },
+//    manual:    { heading, description, chapters: [ { title, body }, ... ] },
+//    faq:       [ { question, answer }, ... ],
+//    footer:    { columns: [ { heading, links: [ { label, url }, ... ] }, ... ] },
+//    admin:     { showSettingsButton }
+//  }
+//
+//  Editing tips:
+//  • Add or remove list items in any `…` list (features, stats, faq …) —
+//    just add/remove numbered items like f1, f2, …
+//  • Strings are written raw (no quotes). Numbers and true/false are kept
+//    as numbers/booleans automatically.
+//  • In footerText, \{year\} and \{companyName\} are placeholders that get
+//    filled in automatically.
+// ============================================================================
+
+config
+  schemaVersion = 1.0.0
+
+  // ── Company / brand identity ─────────────────────────────────────────────
+  branding
+    companyName = RMM-U            // ← managed-service provider name (header, footer, copyright)
+    companyShortName = RMM-U       // compact variant for narrow screens (optional)
+    companyUrl = https://perchance.org/business-erp  // ← your website (links the logo & footer)
+    logoGlyph = R                      // single letter/monogram in the logo mark
+    logoUrl =                          // optional square logo image — upload it in the
+                                       //   settings panel (Branding → Logo image) to get a
+                                       //   hosted URL; shown instead of the letter mark
+    tagline = Multi-tenant remote monitoring & management for every endpoint
+    contactEmail = hello@your-company.com
+    contactPhone = +1 (555) 010-0000
+    address = 123 Main Street, Suite 100, Anytown, USA
+    footerText = © \{year\} \{companyName\}. All rights reserved.
+
+  // ── Visual theme ─────────────────────────────────────────────────────────
+  theme
+    mode = light                      // light | dark
+    accentStyle = gradient            // gradient | solid (how CTAs & highlights are filled)
+    radius = 16                       // corner radius in px
+    fontSize = 16                     // base text size in px (15 = small, 16 = normal, 18 = large)
+    fontFamily = lato                 // font pairing: lato | inter | roboto | open-sans | source-sans |
+                                      //   ibm-plex | dm-sans | manrope | montserrat-lato |
+                                      //   playfair-lato | merriweather-inter
+    reduceMotion = false              // true disables animations & transitions
+
+  // ── Brand palette (hex colors) ───────────────────────────────────────────
+  colors
+    primary = #0a58ca                 // trust blue — main brand color, buttons, links, highlights
+    secondary = #6ea8fe               // soft blue — gradients, charts, avatars
+    accent = #084298                  // deep blue — stars, badges, small details
+    background = #f8f9fa              // page background
+    surface = #ffffff                 // cards & section backgrounds
+    text = #212529                    // main text
+    textMuted = #6c757d               // secondary text
+
+  // ── Product / project — the hero section ──────────────────────────────────
+  product
+    name = RMM-U
+    badge = Small-business ERP
+    headline = Run your whole business on one system.
+    headlineAccent = one system.      // word(s) highlighted in the brand gradient
+    subheadline = Quotes become orders, orders become invoices, stock moves, projects track time, and every transaction flows into the books — automatically.
+    primaryCta = Get started
+    primaryCtaUrl = #
+    secondaryCta = See how it works
+    secondaryCtaUrl = #how
+    status = ERP core · rolling out     // small status chip under the CTAs (empty to hide)
+
+  // ── "Trusted by" strip ────────────────────────────────────────────────────
+  trustedBy = [["Acme Corp","Globex Industries","Initech","Umbrella Systems","Stark Enterprises","Wayne Group"]]
+
+  // ── Feature grid (3–8 cards) ──────────────────────────────────────────────
+  features
+    f1
+      icon = zap
+      title = Instant deployments
+      description = Ship updates in seconds with automated build and release pipelines baked in from day one.
+    f2
+      icon = shield
+      title = Enterprise-grade security
+      description = Role-based access, audit logs, and encryption at rest keep your data protected at every layer.
+    f3
+      icon = globe
+      title = Global by default
+      description = Run in regions worldwide with automatic failover and a 99.99% uptime guarantee.
+    f4
+      icon = chart
+      title = Actionable analytics
+      description = Real-time dashboards and reports give your team the visibility it needs to make confident decisions.
+    f5
+      icon = layers
+      title = Modular architecture
+      description = Clean, documented APIs and pluggable components make the system easy to extend and maintain.
+    f6
+      icon = code
+      title = Developer friendly
+      description = Comprehensive docs, typed SDKs, and a CLI that fits naturally into your existing workflow.
+
+  // ── Stats band ────────────────────────────────────────────────────────────
+  stats
+    s1
+      value = 99.99
+      suffix = %
+      label = Uptime SLA
+    s2
+      value = 12
+      suffix = k+
+      label = Active users
+    s3
+      value = 40
+      suffix = +
+      label = Countries served
+    s4
+      value = 24
+      suffix = /7
+      label = Dedicated support
+
+  // ── Analytics charts (business graphs) ───────────────────────────────────
+  // Rendered with the data-visualization-plugin. Three charts: revenue (line),
+  // leads (bars) and channels (donut). In pjs list syntax, single arrays are
+  // wrapped in one extra [ ] — so labels = [["Jan","Feb",…]] etc.
+  charts
+    enabled = true
+    heading = Performance at a glance
+    description = A live look at the metrics your team cares about most — revenue, pipeline and where your traffic comes from.
+    revenue
+      title = Monthly revenue
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      series
+        s1
+          name = This year
+          data = [[42,48,45,52,58,63,70,74,82,90,95,112]]
+        s2
+          name = Last year
+          data = [[30,34,38,41,45,49,54,58,61,66,70,78]]
+    leads
+      title = New leads per month
+      labels = [["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]]
+      values = [[120,135,128,150,168,182,205,198,226,248,270,305]]
+    channels
+      title = Traffic sources
+      values = [[["Organic search",38],["Paid ads",24],["Referrals",18],["Social media",12],["Direct",8]]]
+
+  // ── "How it works" steps (3) ──────────────────────────────────────────────
+  how
+    h1
+      title = Connect
+      description = Bring your existing tools and data. Step-by-step migration guides make the switch painless.
+    h2
+      title = Configure
+      description = Set up roles, branding, and workflows in minutes with guided, zero-code onboarding.
+    h3
+      title = Launch
+      description = Go live with confidence. We monitor, scale, and support you around the clock.
+
+  // ── Showcase section (left column) ────────────────────────────────────────
+  showcase
+    heading = Built to be dependable
+    description = Under the hood, everything is engineered for transparency and control — so your team can move fast without surprises.
+    points = [["A single source of truth for your team's workflow","Integrates with the tools you already use","Scales from a small team to the whole enterprise"]]
+
+  // ── Testimonials (3) ──────────────────────────────────────────────────────
+  testimonials
+    t1
+      quote = We rolled this out to our entire team in a day — the smoothest onboarding we've experienced with any platform.
+      name = Sarah Chen
+      role = Head of Operations
+      company = Acme Corp
+    t2
+      quote = The reliability speaks for itself: zero downtime across six months of heavy production use.
+      name = Marcus Reid
+      role = CTO
+      company = Globex Industries
+    t3
+      quote = It replaced three separate tools and paid for itself within the first quarter. Our teams love it.
+      name = Amara Okafor
+      role = Product Lead
+      company = Initech
+
+  // ── Final call-to-action band ─────────────────────────────────────────────
+  cta
+    heading = Ready to take the next step?
+    description = Join the teams that ship with confidence. Set up your workspace today — no credit card required.
+    buttonText = Get started today
+    buttonUrl = #
+
+  // ── Product manual (documentation chapters) ──────────────────────────────
+  // A docs-style section with a contents sidebar. Each chapter renders as a
+  // numbered card with a title and body text. Add/remove chapters like m1, m2…
+  // (body is a single string — use the settings panel or a JSON import if you
+  // want real paragraph breaks).
+  manual
+    heading = Product manual
+    description = A guided walkthrough of the product — from first log-in to everyday workflows, admin and support.
+    chapters
+      m1
+        title = Getting started
+        body = Create your account, invite teammates, and complete your first project from template to launch in under an hour.
+      m2
+        title = Installation & setup
+        body = Guided onboarding covers roles, integrations and branding, with step-by-step migration guides that make switching from your existing tools painless.
+      m3
+        title = Everyday workflows
+        body = Build, review and ship from one workspace. Dashboards, notifications and automations keep the whole team aligned.
+      m4
+        title = Admin, billing & support
+        body = Manage users and permissions, review usage and invoices, and reach our 24/7 support team from the help center.
+
+  // ── FAQ accordion ─────────────────────────────────────────────────────────
+  faq
+    q1
+      question = How long does it take to get started?
+      answer = Most teams are up and running within a day. Guided onboarding covers setup, team invites, and integration with your existing tools.
+    q2
+      question = Can we use our existing tools and data?
+      answer = Yes. Migration guides and adapters cover the most common tools and formats, and our team can assist with custom integrations.
+    q3
+      question = Is our data secure?
+      answer = Data is encrypted in transit and at rest, access is role-based and audited, and deployments run in regions of your choice.
+    q4
+      question = What does it cost?
+      answer = Pricing scales with your team and usage. Contact us for a tailored quote — most teams start small and grow with the platform.
+    q5
+      question = What kind of support do we get?
+      answer = Every plan includes access to documentation and community support. Priority plans add a 24/7 support line with guaranteed response times.
+
+  // ── Footer link columns ───────────────────────────────────────────────────
+  footer
+    columns
+      col1
+        heading = Product
+        links
+          l1
+            label = Features
+            url = #features
+          l2
+            label = How it works
+            url = #how
+          l3
+            label = Pricing
+            url = #cta
+          l4
+            label = FAQ
+            url = #faq
+      col2
+        heading = Company
+        links
+          l1
+            label = About
+            url = #
+          l2
+            label = Careers
+            url = #
+          l3
+            label = Contact
+            url = #
+          l4
+            label = Press kit
+            url = #
+      col3
+        heading = Resources
+        links
+          l1
+            label = Documentation
+            url = #
+          l2
+            label = API reference
+            url = #
+          l3
+            label = System status
+            url = #
+          l4
+            label = Community
+            url = #
+
+  // ── Editor / admin behavior ───────────────────────────────────────────────
+  admin
+    showSettingsButton = true         // shows the ⚙ panel used to configure, scan & export
+
+  // ── ERP application settings ──────────────────────────────────────────────
+  // Read by src/erp.js at boot. Role-aware module visibility (Task 1) uses
+  // roleDefault until the server-authorised role model lands in Phase 10.
+  erp
+    version = 0.1.0
+    roleDefault = owner               // owner | manager | staff
+
+  // ── RMM application settings ──────────────────────────────────────────────
+  // Read by src/erp.store.js & src/rmm.tenancy.js at boot. `namespace` is the
+  // editable-file prefix every RMM document is stored under (rmm-v1-*), so it
+  // must stay stable once the platform has data. `seedDemo` writes a demo
+  // tenant on first run so a new console is never empty.
+  rmm
+    namespace = rmm
+    seedDemo = true
+    seedDemoDevices = true
+    seedMasterConfig = true
+    staleAfterMinutes = 15
+    providerPrefix = prov
+    defaultTimezone = UTC
+    defaultCurrency = USD
+    demoProviderName = Demo Managed Services
+    versionHistoryPerDoc = 25
+    versionHistoryBytes = 3145728
+    versionSnapshotBytes = 1572864
+    // ── Agent (Phase 2) ──────────────────────────────────────────────────────
+    agentVersion = 1.0.0                // version the generated installer/agent reports
+    heartbeatSeconds = 300              // agent check-in interval, in seconds
+    enrollmentTokenTtlMinutes = 1440    // lifetime of a one-time enrollment token (0 = never expires)
+    collectorUrl =                      // collector address embedded in installers (empty = derive from this page's origin)
+    // ── Inventory, metrics & jobs (Phase 2 · Tasks 9–11) ─────────────────────
+    inventoryDeltaLimit = 25            // per-device inventory delta log retained
+    inventorySoftwareCap = 500          // max installed-software titles accepted per collection
+    metricsSampleSeconds = 60           // agent performance-sampling interval, in seconds
+    metricsRawPoints = 240              // raw metric samples retained per device
+    metricsHourlyPoints = 168           // hourly metric roll-ups retained per device (7 days)
+    metricsDailyPoints = 30             // daily metric roll-ups retained per device
+    metricsMaxSamplesPerPost = 60       // max metric samples accepted in one authenticated post
+    jobTimeoutSeconds = 300             // default per-job execution timeout
+    jobOutputBytes = 65536              // stdout/stderr captured per job per device
+    jobRetentionHours = 168             // finished jobs retained (7 days)
+    jobDeliveryTimeoutMinutes = 30      // delivered-but-never-started jobs re-queued after this
+    jobExpiryMinutes = 1440             // queued-but-never-delivered jobs expire after this
+    jobMaxAttempts = 2                  // delivery attempts before a run is marked timed-out
+    jobScriptMaxBytes = 262144          // max script size accepted per job
+    // ── Resilience, safety & self-update (Phase 3 · Task 12) ─────────────────
+    backoffBaseSeconds = 5              // first reconnect delay after a failed check-in, in seconds
+    backoffMaxSeconds = 900             // cap on the exponential reconnect backoff, in seconds
+    backoffFactor = 2                   // backoff multiplier per consecutive failure
+    backoffJitter = 0.25                // random jitter applied to each delay (0 = none, 1 = ±100%)
+    retryMaxAttempts = 8                // consecutive failures before an agent reports itself degraded
+    spoolMaxBytes = 26214400            // offline replay buffer cap per endpoint, in bytes (25 MiB)
+    spoolMaxItems = 5000                // offline replay buffer cap per endpoint, in items
+    spoolFlushPerCycle = 50             // buffered posts replayed per successful heartbeat
+    agentMaxCpuPercent = 25             // soft CPU ceiling for agent-spawned jobs, in percent
+    agentCpuNice = 10                   // niceness applied to agent-spawned job processes (0–19)
+    agentIoNice = 6                     // I/O priority class for agent-spawned job processes (0–7)
+    agentMaxMemMB = 256                 // hard memory ceiling per job process, in MB
+    agentMaxConcurrentJobs = 1          // job processes the agent runs at once
+    agentLogMaxBytes = 2097152          // agent log rotation threshold per log file, in bytes
+    agentLogKeep = 3                    // rotated agent log files retained
+    tlsMode = system                    // system (trust store) | pinned (certificate pin) | insecure
+    tlsPinSha256 =                      // collector certificate SPKI SHA-256 pin when tlsMode = pinned
+    tlsAllowInsecure = false            // true permits a plain-HTTP collector address (lab use only)
+    selfUpdateEnabled = true            // allow releases to replace the agent in place
+    selfUpdateChannel = stable          // release channel an agent follows (stable | beta)
+    selfUpdateKeepVersions = 2          // agent builds retained for rollback
+    selfUpdateRollbackOnFailure = true  // restore the previous build if a new one fails its self-test
+    updateDeliveryRetryMinutes = 15     // re-deliver an update request that was never acknowledged
+    updateHistoryLimit = 20             // update events retained per device
+    // ── Diagnostics & support (Phase 3 · Task 13) ────────────────────────────
+    diagnosticRequestLines = 400        // log lines an agent returns for a log-collection request
+    diagnosticLogMaxBytes = 262144      // uploaded log excerpt cap, in bytes
+    diagnosticLogKeep = 10              // log uploads retained per device
+    diagnosticSelfTestKeep = 20         // self-test reports retained per device
+    // ── Dispatch, event stream & retention (Phase 3 · Tasks 15–17) ──────────
+    jobHistoryKeep = 50                 // job-result entries retained per device on the collector
+    eventHistory = 200                  // device/alert/job events retained in the console stream
+    eventPollSeconds = 15               // collector poll interval used when the realtime stream is unavailable
+    alertRetentionDays = 30             // alert history retained (Phase 5; the prune hook is live now)
+    // ── Groups, tags, policies & monitors (Phase 4 · Tasks 18–20) ───────────
+    seedDemoGroups = true               // seed rule-based demo groups alongside the demo tenant
+    groupConditionCap = 24              // max conditions in one dynamic-group rule
+    policyEnabled = true                // master switch for policy resolution (Task 19)
+    monitorEnabled = true               // master switch for monitor evaluation (Task 20)
+    monitorForMinutes = 5               // default "for N minutes" before a monitor fires
+    monitorIntervalSeconds = 60         // default monitor polling interval, in seconds
+    // ── Schedules, maintenance, automation & scripts (Phase 4 · Tasks 21–23) ─
+    maintenanceDefersJobs = true        // maintenance windows defer non-essential jobs by default
+    suppressionsCap = 500               // suppression-log + deferral records retained
+    scheduleDueWindowMinutes = 5        // how late a schedule trigger may fire (AUTO.scheduleDue)
+    notificationHistory = 500           // notification records retained
+    automationEnabled = true            // master switch for the automation engine
+    automationRunHistory = 20           // runs retained per automation rule
+    automationConditionCap = 24         // max conditions in one automation rule
+    scriptLibraryEnabled = true         // master switch for the script & component library
+    scriptVersionHistory = 10           // version snapshots retained per library entry
+    scriptMaxComponentDepth = 4         // max nested {{component:…}} depth
+    scriptComponentMaxBytes = 262144    // max expanded component/script size, in bytes
+    // ── Alerting & response (Phase 5 · Tasks 24–26) ─────────────────────────
+    alertEnabled = true                 // master switch for the alert lifecycle
+    alertFlapMinutes = 10               // a re-fire inside this window reopens the alert (flapping)
+    alertFlapThreshold = 3              // reopens on one alert before it is flagged as flapping
+    alertHistory = 500                  // alert records retained per provider
+    notifyEnabled = true                // master switch for notification routing (Task 25)
+    routingEnabled = true               // master switch for severity/site routing
+    notifyDedupeMinutes = 15            // identical alert+channel+recipient notifications collapsed
+    notifyDigestMinutes = 60            // digest flush period, in minutes
+    notifyDigestMax = 200               // items retained per queued digest
+    escalationEnabled = true            // master switch for escalation paths
+    psaEnabled = true                   // master switch for the psa-u ticket bridge (Task 26)
+    psaUrl =                            // psa-u base URL (empty = simulate locally)
+    psaQueue =                          // default psa-u queue
+    psaAutoTicket = true                // open/update a ticket automatically for critical alerts
+    psaTicketPrefix = PSA               // simulated psa-u ticket reference prefix
+    // ── Alert triage (Phase 5 · Task 27) ────────────────────────────────────
+    triageWindowDays = 30               // response-metric window (volume/MTTA/MTTR), in days
+    triageAckTargetMinutes = 15         // target time-to-acknowledge used for the SLA share
+    // ── Patch management (Phase 6 · Tasks 28–29) ────────────────────────────
+    patchEnabled = true                 // master switch for patch policy + scanning
+    patchPolicyEnabled = true           // allow custom patch policies on top of the default
+    patchScanEnabled = true             // master switch for running compliance scans
+    patchScanHistory = 200              // scan-run records retained per provider
+    patchScanStateCap = 500             // scan records retained in the hidden patchscan doc
+    patchDefaultDeadlineDays = 0        // fallback deadline when a classification states none
+    patchAlertEnabled = false           // raise/clear an alert when a device's compliance changes
+    patchStaleHours = 24                // a device's last scan older than this counts as not-recently-scanned
+    patchMissingGraceDays = 14          // how long a device may be non-compliant before it is flagged
+    // ── Patch deployment & audit (Phase 6 · Task 30) ────────────────────────
+    patchDeployEnabled = true           // master switch for agent-driven deployment of approved patches
+    patchRebootEnabled = true           // master switch for dispatching reboots
+    patchRetryMax = 2                   // automatic retries for a device whose patches partially failed
+    patchRetryBackoffMinutes = 30       // minimum wait between a failure and its automatic retry
+    patchDeployHistory = 100            // deployment records retained per provider
+    patchDeployMaxPerJob = 25           // patches bundled into a single agent job
+    patchDeployTimeoutSeconds = 3600    // agent job timeout for a deployment
+    // ── Software catalog & deployment (Phase 7 · Tasks 31–33) ───────────────
+    softwareEnabled = true              // master switch for the software catalog
+    softwareDeployEnabled = true        // master switch for agent-driven software deployment
+    softwareDetectEnabled = true        // read install state from the device software inventory
+    softwareLicenseEnabled = true       // master switch for licence reconciliation
+    softwareRetryMax = 2                // automatic retries for a device whose package actions failed
+    softwareRetryBackoffMinutes = 30    // minimum wait between a failure and its automatic retry
+    softwareDeployHistory = 100         // deployment records retained per provider
+    softwareDeployMaxPerJob = 25        // package actions bundled into a single agent job
+    softwareDeployTimeoutSeconds = 3600 // agent job timeout for a software deployment
+    // ── Security, compliance & backup (Phase 8 · Tasks 34–36) ───────────────
+    securityEnabled = true              // master switch for security posture monitoring
+    securityScanEnabled = true          // master switch for running posture scans
+    securityAlertEnabled = false        // raise/clear an alert when a device's posture changes
+    securityScanHistory = 200           // scan records retained per provider
+    securityDriftHistory = 500          // drift-run records retained per provider
+    securityTrackAdmins = true          // detect local-administrator set changes between scans
+    backupMonitorEnabled = true         // master switch for backup verification monitoring
+    backupAlertEnabled = true           // raise/clear an alert when a backup is missed or fails
+    backupDefaultMaxAgeHours = 26        // fallback hours between an expected successful backup
+    backupDefaultGraceHours = 4          // fallback grace window before a backup counts as missed
+    backupJobHistory = 500               // backup job records retained per provider
+    backupRecoveryTestEnabled = true     // prompt periodic recovery-test confirmation
+    // ── Remote access & field actions (Phase 9 · Tasks 37–39) ───────────────
+    remoteEnabled = true                // master switch for the remote console
+    remoteAllowStaff = false            // allow the staff role (not just owner/manager) to run remote actions
+    remoteConfirmCommands = true        // require confirmation for deny-list "confirm"-level commands
+    remoteCommandTimeoutSeconds = 120   // agent job timeout for a single remote command
+    remoteCommandHistory = 500          // command transcript entries retained per shell session
+    remoteSessionHistory = 500          // shell + tool-session records retained per provider
+    remoteTransferHistory = 500         // file-transfer records retained per provider
+    remoteMaxFileBytes = 1048576        // largest file the console will push/pull (bytes)
+    remoteChunkChars = 65536            // characters per transfer chunk
+    remoteQuarantineUploads = true      // quarantine uploads for review before release
+    remoteCommandMaxChars = 20000       // largest single command the console will accept
+    remoteDenyExtra =                   // extra confirm-level deny patterns (comma-separated regex/substring)
+    // ── Dashboards, reporting & integrations (Phase 10 · Tasks 40–42) ───────
+    dashboardEnabled = true             // master switch for the fleet dashboard
+    agentLatestVersion =                // override the "latest agent" version shown on the dashboard (empty = auto)
+    reportsEnabled = true               // master switch for the client report library
+    reportDeliveryHistory = 200         // report-delivery records retained per provider
+    integrationsEnabled = true          // master switch for field ownership, the event bus & outbound webhooks
+    integrationPublicationHistory = 500 // published event envelopes retained per provider
+    // ── Data-quality linter (Phase 10 · Task 43) ───────────────────────────
+    dataQualityEnabled = true           // master switch for the data-quality linter
+    dqOfflineDays = 7                   // an offline agent older than this many days is a critical finding
+    dqManualAlertDays = 30              // a manual (monitor-less) alert left active longer than this is flagged
+    dqDuplicateFields = hostname,serial // device fields checked for duplicate records (hostname,serial,mac,domain,displayName)
+    // ── Realtime console & multi-user control (Phase 12 · Tasks 49–50) ──────
+    liveEnabled = true                  // master switch for the realtime console stream
+    livePresenceEnabled = true          // announce which device each console session is viewing
+    liveAutoRefreshSeconds = 3          // throttle for live auto-refreshes of the active view (seconds)
+    livePanelHistory = 50               // events shown in the realtime-console panel
+    rateLimitPerNetConnections = 10     // max concurrent console sessions allowed from one network group
+    rateLimitActionsPerMinute = 240     // guarded console actions allowed per connection per minute
+    rateLimitClaimsPerMinute = 60       // document claims allowed per connection per minute
+    auditRemoteActions = true           // log every remote action to the true actor's server audit trail
+    docClaimsEnabled = true             // hub-mediated edit claims stop one user silently overwriting another
+    docClaimTtlSeconds = 900            // an idle edit claim is released after this many seconds

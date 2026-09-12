@@ -1,0 +1,855 @@
+<!-- ====================================================================
+     PSA-U — application shell
+     The frame every station renders inside: header + side navigation
+     across the PSA-U stations (Dashboard, Service Desk, Dispatch,
+     Time & Expense, Agreements, Billing, Projects, Sales, Procurement,
+     Products, Knowledge, Companies, Client Portal, Reports, Admin),
+     role-aware module visibility, a topbar active-client selector,
+     and consistent loading / empty / error states with responsive
+     phone & desktop layouts.
+     Shell logic: src/erp.js · module registry: src/psa.modules.js
+     Shell styles: src/erp.css · base tokens: src/template.css
+     ==================================================================== -->
+
+<script type="text/x-server-plugin">
+// ==========================================================================
+//  PSA-U — COLLABORATION HUB (Phase 13; server-authoritative)
+//  Realtime companion: role/scope enforcement, presence, record-editing
+//  presence, per-company change fan-out, rate control, and the authoritative
+//  multi-user audit ring.
+//
+//  SECURITY MODEL — everything in this block is PUBLIC source. The runtime
+//  executes it authoritatively, but clients can read it. Only the SHA-256
+//  hash of the first-time owner password lives here (never the plaintext).
+//
+//  Phase 13 changes the authority model: EVERY guarded action is authorised
+//  on the server against (a) the system role floor, (b) the functional
+//  capability (administrator / dispatcher / account-manager / finance /
+//  technician), (c) the company & board scopes stored on the server user
+//  record, and (d) the financial-visibility flag. Hiding a button is never
+//  the boundary. The document payloads themselves stay in the client store
+//  (upload-plugin editable files) and are version-checked & idempotent there;
+//  this hub indexes versions, signs audit entries and relays change/editing
+//  presence. That split is documented in src/README.md.
+//
+//  DURABLE STATE LAYOUT (binary, versioned v2)
+//    0        VERSION byte (2)
+//    1..7     reserved
+//    8        user table — 128-byte slots (MAX_USERS = 256):
+//      0..31    userId (32 hex)
+//      32..55   displayName (24 ASCII, null-padded)
+//      56       systemRole (0 staff, 1 manager, 2 owner)
+//      57       functionalRole (0 admin,1 dispatcher,2 account_mgr,3 finance,4 technician)
+//      58       flags (bit0 financials-visible, bit1 admin-unlocked)
+//      59       reserved
+//      60..63   lastSeen (u32 epoch seconds)
+//      64..79   company scope bitfield (128 bits; all-zero = all companies)
+//      80..95   board scope bitfield   (128 bits; all-zero = all boards)
+//      96..127  reserved
+//    USER_END = 8 + 256*128 = 32776
+//    AUD_HDR  = USER_END : u32 count, u32 next
+//    AUD_OFF  = AUD_HDR + 8 — audit ring, 96-byte entries:
+//      0..3    seq (u32, monotonic)
+//      4..7    ts (u32 epoch seconds)
+//      8       systemRole
+//      9       functionalRole
+//      10      flags
+//      11..42  userId (32 hex)
+//      43..74  permission / legacy action (32 ASCII)
+//      75..78  targetId (u32, 0 = none)
+//      79      targetType code
+//      80..95  reserved
+//    ring size derived from remaining state, capped at 4096
+//
+//  MIGRATION: a v1 hub (64-byte user slots) is migrated on boot — user ids,
+//  names, roles and the audit ring are preserved and new fields initialised.
+// ==========================================================================
+var ADMIN_PASSWORD_SHA256 = "35292c3c6370ff63b343a51c3b6e86635f310719edce4843a400f0be2e1b22fd";
+
+var VERSION = 2;
+var USER_BASE = 8, USER_LEN = 128, MAX_USERS = 256;
+var USER_END = USER_BASE + MAX_USERS * USER_LEN; // 32776
+var AUD_HDR = USER_END;
+var AUD_OFF = AUD_HDR + 8;
+var AUD_LEN = 96;
+var MAX_AUDIT = Math.min(4096, Math.floor((state.length - AUD_OFF) / AUD_LEN));
+
+// v1 layout constants (migration only)
+var V1_USER_LEN = 64, V1_AUD_HDR = 8 + 256 * 64, V1_AUD_OFF = V1_AUD_HDR + 8, V1_AUD_LEN = 64, V1_MAX_AUDIT = 4096;
+
+// ---- functional roles & capability bits ----
+var FUNC_NAMES = ["administrator", "dispatcher", "account_manager", "finance", "technician"];
+var CAP_VIEW = 1, CAP_WORK = 2, CAP_DISPATCH = 4, CAP_SELL = 8, CAP_BUY = 16, CAP_FINANCE = 32, CAP_MANAGE = 64;
+var CAP_ALL = CAP_VIEW | CAP_WORK | CAP_DISPATCH | CAP_SELL | CAP_BUY | CAP_FINANCE | CAP_MANAGE;
+var FUNC_CAPS = [
+  CAP_ALL,                                          // 0 administrator
+  CAP_VIEW | CAP_WORK | CAP_DISPATCH,               // 1 dispatcher
+  CAP_VIEW | CAP_WORK | CAP_SELL | CAP_FINANCE,     // 2 account manager
+  CAP_VIEW | CAP_FINANCE,                           // 3 finance
+  CAP_VIEW | CAP_WORK,                              // 4 technician
+];
+function capName(bit) {
+  if (bit === CAP_VIEW) return "view";
+  if (bit === CAP_WORK) return "work";
+  if (bit === CAP_DISPATCH) return "dispatch";
+  if (bit === CAP_SELL) return "sales";
+  if (bit === CAP_BUY) return "supply";
+  if (bit === CAP_FINANCE) return "finance";
+  return "manage";
+}
+
+// ---- permission → system-role floor (mirrors src/psa.security.js PERMS) ----
+var PERM_OWNER_ONLY = { "companies.delete": 1, "members.edit": 1, "taxonomy.edit": 1, "backup.manage": 1, "security.edit": 1, "rates.edit": 1, "catalog.margins": 1 };
+var PERM_STAFF_OK = { "tickets.edit": 1, "appointments.edit": 1, "timeoff.edit": 1, "time.edit": 1, "expenses.edit": 1, "sales.activity": 1, "procurement.receive": 1, "approvals.request": 1 };
+var PERM_MANAGER_VIEW = { "financials.view": 1, "rates.view": 1, "security.view": 1, "data.view": 1, "workflow.view": 1, "notifications.view": 1 };
+
+// ---- permission → capability (functional role) ----
+function requiredCap(perm) {
+  if (/\.view$/.test(perm) || perm === "dashboard.view") return CAP_VIEW;
+  if (perm === "reports.financial") return CAP_FINANCE;
+  if (perm === "agreements.bill") return CAP_FINANCE;
+  if (perm === "agreements.edit") return CAP_SELL;
+  if (perm === "approvals.request") return CAP_WORK;
+  var p = String(perm).split(".")[0];
+  if (p === "tickets" || p === "time" || p === "expenses" || p === "appointments" || p === "timeoff") return CAP_WORK;
+  if (p === "dispatch" || p === "schedule") return CAP_DISPATCH;
+  if (p === "billing" || p === "payments" || p === "rates") return CAP_FINANCE;
+  if (p === "sales") return CAP_SELL;
+  if (p === "catalog" || p === "procurement" || p === "inventory") return CAP_BUY;
+  return CAP_MANAGE;
+}
+
+// ---- permissions that additionally require financial visibility ----
+var PERM_FINANCIAL = {
+  "financials.view": 1, "rates.view": 1, "rates.edit": 1,
+  "billing.view": 1, "billing.edit": 1, "billing.post": 1,
+  "payments.view": 1, "payments.edit": 1, "payments.void": 1,
+  "reports.financial": 1, "agreements.bill": 1, "catalog.margins": 1,
+};
+
+// ---- known permission prefixes (fail-closed for anything else) ----
+var KNOWN_PREFIX = { dashboard: 1, companies: 1, sites: 1, contacts: 1, members: 1, teams: 1, calendars: 1, taxonomy: 1, financials: 1, data: 1, sync: 1, backup: 1, portal: 1, security: 1, tickets: 1, boards: 1, routing: 1, sla: 1, templates: 1, workflow: 1, notifications: 1, dispatch: 1, appointments: 1, schedule: 1, timeoff: 1, time: 1, expenses: 1, rates: 1, agreements: 1, billing: 1, payments: 1, projects: 1, sales: 1, catalog: 1, procurement: 1, inventory: 1, kb: 1, configuration: 1, rmm: 1, approvals: 1, reports: 1, integrations: 1, api: 1, integrity: 1 };
+function permKnown(perm) {
+  perm = String(perm || "");
+  var i = perm.indexOf(".");
+  if (i <= 0) return false;
+  return !!KNOWN_PREFIX[perm.slice(0, i)];
+}
+function permSystemRole(perm) {
+  if (PERM_OWNER_ONLY[perm]) return 2;
+  if (PERM_MANAGER_VIEW[perm]) return 1;
+  if (PERM_STAFF_OK[perm]) return 0;
+  if (/\.view$/.test(perm) || perm === "dashboard.view") return 0;
+  return 1;
+}
+// legacy guarded-action names (inherited finance/backup callers) → permission
+var LEGACY_PERM = {
+  post_journal: "billing.post", reverse_journal: "billing.post", receive_payment: "payments.edit",
+  bank_entry: "payments.edit", clear_bank: "payments.edit", credit_note: "payments.edit",
+  close_period: "data.manage", reopen_period: "data.manage",
+  chart_update: "taxonomy.edit", tax_update: "taxonomy.edit", defaults_update: "taxonomy.edit",
+  settings_update: "data.manage", pay_bill: "procurement.approve",
+  restore_backup: "backup.manage", publish_backup: "backup.manage", archive_doc: "data.manage",
+  invoice_from_order: "billing.edit",
+};
+function resolvePerm(data) {
+  if (data && data.perm) return String(data.perm);
+  var a = data && data.action ? String(data.action) : "";
+  return LEGACY_PERM[a] || a;
+}
+
+// ---- ephemeral per-connection state (rebuilt on rebuild; never trusted as durable) ----
+var conns = new Map();        // conn.id -> {conn, info, focus, watchingGlobal}
+var userConns = new Map();    // userId -> Set(conn.id)
+var versionIndex = new Map(); // docName -> {rev, u, n, ts}
+var rate = {};                // rate-limit buckets: key -> {t, c}
+
+if (state.length < AUD_OFF || MAX_AUDIT < 8) throw new Error("PSA-U hub: state too small");
+if (state[0] !== VERSION) migrateState();
+
+// ---------------- byte helpers ----------------
+function writeU32(off, v) {
+  v = v >>> 0;
+  state[off] = v & 255; state[off + 1] = (v >>> 8) & 255;
+  state[off + 2] = (v >>> 16) & 255; state[off + 3] = (v >>> 24) & 255;
+}
+function readU32(off) {
+  return (state[off] | (state[off + 1] << 8) | (state[off + 2] << 16) | (state[off + 3] << 24)) >>> 0;
+}
+function writeAscii(arr, off, s, max) {
+  for (var i = 0; i < max; i++) arr[off + i] = 0;
+  s = String(s == null ? "" : s);
+  for (var j = 0; j < s.length && j < max; j++) { var c = s.charCodeAt(j) & 0x7f; arr[off + j] = c ? c : 0; }
+}
+function readAscii(arr, off, max) {
+  var s = "";
+  for (var i = 0; i < max; i++) { var c = arr[off + i]; if (!c) break; s += String.fromCharCode(c); }
+  return s;
+}
+function asciiName(s, max) {
+  s = String(s || "").replace(/[^\x20-\x7e]/g, "").trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+function isHex32(s) { return /^[0-9a-f]{32}$/.test(String(s || "")); }
+
+// bitfield helpers (128 bits at a byte offset)
+function bitsToIds(off) {
+  var out = [];
+  for (var i = 0; i < 128; i++) if (state[off + (i >> 3)] & (1 << (i & 7))) out.push(i);
+  return out;
+}
+function bitsHas(off, id) {
+  id = Number(id);
+  if (!(id >= 0 && id < 128)) return false;
+  return !!(state[off + (id >> 3)] & (1 << (id & 7)));
+}
+function bitsSet(off, ids) {
+  for (var i = 0; i < 16; i++) state[off + i] = 0;
+  (ids || []).forEach(function (id) { id = Number(id); if (id >= 0 && id < 128) state[off + (id >> 3)] |= (1 << (id & 7)); });
+}
+function bitsEmpty(off) { for (var i = 0; i < 16; i++) if (state[off + i]) return false; return true; }
+
+// ---------------- user table ----------------
+function userSlot(userId) {
+  for (var i = 0; i < MAX_USERS; i++) { var off = USER_BASE + i * USER_LEN; if (readAscii(state, off, 32) === userId) return off; }
+  for (var j = 0; j < MAX_USERS; j++) { var o = USER_BASE + j * USER_LEN; if (readAscii(state, o, 32) === "") return o; }
+  return -1;
+}
+function userCount() {
+  var n = 0;
+  for (var i = 0; i < MAX_USERS; i++) if (readAscii(state, USER_BASE + i * USER_LEN, 32) !== "") n++;
+  return n;
+}
+function userRecord(off) {
+  return {
+    userId: readAscii(state, off, 32),
+    displayName: readAscii(state, off + 32, 24),
+    role: state[off + 56],
+    func: state[off + 57],
+    financials: !!(state[off + 58] & 1),
+    lastSeen: readU32(off + 60),
+    companies: bitsToIds(off + 64),
+    boards: bitsToIds(off + 80),
+  };
+}
+function userList(withOnline) {
+  var out = [];
+  for (var i = 0; i < MAX_USERS; i++) {
+    var off = USER_BASE + i * USER_LEN;
+    if (!readAscii(state, off, 32)) continue;
+    var rec = userRecord(off);
+    if (withOnline) rec.online = userConns.has(rec.userId);
+    out.push(rec);
+  }
+  return out;
+}
+function infoOf(conn) { var e = conns.get(conn.id); return e && e.info ? e.info : null; }
+function connEntry(conn) { return conns.get(conn.id) || null; }
+function rateLimit(key, max, windowMs) {
+  var now = Date.now();
+  var r = rate[key];
+  if (!r || now - r.t > windowMs) { rate[key] = { t: now, c: 1 }; return true; }
+  r.c++;
+  return r.c <= max;
+}
+function netKey(conn, idx) { return (conn && conn.net && conn.net[idx] != null) ? String(conn.net[idx]) : "x"; }
+function roleName(r) { return r === 2 ? "owner" : r === 1 ? "manager" : "staff"; }
+
+// ---------------- audit ring ----------------
+var TARGET_TYPES = { none: 0, ticket: 1, invoice: 2, payment: 3, company: 4, configuration: 5, agreement: 6, member: 7, doc: 8, other: 9 };
+function auditAppend(userId, role, func, flags, perm, targetType, targetId) {
+  var next = readU32(AUD_HDR + 4);
+  var off = AUD_OFF + (next % MAX_AUDIT) * AUD_LEN;
+  var seq = next + 1;
+  writeU32(off, seq);
+  writeU32(off + 4, (Date.now() / 1000) | 0);
+  state[off + 8] = role;
+  state[off + 9] = func;
+  state[off + 10] = flags;
+  writeAscii(state, off + 11, userId, 32);
+  writeAscii(state, off + 43, perm, 32);
+  writeU32(off + 75, Number(targetId) || 0);
+  state[off + 79] = TARGET_TYPES[targetType] || 0;
+  writeU32(AUD_HDR, Math.min(readU32(AUD_HDR) + 1, MAX_AUDIT));
+  writeU32(AUD_HDR + 4, seq);
+  return { seq: seq, ts: readU32(off + 4), role: role, func: func, userId: userId, perm: perm };
+}
+function auditTail(limit) {
+  var next = readU32(AUD_HDR + 4);
+  var n = Math.min(limit, next, MAX_AUDIT);
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    var seq = next - i;
+    if (seq <= 0) break;
+    var off = AUD_OFF + (((seq - 1) % MAX_AUDIT) + MAX_AUDIT) % MAX_AUDIT * AUD_LEN;
+    out.push({
+      seq: readU32(off), ts: readU32(off + 4), role: state[off + 8], func: state[off + 9],
+      user: readAscii(state, off + 11, 32), perm: readAscii(state, off + 43, 32),
+      targetId: readU32(off + 75) || null, targetType: state[off + 79],
+    });
+  }
+  return out;
+}
+
+// ---------------- migration from the v1 hub ----------------
+function migrateState() {
+  var prev = state[0];
+  var oldUsers = [], oldAudit = [];
+  if (prev === 1 && state.length > V1_AUD_OFF + V1_AUD_LEN * 8) {
+    for (var i = 0; i < 256; i++) {
+      var o = 8 + i * V1_USER_LEN;
+      var id = readAscii(state, o, 32);
+      if (!id) continue;
+      oldUsers.push({ id: id, name: readAscii(state, o + 32, 24), role: state[o + 56], last: readU32(o + 58) });
+    }
+    var v1Max = Math.min(V1_MAX_AUDIT, Math.floor((state.length - V1_AUD_OFF) / V1_AUD_LEN));
+    var anext = readU32(V1_AUD_HDR + 4);
+    var copy = Math.min(anext, v1Max, 500);
+    for (var k = 0; k < copy; k++) {
+      var seq = anext - k;
+      if (seq <= 0) break;
+      var off = V1_AUD_OFF + (((seq - 1) % v1Max) + v1Max) % v1Max * V1_AUD_LEN;
+      oldAudit.push({ user: readAscii(state, off + 9, 32), role: state[off + 8], action: readAscii(state, off + 41, 23), ts: readU32(off + 4) });
+    }
+  }
+  state.fill(0);
+  state[0] = VERSION;
+  writeU32(AUD_HDR, 0); writeU32(AUD_HDR + 4, 0);
+  for (var u = 0; u < oldUsers.length; u++) {
+    var r = oldUsers[u];
+    var off = userSlot(r.id);
+    if (off < 0) continue;
+    writeAscii(state, off, r.id, 32);
+    writeAscii(state, off + 32, r.name || "User", 24);
+    state[off + 56] = r.role;
+    state[off + 57] = r.role === 2 ? 0 : (r.role === 1 ? 2 : 4); // owner→admin, manager→account_mgr, staff→technician
+    state[off + 58] = r.role >= 1 ? 1 : 0;
+    writeU32(off + 60, r.last || 0);
+  }
+  for (var a = oldAudit.length - 1; a >= 0; a--) {
+    var e = oldAudit[a];
+    var rec = auditAppend(e.user, e.role, 4, 0, LEGACY_PERM[e.action] || e.action, "doc", 0);
+    // preserve the original sequence/timestamp where possible
+    var off2 = AUD_OFF + (((rec.seq - 1) % MAX_AUDIT) + MAX_AUDIT) % MAX_AUDIT * AUD_LEN;
+    writeU32(off2 + 4, e.ts);
+  }
+}
+
+// ---------------- authorisation ----------------
+function authorizePerm(info, perm, ctx) {
+  if (!permKnown(perm)) return { ok: false, denied: true, reason: "unknown", perm: perm };
+  var need = permSystemRole(perm);
+  if (info.role < need) return { ok: false, denied: true, reason: "role", perm: perm, requiredRole: roleName(need) };
+  var cap = requiredCap(perm);
+  if ((FUNC_CAPS[info.func] & cap) === 0) return { ok: false, denied: true, reason: "capability", perm: perm, requiredCap: capName(cap) };
+  var off = userSlot(info.userId);
+  ctx = ctx || {};
+  if (off >= 0 && ctx.companyId != null && !bitsEmpty(off + 64) && !bitsHas(off + 64, ctx.companyId))
+    return { ok: false, denied: true, reason: "scope", scope: "company", perm: perm };
+  if (off >= 0 && ctx.boardId != null && !bitsEmpty(off + 80) && !bitsHas(off + 80, ctx.boardId))
+    return { ok: false, denied: true, reason: "scope", scope: "board", perm: perm };
+  if (PERM_FINANCIAL[perm] && off >= 0 && (state[off + 58] & 1) === 0)
+    return { ok: false, denied: true, reason: "financial", perm: perm };
+  return { ok: true, perm: perm };
+}
+
+// ---------------- SHA-256 (pure sync JS — no crypto/TextEncoder on server) ----------------
+function sha256Hex(input) {
+  var bytes = [];
+  for (var i = 0; i < input.length; i++) {
+    var c = input.charCodeAt(i);
+    if (c < 128) bytes.push(c);
+    else if (c < 2048) bytes.push(192 | c >> 6, 128 | c & 63);
+    else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < input.length) {
+      var c2 = input.charCodeAt(i + 1);
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+        var cp = 0x10000 + ((c - 0xD800) << 10) + (c2 - 0xDC00);
+        bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
+        i++;
+      } else bytes.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+    } else bytes.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+  }
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (var k = 7; k >= 0; k--) bytes.push((bitLen / Math.pow(2, 8 * k)) & 255);
+  var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  var K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  var w = new Array(64);
+  for (var blk = 0; blk < bytes.length; blk += 64) {
+    for (var t = 0; t < 16; t++) w[t] = ((bytes[blk + t * 4] << 24) | (bytes[blk + t * 4 + 1] << 16) | (bytes[blk + t * 4 + 2] << 8) | bytes[blk + t * 4 + 3]) >>> 0;
+    for (var t2 = 16; t2 < 64; t2++) {
+      var w15 = w[t2 - 15], w2 = w[t2 - 2];
+      var s0 = ((w15 >>> 7) | (w15 << 25)) ^ ((w15 >>> 18) | (w15 << 14)) ^ (w15 >>> 3);
+      var s1 = ((w2 >>> 17) | (w2 << 15)) ^ ((w2 >>> 19) | (w2 << 13)) ^ (w2 >>> 10);
+      w[t2] = (w[t2 - 16] + s0 + w[t2 - 7] + s1) >>> 0;
+    }
+    var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (var i2 = 0; i2 < 64; i2++) {
+      var S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+      var ch = (e & f) ^ (~e & g);
+      var t1 = (h + S1 + ch + K[i2] + w[i2]) >>> 0;
+      var S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var t22 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t22) >>> 0;
+    }
+    H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + b) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+    H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+  }
+  var hex = "";
+  function hx(v) { v = v & 255; return (v < 16 ? "0" : "") + v.toString(16); }
+  for (var j = 0; j < 8; j++) { var v = H[j]; hex += hx(v >>> 24) + hx(v >>> 16) + hx(v >>> 8) + hx(v); }
+  return hex;
+}
+
+// ---------------- lifecycle ----------------
+self.onopen = function (o) {
+  var conn = o.conn;
+  conn.subscribe("psa");
+  conns.set(conn.id, { conn: conn, info: null, focus: null, watchingGlobal: false, watching: [] });
+};
+self.onclose = function (o) {
+  var conn = o.conn;
+  var e = conns.get(conn.id);
+  if (e) {
+    if (e.focus) pubsub.publish("psa", JSON.stringify({ t: "focus", u: e.info ? e.info.userId : "", n: e.info ? e.info.displayName : "", kind: e.focus.kind, id: e.focus.id, on: false }));
+    if (e.info) {
+      var ids = userConns.get(e.info.userId);
+      if (ids) { ids.delete(conn.id); if (ids.size === 0) userConns.delete(e.info.userId); }
+      pubsub.publish("psa", JSON.stringify({ t: "pres", u: e.info.userId, n: e.info.displayName, r: e.info.role, f: e.info.func, on: false }));
+    }
+    conns.delete(conn.id);
+  }
+};
+
+self.rpc = {
+  hello({ conn }, data) {
+    var d = JSON.parse(data || "{}");
+    var userId = String(d.userId || "");
+    if (!isHex32(userId)) return JSON.stringify({ ok: false, err: "bad_id" });
+    if (!rateLimit("hello:" + netKey(conn, 1), 60, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var displayName = asciiName(d.displayName, 24);
+    var off = userSlot(userId);
+    if (off < 0) return JSON.stringify({ ok: false, err: "users_full" });
+    if (readAscii(state, off, 32) === "") {
+      var first = userCount() === 0;
+      writeAscii(state, off, userId, 32);
+      state[off + 56] = first ? 2 : 0;   // system role
+      state[off + 57] = first ? 0 : 4;   // functional role (admin / technician)
+      state[off + 58] = first ? 1 : 0;   // financial visibility
+    }
+    writeAscii(state, off + 32, displayName || readAscii(state, off + 32, 24) || "User", 24);
+    writeU32(off + 60, (Date.now() / 1000) | 0);
+    var rec = userRecord(off);
+    var info = { userId: userId, displayName: rec.displayName, role: rec.role, func: rec.func, admin: !!(state[off + 58] & 2) };
+    var prevE = conns.get(conn.id);
+    conns.set(conn.id, {
+      conn: conn, info: info, focus: prevE ? prevE.focus : null,
+      watchingGlobal: prevE ? prevE.watchingGlobal : true,
+      watching: prevE && prevE.watching ? prevE.watching : [],
+    });
+    if (!userConns.has(userId)) userConns.set(userId, new Set());
+    userConns.get(userId).add(conn.id);
+    pubsub.publish("psa", JSON.stringify({ t: "pres", u: userId, n: rec.displayName, r: rec.role, f: rec.func, on: true }));
+    return JSON.stringify({
+      ok: true, userId: userId, displayName: rec.displayName, role: rec.role, func: rec.func,
+      financials: rec.financials, companies: rec.companies, boards: rec.boards, caps: FUNC_CAPS[rec.func],
+      admin: info.admin, users: userList(false),
+    });
+  },
+
+  whoami({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var off = userSlot(info.userId);
+    var rec = off >= 0 ? userRecord(off) : { role: info.role, func: info.func, financials: false, companies: [], boards: [] };
+    return JSON.stringify({ ok: true, userId: info.userId, displayName: info.displayName, role: rec.role, func: rec.func, financials: rec.financials, companies: rec.companies, boards: rec.boards, caps: FUNC_CAPS[rec.func], admin: !!info.admin });
+  },
+
+  peers({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    conns.forEach(function (e) {
+      if (e.info) out.push({ userId: e.info.userId, displayName: e.info.displayName, role: e.info.role, func: e.info.func, admin: !!e.info.admin, focus: e.focus ? { kind: e.focus.kind, id: e.focus.id } : null });
+    });
+    return JSON.stringify({ ok: true, peers: out });
+  },
+
+  authAdmin({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("admin:" + conn.id, 6, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    if (!rateLimit("adminNet:" + netKey(conn, 1) + (conn.isProxy ? ":p" : ""), conn.isProxy ? 8 : 20, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    if (sha256Hex(String(d.password || "")) !== ADMIN_PASSWORD_SHA256) return JSON.stringify({ ok: false, err: "bad_password" });
+    info.admin = true; info.role = 2; info.func = 0;
+    var off = userSlot(info.userId);
+    if (off >= 0) { state[off + 56] = 2; state[off + 57] = 0; state[off + 58] = state[off + 58] | 1 | 2; writeU32(off + 60, (Date.now() / 1000) | 0); }
+    pubsub.publish("psa", JSON.stringify({ t: "role", u: info.userId, r: 2, f: 0, n: info.displayName }));
+    return JSON.stringify({ ok: true, role: 2, func: 0, admin: true });
+  },
+
+  setUser({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!(info.admin || info.role === 2)) return JSON.stringify({ ok: false, err: "unauthorized" });
+    if (!rateLimit("setuser:" + conn.id, 120, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var userId = String(d.userId || "");
+    var off = userSlot(userId);
+    if (off < 0 || readAscii(state, off, 32) === "") return JSON.stringify({ ok: false, err: "no_user" });
+    if (d.role != null) { var r = Number(d.role); if (r !== 0 && r !== 1 && r !== 2) return JSON.stringify({ ok: false, err: "bad_role" }); state[off + 56] = r; }
+    if (d.func != null) { var f = Number(d.func); if (!(f >= 0 && f < FUNC_NAMES.length)) return JSON.stringify({ ok: false, err: "bad_func" }); state[off + 57] = f; }
+    if (d.financials != null) { if (d.financials) state[off + 58] |= 1; else state[off + 58] &= ~1; }
+    if (d.companies !== undefined) bitsSet(off + 64, d.companies || []);
+    if (d.boards !== undefined) bitsSet(off + 80, d.boards || []);
+    var rec = userRecord(off);
+    var ids = userConns.get(userId);
+    if (ids) ids.forEach(function (cid) { var e = conns.get(cid); if (e && e.info) { e.info.role = rec.role; e.info.func = rec.func; } });
+    pubsub.publish("psa", JSON.stringify({ t: "role", u: userId, r: rec.role, f: rec.func, n: rec.displayName }));
+    return JSON.stringify({ ok: true, user: rec });
+  },
+
+  // legacy alias used by older UI: set the system role only
+  setRole({ conn }, data) {
+    var d = JSON.parse(data || "{}");
+    return self.rpc.setUser({ conn: conn }, JSON.stringify({ userId: d.userId, role: d.role }));
+  },
+
+  removeUser({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!(info.admin || info.role === 2)) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var userId = String((JSON.parse(data || "{}") || {}).userId || "");
+    if (userId === info.userId) return JSON.stringify({ ok: false, err: "self" });
+    var off = userSlot(userId);
+    if (off < 0 || readAscii(state, off, 32) === "") return JSON.stringify({ ok: false, err: "no_user" });
+    for (var i = 0; i < USER_LEN; i++) state[off + i] = 0;
+    var ids = userConns.get(userId);
+    if (ids) ids.forEach(function (cid) { var e = conns.get(cid); if (e) { try { e.conn.close(4400, "removed"); } catch (er) {} } });
+    return JSON.stringify({ ok: true });
+  },
+
+  listUsers({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!(info.admin || info.role === 2)) return JSON.stringify({ ok: false, err: "unauthorized" });
+    return JSON.stringify({ ok: true, users: userList(true), funcs: FUNC_NAMES });
+  },
+
+  authorize({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("auth:" + conn.id, 600, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    if (!rateLimit("authNet:" + netKey(conn, 2) + (conn.isProxy ? ":p" : ""), conn.isProxy ? 900 : 3000, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var perm = resolvePerm(d);
+    var res = authorizePerm(info, perm, d.ctx || {});
+    if (!res.ok && res.reason) return JSON.stringify(res);
+    return JSON.stringify({ ok: true, perm: perm });
+  },
+
+  approve({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("auth:" + conn.id, 600, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    if (!rateLimit("authNet:" + netKey(conn, 2) + (conn.isProxy ? ":p" : ""), conn.isProxy ? 900 : 3000, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var perm = resolvePerm(d);
+    // `authorize` is the fail-closed gate. `approve` records what already
+    // happened, so a known permission is re-authorised here (and denied
+    // loudly) while an unrecognised action is still logged — refusing to
+    // record it would leave an audit gap, which is worse than a log-only row.
+    var known = permKnown(perm);
+    if (known) {
+      var res = authorizePerm(info, perm, d.ctx || {});
+      if (!res.ok) {
+        res.denied = true;
+        if (res.reason === "role") res.reason2 = "requires the " + res.requiredRole + " role";
+        return JSON.stringify(res);
+      }
+    }
+    var aoff = userSlot(info.userId);
+    var aflags = aoff >= 0 ? (state[aoff + 58] | 0) : 0;
+    var e = auditAppend(info.userId, info.role, info.func, aflags, perm, String(d.targetType || "none"), d.targetId);
+    pubsub.publish("psa", JSON.stringify({ t: "audit", s: e.seq }));
+    return JSON.stringify({
+      ok: true,
+      loggedOnly: !known,
+      entry: {
+        id: e.seq, ts: new Date(e.ts * 1000).toISOString(), actor: info.displayName, userId: info.userId,
+        role: info.role, func: info.func, action: perm, perm: perm,
+        summary: String(d.summary || "").slice(0, 500),
+        targetType: String(d.targetType || ""), targetId: d.targetId == null ? null : String(d.targetId),
+      },
+    });
+  },
+
+  announce({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("ann:" + conn.id, 240, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var doc = String(d.doc || "");
+    if (doc.length > 64 || !/^psa-v1-[a-z0-9-]+$/.test(doc)) return JSON.stringify({ ok: false, err: "bad_doc" });
+    var rev = Number(d.rev) || 0;
+    var ts = (Date.now() / 1000) | 0;
+    versionIndex.set(doc, { rev: rev, u: info.userId, n: info.displayName, ts: ts });
+    var payload = JSON.stringify({ t: "chg", d: doc, r: rev, u: info.userId, n: info.displayName, f: info.func, ts: ts });
+    pubsub.publish("psa:chg", payload); // global watchers (users with all-company scope)
+    var m = /^psa-v1-company-(\d+)/.exec(doc);
+    if (m) pubsub.publish("psa:co:" + m[1], payload); // per-company watchers (scoped users)
+    return JSON.stringify({ ok: true });
+  },
+
+  watch({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("watch:" + conn.id, 60, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var e = connEntry(conn);
+    var off = userSlot(info.userId);
+    // Unsubscribe previous company topics (managed by remembering them on the entry).
+    if (e && e.watching) e.watching.forEach(function (cid) { try { conn.unsubscribe("psa:co:" + cid); } catch (er) {} });
+    if (e) e.watching = [];
+    var ids = Array.isArray(d.companies) ? d.companies : null;
+    if (!ids || ids.length === 0) {
+      // "all companies" watcher → the global change topic
+      conn.subscribe("psa:chg");
+      if (e) e.watchingGlobal = true;
+      return JSON.stringify({ ok: true, scope: "all" });
+    }
+    if (e) e.watchingGlobal = false;
+    try { conn.unsubscribe("psa:chg"); } catch (er) {}
+    var allowed = [];
+    ids.slice(0, 48).forEach(function (cid) {
+      cid = Number(cid);
+      if (!(cid >= 0 && cid < 128)) return;
+      if (off >= 0 && !bitsEmpty(off + 64) && !bitsHas(off + 64, cid)) return; // not in scope
+      try { conn.subscribe("psa:co:" + cid); if (e) e.watching.push(cid); allowed.push(cid); } catch (er) {}
+    });
+    return JSON.stringify({ ok: true, scope: "companies", watching: allowed });
+  },
+
+  focus({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!rateLimit("focus:" + conn.id, 600, 60000)) return JSON.stringify({ ok: false, err: "rate" });
+    var d = JSON.parse(data || "{}");
+    var e = connEntry(conn);
+    var on = !!d.on;
+    var kind = asciiName(d.kind, 24);
+    var id = asciiName(String(d.id == null ? "" : d.id), 24);
+    if (on) {
+      e.focus = { kind: kind, id: id };
+      pubsub.publish("psa", JSON.stringify({ t: "focus", u: info.userId, n: info.displayName, kind: kind, id: id, on: true }));
+    } else {
+      if (e.focus) pubsub.publish("psa", JSON.stringify({ t: "focus", u: info.userId, n: info.displayName, kind: e.focus.kind, id: e.focus.id, on: false }));
+      e.focus = null;
+    }
+    return JSON.stringify({ ok: true });
+  },
+
+  index({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    var out = [];
+    versionIndex.forEach(function (v, k) { out.push({ d: k, r: v.rev, u: v.u, n: v.n, ts: v.ts }); });
+    return JSON.stringify({ ok: true, index: out });
+  },
+
+  auditTail({ conn }, data) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!(info.admin || info.role === 2)) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var limit = Math.min(Number((JSON.parse(data || "{}") || {}).limit) || 50, 500);
+    return JSON.stringify({ ok: true, entries: auditTail(limit) });
+  },
+
+  rateStats({ conn }) {
+    var info = infoOf(conn);
+    if (!info) return JSON.stringify({ ok: false, err: "hello_first" });
+    if (!(info.admin || info.role === 2)) return JSON.stringify({ ok: false, err: "unauthorized" });
+    var out = [], total = 0, proxy = 0;
+    conns.forEach(function (e) {
+      total++;
+      if (e.conn.isProxy) proxy++;
+      if (e.info) out.push({ userId: e.info.userId, displayName: e.info.displayName, role: e.info.role, func: e.info.func, proxy: !!e.conn.isProxy, focus: e.focus ? (e.focus.kind + ":" + e.focus.id) : null });
+    });
+    return JSON.stringify({ ok: true, connections: total, proxies: proxy, peers: out, maxAudit: MAX_AUDIT, users: userCount() });
+  },
+};
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="src/template.css">
+<link rel="stylesheet" href="src/erp.css">
+
+<div class="progress-bar" id="progressBar"></div>
+
+<div class="erp-app" id="app">
+
+  <!-- ============================ sidebar ============================ -->
+  <aside class="erp-sidebar" id="sidebar" aria-label="ERP modules">
+    <div class="erp-brand">
+      <a class="erp-logo" href="#/dashboard">
+        <span class="erp-logo-mark" id="logoMark">P</span>
+        <span class="erp-logo-text">
+          <span class="erp-logo-name" id="brandName">PSA-U</span>
+          <span class="erp-logo-sub">Professional services automation</span>
+        </span>
+      </a>
+    </div>
+    <nav class="erp-nav" id="nav" aria-label="Modules"></nav>
+    <div class="erp-sidebar-foot">
+      <span class="erp-role-chip" id="roleChip">owner</span>
+      <span class="erp-version">PSA core · v<span id="versionText">0.1.0</span></span>
+    </div>
+  </aside>
+
+  <div class="erp-overlay" id="overlay" hidden></div>
+
+  <!-- ============================ main ============================ -->
+  <div class="erp-main">
+    <header class="erp-topbar">
+      <button class="icon-btn erp-hamburger" id="hamburgerBtn" aria-label="Open menu" aria-expanded="false">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>
+      </button>
+      <div class="erp-title">
+        <h1 id="pageTitle">Dashboard</h1>
+        <p id="pageSubtitle"></p>
+      </div>
+      <div class="erp-topbar-actions">
+        <label class="erp-client-select" id="companySelectWrap" title="Active client" hidden>
+          <span class="erp-role-label">Client</span>
+          <select id="companySelect" aria-label="Active client"></select>
+        </label>
+        <span class="erp-team-state" id="teamState" title="Realtime team hub">
+          <span class="erp-team-dot gray" id="teamDot"></span>
+          <span class="erp-team-text" id="teamStateText">offline</span>
+        </span>
+        <label class="erp-role-select" id="roleSelectWrap" title="Local role demo — when the team hub is online the server role overrides this">
+          <span class="erp-role-label">Acting as</span>
+          <select id="roleSelect" aria-label="Current role">
+            <option value="owner">Owner</option>
+            <option value="manager">Manager</option>
+            <option value="staff">Staff</option>
+          </select>
+        </label>
+        <button class="icon-btn erp-team-btn" id="teamBtn" aria-label="Team hub" title="Team, roles &amp; access">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </button>
+        <button class="icon-btn erp-sync-btn" id="syncBtn" aria-label="Sync & conflicts" title="Sync documents">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+          <span class="erp-badge" id="syncBadge" hidden></span>
+        </button>
+        <button class="icon-btn erp-health-btn" id="healthBtn" aria-label="Data &amp; sync" title="Data &amp; sync — storage, backups &amp; version history">
+          <span class="erp-health-dot gray" id="healthDot"></span>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </button>
+        <button class="icon-btn" id="themeToggle" aria-label="Toggle dark mode" title="Toggle dark mode"><span id="themeToggleIcon"></span></button>
+      </div>
+    </header>
+
+    <div class="erp-sync-banner" id="syncBanner" hidden role="status">
+      <span class="erp-sync-banner-mark" aria-hidden="true">!</span>
+      <span class="erp-sync-banner-text" id="syncBannerText"></span>
+      <button class="btn btn-sm btn-primary" id="syncBannerBtn">Review</button>
+    </div>
+
+    <main class="erp-content" id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div class="toast-ctn" id="toastCtn"></div>
+
+<!-- Shared modal for forms/editors/confirms -->
+<div class="modal-back" id="uiModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="uiModalTitle">
+    <div class="modal-head">
+      <h2 class="modal-title" id="uiModalTitle"></h2>
+      <button class="icon-btn" data-ui-close aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
+    <div class="modal-body" id="uiModalBody"></div>
+    <div class="modal-foot" id="uiModalFoot"></div>
+  </div>
+</div>
+
+<!-- Sync & conflicts resolution modal -->
+<div class="modal-back" id="syncModal" aria-hidden="true">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="syncModalTitle">
+    <div class="modal-head">
+      <h2 class="modal-title" id="syncModalTitle">Sync &amp; conflicts</h2>
+      <button class="icon-btn" data-sync-close aria-label="Close"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    </div>
+    <div class="modal-body" id="syncModalBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="syncNowBtn">Sync now</button>
+      <button class="btn btn-ghost" data-sync-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="src/erp.js"></script>
+<script src="src/erp.ui.js"></script>
+<script src="src/psa.modules.js"></script>
+<script src="src/erp.store.js"></script>
+<script src="src/erp.sync.js"></script>
+<script src="src/erp.master.js"></script>
+<script src="src/erp.backup.js"></script>
+<script src="src/erp.team.js"></script>
+<script src="src/psa.collab.js"></script>
+<script src="src/psa.history.js"></script>
+<script src="src/psa.taxonomy.js"></script>
+<script src="src/psa.tenancy.js"></script>
+<script src="src/psa.members.js"></script>
+<script src="src/psa.security.js"></script>
+<script src="src/psa.sla.js"></script>
+<script src="src/psa.workflow.js"></script>
+<script src="src/psa.notify.js"></script>
+<script src="src/psa.tickets.js"></script>
+<script src="src/psa.templates.js"></script>
+<script src="src/psa.scheduling.js"></script>
+<script src="src/psa.appointments.js"></script>
+<script src="src/psa.dispatch.js"></script>
+<script src="src/psa.time.js"></script>
+<script src="src/psa.timesheets.js"></script>
+<script src="src/psa.expenses.js"></script>
+<script src="src/psa.agreements.js"></script>
+<script src="src/psa.billing.js"></script>
+<script src="src/psa.payments.js"></script>
+<script src="src/psa.ar.js"></script>
+<script src="src/psa.reports.js"></script>
+<script src="src/psa.dashboards.js"></script>
+<script src="src/psa.bi.js"></script>
+<script src="src/psa.integrations.js"></script>
+<script src="src/psa.api.js"></script>
+<script src="src/psa.integrity.js"></script>
+<script src="src/psa.projects.js"></script>
+<script src="src/psa.sales.js"></script>
+<script src="src/psa.catalog.js"></script>
+<script src="src/psa.inventory.js"></script>
+<script src="src/psa.procurement.js"></script>
+<script src="src/psa.kb.js"></script>
+<script src="src/psa.configurations.js"></script>
+<script src="src/psa.rmm.js"></script>
+<script src="src/psa.approvals.js"></script>
+<script src="src/psa.portal.js"></script>
+<script src="src/psa.knowledge.js"></script>
+<script src="src/psa.companies.js"></script>
+<script src="src/psa.dashboard.js"></script>
+<script src="src/psa.admin.js"></script>
+<script src="src/psa.servicedesk.js"></script>
+<script src="src/psa.tests.js"></script>

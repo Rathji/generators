@@ -21,6 +21,10 @@
       P.push("Notable comms traffic: ");
       for (const q of quotes) P.push("\"" + q.text + "\"");
     }
+    if (battle.banter && battle.banter.length) {
+      P.push("Comms chatter heard across the lance:");
+      for (const b of battle.banter) P.push(b.callsign + ": \"" + b.text + "\"");
+    }
     if (battle.outcome === "victory") {
       P.push("Objectives were secured and the employer's payment is in the account. Salvage crews are already picking over the wrecks.");
     } else if (battle.outcome === "partial") {
@@ -34,6 +38,7 @@
 
   function narrativePrompt(battle, payout) {
     const summary = battSummary(battle).join("\n");
+    const chatter = (battle.banter || []).map((b) => b.callsign + ": \"" + b.text + "\"").join("\n");
     const lance = battle.lance.map((l) => (l.tag ? l.tag + (l.dead ? " (KIA machine)" : "") : l.unitName)).join(", ");
     const pilotLine = battle.lance.map((l) => {
       const d = l.personDesc ? " — " + l.personDesc : "";
@@ -47,6 +52,7 @@
       + "\nPILOTS (callsign — background, personality traits, motivation):\n" + pilotLine
       + "\nENEMY LOSSES: " + battle.enemyLossDesc
       + "\nFRIENDLY MACHINES LOST: " + battle.ourDeadCount + "\n\nKEY EVENTS:\n" + summary
+      + (chatter ? "\n\nCOMMS CHATTER (personality quotes — use some verbatim, keep the voices distinct):\n" + chatter : "")
       + "\n\nWrite 3 to 5 paragraphs. Include at least one direct quote from a pilot using their callsign.";
   }
 
@@ -180,6 +186,27 @@
     if (window.root && root.kv) { try { await root.kv.portraits.clear(); } catch (e) { console.warn("ai.clearPortraits:", e); } }
   }
 
+  function exportPortraits() {
+    const out = {};
+    for (const [k, v] of portraitCache) out[k] = v;
+    return out;
+  }
+
+  async function importPortraits(map, opts) {
+    const clear = !opts || opts.clear !== false;
+    if (clear) await clearPortraits();
+    if (!map || typeof map !== "object") return 0;
+    let n = 0;
+    for (const k of Object.keys(map)) {
+      const v = map[k];
+      if (!v) continue;
+      portraitCache.set(String(k), v);
+      try { if (window.root && root.kv) await root.kv.portraits.set(String(k), v); } catch (e) { console.warn("ai.importPortraits persist:", e); }
+      n++;
+    }
+    return n;
+  }
+
   async function _pumpPortraits() {
     if (_portraitBusy) return;
     _portraitBusy = true;
@@ -216,5 +243,5 @@
     return { total, queued: items.length };
   }
 
-  window.BMGA = { templateReport, narrativePrompt, battleImagePrompt, generateReport, generateBattleImage, generatePortrait, preloadPortraits, getPortrait, isPortraitQueued, forgetPortrait, clearPortraits, queuePortrait, queuePortraitAll, hasAI };
+  window.BMGA = { templateReport, narrativePrompt, battleImagePrompt, generateReport, generateBattleImage, generatePortrait, preloadPortraits, getPortrait, isPortraitQueued, forgetPortrait, clearPortraits, exportPortraits, importPortraits, queuePortrait, queuePortraitAll, hasAI };
 })();
