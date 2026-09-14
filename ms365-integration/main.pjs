@@ -4,27 +4,36 @@
 // Plugs any Perchance generator into Microsoft 365 (Outlook mail, OneDrive/
 // SharePoint, Calendar, Microsoft To Do) through the Microsoft Graph API.
 //
-//   Auth     src/auth/    — OAuth2 authorization-code + PKCE flow, token
-//                           lifecycle manager (persistence + auto-refresh),
-//                           tenant & account validator, on-demand scoped
-//                           permission requests.
-//   Graph    src/graph/   — generic request wrapper (bearer headers, OData
-//                           queries, 429/503/504 backoff, 401 refresh-and-
-//                           retry, paging) + error mapping engine.
-//   Mail     src/mail/    — mailbox query, email dispatcher, calendar sync.
-//   Files    src/files/   — file discovery, upload/download streamer,
-//                           permission auditor.
-//   Tasks    src/tasks/   — To Do list sync + task state updater.
-//   Health   src/health/  — end-to-end connection check.
+//   Auth     OAuth2 authorization-code + PKCE flow, token lifecycle manager
+//            (persistence + auto-refresh), tenant & account validator,
+//            on-demand scoped permission requests.
+//   Graph    generic request wrapper (bearer headers, OData queries,
+//            429/503/504 backoff, 401 refresh-and-retry, paging) + error
+//            mapping engine.
+//   Mail     mailbox query, email dispatcher, calendar sync.
+//   Files    file discovery, upload/download streamer, permission auditor.
+//   Tasks    To Do list sync + task state updater.
+//   Health   end-to-end connection check.
 //
-// All modules are exposed on window.ms365 (auth, graph, mail, files, tasks,
-// health) and each ships a validation suite — run them with ?test=<suite>.
-// Full usage & architecture docs: src/README.md and the page (index.html).
+// THE WHOLE API LIVES IN THIS FILE, because a Perchance import pulls in only
+// the other generator's main.pjs — never its index.html or its src/ files. So
+// an importer gets a complete, self-contained API from a single import line:
+//
+//   yourApiHandle = [the import block naming this generator]
+//   await root.yourApiHandle.configure({ clientId: "…", tenant: "…" })
+//   const me = await root.yourApiHandle.graph.graphGet("/me")
+//
+// The plugin's own page (index.html) is a live playground that renders
+// ms365Widget() and runs the validation suites. Everything mutable lives in a
+// single lazily-created namespace: window.__ms365Internal.
+//
+// NOTE ON src/: the files under src/ are the *test suites* (and thin adapters
+// onto this API) — the implementation you are reading is the one that ships.
 // ═══════════════════════════════════════════════════════════════════════════
 
 $meta
   title = Microsoft 365 Integration
-  description = A Perchance plugin that plugs your generators into Microsoft 365 (Outlook mail, OneDrive/SharePoint files, Calendar, To Do/Planner) through the Microsoft Graph API — OAuth2 + PKCE sign-in with token auto-refresh, tenant & account validation, a Graph request wrapper with friendly error mapping, mail/calendar/files/tasks feature modules, connection health checks, and on-demand scoped permissions.
+  description = An importable Perchance plugin that plugs your generators into Microsoft 365 (Outlook mail, OneDrive/SharePoint files, Calendar, To Do) through the Microsoft Graph API. One import gives you the whole API on root.ms365: OAuth2 + PKCE sign-in with token auto-refresh, an embedded-app relay redirect, tenant & account validation, a Graph request wrapper with friendly error mapping, mail/calendar/files/tasks modules, connection health checks, and on-demand scoped permissions.
   tags = microsoft, office365, outlook, onedrive, sharepoint, calendar, graph, oauth2, integration, plugin
   header
     mode = minimal
@@ -36,8 +45,8 @@ superFetch = {import:super-fetch-plugin}
 
 
 // ── 1. CONFIG ──────────────────────────────────────────────────────────────
-// Defaults for the OAuth2 flow. Users can edit these here, or override them
-// live in the widget on the page (overrides are remembered in localStorage).
+// Defaults for the OAuth2 flow. Importers can't edit these lists, so they use
+// root.ms365.configure({...}) instead — configure() merges over these defaults.
 
 ms365Config
   clientId = 
@@ -56,57 +65,2491 @@ ms365InitConfig() =>
   if(ms365Config.scopes && ms365Config.scopes.selectAll) {
     scopes = ms365Config.scopes.selectAll.map(x => x.evaluateItem).filter(s => s);
   }
-  return { clientId: cid || "", tenant: ten || "common", scopes };
+  return { clientId: String(cid || "").trim(), tenant: String(ten || "common").trim() || "common", scopes: scopes };
+
+ms365Version() =>
+  return "2.0.0";
 
 
-// ── 2. WIDGET ──────────────────────────────────────────────────────────────
-// The auth card returned by $output (and rendered on this page). Hydrated by
-// src/auth/oauth2.js via index.html's module script.
+// ── 2. INTERNAL STATE ──────────────────────────────────────────────────────
+// One namespaced store per page. Nothing here is touched at import time.
 
+ms365FreshInternal() =>
+  return {
+    config: null,
+    tokenStoreClass: null,
+    refreshInFlight: null,
+    autoTimer: null,
+    listeners: { change: [], expired: [] },
+    popups: [],
+    graphSettings: null,
+    graphStats: { requests: 0, retries: 0, throttledCount: 0 },
+    codeMap: null,
+    statusMap: null,
+    api: null
+  };
+
+ms365Internal() =>
+  if(typeof window === "undefined") {
+    if(!globalThis.__ms365Internal) globalThis.__ms365Internal = ms365FreshInternal();
+    return globalThis.__ms365Internal;
+  }
+  if(!window.__ms365Internal) window.__ms365Internal = ms365FreshInternal();
+  return window.__ms365Internal;
+
+
+// ── 3. SMALL UTILITIES ─────────────────────────────────────────────────────
+
+ms365IsThenable(v) =>
+  return !!v && (typeof v === "object" || typeof v === "function") && typeof v.then === "function";
+
+ms365DefaultStorage() =>
+  let s = null;
+  try { if(typeof window !== "undefined" && window.localStorage) s = window.localStorage; } catch(e) { s = null; }
+  if(s) return s;
+  try { if(typeof window !== "undefined" && window.sessionStorage) s = window.sessionStorage; } catch(e) { s = null; }
+  return s;
+
+// Normalize a caller-supplied storage into a Web-Storage-shaped adapter whose
+// methods may return promises. Accepts:
+//   * a Web Storage object (localStorage, sessionStorage, a MemoryStorage…)
+//   * a function returning one (the historical `storage: () => store` form)
+//   * an adapter with get/set/remove (kv-plugin style; `delete` also accepted)
+// Returns null when nothing usable is available.
+ms365StorageAdapter(src) =>
+  let base = src;
+  if(typeof base === "function") {
+    try { base = base(); } catch(e) { base = null; }
+  }
+  if(!base) base = ms365DefaultStorage();
+  if(!base) return null;
+  if(typeof base.getItem === "function") {
+    return {
+      getItem: (k) => base.getItem(k),
+      setItem: (k, v) => base.setItem(k, v),
+      removeItem: (k) => base.removeItem(k)
+    };
+  }
+  if(typeof base.get === "function") {
+    return {
+      getItem: (k) => base.get(k),
+      setItem: (k, v) => (typeof base.set === "function" ? base.set(k, v) : undefined),
+      removeItem: (k) => (typeof base.remove === "function" ? base.remove(k) : (typeof base.delete === "function" ? base.delete(k) : undefined))
+    };
+  }
+  return null;
+
+async ms365StorageRead(adapter, key) =>
+  if(!adapter) return null;
+  try { return await adapter.getItem(key); } catch(e) { return null; }
+
+async ms365StorageWrite(adapter, key, value) =>
+  if(!adapter) return false;
+  try { await adapter.setItem(key, value); return true; } catch(e) { return false; }
+
+async ms365StorageDelete(adapter, key) =>
+  if(!adapter) return;
+  try { await adapter.removeItem(key); } catch(e) {}
+
+
+// ── 4. STORAGE KEYS ────────────────────────────────────────────────────────
+// Keys are namespaced per connection (client id + tenant) so that configuring
+// a second app/tenant doesn't clobber the first one's session.
+
+ms365ConnectionNamespace(cfg) =>
+  if(!cfg) return "";
+  if(typeof cfg.namespace === "string" && cfg.namespace) return cfg.namespace;
+  if(cfg.connectionId) return String(cfg.connectionId);
+  if(cfg.clientId) return String(cfg.clientId).trim() + "|" + String(cfg.tenant || "common").trim();
+  return "";
+
+ms365StorageKey(base, cfg) =>
+  const ns = ms365ConnectionNamespace(cfg);
+  return ns ? base + "::" + ns : base;
+
+ms365SessionKey(cfg) =>
+  return ms365StorageKey("ms365.oauth2.session", cfg);
+
+ms365PendingKey(cfg) =>
+  return ms365StorageKey("ms365.oauth2.pending", cfg);
+
+// The keys the active configuration reads/writes (useful for debugging, and
+// for tests that inspect the raw storage).
+ms365StorageKeys() =>
+  const cfg = ms365Internal().config;
+  return { session: ms365SessionKey(cfg), pending: ms365PendingKey(cfg), namespace: ms365ConnectionNamespace(cfg) };
+
+
+// ── 5. TOKEN STORE ─────────────────────────────────────────────────────────
+// Sessions are stored in the generator's OWN origin partition
+// (https://<publicId>.perchance.org/<name>) — the same browser partition MSAL
+// uses for SPA token storage. Only code running in this origin can read them;
+// they are never sent to or stored on any server.
+// save()/load()/clear() stay synchronous when the underlying storage is
+// synchronous, and return promises when it isn't (so a kv/IndexedDB-backed
+// adapter works too).
+
+ms365TokenStoreClass() =>
+  const st = ms365Internal();
+  if(st.tokenStoreClass) return st.tokenStoreClass;
+  class TokenStore {
+    constructor(storage, opts) {
+      this.storage = storage || ms365StorageAdapter(null);
+      this.key = (opts && opts.key) || "ms365.oauth2.session";
+    }
+    _parse(raw) {
+      if(raw === null || raw === undefined) return null;
+      try {
+        const s = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if(!s || !s.tokens || !s.tokens.accessToken) return null;
+        return s;
+      } catch(e) { return null; }
+    }
+    save(session) {
+      if(!this.storage) return false;
+      let out = null;
+      try { out = this.storage.setItem(this.key, JSON.stringify(session)); }
+      catch(e) { return false; }
+      if(ms365IsThenable(out)) return out.then(() => true, () => false);
+      return true;
+    }
+    load() {
+      if(!this.storage) return null;
+      let raw = null;
+      try { raw = this.storage.getItem(this.key); }
+      catch(e) { return null; }
+      const self = this;
+      if(ms365IsThenable(raw)) return raw.then((v) => self._parse(v), () => null);
+      return this._parse(raw);
+    }
+    clear() {
+      if(!this.storage) return;
+      try { return this.storage.removeItem(this.key); } catch(e) { return undefined; }
+    }
+  }
+  st.tokenStoreClass = TokenStore;
+  return TokenStore;
+
+
+// ── 6. OAUTH2 (authorization code + PKCE) ──────────────────────────────────
+// Against the Microsoft Identity Platform v2.0 endpoints. Fully
+// dependency-injectable: configure({ storage, fetchImpl, store, navigate,
+// autoRefresh, relay, … }) so tests can run it with mocks and so callers can
+// back tokens with kv/IndexedDB.
+
+ms365OauthDefaults() =>
+  return {
+    clientId: "",
+    tenant: "common",
+    scopes: ["openid", "profile", "email", "offline_access", "User.Read"],
+    authorizeUrl: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize",
+    tokenUrl: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token",
+    redirectUri: "",
+    prompt: null,
+    storage: null,
+    fetchImpl: null,
+    navigate: null,
+    store: null,
+    refreshMarginMs: 5 * 60 * 1000,
+    autoRefresh: true,
+    popupWidth: 600,
+    popupHeight: 700,
+    authTimeoutMs: 5 * 60 * 1000,
+    namespace: null,
+    connectionId: null,
+    relay: null
+  };
+
+ms365NormalizeScopes(scopes) =>
+  const list = [];
+  const push = (s) => { const t = String(s).trim(); if(t && list.indexOf(t) < 0) list.push(t); };
+  if(Array.isArray(scopes)) scopes.forEach(push);
+  else if(typeof scopes === "string") scopes.split(/[\s,]+/).forEach(push);
+  return list.length ? list : ["openid", "profile", "email", "offline_access", "User.Read"];
+
+// configure() merges: pjs-list defaults ← previous runtime config ← partial.
+// Re-calling it with only some keys keeps the rest.
+ms365Configure(partial = {}) =>
+  if(!partial || typeof partial !== "object") throw new TypeError("ms365.configure: expected an options object");
+  const st = ms365Internal();
+  const defaults = ms365InitConfig();
+  const prev = st.config || {};
+  const next = Object.assign({}, ms365OauthDefaults(), defaults, prev, partial);
+  if(typeof next.clientId !== "string" || !next.clientId.trim()) {
+    throw new Error("ms365.oauth2: `clientId` is required — register an app at https://aka.ms/aadappreg and paste its Application (client) ID.");
+  }
+  next.clientId = next.clientId.trim();
+  next.tenant = String(next.tenant || "common").trim() || "common";
+  next.scopes = ms365NormalizeScopes(next.scopes);
+  if(next.scopes.indexOf("offline_access") < 0) next.scopes.push("offline_access");
+  st.config = next;
+  return ms365GetConfig();
+
+ms365GetConfig() =>
+  const cfg = ms365Internal().config;
+  return cfg ? Object.assign({}, cfg, { scopes: cfg.scopes.slice() }) : null;
+
+ms365RequireConfig() =>
+  const cfg = ms365Internal().config;
+  if(!cfg) throw new Error("ms365.oauth2: not configured — call configure({ clientId, tenant, ... }) first.");
+  return cfg;
+
+ms365ResolveFetchWith(explicit) =>
+  if(explicit) return explicit;
+  const cfg = ms365Internal().config;
+  if(cfg && cfg.fetchImpl) return cfg.fetchImpl;
+  const sf = ms365SuperFetch();
+  if(sf) return sf;
+  if(typeof fetch === "function") return fetch;
+  throw new Error("ms365: no fetch available — import super-fetch-plugin in main.pjs or pass fetchImpl.");
+
+// super-fetch-plugin (CORS-free proxy) is the default transport: the Microsoft
+// token endpoint is not CORS-enabled, so a plain browser fetch cannot reach it.
+ms365SuperFetch() =>
+  try {
+    if(typeof superFetch === "function") return superFetch;
+    if(superFetch && typeof superFetch.fetch === "function") return superFetch.fetch;
+  } catch(e) {}
+  return null;
+
+ms365ResolveFetch() =>
+  return ms365ResolveFetchWith(null);
+
+// ── storage-backed session + pending-auth records ──
+ms365GetStore(cfg) =>
+  if(cfg && cfg.store) return cfg.store;
+  const Cls = ms365TokenStoreClass();
+  return new Cls(ms365StorageAdapter(cfg && cfg.storage), { key: ms365SessionKey(cfg) });
+
+ms365SaveSession(session) =>
+  const cfg = ms365Internal().config;
+  const stored = { tokens: session.tokens, profile: session.profile || null, savedAt: Date.now() };
+  const out = ms365GetStore(cfg).save(stored);
+  if(ms365IsThenable(out)) return out.then(() => stored, () => stored);
+  return stored;
+
+ms365LoadSession() =>
+  const cfg = ms365Internal().config;
+  return ms365GetStore(cfg).load();
+
+ms365ClearSession() =>
+  const cfg = ms365Internal().config;
+  return ms365GetStore(cfg).clear();
+
+async ms365CommitSession(tokens, profile) =>
+  const session = await ms365SaveSession({ tokens: tokens, profile: profile });
+  ms365ScheduleAutoRefresh(session);
+  ms365EmitSessionChange(session);
+  return session;
+
+ms365OnSessionChange(fn) =>
+  const st = ms365Internal();
+  st.listeners.change.push(fn);
+  return () => { const i = st.listeners.change.indexOf(fn); if(i >= 0) st.listeners.change.splice(i, 1); };
+
+ms365OnSessionExpired(fn) =>
+  const st = ms365Internal();
+  st.listeners.expired.push(fn);
+  return () => { const i = st.listeners.expired.indexOf(fn); if(i >= 0) st.listeners.expired.splice(i, 1); };
+
+ms365EmitSessionChange(session) =>
+  const st = ms365Internal();
+  st.listeners.change.slice().forEach((fn) => { try { fn(session); } catch(e) {} });
+
+ms365EmitSessionExpired(err) =>
+  const st = ms365Internal();
+  st.listeners.expired.slice().forEach((fn) => { try { fn(err); } catch(e) {} });
+
+async ms365PersistPending(pending) =>
+  const cfg = ms365Internal().config;
+  await ms365StorageWrite(ms365StorageAdapter(cfg && cfg.storage), ms365PendingKey(cfg), JSON.stringify(pending));
+
+async ms365ReadPending() =>
+  const cfg = ms365Internal().config;
+  const raw = await ms365StorageRead(ms365StorageAdapter(cfg && cfg.storage), ms365PendingKey(cfg));
+  if(raw === null || raw === undefined) return null;
+  try { return JSON.parse(raw); } catch(e) { return null; }
+
+async ms365ClearPending() =>
+  const cfg = ms365Internal().config;
+  await ms365StorageDelete(ms365StorageAdapter(cfg && cfg.storage), ms365PendingKey(cfg));
+
+// ── PKCE (RFC 7636) ──
+ms365PkceChars() =>
+  return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+
+ms365GenerateCodeVerifier(length) =>
+  const n = Math.max(43, Math.min(128, length || 64));
+  const bytes = new Uint8Array(n);
+  const chars = ms365PkceChars();
+  const c = (typeof crypto !== "undefined") ? crypto : null;
+  if(c && c.getRandomValues) c.getRandomValues(bytes);
+  else for(let i = 0; i < n; i++) bytes[i] = Math.floor(Math.random() * 256);
+  let out = "";
+  for(let i = 0; i < n; i++) out += chars[bytes[i] % chars.length];
+  return out;
+
+ms365Base64UrlEncode(bytes) =>
+  let bin = "";
+  for(let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+async ms365ComputeCodeChallenge(verifier) =>
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return ms365Base64UrlEncode(new Uint8Array(digest));
+
+ms365GenerateState() =>
+  return "ms365_" + ms365GenerateCodeVerifier(32);
+
+// ── URL building ──
+ms365Endpoint(cfg, url) =>
+  return String(url).replace("{tenant}", encodeURIComponent(cfg.tenant));
+
+ms365DefaultRelayPage() =>
+  return "https://perchance.org/ms365-integration";
+
+// "relay" mode: point the Azure redirect URI at THIS plugin's own page, which
+// then postMessages the authorization response back to the opener. That way
+// every importer/fork can share one registered redirect URI instead of
+// registering each <publicId>.perchance.org/<name> origin.
+ms365RelayRedirect(cfg, opts) =>
+  const hasOverride = !!(opts && Object.prototype.hasOwnProperty.call(opts, "relay"));
+  const r = hasOverride ? opts.relay : (cfg && cfg.relay);
+  if(!r) return "";
+  if(r === true) return ms365DefaultRelayPage();
+  const s = String(r);
+  if(/^https?:\/\//i.test(s)) return s;
+  return "https://perchance.org/" + s;
+
+ms365ResolveRedirectUri(cfg, explicit, opts) =>
+  if(explicit) return explicit;
+  if(typeof cfg.redirectUri === "function") { const u = cfg.redirectUri(); if(u) return u; }
+  if(cfg.redirectUri) return cfg.redirectUri;
+  const relay = ms365RelayRedirect(cfg, opts);
+  if(relay) return relay;
+  if(typeof window !== "undefined" && window.location && window.location.pathname) {
+    return window.location.origin + window.location.pathname;
+  }
+  return "";
+
+async ms365BuildAuthorizeUrl(overrides = {}) =>
+  const cfg = ms365RequireConfig();
+  const verifier = overrides.codeVerifier || ms365GenerateCodeVerifier(64);
+  const state = overrides.state || ms365GenerateState();
+  const challenge = await ms365ComputeCodeChallenge(verifier);
+  const redirectUri = ms365ResolveRedirectUri(cfg, overrides.redirectUri, overrides);
+  const baseScopes = overrides.extraScopes && overrides.extraScopes.length ? cfg.scopes.concat(overrides.extraScopes) : cfg.scopes;
+  const params = {
+    client_id: cfg.clientId,
+    response_type: "code",
+    redirect_uri: redirectUri,
+    scope: baseScopes.join(" "),
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    state: state
+  };
+  if(overrides.prompt || cfg.prompt) params.prompt = overrides.prompt || cfg.prompt;
+  return {
+    url: ms365Endpoint(cfg, cfg.authorizeUrl) + "?" + new URLSearchParams(params).toString(),
+    verifier: verifier,
+    state: state,
+    challenge: challenge,
+    redirectUri: redirectUri
+  };
+
+async ms365PrepareAuth(overrides = {}) =>
+  const built = await ms365BuildAuthorizeUrl(overrides);
+  await ms365PersistPending({ state: built.state, verifier: built.verifier, redirectUri: built.redirectUri, createdAt: Date.now() });
+  return built;
+
+// ── token exchange / refresh ──
+ms365NormalizeTokens(data) =>
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || null,
+    idToken: data.id_token || null,
+    tokenType: data.token_type || "Bearer",
+    scope: data.scope ? data.scope.split(/[\s,]+/).filter(Boolean) : [],
+    expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000,
+    raw: data
+  };
+
+async ms365PostToken(cfg, body, fetchImpl, networkMsg) =>
+  const doFetch = fetchImpl || ms365ResolveFetchWith(cfg.fetchImpl);
+  let res;
+  try {
+    res = await doFetch(ms365Endpoint(cfg, cfg.tokenUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: body.toString()
+    });
+  } catch(err) {
+    throw new Error(networkMsg + err.message);
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch(err) {
+    throw new Error("ms365.oauth2: token endpoint returned a non-JSON response (HTTP " + (res && res.status) + ").");
+  }
+  if(!res.ok || data.error || !data.access_token) {
+    throw ms365MapTokenError(data, res && res.status);
+  }
+  return ms365NormalizeTokens(data);
+
+async ms365ExchangeCodeForTokens(code, verifier, opts = {}) =>
+  const cfg = ms365RequireConfig();
+  const pending = (await ms365ReadPending()) || {};
+  const redirectUri = opts.redirectUri || pending.redirectUri || ms365ResolveRedirectUri(cfg, null, opts);
+  const body = new URLSearchParams({
+    client_id: cfg.clientId,
+    grant_type: "authorization_code",
+    code: code,
+    redirect_uri: redirectUri,
+    code_verifier: verifier
+  });
+  const tokens = await ms365PostToken(cfg, body, opts.fetchImpl, "ms365.oauth2: token request failed at the network level: ");
+  await ms365ClearPending();
+  return tokens;
+
+async ms365RefreshTokens(refreshToken, opts = {}) =>
+  const cfg = ms365RequireConfig();
+  const body = new URLSearchParams({
+    client_id: cfg.clientId,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    redirect_uri: opts.redirectUri || ms365ResolveRedirectUri(cfg, null, opts),
+    scope: cfg.scopes.join(" ")
+  });
+  return ms365PostToken(cfg, body, opts.fetchImpl, "ms365.oauth2: token refresh failed at the network level: ");
+
+ms365RefreshMargin(cfg, session) =>
+  if(!session || !session.tokens || !session.savedAt) return cfg.refreshMarginMs;
+  const lifetime = session.tokens.expiresAt - session.savedAt;
+  if(!(lifetime > 0)) return cfg.refreshMarginMs;
+  return Math.min(cfg.refreshMarginMs, lifetime * 0.2);
+
+async ms365GetValidToken(opts = {}) =>
+  const st = ms365Internal();
+  const session = await ms365LoadSession();
+  if(!session || !session.tokens || !session.tokens.accessToken) return null;
+  const t = session.tokens;
+  const cfg = st.config;
+  const margin = cfg ? ms365RefreshMargin(cfg, session) : 5 * 60 * 1000;
+  if(!opts.force && t.expiresAt - margin > Date.now()) return t.accessToken;
+  if(st.refreshInFlight) return st.refreshInFlight;
+  if(!cfg) throw new Error("ms365.oauth2: not configured — call configure({ clientId, tenant, ... }) first.");
+  const promise = (async () => {
+    try {
+      if(!t.refreshToken) {
+        await ms365ClearSession();
+        const err = new Error("ms365.oauth2: access token expired and no refresh token is available — sign in again.");
+        err.code = "no_refresh_token";
+        ms365EmitSessionExpired(err);
+        return null;
+      }
+      const newTokens = await ms365RefreshTokens(t.refreshToken, opts);
+      const next = await ms365CommitSession(newTokens, session.profile);
+      return next.tokens.accessToken;
+    } catch(err) {
+      const c = err && err.code;
+      if(c === "invalid_grant" || c === "interaction_required" || c === "consent_required" || c === "login_required") {
+        await ms365ClearSession();
+        ms365EmitSessionExpired(err);
+        return null;
+      }
+      throw err;
+    }
+  })();
+  const clear = () => { if(st.refreshInFlight === promise) st.refreshInFlight = null; };
+  promise.then(clear, clear);
+  st.refreshInFlight = promise;
+  return promise;
+
+async ms365RefreshSession(opts = {}) =>
+  return ms365GetValidToken(Object.assign({ force: true }, opts || {}));
+
+// ── auto-refresh timer ──
+ms365StopAutoRefresh() =>
+  const st = ms365Internal();
+  if(st.autoTimer) { clearTimeout(st.autoTimer); st.autoTimer = null; }
+
+ms365ScheduleAutoRefreshWith(session, cfg) =>
+  const st = ms365Internal();
+  if(!cfg || !cfg.autoRefresh) return null;
+  if(!session || !session.tokens || !session.tokens.expiresAt) return null;
+  let delay = session.tokens.expiresAt - ms365RefreshMargin(cfg, session) - Date.now();
+  if(delay < 5000) delay = 5000;
+  st.autoTimer = setTimeout(async () => {
+    st.autoTimer = null;
+    try {
+      await ms365GetValidToken();
+    } catch(e) {
+      ms365ScheduleAutoRefresh();
+    }
+  }, delay);
+  return delay;
+
+ms365ScheduleAutoRefresh(session, opts = {}) =>
+  ms365StopAutoRefresh();
+  const cfg = ms365Internal().config;
+  if(!cfg || !cfg.autoRefresh) return null;
+  const s = session || ms365LoadSession();
+  if(ms365IsThenable(s)) {
+    s.then((x) => { ms365ScheduleAutoRefreshWith(x, cfg); return x; }, () => null);
+    return null;
+  }
+  return ms365ScheduleAutoRefreshWith(s, cfg);
+
+// ── auth error messages ──
+ms365AuthErrorMessages() =>
+  return {
+    access_denied: "Sign-in was declined — retry when you are ready.",
+    invalid_scope: "One or more requested permission scopes are not supported or not consented.",
+    login_required: "Microsoft requires an interactive sign-in for this request.",
+    consent_required: "Consent for this application's permissions is required.",
+    interaction_required: "The request needs your interaction with Microsoft.",
+    temporarily_unavailable: "Microsoft sign-in is temporarily unavailable — please retry.",
+    invalid_grant: "The authorization code is invalid or has expired — please sign in again.",
+    invalid_client: "The application (client) ID or its configuration is invalid — check the Azure app registration.",
+    unauthorized_client: "This application is not authorized for the requested scope.",
+    unsupported_grant_type: "The token grant type is not supported by Microsoft.",
+    server_error: "Microsoft reported a server error — please retry shortly."
+  };
+
+ms365BuildAuthError(code, description) =>
+  const map = ms365AuthErrorMessages();
+  const friendly = map[code] || "Microsoft authentication failed.";
+  const err = new Error(friendly);
+  err.code = code;
+  err.original = description || "";
+  err.isMs365Error = true;
+  return err;
+
+ms365MapTokenError(data, status) =>
+  const err = ms365BuildAuthError((data && data.error) || "http_" + status, (data && data.error_description) || "");
+  err.httpStatus = status;
+  return err;
+
+// ── id_token / profile ──
+ms365DecodeJwtPayload(token) =>
+  if(!token) return null;
+  const parts = String(token).split(".");
+  if(parts.length < 2) return null;
+  try {
+    let b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    while(b64.length % 4) b64 += "=";
+    return JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch(e) { return null; }
+
+ms365ProfileFromIdToken(idToken) =>
+  const p = ms365DecodeJwtPayload(idToken);
+  if(!p) return null;
+  return {
+    name: p.name || p.preferred_username || p.email || null,
+    preferredUsername: p.preferred_username || null,
+    email: p.email || p.preferred_username || null,
+    sub: p.sub || null,
+    oid: p.oid || null,
+    tenantId: p.tid || null,
+    raw: p
+  };
+
+// ── interactive flow ──
+ms365DefaultNavigate(url) =>
+  if(typeof window !== "undefined" && window.location) window.location.assign(url);
+
+ms365AbortPopups(st) =>
+  st = st || ms365Internal();
+  const entries = st.popups.slice();
+  st.popups = [];
+  entries.forEach((entry) => {
+    entry.settled = true;
+    try { if(entry.cleanup) entry.cleanup(); } catch(e) {}
+    try { entry.reject(new Error("ms365.oauth2: the pending sign-in was cancelled.")); } catch(e) {}
+  });
+
+async ms365LaunchAuthFlow(opts = {}) =>
+  const built = await ms365PrepareAuth(opts);
+  const popup = ms365OpenPopup(built.url);
+  if(popup) {
+    return ms365RegisterPopupAuth(built.state, built.verifier, built.redirectUri, popup, opts);
+  }
+  const cfg = ms365RequireConfig();
+  const navigate = cfg.navigate || ms365DefaultNavigate;
+  navigate(built.url);
+  return null;
+
+ms365OpenPopup(url) =>
+  const cfg = ms365RequireConfig();
+  try {
+    const w = Math.min(cfg.popupWidth, 900);
+    const h = Math.min(cfg.popupHeight, 800);
+    const left = Math.max(0, Math.round((window.screen.width - w) / 2));
+    const top = Math.max(0, Math.round((window.screen.height - h) / 2));
+    return window.open(url, "ms365-auth", "width=" + w + ",height=" + h + ",left=" + left + ",top=" + top + ",resizable=yes,scrollbars=yes");
+  } catch(e) { return null; }
+
+ms365WatchPopupClose(popup, entry, onClosed) =>
+  const poll = setInterval(() => {
+    if(entry.settled) { clearInterval(poll); return; }
+    if(popup.closed) {
+      clearInterval(poll);
+      setTimeout(() => { if(!entry.settled) onClosed(); }, 1200);
+    }
+  }, 500);
+
+ms365RegisterPopupAuth(state, verifier, redirectUri, popup, opts) =>
+  const cfg = ms365RequireConfig();
+  const st = ms365Internal();
+  return new Promise((resolve, reject) => {
+    const entry = { settled: false, timer: null, cleanup: null, reject: reject };
+    const cleanup = () => {
+      clearTimeout(entry.timer);
+      try { window.removeEventListener("message", onMessage); } catch(e) {}
+      const i = st.popups.indexOf(entry);
+      if(i >= 0) st.popups.splice(i, 1);
+    };
+    entry.cleanup = cleanup;
+    entry.reject = reject;
+    entry.timer = setTimeout(() => {
+      entry.settled = true;
+      cleanup();
+      reject(new Error("ms365.oauth2: sign-in timed out."));
+    }, cfg.authTimeoutMs);
+
+    async function onMessage(ev) {
+      const d = ev && ev.data;
+      if(!d) return;
+      const isRelay = d.type === "ms365:auth";
+      const isPopup = d.type === "ms365-auth";
+      if(!isRelay && !isPopup) return;
+      if(d.state !== state) return;
+      if(!isRelay) {
+        if(ev.origin !== window.location.origin) return;
+      }
+      // Relay messages arrive from the plugin's own page — a different origin,
+      // in a window we have no handle on — so the source cannot be checked.
+      // That is safe: the message must still carry our unguessable per-request
+      // `state`, and the returned code is useless without the PKCE verifier,
+      // which never leaves this window.
+      entry.settled = true;
+      // A relayed response can't close the sign-in popup from its own side (it
+      // runs cross-origin inside the shell's iframe), so close the handle we
+      // opened as soon as we've received it.
+      if(isRelay && popup) { try { popup.close(); } catch(err) {} }
+      if(d.error) {
+        cleanup();
+        reject(ms365BuildAuthError(d.error, d.errorDescription));
+        return;
+      }
+      try {
+        const tokens = await ms365ExchangeCodeForTokens(d.code, verifier, { redirectUri: redirectUri });
+        cleanup();
+        const profile = ms365ProfileFromIdToken(tokens.idToken);
+        await ms365CommitSession(tokens, profile);
+        resolve({ tokens: tokens, profile: profile });
+      } catch(err) {
+        cleanup();
+        reject(err);
+      }
+    }
+    window.addEventListener("message", onMessage);
+    st.popups.push(entry);
+    if(popup) ms365WatchPopupClose(popup, entry, () => {
+      entry.settled = true;
+      cleanup();
+      reject(new Error("ms365.oauth2: sign-in window was closed before completing."));
+    });
+  });
+
+// Candidate windows to send a relayed authorization response to. In relay mode
+// the plugin's page loads inside the perchance shell's iframe inside the sign-in
+// popup, so `window.opener` is null there — the opener actually lives one level
+// up, on the top-level shell window (`opener` is one of the few properties that
+// stays readable across origins).
+ms365OpenerTargets() =>
+  const out = [];
+  const add = (w) => {
+    try {
+      if(w && w !== window && out.indexOf(w) === -1) out.push(w);
+    } catch(e) {}
+  };
+  try { add(window.opener); } catch(e) {}
+  try { add(window.parent && window.parent.opener); } catch(e) {}
+  try { add(window.top && window.top.opener); } catch(e) {}
+  return out;
+
+// The redirect target when relay mode is used: this plugin's own page, loaded
+// with the authorization response. It forwards the response to the opener and
+// closes itself.
+async ms365RelayToOpener(params, state) =>
+  const msg = { type: "ms365:auth", state: state };
+  if(params.get("code")) msg.code = params.get("code");
+  else {
+    msg.error = params.get("error") || "unknown_error";
+    msg.errorDescription = params.get("error_description") || "";
+  }
+  const targets = ms365OpenerTargets();
+  for(const t of targets) {
+    try { t.postMessage(msg, "*"); } catch(e) {}
+  }
+  // We can usually not close the sign-in popup from here: in relay mode this
+  // page runs inside the perchance shell's iframe, and `window.close()` only
+  // works on windows opened by script. The opener closes the popup as soon as it
+  // receives this message; the call below covers the direct-navigation case.
+  try { window.close(); } catch(e) {}
+  return { status: "relayed", state: state, targets: targets.length };
+
+// Safe to call on every page load: no-op unless the URL carries an auth
+// response (?code / ?error + ?state). Handles three shapes:
+//   * a relay page (?...&__ms365_relay=1, or any opener page with no local
+//     pending record) → postMessage back to the opener and close
+//   * a same-origin popup → forward to the opener via postMessage
+//   * a same-tab return → exchange the code locally
+async ms365HandleCallback(opts = {}) =>
+  const loc = (typeof window !== "undefined") ? window.location : null;
+  const params = opts.params || (loc ? new URLSearchParams(loc.search) : null);
+  if(!params) return null;
+  const state = params.get("state");
+  if(!state) return null;
+  const fromLocation = !opts.params;
+  const hasOpener = typeof window !== "undefined" && ms365OpenerTargets().length > 0;
+  const hasResponse = !!(params.get("code") || params.get("error"));
+
+  if(params.get("__ms365_relay")) return ms365RelayToOpener(params, state);
+
+  const pending = await ms365ReadPending();
+  if(!pending || pending.state !== state) {
+    if(fromLocation && hasOpener && hasResponse) return ms365RelayToOpener(params, state);
+    await ms365ClearPending();
+    return { status: "error", error: new Error("ms365.oauth2: state mismatch — authentication was rejected (possible CSRF).") };
+  }
+  await ms365ClearPending();
+
+  if(typeof window !== "undefined" && window.opener) {
+    const msg = { type: "ms365-auth", state: state };
+    if(params.get("code")) msg.code = params.get("code");
+    else {
+      msg.error = params.get("error") || "unknown_error";
+      msg.errorDescription = params.get("error_description") || "";
+    }
+    try { window.opener.postMessage(msg, window.location.origin); } catch(e) {}
+    try { window.close(); } catch(e) {}
+    return { status: "forwarded", state: state };
+  }
+
+  if(params.get("error")) {
+    return { status: "error", error: ms365BuildAuthError(params.get("error"), params.get("error_description")) };
+  }
+  const code = params.get("code");
+  if(!code) {
+    return { status: "error", error: new Error("ms365.oauth2: authorization response did not include a code.") };
+  }
+  try {
+    const tokens = await ms365ExchangeCodeForTokens(code, pending.verifier, { redirectUri: pending.redirectUri });
+    const profile = ms365ProfileFromIdToken(tokens.idToken);
+    await ms365CommitSession(tokens, profile);
+    return { status: "success", tokens: tokens, profile: profile };
+  } catch(error) {
+    return { status: "error", error: error };
+  }
+
+
+// ── 7. ERROR MAPPING ENGINE ────────────────────────────────────────────────
+// Maps Microsoft Graph error codes (and HTTP statuses) to human-readable
+// verdicts so callers fail gracefully instead of surfacing raw Graph JSON.
+//   ms365MapGraphError(err)   → { code, status, friendly, category, hint, retryable }
+//   ms365ToFriendlyError(err) → the same Error with .friendly/.category/.hint/.mapped
+
+ms365CodeMap() =>
+  const st = ms365Internal();
+  if(st.codeMap) return st.codeMap;
+  st.codeMap = {
+    // ── auth / permission ──
+    AccessDenied: { friendly: "You don't have permission to perform this action.", category: "permission", hint: "Ask your Microsoft 365 admin to grant the needed permission — some scopes require admin consent." },
+    accessDenied: { friendly: "You don't have permission to perform this action.", category: "permission", hint: "Ask your Microsoft 365 admin to grant the needed permission — some scopes require admin consent." },
+    Forbidden: { friendly: "Access is forbidden for this resource.", category: "permission", hint: "The account or the app is missing permission for this resource." },
+    Authorization_RequestDenied: { friendly: "Your organization's admin has not granted consent for this operation.", category: "consent", hint: "Ask the tenant admin to review the app's requested permissions in the Entra admin center." },
+    Authorization_IdentityNotFound: { friendly: "The user or identity could not be found.", category: "identity", hint: "Check that the user exists in this tenant and has a valid account." },
+    Authorization_PermissionDenied: { friendly: "The user lacks the permission required for this operation.", category: "permission", hint: "Request the missing scope via root.ms365.scopedPermissions.ensureScopes(...)." },
+    unauthenticated: { friendly: "Authentication failed — the access token is missing, invalid or expired.", category: "auth", hint: "Sign in again, or ensure the token is refreshed via oauth2.getValidToken()." },
+    authenticationError: { friendly: "Microsoft could not authenticate this request.", category: "auth", hint: "Sign in again. If it persists, the app registration may be misconfigured." },
+    invalidAuthenticationToken: { friendly: "The access token is invalid or has expired.", category: "auth", hint: "The token is auto-refreshed by the token lifecycle manager; sign in again if this recurs." },
+    InvalidAuthenticationToken: { friendly: "The access token is invalid or has expired.", category: "auth", hint: "The token is auto-refreshed by the token lifecycle manager; sign in again if this recurs." },
+    invalidClient: { friendly: "The app registration is invalid.", category: "config", hint: "Check the Client (Application) ID and that the app registration exists." },
+    invalidGrant: { friendly: "The refresh token is invalid or has been revoked.", category: "auth", hint: "Sign in again to obtain a fresh token." },
+    invalidRequest: { friendly: "The request was malformed or contained invalid values.", category: "request", hint: "Review the request body and parameters." },
+    consentNeeded: { friendly: "Your consent is required before this operation can run.", category: "consent", hint: "Use root.ms365.scopedPermissions.ensureScopes(...) to request the missing permission." },
+    interactionRequired: { friendly: "This operation needs you to sign in interactively.", category: "consent", hint: "Launch the auth flow again (prompt=consent) to grant the new permission." },
+    loginRequired: { friendly: "You need to sign in to continue.", category: "auth", hint: "Sign in with Microsoft." },
+    consent_required: { friendly: "Admin or user consent is required for this operation.", category: "consent", hint: "Request the scope via root.ms365.scopedPermissions.ensureScopes(...) or ask the admin." },
+
+    // ── resource / item ──
+    NotFound: { friendly: "The requested resource was not found.", category: "not_found", hint: "Check the resource ID, path or search query." },
+    itemNotFound: { friendly: "The item was not found.", category: "not_found", hint: "It may have been moved, renamed or deleted." },
+    ErrorItemNotFound: { friendly: "The item was not found.", category: "not_found", hint: "It may have been moved, renamed or deleted." },
+    Request_ResourceNotFound: { friendly: "The requested resource was not found.", category: "not_found", hint: "Check the ID or path used in the request." },
+    ResourceNotFound: { friendly: "The requested resource was not found.", category: "not_found", hint: "Check the ID or path used in the request." },
+    ErrorFolderNotFound: { friendly: "The mail folder was not found.", category: "not_found", hint: "Check the folder ID or name." },
+    SyncFolderNotFound: { friendly: "The sync folder was not found.", category: "not_found", hint: "The folder may not exist in this mailbox." },
+    ErrorInvalidUser: { friendly: "The user is invalid or does not exist.", category: "identity", hint: "Check the user principal name or ID." },
+
+    // ── mail ──
+    MailboxNotEnabledForRESTAPI: { friendly: "This mailbox isn't enabled for the REST API.", category: "mailbox", hint: "A Microsoft 365 Exchange Online mailbox is required (personal accounts can't be used here)." },
+    MailboxInconsistentState: { friendly: "The mailbox is in an inconsistent state — try again.", category: "mailbox", retryable: true },
+    MessageTooBig: { friendly: "The message is too large to send.", category: "mailbox", hint: "Reduce the message size or attachment sizes." },
+    RecipientNotFound: { friendly: "One or more recipients could not be found.", category: "mailbox", hint: "Check the recipient email addresses." },
+    NoResolvableSmtpAddress: { friendly: "One or more recipients have no valid email address.", category: "mailbox", hint: "Check recipient addresses, especially distribution groups." },
+    MessageRecipientHasNoSMTPAddress: { friendly: "A recipient has no SMTP address.", category: "mailbox", hint: "Check the recipient list." },
+    SendAsDenied: { friendly: "You are not allowed to send as this identity.", category: "permission", hint: "Ask the tenant admin for send-as permission." },
+    CannotDeleteSubmittedMessage: { friendly: "This message was already submitted and can't be deleted.", category: "mailbox", hint: "A submitted draft can no longer be deleted." },
+    AttachmentSizeLimitExceeded: { friendly: "The attachment is larger than the allowed limit.", category: "mailbox", hint: "Graph allows files up to 150 MB per message; use a smaller attachment." },
+    FolderCountExceeded: { friendly: "The folder hierarchy is too deep.", category: "mailbox" },
+
+    // ── files / OneDrive ──
+    FileNotAvailableForUpload: { friendly: "The file is not available for upload right now.", category: "files", retryable: true },
+    FileNameTooLong: { friendly: "The file name is too long.", category: "files", hint: "Use a shorter file name (max 255 characters)." },
+    FileNameContainsInvalidCharacters: { friendly: "The file name contains characters that aren't allowed.", category: "files", hint: "Remove characters such as * : \\ / ? and control characters." },
+    NameAlreadyExists: { friendly: "An item with this name already exists.", category: "files", hint: "Use a different name or set conflictBehavior to 'replace'." },
+    nameAlreadyExists: { friendly: "An item with this name already exists.", category: "files", hint: "Use a different name or set conflictBehavior to 'replace'." },
+    MalwareDetected: { friendly: "Malware was detected in the file and it was blocked.", category: "files" },
+    QuotaLimitReached: { friendly: "The storage quota for this account has been reached.", category: "files", hint: "Free up space or use a different drive." },
+    OneDriveNotEnabled: { friendly: "OneDrive is not enabled for this account.", category: "files", hint: "The user needs an active OneDrive for Business licence." },
+    NotSupportedResourceType: { friendly: "This resource type isn't supported.", category: "files" },
+    SharingLinkCreationFailed: { friendly: "The sharing link could not be created.", category: "files" },
+    InvalidRange: { friendly: "The requested byte range is invalid.", category: "files" },
+    ErrorAccessDenied: { friendly: "Access to the file or folder was denied.", category: "permission", hint: "Check that you have at least read permission on the item." },
+
+    // ── throttle / service ──
+    ActivityLimitReached: { friendly: "Microsoft is throttling requests from this app.", category: "throttle", retryable: true, hint: "Slow down or retry after the delay suggested by the Retry-After header." },
+    activityLimitReached: { friendly: "Microsoft is throttling requests from this app.", category: "throttle", retryable: true, hint: "Slow down or retry after the delay suggested by the Retry-After header." },
+    TooManyRequests: { friendly: "Too many requests — Microsoft is throttling this app.", category: "throttle", retryable: true, hint: "Retry after the suggested delay; the wrapper already backs off automatically." },
+    ThrottledRequests: { friendly: "Microsoft is throttling requests from this app.", category: "throttle", retryable: true },
+    ServiceNotAvailable: { friendly: "Microsoft 365 is temporarily unavailable.", category: "service", retryable: true, hint: "Retry shortly — the wrapper backs off automatically." },
+    ServiceUnavailable: { friendly: "Microsoft 365 is temporarily unavailable.", category: "service", retryable: true, hint: "Retry shortly — the wrapper backs off automatically." },
+    GeneralException: { friendly: "Microsoft 365 returned a generic error.", category: "service", retryable: true },
+    ResourceModified: { friendly: "The resource was modified by someone else — reload and retry.", category: "conflict", hint: "Re-fetch the item to get its current state." },
+    ResyncRequired: { friendly: "Your local copy is out of sync — reload it.", category: "conflict" },
+    NotAllowed: { friendly: "This operation is not allowed for the current context.", category: "permission", hint: "The account or item state doesn't permit this operation." },
+    NotSupported: { friendly: "This operation is not supported.", category: "request" },
+
+    // ── internal (ms365 modules) ──
+    not_found: { friendly: "The requested resource was not found.", category: "not_found", hint: "Check the ID, path or search query used in the request." },
+    not_authenticated: { friendly: "You aren't signed in — an access token is required for this call.", category: "auth", hint: "Call oauth2.launchAuthFlow() or sign in via the widget first." },
+    network_error: { friendly: "The request failed at the network level — is the app online?", category: "network", retryable: true },
+    no_refresh_token: { friendly: "The access token expired and there is no refresh token — sign in again.", category: "auth", hint: "Make sure the offline_access scope is granted." }
+  };
+  return st.codeMap;
+
+ms365StatusMap() =>
+  const st = ms365Internal();
+  if(st.statusMap) return st.statusMap;
+  st.statusMap = {
+    400: { friendly: "The request was malformed (HTTP 400).", category: "request" },
+    401: { friendly: "Authentication failed — the access token is missing, invalid or expired (HTTP 401).", category: "auth", hint: "Sign in again; the wrapper auto-refreshes on 401." },
+    403: { friendly: "Access is forbidden — you don't have permission for this resource (HTTP 403).", category: "permission" },
+    404: { friendly: "The requested resource was not found (HTTP 404).", category: "not_found" },
+    405: { friendly: "This method is not allowed on the resource (HTTP 405).", category: "request" },
+    409: { friendly: "The resource was modified elsewhere — reload and retry (HTTP 409).", category: "conflict" },
+    412: { friendly: "A precondition on the request failed (HTTP 412).", category: "conflict" },
+    413: { friendly: "The request payload is too large (HTTP 413).", category: "request" },
+    415: { friendly: "The media type isn't supported (HTTP 415).", category: "request" },
+    422: { friendly: "The server understood the request but couldn't process it (HTTP 422).", category: "request" },
+    429: { friendly: "Microsoft is throttling requests — retry after the suggested delay (HTTP 429).", category: "throttle", retryable: true },
+    500: { friendly: "An internal error occurred on Microsoft's servers (HTTP 500).", category: "service", retryable: true },
+    501: { friendly: "This operation is not implemented (HTTP 501).", category: "request" },
+    503: { friendly: "Microsoft 365 is temporarily unavailable — retry shortly (HTTP 503).", category: "service", retryable: true },
+    504: { friendly: "Microsoft's servers timed out — retry shortly (HTTP 504).", category: "service", retryable: true }
+  };
+  return st.statusMap;
+
+ms365DefaultFriendly(err, code, status) =>
+  const raw = err && (err.message || (err.body && err.body.error && err.body.error.message) || (err.body && err.body.error && err.body.error.code) || "");
+  const cleaned = String(raw).replace(/^ms365\.graph:\s*/, "").trim();
+  const suffix = status != null ? " (HTTP " + status + ")" : "";
+  if(cleaned) return cleaned + suffix;
+  return "Microsoft Graph request failed" + (code ? " — " + code : "") + suffix + ".";
+
+ms365MapGraphError(err) =>
+  const code = err && err.code ? String(err.code) : null;
+  const status = err && err.status != null ? Number(err.status) : null;
+  const codeMap = ms365CodeMap();
+  const statusMap = ms365StatusMap();
+  const entry = (code && codeMap[code]) || (status != null && statusMap[status]) || null;
+  const friendly = entry ? entry.friendly : ms365DefaultFriendly(err, code, status);
+  return {
+    code: code || (status != null ? "http_" + status : "unknown"),
+    status: status,
+    friendly: friendly,
+    category: (entry && entry.category) || "unknown",
+    hint: (entry && entry.hint) || "",
+    retryable: !!(entry && entry.retryable) || status === 429 || status === 503 || status === 504
+  };
+
+ms365ToFriendlyError(err) =>
+  let e = err;
+  if(!(e instanceof Error)) {
+    e = new Error(String((err && err.message) || err));
+    if(err && typeof err === "object") {
+      if(err.code !== undefined) e.code = err.code;
+      if(err.status !== undefined) e.status = err.status;
+      if(err.body !== undefined) e.body = err.body;
+    }
+  }
+  const mapped = ms365MapGraphError(e);
+  if(!("friendly" in e)) e.friendly = mapped.friendly;
+  if(!("category" in e)) e.category = mapped.category;
+  if(!("hint" in e)) e.hint = mapped.hint;
+  e.mapped = mapped;
+  return e;
+
+ms365FormatFriendlyError(err) =>
+  const mapped = err && err.mapped ? err.mapped : ms365MapGraphError(err);
+  let out = mapped.friendly;
+  if(mapped.hint) out += "\n" + mapped.hint;
+  return out;
+
+
+// ── 8. ODATA HELPERS ───────────────────────────────────────────────────────
+// Build Microsoft Graph OData query syntax ($filter expressions, $select
+// lists, date/time values).
+
+ms365EscapeODataStr(s) =>
+  return String(s).replace(/'/g, "''");
+
+// Date / epoch-ms / ISO string → "YYYY-MM-DDTHH:mm:ssZ" (ms dropped).
+ms365ToODataDate(v) =>
+  if(v === undefined || v === null || v === "") return null;
+  const d = v instanceof Date ? v : new Date(typeof v === "string" ? v : Number(v));
+  if(isNaN(d.getTime())) throw new Error("ms365.odata: invalid date value " + v);
+  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+
+// Graph "dateTimeTimeZone" object { dateTime, timeZone }.
+ms365ToGraphDateTime(v, timeZone) =>
+  if(v && typeof v === "object" && "dateTime" in v) {
+    return { dateTime: v.dateTime, timeZone: timeZone || v.timeZone || "UTC" };
+  }
+  const iso = ms365ToODataDate(v);
+  return { dateTime: iso, timeZone: timeZone || "UTC" };
+
+// Normalize a filter value that may be a single item or an array (any-of).
+ms365AnyOf(values) =>
+  const arr = Array.isArray(values) ? values : (values === undefined || values === null ? [] : [values]);
+  return arr.filter((v) => v !== undefined && v !== null && v !== "");
+
+
+// ── 9. GRAPH REQUEST WRAPPER ───────────────────────────────────────────────
+// The standardized handler for every Microsoft Graph call: bearer auth
+// (auto-refreshed), OData query strings with literal `$` keys, 429/503/504
+// backoff honoring Retry-After, one forced-refresh-and-retry on 401, JSON
+// parsing, and @odata.nextLink paging.
+
+ms365GraphDefaults() =>
+  return {
+    graphBase: "https://graph.microsoft.com/v1.0",
+    maxRetries: 4,
+    baseBackoffMs: 500,
+    maxBackoffMs: 30000,
+    backoffMultiplier: 2,
+    jitter: 0.25,
+    retryStatuses: [429, 503, 504],
+    allowTokenRetry: true
+  };
+
+ms365GraphSettings() =>
+  const st = ms365Internal();
+  if(!st.graphSettings) st.graphSettings = ms365GraphDefaults();
+  return st.graphSettings;
+
+ms365ConfigureGraph(opts = {}) =>
+  const st = ms365Internal();
+  st.graphSettings = Object.assign({}, ms365GraphSettings(), opts);
+  return Object.assign({}, st.graphSettings);
+
+ms365ResetGraphConfig(opts = {}) =>
+  const st = ms365Internal();
+  st.graphSettings = Object.assign({}, ms365GraphDefaults(), opts);
+  return Object.assign({}, st.graphSettings);
+
+ms365GetGraphSettings() =>
+  return Object.assign({}, ms365GraphSettings());
+
+ms365GetGraphStats() =>
+  return Object.assign({}, ms365Internal().graphStats);
+
+ms365ResetGraphStats() =>
+  const st = ms365Internal();
+  st.graphStats = { requests: 0, retries: 0, throttledCount: 0 };
+  return Object.assign({}, st.graphStats);
+
+ms365Sleep(ms) =>
+  return new Promise((r) => setTimeout(r, ms));
+
+async ms365GraphRequest(method, path, opts = {}) =>
+  const st = ms365Internal();
+  const o = Object.assign({}, ms365GraphSettings(), opts);
+  let token = o.token || (await ms365GetValidToken());
+  if(!token) {
+    const err = new Error("ms365.graph: not authenticated — no access token available.");
+    err.code = "not_authenticated";
+    throw ms365ToFriendlyError(err);
+  }
+  const url = ms365BuildUrl(method, path, o);
+  st.graphStats.requests++;
+  let refreshedOnce = false;
+  let attempt = 0;
+  for(;;) {
+    const headers = ms365BuildHeaders(o, token);
+    const body = ms365BuildBody(o);
+    let res;
+    try {
+      res = await (o.fetchImpl || ms365ResolveFetch())(url, { method: method, headers: headers, body: body });
+    } catch(e) {
+      if(attempt < o.maxRetries) {
+        st.graphStats.retries++;
+        await ms365Sleep(ms365Backoff(attempt, o));
+        attempt++;
+        continue;
+      }
+      const err = new Error("ms365.graph: request failed at the network level: " + e.message);
+      err.code = "network_error";
+      err.retryable = true;
+      throw ms365ToFriendlyError(err);
+    }
+    const status = res.status == null ? (res.ok ? 200 : 0) : res.status;
+
+    if(status === 429) st.graphStats.throttledCount++;
+
+    if(status === 401 && !refreshedOnce && o.allowTokenRetry) {
+      refreshedOnce = true;
+      let fresh = null;
+      try { fresh = await ms365GetValidToken({ force: true }); } catch(e) { fresh = null; }
+      if(fresh) {
+        token = fresh;
+        attempt = 0;
+        continue;
+      }
+    }
+
+    if(o.retryStatuses.indexOf(status) >= 0 && attempt < o.maxRetries) {
+      st.graphStats.retries++;
+      const after = ms365RetryAfterMs(res);
+      const delay = after === null ? ms365Backoff(attempt, o) : after;
+      if(o.onRetry) { try { o.onRetry({ attempt: attempt, status: status, delayMs: delay }); } catch(e) {} }
+      await ms365Sleep(delay);
+      attempt++;
+      continue;
+    }
+
+    if(o.rawResponse) return res;
+    return ms365ParseResponse(res);
+  }
+
+ms365GraphGet(path, opts) =>
+  return ms365GraphRequest("GET", path, opts);
+
+ms365GraphPost(path, opts) =>
+  return ms365GraphRequest("POST", path, opts);
+
+ms365GraphPatch(path, opts) =>
+  return ms365GraphRequest("PATCH", path, opts);
+
+ms365GraphPut(path, opts) =>
+  return ms365GraphRequest("PUT", path, opts);
+
+ms365GraphDelete(path, opts) =>
+  return ms365GraphRequest("DELETE", path, opts);
+
+async ms365GetAllPages(path, opts = {}) =>
+  const maxPages = opts.maxPages || 50;
+  const all = [];
+  let url = path;
+  let totalCount = null;
+  for(let page = 0; page < maxPages; page++) {
+    const o = page === 0
+      ? Object.assign({}, opts, { query: Object.assign({}, opts.query || {}) })
+      : Object.assign({}, opts, { query: undefined });
+    const data = await ms365GraphRequest("GET", url, o);
+    const items = Array.isArray(data) ? data : (data && Array.isArray(data.value) ? data.value : []);
+    if(page === 0 && data && typeof data["@odata.count"] !== "undefined") totalCount = data["@odata.count"];
+    for(let i = 0; i < items.length; i++) all.push(items[i]);
+    const next = data && data["@odata.nextLink"];
+    if(!next) break;
+    url = next;
+  }
+  return { value: all, count: all.length, totalCount: totalCount };
+
+// ── building blocks ──
+ms365BuildUrl(method, path, o) =>
+  let url = String(path);
+  if(!/^https?:\/\//i.test(url)) {
+    if(url.indexOf("/") !== 0) url = "/" + url;
+    url = o.graphBase + url;
+  }
+  const q = o.query || {};
+  const parts = [];
+  const keys = Object.keys(q);
+  for(let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = q[k];
+    if(v === undefined || v === null) continue;
+    if(Array.isArray(v)) { for(let j = 0; j < v.length; j++) parts.push(k + "=" + encodeURIComponent(String(v[j]))); }
+    else parts.push(k + "=" + encodeURIComponent(String(v)));
+  }
+  if(parts.length) url += (url.indexOf("?") >= 0 ? "&" : "?") + parts.join("&");
+  return url;
+
+ms365BuildHeaders(o, token) =>
+  const h = { Authorization: "Bearer " + token, Accept: "application/json" };
+  const hasBody = o.body !== undefined && o.body !== null;
+  if(hasBody && !ms365IsBlob(o.body) && !ms365IsFormData(o.body)) {
+    h["Content-Type"] = o.contentType || "application/json";
+  }
+  if(o.headers) Object.assign(h, o.headers);
+  return h;
+
+ms365BuildBody(o) =>
+  if(o.body === undefined || o.body === null) return undefined;
+  if(typeof o.body === "string") return o.body;
+  if(ms365IsBlob(o.body) || ms365IsFormData(o.body)) return o.body;
+  if(o.raw) return o.body;
+  return JSON.stringify(o.body);
+
+ms365IsBlob(v) =>
+  return typeof Blob !== "undefined" && v instanceof Blob;
+
+ms365IsFormData(v) =>
+  return typeof FormData !== "undefined" && v instanceof FormData;
+
+ms365Backoff(attempt, o) =>
+  const base = o.baseBackoffMs * Math.pow(o.backoffMultiplier || 2, attempt);
+  const capped = Math.min(base, o.maxBackoffMs);
+  const j = (Math.random() * 2 - 1) * (o.jitter || 0);
+  return Math.max(0, Math.round(capped * (1 + j)));
+
+ms365RetryAfterMs(res) =>
+  const raw = ms365HeaderGet(res, "Retry-After");
+  if(raw === null || raw === undefined) return null;
+  const n = Number(String(raw).trim());
+  if(!isNaN(n) && isFinite(n)) return Math.max(0, n * 1000);
+  const t = Date.parse(String(raw).trim());
+  if(!isNaN(t)) return Math.max(0, t - Date.now());
+  return null;
+
+ms365HeaderGet(res, name) =>
+  const h = res && res.headers;
+  if(!h) return null;
+  if(typeof h.get === "function") {
+    try { return h.get(name); } catch(e) { return null; }
+  }
+  const low = String(name).toLowerCase();
+  const keys = Object.keys(h);
+  for(let i = 0; i < keys.length; i++) {
+    if(String(keys[i]).toLowerCase() === low) return h[keys[i]];
+  }
+  return null;
+
+async ms365ParseResponse(res) =>
+  const status = res.status == null ? (res.ok ? 200 : 0) : res.status;
+  if(status === 204 || status === 205) return null;
+  let text = null;
+  try { text = await res.text(); } catch(e) { text = null; }
+  if(!text || !text.trim()) {
+    if(status >= 200 && status < 300) return null;
+    throw ms365GraphError(status, null, text);
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch(e) {
+    if(status >= 200 && status < 300) return text;
+    throw ms365GraphError(status, null, text);
+  }
+  if(status >= 400) throw ms365GraphError(status, data, text);
+  return data;
+
+ms365GraphError(status, data, text) =>
+  const e = data && data.error;
+  const code = (e && e.code) || (data && data.code) || "http_" + status;
+  const message = (e && e.message) || (data && data.message) || "Graph request failed (HTTP " + status + ").";
+  const err = new Error("ms365.graph: " + message);
+  err.code = code;
+  err.status = status;
+  err.isGraphError = true;
+  err.body = data || text || null;
+  err.retryable = status === 429 || status === 503 || status === 504;
+  return ms365ToFriendlyError(err);
+
+
+// ── 10. TENANT & ACCOUNT VALIDATOR ─────────────────────────────────────────
+// Verifies the signed-in user belongs to a genuine Microsoft 365 tenant and
+// holds the minimum organizational attributes the plugin needs.
+// Works in tiers: JWT claims (openid) → GET /me (User.Read) → GET /organization
+// (Organization.Read.All, admin consent).
+
+ms365ConsumerTenantId() =>
+  return "9188040d-6c67-4c5b-b112-36a304b66dad";
+
+ms365TenantDefaults() =>
+  return {
+    requireVerifiedDomain: true,
+    requireTenantPlans: true,
+    requireMember: true,
+    requireAccountEnabled: true,
+    requireLicense: false,
+    deepTenantCheck: null,
+    fetchImpl: null,
+    graphBase: "https://graph.microsoft.com/v1.0"
+  };
+
+ms365TenantVerdict(checks, tenant, user, error) =>
+  return { valid: checks.every((c) => c.pass), checks: checks, tenant: tenant, user: user, error: error };
+
+async ms365ValidateTenant(opts = {}) =>
+  const o = Object.assign({}, ms365TenantDefaults(), opts);
+  const checks = [];
+  const add = (name, pass, detail) => { checks.push({ name: name, pass: !!pass, detail: detail || "" }); };
+  let error = null;
+
+  let token = null;
+  try {
+    token = await ms365GetValidToken({ force: !!o.force });
+  } catch(e) {
+    error = e;
+    add("authentication", false, e.message);
+    return ms365TenantVerdict(checks, null, null, error);
+  }
+  if(!token) {
+    error = new Error("ms365.tenant: not authenticated — sign in first.");
+    error.code = "not_authenticated";
+    add("authentication", false, error.message);
+    return ms365TenantVerdict(checks, null, null, error);
+  }
+  add("authentication", true, "valid access token");
+
+  const session = ms365LoadSession();
+  const profile = (session && session.profile) || null;
+  const scopes = (session && session.tokens && session.tokens.scope) || [];
+  const tid = profile ? (profile.tenantId || null) : null;
+  const oid = profile ? (profile.oid || profile.sub || null) : null;
+
+  const tenant = { id: tid || null, displayName: null, verifiedDomains: [], assignedPlans: [] };
+  const user = { id: null, upn: null, displayName: null, mail: null, userType: "", accountEnabled: true, licenseCount: 0 };
+
+  if(!tid) {
+    add("tenant_identity", false, "no id_token tenant claim — tenant unknown");
+  } else if(!oid) {
+    add("tenant_identity", false, "missing user object id (oid/sub) claim");
+  } else {
+    add("tenant_identity", true, "tenant id " + tid);
+  }
+
+  if(tid && String(tid).toLowerCase() === ms365ConsumerTenantId()) {
+    add("tenant_not_consumer", false, "personal Microsoft account (consumer tenant) — not a Microsoft 365 tenant");
+  } else if(tid) {
+    add("tenant_not_consumer", true, "work/school tenant " + tid);
+  } else {
+    add("tenant_not_consumer", false, "tenant unknown — cannot rule out a consumer account");
+  }
+
+  let me = null;
+  try {
+    me = await ms365TenantGraphGet(o, "/me?$select=id,displayName,userPrincipalName,mail,userType,accountEnabled,assignedLicenses", token);
+  } catch(e) {
+    error = e;
+    add("graph_me", false, e.message);
+    return ms365TenantVerdict(checks, tenant, user, error);
+  }
+  add("graph_me", true, "Graph /me responded for " + (me.userPrincipalName || me.id || "user"));
+  user.id = me.id || null;
+  user.upn = me.userPrincipalName || null;
+  user.displayName = me.displayName || null;
+  user.mail = me.mail || null;
+  user.userType = me.userType || "";
+  user.accountEnabled = me.accountEnabled !== false;
+  user.licenseCount = Array.isArray(me.assignedLicenses) ? me.assignedLicenses.length : 0;
+
+  if(oid && user.id && String(oid).toLowerCase() !== String(user.id).toLowerCase()) {
+    add("user_identity", false, "Graph user id " + user.id + " does not match id_token oid " + oid);
+  } else {
+    add("user_identity", true, "Graph account matches the signed-in identity");
+  }
+  add("user_active", !o.requireAccountEnabled || user.accountEnabled, user.accountEnabled ? "account enabled" : "account disabled");
+  const isMember = !user.userType || user.userType === "Member";
+  add("user_member", !o.requireMember || isMember, user.userType ? "userType=" + user.userType : "userType unspecified");
+  add("user_licensed", !o.requireLicense || user.licenseCount > 0, user.licenseCount + " assigned license(s)");
+
+  const wantDeep = o.deepTenantCheck === null ? scopes.indexOf("Organization.Read.All") >= 0 : !!o.deepTenantCheck;
+  if(wantDeep) {
+    try {
+      const res = await ms365TenantGraphGet(o, "/organization?$select=id,displayName,verifiedDomains,assignedPlans", token);
+      const org = Array.isArray(res.value) ? res.value[0] : (res.value || null);
+      if(!org || !org.id) {
+        add("tenant_deep", false, "organization endpoint returned no tenant record");
+      } else {
+        tenant.id = org.id;
+        tenant.displayName = org.displayName || null;
+        tenant.verifiedDomains = (org.verifiedDomains || []).map((d) => d && d.name).filter(Boolean);
+        tenant.assignedPlans = (org.assignedPlans || [])
+          .filter((p) => p && p.capabilityStatus === "Enabled")
+          .map((p) => p.servicePlanName || p.service || "?");
+        const verified = (org.verifiedDomains || []).some((d) => d && d.isVerified);
+        add("tenant_verified", !o.requireVerifiedDomain || verified, verified ? "verified domains: " + tenant.verifiedDomains.join(", ") : "no verified domains");
+        add("tenant_plans", !o.requireTenantPlans || tenant.assignedPlans.length > 0, tenant.assignedPlans.length + " enabled plan(s)");
+        if(tid && String(tid).toLowerCase() !== String(org.id).toLowerCase()) {
+          add("tenant_match", false, "id_token tenant " + tid + " does not match /organization tenant " + org.id);
+        } else {
+          add("tenant_match", true, "id_token and /organization agree on tenant " + (org.id || "?"));
+        }
+      }
+      add("tenant_deep", true, "deep tenant check via /organization");
+    } catch(e) {
+      error = e;
+      add("tenant_deep", false, e.message);
+    }
+  } else {
+    const reason = o.deepTenantCheck === false ? "disabled" : "Organization.Read.All scope not granted";
+    add("tenant_deep", true, "skipped — " + reason);
+  }
+
+  return ms365TenantVerdict(checks, tenant, user, error);
+
+async ms365TenantGraphGet(o, path, token) =>
+  const fetchImpl = o.fetchImpl || ms365ResolveFetch();
+  let res;
+  try {
+    res = await fetchImpl(o.graphBase + path, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + token, Accept: "application/json" }
+    });
+  } catch(err) {
+    const e = new Error("ms365.tenant: Graph request failed at the network level: " + err.message);
+    e.code = "graph_network";
+    throw e;
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch(err) {
+    const e = new Error("ms365.tenant: Graph returned a non-JSON response (HTTP " + (res && res.status) + ").");
+    e.code = "graph_bad_json";
+    e.httpStatus = res && res.status;
+    throw e;
+  }
+  if(!res.ok || (data && data.error)) throw ms365TenantGraphError(data, res && res.status);
+  return data;
+
+ms365TenantGraphError(data, status) =>
+  const code = (data && data.error && data.error.code) || "http_" + status;
+  const msg = (data && data.error && data.error.message) || "Graph request failed (HTTP " + status + ").";
+  const err = new Error("ms365.tenant: " + msg);
+  err.code = code;
+  err.httpStatus = status;
+  err.isGraphError = true;
+  return err;
+
+
+// ── 11. SCOPED PERMISSIONS ─────────────────────────────────────────────────
+// Dynamic scope requests: when a feature is triggered, check whether the
+// current grant carries the scopes it needs; if not, run an incremental-consent
+// re-auth asking only for the missing permissions.
+
+ms365FeatureScopes() =>
+  return {
+    mail: ["Mail.ReadWrite"],
+    mailSend: ["Mail.Send"],
+    calendar: ["Calendars.ReadWrite"],
+    files: ["Files.ReadWrite.All"],
+    tasks: ["Tasks.ReadWrite"],
+    tenant: ["Organization.Read.All"]
+  };
+
+ms365FeatureLabels() =>
+  return {
+    mail: "Read & manage email",
+    mailSend: "Send email on your behalf",
+    calendar: "Read & create calendar events",
+    files: "Access your files in OneDrive/SharePoint",
+    tasks: "Read & update your To Do tasks",
+    tenant: "Read organization information"
+  };
+
+ms365ScopesForFeature(feature) =>
+  const map = ms365FeatureScopes();
+  if(Array.isArray(feature)) {
+    const out = [];
+    for(let i = 0; i < feature.length; i++) {
+      const f = feature[i];
+      if(typeof f === "string" && map[f]) { for(let j = 0; j < map[f].length; j++) out.push(map[f][j]); }
+      else if(typeof f === "string") out.push(f);
+    }
+    return out.filter((s, i) => out.indexOf(s) === i);
+  }
+  if(typeof feature === "string" && map[feature]) return map[feature].slice();
+  if(typeof feature === "string") return [feature];
+  return [];
+
+ms365MissingScopes(feature) =>
+  const cfg = ms365GetConfig();
+  if(!cfg) return ms365ScopesForFeature(feature);
+  const current = cfg.scopes || [];
+  return ms365ScopesForFeature(feature).filter((s) => current.indexOf(s) < 0);
+
+ms365HasScopes(feature) =>
+  return ms365MissingScopes(feature).length === 0;
+
+async ms365EnsureScopes(feature, opts = {}) =>
+  const required = ms365ScopesForFeature(feature);
+  const cfg = ms365GetConfig();
+  if(!cfg) throw new Error("ms365.scopedPermissions: not configured — call oauth2.configure({ clientId, ... }) first.");
+  if(!required.length) return { granted: true, added: [], missing: [] };
+
+  const current = cfg.scopes || [];
+  const missing = required.filter((s) => current.indexOf(s) < 0);
+  if(!missing.length) return { granted: true, added: [], missing: [] };
+
+  const authOpts = Object.assign({ extraScopes: missing, prompt: "consent" }, opts.auth || {});
+  const res = await ms365LaunchAuthFlow(authOpts);
+  if(res === null) return { granted: false, added: [], missing: missing, aborted: true };
+  if(!res.tokens) return { granted: false, added: [], missing: missing, aborted: true };
+
+  const merged = current.slice();
+  for(let i = 0; i < required.length; i++) { if(merged.indexOf(required[i]) < 0) merged.push(required[i]); }
+  ms365Configure(Object.assign({}, cfg, { scopes: merged }));
+  return { granted: true, added: missing, missing: [], scopes: merged };
+
+
+// ── 12. MAIL ───────────────────────────────────────────────────────────────
+
+ms365MessageSelect() =>
+  return ["id", "subject", "from", "toRecipients", "ccRecipients", "bccRecipients",
+    "body", "bodyPreview", "receivedDateTime", "sentDateTime", "importance",
+    "isRead", "hasAttachments", "categories", "conversationId", "webLink", "isDraft"].join(",");
+
+// folder: "inbox" (default), a mail-folder ID, or a well-known folder name.
+ms365ResolveMailboxPath(folder) =>
+  if(!folder || folder === "inbox") return "/me/mailFolders/inbox";
+  return "/me/mailFolders/" + encodeURIComponent(folder);
+
+ms365BuildMessageQuery(f) =>
+  const q = { $orderby: "receivedDateTime desc", $select: f.select || ms365MessageSelect() };
+  if(f.top) q.$top = f.top;
+  if(f.skip) q.$skip = f.skip;
+  const filters = [];
+  const froms = ms365AnyOf(f.from);
+  if(froms.length) filters.push("(" + froms.map((x) => "from/emailAddress/address eq '" + ms365EscapeODataStr(x) + "'").join(" or ") + ")");
+  const tos = ms365AnyOf(f.to);
+  if(tos.length) filters.push("(" + tos.map((x) => "toRecipients/any(t:t/emailAddress/address eq '" + ms365EscapeODataStr(x) + "')").join(" or ") + ")");
+  if(f.subject) filters.push("contains(subject, '" + ms365EscapeODataStr(f.subject) + "')");
+  if(f.keyword) filters.push("(contains(subject, '" + ms365EscapeODataStr(f.keyword) + "') or contains(bodyPreview, '" + ms365EscapeODataStr(f.keyword) + "'))");
+  if(f.isRead !== undefined && f.isRead !== null) filters.push("isRead eq " + (f.isRead ? "true" : "false"));
+  if(f.receivedAfter) {
+    const d = ms365ToODataDate(f.receivedAfter);
+    if(d) filters.push("receivedDateTime ge " + d);
+  }
+  if(f.receivedBefore) {
+    const d = ms365ToODataDate(f.receivedBefore);
+    if(d) filters.push("receivedDateTime lt " + d);
+  }
+  if(filters.length) q.$filter = filters.join(" and ");
+  return q;
+
+ms365EmailAddress(holder) =>
+  if(!holder) return null;
+  const a = holder.emailAddress || {};
+  return { name: a.name || "", address: a.address || "" };
+
+ms365NormalizeMessage(m) =>
+  if(!m) return null;
+  return {
+    id: m.id,
+    subject: m.subject || "",
+    from: ms365EmailAddress(m.from),
+    to: (m.toRecipients || []).map(ms365EmailAddress),
+    cc: (m.ccRecipients || []).map(ms365EmailAddress),
+    bcc: (m.bccRecipients || []).map(ms365EmailAddress),
+    bodyPreview: m.bodyPreview || "",
+    body: m.body ? { type: m.body.contentType || "text", content: m.body.content || "" } : null,
+    receivedAt: m.receivedDateTime || null,
+    sentAt: m.sentDateTime || null,
+    importance: m.importance || "normal",
+    isRead: !!m.isRead,
+    isDraft: !!m.isDraft,
+    hasAttachments: !!m.hasAttachments,
+    categories: m.categories || [],
+    conversationId: m.conversationId || null,
+    webLink: m.webLink || null
+  };
+
+async ms365SearchEmails(filters = {}, opts = {}) =>
+  const q = ms365BuildMessageQuery(filters);
+  const path = ms365ResolveMailboxPath(filters.folder) + "/messages";
+  const data = await ms365GetAllPages(path, {
+    query: q,
+    maxPages: opts.maxPages || 10,
+    maxRetries: opts.maxRetries,
+    fetchImpl: opts.fetchImpl
+  });
+  return { value: data.value.map(ms365NormalizeMessage), count: data.count, totalCount: data.totalCount };
+
+async ms365ListInbox(filters = {}, opts = {}) =>
+  return ms365SearchEmails(Object.assign({}, filters, { folder: "inbox" }), opts);
+
+async ms365GetMessage(messageId, opts = {}) =>
+  const data = await ms365GraphGet("/me/messages/" + encodeURIComponent(messageId), {
+    query: { $select: ms365MessageSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeMessage(data);
+
+
+// ── 12b. EMAIL DISPATCHER ──────────────────────────────────────────────────
+// Sends emails (CC/BCC, HTML or text body, importance, attachments), creates
+// drafts and sends existing drafts.
+
+ms365ToAddress(v) =>
+  if(typeof v === "string") return { address: v, name: "" };
+  if(v && typeof v === "object") {
+    if(v.emailAddress) return { address: v.emailAddress.address || "", name: v.emailAddress.name || "" };
+    return { address: v.address || "", name: v.name || "" };
+  }
+  return { address: String(v), name: "" };
+
+ms365BuildAttachment(a) =>
+  return {
+    "@odata.type": "#microsoft.graph.fileAttachment",
+    name: a.name || "attachment",
+    contentType: a.mimeType || "application/octet-stream",
+    contentBytes: a.contentBytes || ms365EncodeBase64(a.content),
+    isInline: !!a.isInline
+  };
+
+ms365BuildEmailMessage(opts) =>
+  const m = {};
+  if(opts.subject !== undefined && opts.subject !== null) m.subject = opts.subject;
+  if(opts.html) m.body = { contentType: "html", content: opts.html };
+  else if(opts.body !== undefined && opts.body !== null) m.body = { contentType: "text", content: opts.body };
+  const toArr = ms365AnyOf(opts.to);
+  if(toArr.length) m.toRecipients = toArr.map((x) => ({ emailAddress: ms365ToAddress(x) }));
+  const ccArr = ms365AnyOf(opts.cc);
+  if(ccArr.length) m.ccRecipients = ccArr.map((x) => ({ emailAddress: ms365ToAddress(x) }));
+  const bccArr = ms365AnyOf(opts.bcc);
+  if(bccArr.length) m.bccRecipients = bccArr.map((x) => ({ emailAddress: ms365ToAddress(x) }));
+  if(opts.from) m.from = { emailAddress: ms365ToAddress(opts.from) };
+  const rt = ms365AnyOf(opts.replyTo);
+  if(rt.length) m.replyTo = rt.map((x) => ({ emailAddress: ms365ToAddress(x) }));
+  if(opts.importance) m.importance = opts.importance;
+  if(opts.attachments && opts.attachments.length) m.attachments = opts.attachments.map(ms365BuildAttachment);
+  return m;
+
+async ms365SendEmail(opts = {}) =>
+  const message = ms365BuildEmailMessage(opts);
+  const payload = { message: message, saveToSentItems: opts.saveToSentItems !== false };
+  if(opts.from) payload.message.from = { emailAddress: ms365ToAddress(opts.from) };
+  await ms365GraphPost("/me/sendMail", { body: payload, fetchImpl: opts.fetchImpl });
+  return { ok: true };
+
+async ms365CreateDraft(opts = {}) =>
+  const data = await ms365GraphPost("/me/messages", { body: ms365BuildEmailMessage(opts), fetchImpl: opts.fetchImpl });
+  return data;
+
+async ms365SendDraft(draftId, opts = {}) =>
+  await ms365GraphPost("/me/messages/" + encodeURIComponent(draftId) + "/send", { fetchImpl: opts.fetchImpl });
+  return { ok: true };
+
+ms365BytesToBase64(bytes) =>
+  const CHUNK = 0x8000;
+  let binary = "";
+  for(let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+
+ms365EncodeBase64(content) =>
+  if(typeof content === "string") {
+    return ms365BytesToBase64(new TextEncoder().encode(content));
+  }
+  if(content instanceof Uint8Array) return ms365BytesToBase64(content);
+  if(content instanceof ArrayBuffer) return ms365BytesToBase64(new Uint8Array(content));
+  if(typeof Blob !== "undefined" && content instanceof Blob) {
+    throw new Error("ms365.email: Blob attachments must be converted first — call encodeContentToBase64(await blob.arrayBuffer()) or pass an ArrayBuffer/Uint8Array.");
+  }
+  throw new Error("ms365.email: unsupported attachment content type.");
+
+async ms365EncodeContentToBase64(content) =>
+  return ms365EncodeBase64(content);
+
+
+// ── 12c. CALENDAR SYNC ─────────────────────────────────────────────────────
+// Retrieves upcoming events (optionally date-filtered) and creates new events.
+
+ms365EventSelect() =>
+  return ["id", "subject", "start", "end", "location", "attendees", "organizer",
+    "isAllDay", "isOnlineMeeting", "onlineMeeting", "bodyPreview", "categories", "webLink"].join(",");
+
+ms365EventsPath(calendarId) =>
+  return calendarId ? "/me/calendars/" + encodeURIComponent(calendarId) + "/events" : "/me/calendar/events";
+
+async ms365ListUpcomingEvents(filters = {}, opts = {}) =>
+  const q = { $select: opts.select || ms365EventSelect(), $top: filters.max || opts.top || 20 };
+  const order = filters.orderBy || (filters.start ? "start/dateTime asc" : "start/dateTime desc");
+  q.$orderby = order;
+  const parts = [];
+  const after = ms365ToODataDate(filters.start);
+  const before = ms365ToODataDate(filters.end);
+  if(after) parts.push("start/dateTime ge " + after);
+  if(before) parts.push("end/dateTime le " + before);
+  if(filters.includeAllDay === false) parts.push("type ne 'allDay'");
+  if(filters.subject) parts.push("contains(subject, '" + String(filters.subject).replace(/'/g, "''") + "')");
+  if(parts.length) q.$filter = parts.join(" and ");
+  const data = await ms365GetAllPages(ms365EventsPath(filters.calendarId), {
+    query: q,
+    maxPages: opts.maxPages || 10,
+    fetchImpl: opts.fetchImpl
+  });
+  return { value: data.value.map(ms365NormalizeEvent), count: data.count, totalCount: data.totalCount };
+
+async ms365GetEvent(eventId, opts = {}) =>
+  const data = await ms365GraphGet("/me/events/" + encodeURIComponent(eventId), {
+    query: { $select: ms365EventSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeEvent(data);
+
+ms365BuildEventBody(opts) =>
+  const subject = opts.subject;
+  const timeZone = opts.timeZone;
+  const ev = {
+    subject: subject,
+    start: ms365ToGraphDateTime(opts.start, timeZone),
+    end: ms365ToGraphDateTime(opts.end, timeZone)
+  };
+  if(opts.isAllDay) {
+    ev.isAllDay = true;
+    ev.start.dateTime = ev.start.dateTime.slice(0, 10);
+    ev.end.dateTime = ev.end.dateTime.slice(0, 10);
+  }
+  if(opts.body !== undefined && opts.body !== null) ev.body = { contentType: "text", content: opts.body };
+  const ats = ms365AnyOf(opts.attendees);
+  if(ats.length) {
+    ev.attendees = ats.map((a) => ({
+      emailAddress: a.emailAddress || (typeof a === "string" ? { address: a, name: "" } : { address: a.address || "", name: a.name || "" }),
+      type: a.type || "required"
+    }));
+  }
+  if(opts.location) {
+    ev.location = typeof opts.location === "string"
+      ? { displayName: opts.location }
+      : { displayName: opts.location.displayName || "", address: opts.location.address || undefined };
+  }
+  if(opts.onlineMeeting) ev.isOnlineMeeting = true;
+  if(opts.importance) ev.importance = opts.importance;
+  if(opts.categories && opts.categories.length) ev.categories = opts.categories;
+  return ev;
+
+async ms365CreateEvent(opts = {}) =>
+  if(!opts.subject) throw new Error("ms365.calendar: `subject` is required.");
+  if(opts.start == null || opts.end == null) throw new Error("ms365.calendar: `start` and `end` are required.");
+  const body = ms365BuildEventBody(opts);
+  const data = await ms365GraphPost(ms365EventsPath(opts.calendarId), { body: body, fetchImpl: opts.fetchImpl });
+  return ms365NormalizeEvent(data);
+
+ms365DateTimeTimeZone(d) =>
+  if(!d) return null;
+  return { dateTime: d.dateTime || null, timeZone: d.timeZone || "UTC" };
+
+ms365NormalizeEvent(e) =>
+  if(!e) return null;
+  return {
+    id: e.id,
+    subject: e.subject || "(no subject)",
+    start: ms365DateTimeTimeZone(e.start),
+    end: ms365DateTimeTimeZone(e.end),
+    isAllDay: !!e.isAllDay,
+    isOnlineMeeting: !!e.isOnlineMeeting,
+    onlineMeetingUrl: (e.onlineMeeting && e.onlineMeeting.joinUrl) || null,
+    location: { name: (e.location && e.location.displayName) || "", address: (e.location && e.location.address && e.location.address.street) || "" },
+    attendees: (e.attendees || []).map((a) => ({
+      email: (a.emailAddress && a.emailAddress.address) || "",
+      name: (a.emailAddress && a.emailAddress.name) || "",
+      type: a.type || "required",
+      responseStatus: (a.status && a.status.response) || "none"
+    })),
+    organizer: e.organizer && e.organizer.emailAddress ? { email: e.organizer.emailAddress.address, name: e.organizer.emailAddress.name } : null,
+    bodyPreview: e.bodyPreview || "",
+    categories: e.categories || [],
+    webLink: e.webLink || null
+  };
+
+
+// ── 13. FILES ──────────────────────────────────────────────────────────────
+
+ms365ItemSelect() =>
+  return ["id", "name", "folder", "file", "size", "createdDateTime", "lastModifiedDateTime",
+    "webUrl", "parentReference", "downloadUrl"].join(",");
+
+// drive: undefined | drive-id string | { siteId } | { driveId } | "sharepoint"
+ms365ResolveDrive(drive) =>
+  if(!drive) return "/me/drive";
+  if(typeof drive === "string") {
+    if(drive === "sharepoint" || drive.indexOf("/") === 0) return drive;
+    return "/drives/" + encodeURIComponent(drive);
+  }
+  if(drive.siteId) return "/sites/" + encodeURIComponent(drive.siteId) + "/drive";
+  if(drive.driveId) return "/drives/" + encodeURIComponent(drive.driveId);
+  if(drive.groupId) return "/groups/" + encodeURIComponent(drive.groupId) + "/drive";
+  return "/me/drive";
+
+ms365NormalizeItem(it) =>
+  if(!it) return null;
+  return {
+    id: it.id,
+    name: it.name,
+    isFolder: !!it.folder,
+    isFile: !!it.file,
+    mimeType: it.file && it.file.mimeType ? it.file.mimeType : (it.folder ? "folder" : null),
+    size: it.size != null ? Number(it.size) : 0,
+    createdDateTime: it.createdDateTime || null,
+    lastModifiedDateTime: it.lastModifiedDateTime || null,
+    webUrl: it.webUrl || null,
+    downloadUrl: it["@microsoft.graph.downloadUrl"] || null,
+    parentId: it.parentReference ? (it.parentReference.id || null) : null,
+    path: it.parentReference ? (it.parentReference.path || null) : null,
+    childCount: it.folder && it.folder.childCount != null ? it.folder.childCount : null
+  };
+
+// base + "/root:/path:/children" (relative path) or base + "/items/{id}/children".
+ms365FolderChildrenPath(base, folder) =>
+  if(!folder) return base + "/root/children";
+  if(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}/.test(String(folder))) {
+    return base + "/items/" + encodeURIComponent(folder) + "/children";
+  }
+  const cleaned = String(folder).replace(/^\/+|\/+$/g, "");
+  return base + "/root:/" + cleaned.split("/").map(encodeURIComponent).join("/") + ":/children";
+
+async ms365ListFiles(filters = {}, opts = {}) =>
+  const base = ms365ResolveDrive(filters.drive);
+  const q = { $select: opts.select || ms365ItemSelect() };
+  if(filters.top) q.$top = filters.top;
+  if(filters.skip) q.$skip = filters.skip;
+  const path = ms365FolderChildrenPath(base, filters.folder);
+  const data = await ms365GetAllPages(path, { query: q, maxPages: opts.maxPages || 20, fetchImpl: opts.fetchImpl });
+  return { value: data.value.map(ms365NormalizeItem), count: data.count, totalCount: data.totalCount };
+
+async ms365SearchFiles(filters = {}, opts = {}) =>
+  const base = ms365ResolveDrive(filters.drive);
+  const q = { $select: opts.select || ms365ItemSelect() };
+  if(filters.top) q.$top = filters.top;
+  const path = base + "/root/search(q='" + ms365EscapeODataStr(filters.query || "") + "')";
+  const data = await ms365GetAllPages(path, { query: q, maxPages: opts.maxPages || 20, fetchImpl: opts.fetchImpl });
+  return { value: data.value.map(ms365NormalizeItem), count: data.count, totalCount: data.totalCount };
+
+async ms365GetFileMeta(filters = {}, opts = {}) =>
+  const base = ms365ResolveDrive(filters.drive);
+  const data = await ms365GraphGet(base + "/items/" + encodeURIComponent(filters.itemId), {
+    query: { $select: opts.select || ms365ItemSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeItem(data);
+
+async ms365GetFileByPath(path, opts = {}) =>
+  const data = await ms365GraphGet("/me/drive/root:/" + path, {
+    query: { $select: opts.select || ms365ItemSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeItem(data);
+
+// ── 13b. FILE TRANSFER ─────────────────────────────────────────────────────
+// Simple PUT for ≤4 MB, chunked upload session for larger files; download with
+// optional output-format conversion.
+
+ms365SimpleUploadLimit() =>
+  return 4 * 1024 * 1024;
+
+ms365DefaultChunkSize() =>
+  return 320 * 1024;
+
+ms365DriveItemPath(folder, name) =>
+  const cleaned = String(folder || "").replace(/^\/+|\/+$/g, "");
+  const folderPart = cleaned ? cleaned.split("/").map(encodeURIComponent).join("/") + "/" : "";
+  return "/" + folderPart + encodeURIComponent(name);
+
+async ms365ToBytes(data) =>
+  if(data instanceof Uint8Array) return data;
+  if(data instanceof ArrayBuffer) return new Uint8Array(data);
+  if(typeof Blob !== "undefined" && data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+  if(typeof data === "string") return new TextEncoder().encode(data);
+  throw new Error("ms365.files: unsupported upload data type (use Blob, Uint8Array, ArrayBuffer or string).");
+
+ms365ContentTypeOf(headers) =>
+  if(!headers) return null;
+  if(typeof headers.get === "function") { try { return headers.get("content-type"); } catch(e) { return null; } }
+  const keys = Object.keys(headers);
+  for(let i = 0; i < keys.length; i++) { if(String(keys[i]).toLowerCase() === "content-type") return headers[keys[i]]; }
+  return null;
+
+// Preserve extension integrity: keep the stem, attach the format's extension.
+ms365ApplyFormatExtension(name, format) =>
+  if(!name) return format ? "download." + format : "download";
+  const stem = String(name).replace(/\.[^./]+$/, "");
+  return stem + "." + format;
+
+async ms365UploadFile(opts = {}) =>
+  const name = opts.name;
+  const data = opts.data;
+  const mimeType = opts.mimeType;
+  const folder = opts.folder;
+  const drive = opts.drive;
+  const conflictBehavior = opts.conflictBehavior;
+  if(!name) throw new Error("ms365.files: `name` is required.");
+  if(data == null) throw new Error("ms365.files: `data` is required.");
+  const bytes = await ms365ToBytes(data);
+  const base = ms365ResolveDrive(drive);
+  const itemPath = ms365DriveItemPath(folder, name);
+
+  if(bytes.byteLength > (opts.maxSimpleBytes || ms365SimpleUploadLimit()) && !opts.forceSimple) {
+    return ms365UploadViaSession({
+      base: base, itemPath: itemPath, name: name, bytes: bytes, mimeType: mimeType,
+      conflictBehavior: conflictBehavior, chunkSize: opts.chunkSize || ms365DefaultChunkSize(),
+      fetchImpl: opts.fetchImpl
+    });
+  }
+
+  const path = base + "/root:" + itemPath + ":/content";
+  const item = await ms365GraphPut(path, {
+    body: bytes,
+    raw: true,
+    contentType: mimeType || "application/octet-stream",
+    query: conflictBehavior ? { "@microsoft.graph.conflictBehavior": conflictBehavior } : undefined,
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeItem(item);
+
+async ms365UploadViaSession(p) =>
+  const session = await ms365GraphPost(p.base + "/root:" + p.itemPath + ":/createUploadSession", {
+    body: { item: { "@microsoft.graph.conflictBehavior": p.conflictBehavior || "rename", name: p.name } },
+    fetchImpl: p.fetchImpl
+  });
+  const uploadUrl = session.uploadUrl;
+  if(!uploadUrl) throw new Error("ms365.files: upload session did not return an uploadUrl.");
+  const size = p.bytes.byteLength;
+  for(let start = 0; start < size; start += p.chunkSize) {
+    const chunk = p.bytes.slice(start, Math.min(start + p.chunkSize, size));
+    const rangeEnd = start + chunk.byteLength - 1;
+    await ms365GraphRequest("PUT", uploadUrl, {
+      body: chunk,
+      raw: true,
+      contentType: p.mimeType || "application/octet-stream",
+      headers: { "Content-Length": String(chunk.byteLength), "Content-Range": "bytes " + start + "-" + rangeEnd + "/" + size },
+      fetchImpl: p.fetchImpl
+    });
+  }
+  const item = await ms365GraphGet(p.base + "/root:" + p.itemPath, { fetchImpl: p.fetchImpl });
+  return ms365NormalizeItem(item);
+
+async ms365DownloadFile(p = {}, opts = {}) =>
+  const base = ms365ResolveDrive(p.drive);
+  const res = await ms365GraphGet(base + "/items/" + encodeURIComponent(p.itemId) + "/content", {
+    rawResponse: true,
+    query: p.format ? { format: p.format } : undefined,
+    fetchImpl: opts.fetchImpl
+  });
+  const arrayBuffer = await res.arrayBuffer();
+  const mimeType = ms365ContentTypeOf(res.headers);
+  let finalName = p.name || null;
+  if(p.format) finalName = ms365ApplyFormatExtension(finalName, p.format);
+  return {
+    data: new Uint8Array(arrayBuffer),
+    arrayBuffer: arrayBuffer,
+    name: finalName,
+    mimeType: mimeType,
+    size: arrayBuffer.byteLength,
+    format: p.format || null
+  };
+
+// ── 13c. PERMISSION AUDITOR ────────────────────────────────────────────────
+// Effective Read / Write / Admin access level for a file or folder item.
+
+ms365PermissionSelect() =>
+  return ["id", "roles", "link", "inheritedFrom", "grantedTo", "grantedToIdentities", "hasLinks", "shareId"].join(",");
+
+ms365NormalizePermission(p) =>
+  if(!p) return null;
+  const identityOf = (g) => g && g.user
+    ? { id: g.user.id || null, email: g.user.email || null, displayName: g.user.displayName || null }
+    : (g && g.group
+      ? { id: g.group.id || null, email: g.group.email || null, displayName: g.group.displayName || null }
+      : (g && g.application ? { id: g.application.id || null, displayName: g.application.displayName || null } : null));
+  return {
+    id: p.id,
+    roles: (p.roles || []).map(String),
+    grantedTo: identityOf(p.grantedTo),
+    grantedToIdentities: (p.grantedToIdentities || []).map(identityOf).filter(Boolean),
+    inheritedFrom: p.inheritedFrom ? { id: p.inheritedFrom.id || null, path: p.inheritedFrom.path || null } : null,
+    link: p.link ? { type: p.link.type || null, scope: p.link.scope || null, webUrl: p.link.webUrl || p.link.webHtml || null } : null,
+    hasLinks: !!p.hasLinks,
+    shareId: p.shareId || null
+  };
+
+async ms365GetPermissions(filters = {}, opts = {}) =>
+  if(!filters.itemId) throw new Error("ms365.files: `itemId` is required.");
+  const base = ms365ResolveDrive(filters.drive);
+  const data = await ms365GraphGet(base + "/items/" + encodeURIComponent(filters.itemId) + "/permissions", {
+    query: { $select: opts.select || ms365PermissionSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return (data.value || []).map(ms365NormalizePermission);
+
+ms365AnalyzePermissions(perms, userId) =>
+  const effective = { owner: false, write: false, read: false };
+  const direct = [];
+  const inherited = [];
+  let sharingLink = null;
+  const list = perms || [];
+  for(let i = 0; i < list.length; i++) {
+    const p = list[i];
+    (p.inheritedFrom ? inherited : direct).push(p);
+    const roles = p.roles || [];
+    for(let j = 0; j < roles.length; j++) {
+      const r = String(roles[j]).toLowerCase();
+      if(r === "owner" || r === "fullcontrol" || r === "manage") effective.owner = true;
+      else if(r === "write" || r === "contributor" || r === "edit") effective.write = true;
+      else if(r === "read" || r === "view" || r === "reader") effective.read = true;
+    }
+    if(!sharingLink && p.link) {
+      const kind = p.link.type || "view";
+      sharingLink = {
+        type: String(kind).toLowerCase() === "edit" ? "edit" : "view",
+        webUrl: p.link.webUrl || p.link.webHtml || null,
+        scope: p.link.scope || null
+      };
+    }
+  }
+  const access = effective.owner ? "admin" : (effective.write ? "write" : (effective.read ? "read" : "none"));
+  const rolesOut = [];
+  if(effective.owner) rolesOut.push("owner");
+  if(effective.write) rolesOut.push("write");
+  if(effective.read) rolesOut.push("read");
+  return {
+    access: access,
+    canRead: effective.read || effective.write || effective.owner,
+    canWrite: effective.write || effective.owner,
+    canAdmin: effective.owner,
+    effectiveRoles: rolesOut,
+    directPermissionCount: direct.length,
+    inheritedPermissionCount: inherited.length,
+    directPermissions: direct,
+    inheritedPermissions: inherited,
+    sharingLink: sharingLink
+  };
+
+async ms365CheckAccess(filters = {}, opts = {}) =>
+  const perms = await ms365GetPermissions(filters, opts);
+  return ms365AnalyzePermissions(perms, filters.userId);
+
+ms365DescribeAccess(v) =>
+  const labels = { admin: "admin (full control)", write: "read/write", read: "read-only", none: "no access" };
+  return labels[v.access] || v.access;
+
+
+// ── 14. TASKS (Microsoft To Do) ────────────────────────────────────────────
+
+ms365TaskSelect() =>
+  return ["id", "title", "status", "importance", "percentComplete", "isReminderOn",
+    "createdDateTime", "lastModifiedDateTime", "completedDateTime",
+    "dueDateTime", "body", "categories"].join(",");
+
+ms365TaskListSelect() =>
+  return "id,displayName,isOwner,isShared";
+
+ms365NormalizeTaskList(l) =>
+  if(!l) return null;
+  return {
+    id: l.id,
+    name: l.displayName || "(unnamed list)",
+    isOwner: !!l.isOwner,
+    isShared: !!l.isShared,
+    webLink: l.webLink || null
+  };
+
+ms365NormalizeTask(t, listId) =>
+  if(!t) return null;
+  return {
+    id: t.id,
+    listId: listId || null,
+    title: t.title || "(untitled task)",
+    status: t.status || "notStarted",
+    importance: t.importance || "normal",
+    percentComplete: t.percentComplete == null ? 0 : t.percentComplete,
+    isReminderOn: !!t.isReminderOn,
+    createdDateTime: t.createdDateTime || null,
+    lastModifiedDateTime: t.lastModifiedDateTime || null,
+    completedDateTime: t.completedDateTime || null,
+    due: t.dueDateTime ? { dateTime: t.dueDateTime.dateTime || null, timeZone: t.dueDateTime.timeZone || "UTC" } : null,
+    body: (t.body && t.body.content) || "",
+    categories: t.categories || []
+  };
+
+async ms365ListTaskLists(opts = {}) =>
+  const data = await ms365GetAllPages("/me/todo/lists", {
+    query: { $select: opts.select || ms365TaskListSelect(), $top: opts.top || 50 },
+    maxPages: opts.maxPages || 10,
+    fetchImpl: opts.fetchImpl
+  });
+  return { value: data.value.map(ms365NormalizeTaskList), count: data.count, totalCount: data.totalCount };
+
+async ms365ListTasks(filters = {}, opts = {}) =>
+  if(!filters.listId) throw new Error("ms365.tasks: `listId` is required.");
+  const q = { $select: opts.select || ms365TaskSelect(), $top: filters.top || opts.top || 50 };
+  q.$orderby = filters.orderBy || "createdDateTime desc";
+  const parts = [];
+  if(filters.includeCompleted === false) parts.push("status ne 'completed'");
+  if(filters.status) parts.push("status eq '" + ms365EscapeODataStr(filters.status) + "'");
+  if(filters.importance) parts.push("importance eq '" + ms365EscapeODataStr(filters.importance) + "'");
+  if(filters.title) parts.push("contains(title, '" + ms365EscapeODataStr(filters.title) + "')");
+  if(parts.length) q.$filter = parts.join(" and ");
+  const data = await ms365GetAllPages("/me/todo/lists/" + encodeURIComponent(filters.listId) + "/tasks", {
+    query: q,
+    maxPages: opts.maxPages || 10,
+    fetchImpl: opts.fetchImpl
+  });
+  return { value: data.value.map((t) => ms365NormalizeTask(t, filters.listId)), count: data.count, totalCount: data.totalCount };
+
+async ms365GetTask(taskId, opts = {}) =>
+  if(!opts.listId) throw new Error("ms365.tasks: `listId` is required.");
+  const data = await ms365GraphGet("/me/todo/lists/" + encodeURIComponent(opts.listId) + "/tasks/" + encodeURIComponent(taskId), {
+    query: { $select: ms365TaskSelect() },
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeTask(data, opts.listId);
+
+// ── 14b. TASK UPDATER ──────────────────────────────────────────────────────
+
+ms365BuildTaskPatch(opts = {}) =>
+  const p = {};
+  if(opts.status) p.status = opts.status;
+  else if(opts.complete !== undefined && opts.complete !== null) p.status = opts.complete ? "completed" : "notStarted";
+  if(opts.title !== undefined && opts.title !== null) p.title = opts.title;
+  if(opts.importance) p.importance = opts.importance;
+  if(opts.dueDateTime !== undefined) p.dueDateTime = opts.dueDateTime === null ? null : ms365ToGraphDateTime(opts.dueDateTime);
+  if(opts.percentComplete !== undefined && opts.percentComplete !== null) p.percentComplete = Math.max(0, Math.min(100, Number(opts.percentComplete)));
+  if(opts.body !== undefined && opts.body !== null) p.body = { content: opts.body };
+  if(opts.categories && opts.categories.length) p.categories = opts.categories;
+  return p;
+
+async ms365UpdateTask(opts = {}) =>
+  if(!opts.listId || !opts.taskId) throw new Error("ms365.tasks: `listId` and `taskId` are required.");
+  const patch = ms365BuildTaskPatch(opts);
+  if(!Object.keys(patch).length) throw new Error("ms365.tasks: nothing to update — pass at least one property.");
+  const data = await ms365GraphPatch("/me/todo/lists/" + encodeURIComponent(opts.listId) + "/tasks/" + encodeURIComponent(opts.taskId), {
+    body: patch,
+    fetchImpl: opts.fetchImpl
+  });
+  return ms365NormalizeTask(data, opts.listId);
+
+async ms365SetTaskComplete(p = {}, opts = {}) =>
+  const complete = p.complete === undefined ? true : p.complete;
+  return ms365UpdateTask({ listId: p.listId, taskId: p.taskId, complete: complete, fetchImpl: opts.fetchImpl });
+
+async ms365SetTaskDueDate(p = {}, opts = {}) =>
+  return ms365UpdateTask({ listId: p.listId, taskId: p.taskId, dueDateTime: p.dueDateTime, fetchImpl: opts.fetchImpl });
+
+
+// ── 15. HEALTH CHECK ───────────────────────────────────────────────────────
+// End-to-end connectivity: valid token (refreshing if needed) + GET /me.
+
+ms365MeSelect() =>
+  return "id,displayName,userPrincipalName,mail,userType,mailboxSettings";
+
+async ms365TestConnection(opts = {}) =>
+  const t0 = performance.now();
+  const session = await ms365LoadSession();
+  let token = null;
+  let tokenStatus = "none";
+
+  if(session && session.tokens && session.tokens.accessToken) {
+    const t = session.tokens;
+    const expired = (t.expiresAt || 0) <= Date.now();
+    if(opts.forceRefresh || expired) {
+      token = await ms365GetValidToken({ force: true });
+      tokenStatus = token ? "refreshed" : (expired ? "expired" : "none");
+    } else {
+      token = t.accessToken;
+      tokenStatus = "valid";
+    }
+  }
+
+  const cfg = ms365GetConfig();
+  const scopes = (session && session.tokens && session.tokens.scope && session.tokens.scope.length)
+    ? session.tokens.scope
+    : (cfg ? cfg.scopes : []);
+
+  if(!token) {
+    const err = new Error("ms365.health: not connected — no valid access token.");
+    err.code = "not_authenticated";
+    err.category = "auth";
+    err.friendly = "Not signed in — connect your Microsoft account first.";
+    return { ok: false, latencyMs: 0, tokenStatus: tokenStatus, scopes: scopes, user: null, error: err };
+  }
+
+  try {
+    const me = await ms365GraphGet("/me", {
+      query: { $select: ms365MeSelect() },
+      fetchImpl: opts.fetchImpl,
+      maxRetries: opts.maxRetries
+    });
+    const latencyMs = Math.round(performance.now() - t0);
+    return {
+      ok: true,
+      latencyMs: latencyMs,
+      tokenStatus: tokenStatus,
+      scopes: scopes,
+      user: {
+        id: me.id || null,
+        displayName: me.displayName || null,
+        upn: me.userPrincipalName || null,
+        mail: me.mail || null,
+        userType: me.userType || null,
+        mailboxSettings: me.mailboxSettings || null
+      },
+      error: null
+    };
+  } catch(err) {
+    const latencyMs = Math.round(performance.now() - t0);
+    return {
+      ok: false,
+      latencyMs: latencyMs,
+      tokenStatus: tokenStatus,
+      scopes: scopes,
+      user: null,
+      error: {
+        code: err.code || "unknown",
+        message: err.message,
+        friendly: err.friendly || err.message,
+        category: err.category || null,
+        status: err.status || null
+      }
+    };
+  }
+
+async ms365AssertConnected(opts = {}) =>
+  const res = await ms365TestConnection(opts);
+  if(!res.ok) {
+    const err = new Error(res.error.friendly || res.error.message);
+    err.code = res.error.code;
+    err.category = res.error.category;
+    err.connection = res;
+    throw err;
+  }
+  return res;
+
+
+// ── 16. AUTH WIDGET ────────────────────────────────────────────────────────
+// The optional sign-in card used by the plugin's own playground page. Returns
+// plain HTML; nothing here runs on its own (the page hydrates the elements).
+
+ms365Widget() =>
+  return [
+    '<div class="ms365-widget" id="m365AuthCard">',
+    '  <div class="ms365-head">',
+    '    <div class="ms365-badge">M365</div>',
+    '    <div class="ms365-titles">',
+    '      <div class="ms365-title">Microsoft 365 account</div>',
+    '      <div class="ms365-status" id="m365Status">Not signed in</div>',
+    '    </div>',
+    '  </div>',
+    '  <div class="ms365-user" id="m365User" hidden></div>',
+    '  <div class="ms365-tokens" id="m365Tokens" hidden></div>',
+    '  <div class="ms365-actions">',
+    '    <button type="button" class="ms365-btn ms365-primary" id="m365SignInBtn">Sign in with Microsoft</button>',
+    '    <button type="button" class="ms365-btn" id="m365SignOutBtn" hidden>Sign out</button>',
+    '    <button type="button" class="ms365-btn" id="m365ValidateBtn" hidden>Validate tenant</button>',
+    '    <button type="button" class="ms365-btn" id="m365HealthBtn" hidden>Test connection</button>',
+    '  </div>',
+    '  <div class="ms365-config">',
+    '    <label>Application (client) ID<input id="m365ClientIdInput" type="text" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off" spellcheck="false"></label>',
+    '    <label>Directory (tenant) ID or domain<input id="m365TenantInput" type="text" placeholder="common" autocomplete="off" spellcheck="false"></label>',
+    '    <div class="ms365-redirect">Redirect URI — add this to your Azure app registration under Authentication → Single-page application: <code id="m365RedirectCode">…</code></div>',
+    '  </div>',
+    '  <div class="ms365-msg" id="m365Msg"></div>',
+    '  <div class="ms365-tenant" id="m365TenantResult" hidden></div>',
+    '  <div class="ms365-tenant" id="m365HealthResult" hidden></div>',
+    '  <div class="ms365-graph" id="m365GraphBox" hidden>',
+    '    <div class="ms365-graph-row">',
+    '      <select class="ms365-graph-method" id="m365GraphMethod">',
+    '        <option>GET</option>',
+    '        <option>POST</option>',
+    '        <option>PATCH</option>',
+    '        <option>DELETE</option>',
+    '      </select>',
+    '      <input class="ms365-graph-path" id="m365GraphPath" type="text" value="/me" spellcheck="false" autocomplete="off">',
+    '    </div>',
+    '    <textarea id="m365GraphBody" rows="3" placeholder="JSON body (POST/PATCH)" hidden></textarea>',
+    '    <div class="ms365-actions">',
+    '      <button type="button" class="ms365-btn ms365-primary" id="m365GraphRunBtn">Run Graph request</button>',
+    '    </div>',
+    '    <pre class="ms365-graph-out" id="m365GraphOut"></pre>',
+    '  </div>',
+    '</div>'
+  ].join("\n");
+
+// Kept for backwards compatibility with the page's earlier markup.
 ms365AuthWidget() =>
-  return `<div class="ms365-widget" id="m365AuthCard">
-    <div class="ms365-head">
-      <div class="ms365-badge">M365</div>
-      <div class="ms365-titles">
-        <div class="ms365-title">Microsoft 365</div>
-        <div class="ms365-status" id="m365Status">Not signed in</div>
-      </div>
-    </div>
-    <div class="ms365-user" id="m365User" hidden></div>
-    <div class="ms365-tokens" id="m365Tokens" hidden></div>
-    <div class="ms365-actions">
-      <button type="button" class="ms365-btn ms365-primary" id="m365SignInBtn"><svg width="16" height="16" viewBox="0 0 21 21" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#F25022"/><rect x="11" y="1" width="9" height="9" fill="#7FBA00"/><rect x="1" y="11" width="9" height="9" fill="#00A4EF"/><rect x="11" y="11" width="9" height="9" fill="#FFB900"/></svg>Sign in with Microsoft</button>
-      <button type="button" class="ms365-btn" id="m365SignOutBtn" hidden>Sign out</button>
-      <button type="button" class="ms365-btn" id="m365ValidateBtn" hidden>Validate tenant</button>
-      <button type="button" class="ms365-btn" id="m365HealthBtn" hidden>Test connection</button>
-    </div>
-    <div class="ms365-tenant" id="m365TenantResult" hidden></div>
-    <div class="ms365-tenant" id="m365HealthResult" hidden></div>
-    <div class="ms365-graph" id="m365GraphBox" hidden>
-      <div class="ms365-graph-row">
-        <select id="m365GraphMethod" class="ms365-graph-method">
-          <option>GET</option><option>POST</option><option>PATCH</option><option>DELETE</option>
-        </select>
-        <input id="m365GraphPath" class="ms365-graph-path" value="/me" autocomplete="off" spellcheck="false">
-        <button type="button" class="ms365-btn" id="m365GraphRunBtn">Run</button>
-      </div>
-      <textarea id="m365GraphBody" hidden rows="2" placeholder="Optional JSON body for POST/PATCH"></textarea>
-      <pre class="ms365-graph-out" id="m365GraphOut"></pre>
-    </div>
-    <div class="ms365-config">
-      <label>Client (Application) ID <input id="m365ClientIdInput" placeholder="00000000-0000-0000-0000-000000000000" autocomplete="off"></label>
-      <label>Tenant <input id="m365TenantInput" value="common" autocomplete="off"></label>
-      <div class="ms365-redirect">Redirect URI <code id="m365RedirectCode">…</code></div>
-    </div>
-    <div class="ms365-msg" id="m365Msg"></div>
-  </div>`;
+  return ms365Widget();
 
 
-// ── 3. ENTRY POINT ($output) ───────────────────────────────────────────────
-// Importers get the auth widget:  ms365 = {import:ms365-integration}
-// Then render it:  [ms365]  or  outputEl.innerHTML = root.ms365();
-// The full programmatic API (auth, Graph, mail, files, tasks, health) is
-// exposed on window.ms365 (populated via index.html's module script).
+// ── 17. RESET ──────────────────────────────────────────────────────────────
 
-$output(input, opts) =>
-  ms365AuthWidget();
+async ms365Reset() =>
+  const st = ms365Internal();
+  ms365StopAutoRefresh();
+  ms365AbortPopups(st);
+  try {
+    const out = ms365ClearSession();
+    if(ms365IsThenable(out)) await out;
+  } catch(e) {}
+  try { await ms365ClearPending(); } catch(e) {}
+  st.config = null;
+  st.listeners = { change: [], expired: [] };
+  st.popups = [];
+  st.refreshInFlight = null;
+  st.graphSettings = null;
+  st.graphStats = { requests: 0, retries: 0, throttledCount: 0 };
+  return true;
+
+
+// ── 18. INTROSPECTION ──────────────────────────────────────────────────────
+
+ms365Capabilities() =>
+  return {
+    version: ms365Version(),
+    namespaces: ["configure", "config", "reset", "auth", "oauth2", "tokenStore", "tenantValidator", "graph", "errorMapper", "mail", "files", "tasks", "health", "scopedPermissions", "widget", "capabilities"],
+    features: ms365FeatureLabels(),
+    featureScopes: ms365FeatureScopes()
+  };
+
+
+// ── 19. MODULE NAMESPACES ──────────────────────────────────────────────────
+// The shape importers see: root.<handle>.graph.graphGet(...), .mail.send.*,
+// .files.discover.*, .tasks.sync.*, etc.
+
+// Plain-JS guard around ms365Configure(). Throwing from here (rather than from
+// a pjs function) keeps deliberate validation errors out of the engine's
+// "lists editor" error reporter, which only watches pjs-declared functions.
+ms365ConfigureGuard() =>
+  return (p) => {
+    const isObj = p && typeof p === "object";
+    const hasKey = isObj && ("clientId" in p);
+    const invalid = hasKey && (typeof p.clientId !== "string" || !p.clientId.trim());
+    if(invalid || (!hasKey && !ms365GetConfig())) {
+      throw new Error("ms365.oauth2: `clientId` is required — register an app at https://aka.ms/aadappreg and paste its Application (client) ID.");
+    }
+    return ms365Configure(p);
+  };
+
+ms365OauthNamespace() =>
+  const configure = ms365ConfigureGuard();
+  return {
+    configure: configure,
+    getConfig: () => ms365GetConfig(),
+    reset: () => ms365Reset(),
+    launchAuthFlow: (o) => ms365LaunchAuthFlow(o),
+    prepareAuth: (o) => ms365PrepareAuth(o),
+    buildAuthorizeUrl: (o) => ms365BuildAuthorizeUrl(o),
+    handleCallback: (o) => ms365HandleCallback(o),
+    getValidToken: (o) => ms365GetValidToken(o),
+    refreshSession: (o) => ms365RefreshSession(o),
+    refreshTokens: (t, o) => ms365RefreshTokens(t, o),
+    exchangeCodeForTokens: (c, v, o) => ms365ExchangeCodeForTokens(c, v, o),
+    saveSession: (s) => ms365SaveSession(s),
+    loadSession: () => ms365LoadSession(),
+    clearSession: () => ms365ClearSession(),
+    onSessionChange: (fn) => ms365OnSessionChange(fn),
+    onSessionExpired: (fn) => ms365OnSessionExpired(fn),
+    scheduleAutoRefresh: (s, o) => ms365ScheduleAutoRefresh(s, o),
+    stopAutoRefresh: () => ms365StopAutoRefresh(),
+    profileFromIdToken: (t) => ms365ProfileFromIdToken(t),
+    decodeJwtPayload: (t) => ms365DecodeJwtPayload(t),
+    generateCodeVerifier: (n) => ms365GenerateCodeVerifier(n),
+    generateState: () => ms365GenerateState(),
+    computeCodeChallenge: (v) => ms365ComputeCodeChallenge(v),
+    storageKeys: () => ms365StorageKeys(),
+    relayRedirect: (cfg, o) => ms365RelayRedirect(cfg, o)
+  };
+
+ms365GraphNamespace() =>
+  return {
+    graphRequest: (m, p, o) => ms365GraphRequest(m, p, o),
+    graphGet: (p, o) => ms365GraphGet(p, o),
+    graphPost: (p, o) => ms365GraphPost(p, o),
+    graphPatch: (p, o) => ms365GraphPatch(p, o),
+    graphPut: (p, o) => ms365GraphPut(p, o),
+    graphDelete: (p, o) => ms365GraphDelete(p, o),
+    getAllPages: (p, o) => ms365GetAllPages(p, o),
+    configureGraph: (o) => ms365ConfigureGraph(o),
+    resetGraphConfig: (o) => ms365ResetGraphConfig(o),
+    getGraphSettings: () => ms365GetGraphSettings(),
+    getGraphStats: () => ms365GetGraphStats(),
+    resetGraphStats: () => ms365ResetGraphStats()
+  };
+
+ms365MailNamespace() =>
+  return {
+    query: {
+      resolveMailboxPath: (f) => ms365ResolveMailboxPath(f),
+      searchEmails: (f, o) => ms365SearchEmails(f, o),
+      listInbox: (f, o) => ms365ListInbox(f, o),
+      getMessage: (id, o) => ms365GetMessage(id, o),
+      normalizeMessage: (m) => ms365NormalizeMessage(m)
+    },
+    send: {
+      sendEmail: (o) => ms365SendEmail(o),
+      createDraft: (o) => ms365CreateDraft(o),
+      sendDraft: (id, o) => ms365SendDraft(id, o),
+      buildMessage: (o) => ms365BuildEmailMessage(o),
+      toAddress: (v) => ms365ToAddress(v),
+      encodeBase64: (c) => ms365EncodeBase64(c),
+      encodeContentToBase64: (c) => ms365EncodeContentToBase64(c)
+    },
+    calendar: {
+      listUpcomingEvents: (f, o) => ms365ListUpcomingEvents(f, o),
+      getEvent: (id, o) => ms365GetEvent(id, o),
+      createEvent: (o) => ms365CreateEvent(o),
+      buildEventBody: (o) => ms365BuildEventBody(o),
+      normalizeEvent: (e) => ms365NormalizeEvent(e)
+    }
+  };
+
+ms365FilesNamespace() =>
+  return {
+    discover: {
+      resolveDrive: (d) => ms365ResolveDrive(d),
+      listFiles: (f, o) => ms365ListFiles(f, o),
+      searchFiles: (f, o) => ms365SearchFiles(f, o),
+      getFileMeta: (f, o) => ms365GetFileMeta(f, o),
+      getFileByPath: (p, o) => ms365GetFileByPath(p, o),
+      normalizeItem: (it) => ms365NormalizeItem(it)
+    },
+    transfer: {
+      simpleUploadLimit: () => ms365SimpleUploadLimit(),
+      defaultChunkSize: () => ms365DefaultChunkSize(),
+      driveItemPath: (folder, name) => ms365DriveItemPath(folder, name),
+      uploadFile: (o) => ms365UploadFile(o),
+      downloadFile: (p, o) => ms365DownloadFile(p, o),
+      applyFormatExtension: (n, f) => ms365ApplyFormatExtension(n, f)
+    },
+    auditor: {
+      getPermissions: (f, o) => ms365GetPermissions(f, o),
+      checkAccess: (f, o) => ms365CheckAccess(f, o),
+      analyzePermissions: (p, u) => ms365AnalyzePermissions(p, u),
+      describeAccess: (v) => ms365DescribeAccess(v),
+      normalizePermission: (p) => ms365NormalizePermission(p)
+    }
+  };
+
+ms365TasksNamespace() =>
+  return {
+    sync: {
+      listTaskLists: (o) => ms365ListTaskLists(o),
+      listTasks: (f, o) => ms365ListTasks(f, o),
+      getTask: (id, o) => ms365GetTask(id, o),
+      normalizeTask: (t, l) => ms365NormalizeTask(t, l),
+      normalizeTaskList: (l) => ms365NormalizeTaskList(l)
+    },
+    update: {
+      updateTask: (o) => ms365UpdateTask(o),
+      buildTaskPatch: (o) => ms365BuildTaskPatch(o),
+      setTaskComplete: (p, o) => ms365SetTaskComplete(p, o),
+      setTaskDueDate: (p, o) => ms365SetTaskDueDate(p, o)
+    }
+  };
+
+ms365ScopedNamespace() =>
+  return {
+    features: () => ms365FeatureScopes(),
+    labels: () => ms365FeatureLabels(),
+    scopesForFeature: (f) => ms365ScopesForFeature(f),
+    missingScopes: (f) => ms365MissingScopes(f),
+    hasScopes: (f) => ms365HasScopes(f),
+    ensureScopes: (f, o) => ms365EnsureScopes(f, o)
+  };
+
+ms365TenantNamespace() =>
+  return {
+    CONSUMER_TENANT_ID: ms365ConsumerTenantId(),
+    validateTenant: (o) => ms365ValidateTenant(o)
+  };
+
+ms365ErrorMapperNamespace() =>
+  return {
+    mapGraphError: (e) => ms365MapGraphError(e),
+    toFriendlyError: (e) => ms365ToFriendlyError(e),
+    formatFriendlyError: (e) => ms365FormatFriendlyError(e)
+  };
+
+ms365OdataNamespace() =>
+  return {
+    escapeODataStr: (s) => ms365EscapeODataStr(s),
+    toODataDate: (v) => ms365ToODataDate(v),
+    toGraphDateTime: (v, tz) => ms365ToGraphDateTime(v, tz),
+    anyOf: (v) => ms365AnyOf(v)
+  };
+
+
+// ── 20. PUBLIC API + ENTRY POINT ($output) ─────────────────────────────────
+// $output evaluates to the API object, so importing this generator gives the
+// importer `root.<handle>` = the whole API. The object is callable (it returns
+// the auth widget HTML) and carries every namespace as a property.
+
+ms365WrapBind(fn, props) =>
+  const nativeBind = Function.prototype.bind;
+  function wrap(f) {
+    for(let k in props) f[k] = props[k];
+    Object.defineProperty(f, "bind", {
+      value: function(...args) { return wrap(nativeBind.apply(this, args)); },
+      configurable: true
+    });
+    return f;
+  }
+  return wrap(fn);
+
+ms365ApiMethods() =>
+  const oauth = ms365OauthNamespace();
+  return {
+    version: ms365Version(),
+    capabilities: () => ms365Capabilities(),
+
+    // Validated in this (non-pjs) layer so a misuse doesn't surface as a
+    // "lists editor" error inside the engine's pjs-function error reporter.
+    configure: ms365ConfigureGuard(),
+    config: () => ms365GetConfig(),
+    reset: () => ms365Reset(),
+
+    auth: oauth,
+    oauth2: oauth,
+    tokenStore: { TokenStore: ms365TokenStoreClass() },
+    tenantValidator: ms365TenantNamespace(),
+    scopedPermissions: ms365ScopedNamespace(),
+    graph: ms365GraphNamespace(),
+    errorMapper: ms365ErrorMapperNamespace(),
+    odata: ms365OdataNamespace(),
+    mail: ms365MailNamespace(),
+    files: ms365FilesNamespace(),
+    tasks: ms365TasksNamespace(),
+    health: {
+      testConnection: (o) => ms365TestConnection(o),
+      assertConnected: (o) => ms365AssertConnected(o)
+    },
+    widget: () => ms365Widget(),
+    help: () => ms365Capabilities()
+  };
+
+getMs365Api() =>
+  const st = ms365Internal();
+  if(st.api) return st.api;
+  const api = ms365WrapBind(function() { return ms365Widget(); }, ms365ApiMethods());
+  st.api = api;
+  return api;
+
+$output = [getMs365Api()]

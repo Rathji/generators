@@ -64,7 +64,7 @@ test("ensureScopes: popup flow grants ONLY the missing scope and merges it into 
     const p = sp.ensureScopes("mail");
     let pending = null;
     for (let i = 0; i < 50; i++) {
-      pending = JSON.parse(env.pending.getItem("ms365.oauth2.pending"));
+      pending = JSON.parse(env.pending.getItem(o.storageKeys().pending));
       if (pending) break;
       await new Promise((r) => setTimeout(r, 20));
     }

@@ -83,7 +83,7 @@ test("configure: validates clientId, applies defaults, auto-adds offline_access"
   assert(cfg.scopes.includes("offline_access"), "offline_access auto-added (needed for refresh tokens)");
   assert(cfg.scopes.includes("openid"), "openid scope kept");
   let threw = false;
-  try { o.configure({}); } catch (e) { threw = true; }
+  try { o.configure({ clientId: "" }); } catch (e) { threw = true; }
   assert(threw, "configure without clientId throws");
 });
 
@@ -148,7 +148,7 @@ test("prepareAuth: persists state + verifier + redirectUri for the callback", as
   const store = new MemoryStorage();
   o.configure({ ...TEST_CONFIG, storage: () => store });
   const built = await o.prepareAuth();
-  const raw = store.getItem("ms365.oauth2.pending");
+  const raw = store.getItem(o.storageKeys().pending);
   assert(raw, "pending record stored");
   const p = JSON.parse(raw);
   assertEq(p.state, built.state);
@@ -239,7 +239,7 @@ test("handleCallback: full same-tab callback exchanges the code", async () => {
   assertEq(r.tokens.refreshToken, "RT");
   assert(r.profile, "profile derived from id_token");
   assertEq(r.profile.email, "ada@contoso.com");
-  assertEq(store.getItem("ms365.oauth2.pending"), null, "pending cleared after exchange");
+  assertEq(store.getItem(o.storageKeys().pending), null, "pending cleared after exchange");
 });
 
 test("handleCallback: access_denied maps to a friendly error", async () => {

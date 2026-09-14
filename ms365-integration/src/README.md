@@ -1,225 +1,189 @@
-# MS365 Integration — src/
+# MS365 Integration — source layout
 
 Perchance plugin that plugs generators into Microsoft 365 (Outlook mail,
 OneDrive/SharePoint files, Calendar, To Do/Planner) via the Microsoft Graph API.
 
-Import it from another generator with `ms365 = {import:ms365-integration}`,
-then either render the auth widget (`[ms365]`) or call the programmatic API on
-`window.ms365`. The public page (index.html) is a live playground plus a full
-usage walkthrough and "how it works" architecture section; this file is the
-source-level layout reference.
-
-## Layout
-
-- `auth/oauth2.js` — OAuth2 authorization-code + PKCE flow against the
-  Microsoft Identity Platform v2.0 endpoints, plus the token lifecycle manager
-  (session persistence, single-flight auto-refresh, expiry listeners). Exports:
-  `configure`, `getConfig`, `requireConfig`, PKCE helpers, `buildAuthorizeUrl`,
-  `prepareAuth`, `exchangeCodeForTokens`, `refreshTokens`, `getValidToken`,
-  `refreshSession`, `saveSession`/`loadSession`/`clearSession`,
-  `scheduleAutoRefresh`/`stopAutoRefresh`, `onSessionChange`/`onSessionExpired`,
-  `launchAuthFlow`/`registerPopupAuth`/`handleCallback`, `profileFromIdToken`,
-  `buildAuthError`/`mapTokenError`, `resolveFetch`. Dependency-injectable for
-  tests via `configure({ storage, fetchImpl, store, navigate, autoRefresh, ... })`.
-  `buildAuthorizeUrl` honors an override `prompt` (used by the scoped-permission
-  requestor's `prompt:"consent"`). Production network calls go through
-  super-fetch-plugin (token endpoint is not CORS-enabled) via the
-  `window.__m365.superFetch` bridge set up in index.html.
-- `auth/token-store.js` — `TokenStore` class: save/load/clear a JSON session
-  over injectable storage (default localStorage in the generator's own origin
-  partition). Corrupt-safe loads.
-- `auth/tenant-validator.js` — `validateTenant(opts)` → verdict
-  `{ valid, checks, tenant, user, error }`. Three tiers:
-  - JWT tier (needs only `openid`): tenant identity from the stored id_token
-    profile (`tid`, `oid`/`sub`); rejects personal/consumer accounts via the
-    well-known consumer tenant id `9188040d-6c67-4c5b-b112-36a304b66dad`.
-  - Account tier (needs `User.Read`): `GET /me` — accountEnabled, userType
-    (Member vs Guest), licenses, and that the Graph user id matches the id_token oid.
-  - Deep tenant tier (needs `Organization.Read.All`, admin consent): `GET
-    /organization` — verified domains + enabled plans + id_token/org id match.
-    Auto-runs only when the granted scopes include `Organization.Read.All`;
-    otherwise reports a soft "skipped" check. All requirements toggleable via
-    opts (`requireMember`, `requireAccountEnabled`, `requireLicense`,
-    `requireVerifiedDomain`, `requireTenantPlans`, `deepTenantCheck`).
-- `auth/scoped-permissions.js` — Dynamic scope requestor.
-  `FEATURE_SCOPES` maps feature keys (`mail`, `mailSend`, `calendar`, `files`,
-  `tasks`, `tenant`) to Graph delegated scopes; `scopesForFeature` (arrays/raw
-  passthrough), `missingScopes`, `hasScopes`, and `ensureScopes(feature, opts)`
-  which launches incremental-consent auth (`prompt:"consent"`, `extraScopes` =
-  only the missing scopes) and merges the grant into the active config. Returns
-  `{granted, added, missing, aborted}` or throws.
-- `graph/graph-client.js` — The generic Graph request wrapper.
-  `graphRequest(method, path, opts)` → parsed JSON | text | null, plus
-  `graphGet`/`graphPost`/`graphPatch`/`graphPut`/`graphDelete` and
-  `getAllPages(path, opts)` (walks `@odata.nextLink`). Behavior:
-  - Bearer auth via `getValidToken()` (auto-refreshed); per-call `token` override.
-  - OData query params built with literal `$` keys (URLSearchParams would
-    percent-encode `$`, breaking Graph) via `opts.query` (`$select`, `$filter`,
-    `$top`, arrays → repeated keys).
-  - 429/503/504 retried with exponential backoff + jitter (capped), honoring the
-    `Retry-After` header when present; `opts.retryStatuses`, `maxRetries`,
-    `baseBackoffMs`, `maxBackoffMs`, `onRetry` all tunable per call.
-  - 401 → one forced token refresh (`getValidToken({force:true})`) + retry
-    (disable with `allowTokenRetry:false`).
-  - Empty 2xx/204 → null; non-JSON 2xx → raw text; Graph error bodies → Error
-    with `{code, status, isGraphError, retryable, body, friendly, category, hint}`.
-  - `opts.rawResponse:true` returns the raw Response (for downloads later).
-  - Throttle stats via `getGraphStats()`/`resetGraphStats()`;
-    `configureGraph()`/`resetGraphConfig()`/`getGraphSettings()`.
-  Module-level `settings` is mutable across tests — always call
-  `resetGraphConfig({...})` (now accepts overrides) at the top of tests.
-- `graph/error-mapper.js` — Maps Graph `code`/`status` to friendly internal
-  errors. `mapGraphError(err)` → `{code,status,friendly,category,hint,retryable}`;
-  `toFriendlyError(err)` mutates+returns the same Error with `.friendly/.category/
-  .hint/.mapped` attached (preserving `.code/.status/.body`); `formatFriendlyError`.
-  Wired into graph-client: `not_authenticated`/`network_error` throws and all
-  Graph HTTP errors pass through it.
-- `mail/mailbox-query.js` — `searchEmails({from,to,subject,keyword,isRead,
-  receivedAfter,receivedBefore,folder,top,skip})`, `listInbox`, `getMessage`,
-  `resolveMailboxPath`, `normalizeMessage`. OData `$filter` builder with
-  apostrophe escaping, `$orderby receivedDateTime desc`, paging via getAllPages.
-  Scope: Mail.Read.
-- `mail/email-dispatcher.js` — `sendEmail({to,cc,bcc,subject,body,html,
-  importance,attachments,saveToSentItems,from})` → POST `/me/sendMail`;
-  `createDraft`, `sendDraft`, `buildMessage`, `toAddress` (string | {address,name}
-  | {emailAddress}), `encodeBase64`/`encodeContentToBase64` (chunked; Blob must be
-  converted to ArrayBuffer/Uint8Array first). Scope: Mail.Send.
-- `mail/calendar-sync.js` — `listUpcomingEvents({start,end,max,calendarId,
-  includeAllDay,subject,...})`, `getEvent`, `createEvent({subject,start,end,
-  attendees,location,body,isAllDay,onlineMeeting,calendarId,...})`,
-  `buildEventBody` (all-day → date-only), `normalizeEvent`. Scopes:
-  Calendars.Read / .ReadWrite.
-- `files/file-discovery.js` — `resolveDrive` (me/driveId/siteId/groupId/
-  sharepoint), `listFiles({drive,folder,top})`, `searchFiles({query})`,
-  `getFileMeta`, `getFileByPath`, `normalizeItem`. Uses OneDrive
-  `root:/path:/children` colon syntax. Scope: Files.Read / .ReadWrite.All.
-- `files/file-transfer.js` — `uploadFile({name,data,mimeType,folder,drive,
-  conflictBehavior,forceSimple,...})` — simple PUT ≤4MB (`SIMPLE_UPLOAD_LIMIT`),
-  else chunked upload session (`DEFAULT_CHUNK_SIZE`, Content-Range bytes x-y/size);
-  `downloadFile({drive,itemId,format,name})` → `{data,arrayBuffer,name,mimeType,
-  size,format}` with extension preservation (`applyFormatExtension`). Scopes:
-  Files.ReadWrite / Files.Read.
-- `files/permission-auditor.js` — `getPermissions({drive,itemId})`,
-  `checkAccess({drive,itemId,userId})` → `{access:"admin"|"write"|"read"|"none",
-  canRead,canWrite,canAdmin,effectiveRoles,direct/inherited split,sharingLink}`,
-  `analyzePermissions`, `describeAccess`, `normalizePermission`. Scopes:
-  Sites.Read.All / Files.Read.
-- `tasks/task-sync.js` — `listTaskLists`, `listTasks({listId,includeCompleted,
-  importance,status,title,top})`, `getTask`, `normalizeTaskList`, `normalizeTask`.
-  `$filter` composition with escaping, `$orderby createdDateTime desc`.
-  Scope: Tasks.Read.
-- `tasks/task-updater.js` — `updateTask({listId,taskId,complete,status,title,
-  importance,dueDateTime,percentComplete,body,categories})` (PATCH), with
-  `buildTaskPatch` (complete → status; dueDateTime null clears; percentComplete
-  clamped 0–100) and convenience `setTaskComplete`/`setTaskDueDate`.
-  Scope: Tasks.ReadWrite.
-- `health/connection-check.js` — `testConnection({forceRefresh})` → pings `/me`
-  (latency measured), reports `{ok,latencyMs,tokenStatus:"valid"|"refreshed"|
-  "none"|"expired",scopes,user:{id,displayName,upn,mail,userType,mailboxSettings},
-  error:{code,message,friendly,category}}`; `assertConnected()` throws friendly
-  when unhealthy. `GET /me` 401 → graph's auto-refresh recovers automatically.
-- `odata.js` — shared `escapeODataStr`, `toODataDate`, `toGraphDateTime`, `anyOf`.
-- `test-helpers.js` — shared suite tooling: `assert*`, `MemoryStorage`, `mockRes`,
-  `fakeIdToken`, `makeEnv({scopes,routes,tokenHandler})` (mock token endpoint +
-  Graph routes keyed by pathname with `/v1.0` stripped; fn-routes for pagination),
-  `makeSuite()` → `{TESTS,test,runAll}`. Always `makeEnv()` fresh per test (oauth2
-  config/session is module-global); `navigate:()=>{}` is set so aborted-auth tests
-  don't navigate.
-- `*/**/*.test.js` — validation suites; each exports `runAll()` → results array.
-
-## Usage
-
-In your own generator's `main.pjs`:
+**The whole implementation lives in `main.pjs`.** A Perchance `{import:x}`
+pulls in *only* x's `main.pjs` — never x's `index.html`, never x's `src/` files.
+So the API is assembled once in main.pjs and returned from `$output`; importing
+this generator gives the importer the full API as `root.ms365`:
 
 ```
 ms365 = {import:ms365-integration}
-ms365Config
-  clientId = 01234567-89ab-cdef-0123-456789abcdef
-  tenant = common
-  scopes
-    openid
-    profile
-    email
-    offline_access
-    User.Read
+
+await root.ms365.configure({ clientId, tenant, relay: true });
+await root.ms365.auth.handleCallback();       // no-op unless this load has ?code
+const me = await root.ms365.graph.graphGet("/me");
 ```
 
-Render the widget in HTML with `[ms365]`, or configure at runtime from a script:
-`root.ms365.oauth2.configure({ clientId: "...", tenant: "common" })`. The
-widget's sign-in/sign-out, saved-config restore, callback handling and lifecycle
-listeners are wired up by index.html's module script; it renders the auth card,
-the Graph request playground and (once signed in) the tenant/connection check
-buttons.
+No widget, no extra `<script>` tags, no plugin HTML, no `window.ms365`.
 
-Programmatic examples (all promises):
+- `index.html` is the standalone **playground** (live demo + these docs) and the
+  `?test=` runner. Nothing in it is required by an importer.
+- Every file under `src/` is either the playground's own wiring, a **thin shim**
+  onto the same main.pjs functions, or a validation suite.
 
-```js
-const res = await root.ms365.oauth2.launchAuthFlow();   // {status,tokens,profile} | null
-const token = await root.ms365.oauth2.getValidToken();  // auto-refreshed
+## main.pjs layout
 
-await root.ms365.mail.send.sendEmail({ to: "jane@corp.com", subject: "Hi", body: "..." });
-const inbox = await root.ms365.mail.query.listInbox({ top: 10 });
-const evt = await root.ms365.mail.calendar.createEvent({ subject: "Demo", start: new Date(), end: new Date(Date.now()+3600e3), attendees: ["jane@corp.com"] });
+Single file, Perchance-js functions (`name(args) => { … }`), numbered sections:
 
-const files = await root.ms365.files.discover.listFiles({ top: 20 });
-const up = await root.ms365.files.transfer.uploadFile({ name: "report.pdf", data: blob, conflictBehavior: "replace" });
-const dl = await root.ms365.files.transfer.downloadFile({ itemId: up.id });
+| § | Section | Contents |
+|---|---------|----------|
+| 0 | imports | `superFetch = {import:super-fetch-plugin}` — the default transport |
+| 1 | config | `ms365InitConfig()` defaults list; version; `ms365Internal()` (the one lazily-created `window.__ms365Internal` store) and `ms365FreshInternal()` |
+| 2 | internal state | config, session, listeners, popups, refresh-in-flight promise, graph settings/stats |
+| 3 | utilities | `ms365IsThenable`, default/injectable storage adapters, key namespacing |
+| 4 | storage keys | `ms365StorageKeys()` (`…::<clientId>|<tenant>`) |
+| 5 | token store | `ms365TokenStoreClass()` → `TokenStore` (save/load/clear session) |
+| 6 | OAuth2 + PKCE + relay | PKCE helpers, `buildAuthorizeUrl`, `prepareAuth`, token exchange/refresh, single-flight `getValidToken`, auto-refresh, `launchAuthFlow`/`registerPopupAuth`/`handleCallback`, `ms365RelayToOpener` |
+| 7 | error mapper | Graph code/status → `{code,status,friendly,category,hint,retryable}` |
+| 8 | OData | `escapeODataStr`, `toODataDate`, `toGraphDateTime`, `anyOf` |
+| 9 | Graph wrapper | `graphRequest` + verbs, retries/backoff/`Retry-After`, 401 refresh-and-retry, `getAllPages`, stats/settings |
+| 10 | tenant validator | JWT / account / deep-tenant tiers |
+| 11 | scoped permissions | feature → scopes map, `ensureScopes` incremental consent |
+| 12 | mail | mailbox queries, `sendEmail`/drafts, calendar events |
+| 13 | files | drive resolution, list/search/get, upload (simple + chunked), download, permission audit |
+| 14 | tasks | To Do lists/tasks read + update |
+| 15 | health | `testConnection` / `assertConnected` |
+| 16 | widget | `ms365Widget()` HTML string (`ms365AuthWidget()` is a back-compat alias) |
+| 17 | reset | `ms365Reset()` — clears config/session/pending/timers/popups |
+| 18 | introspection | `ms365Capabilities()` |
+| 19 | namespaces | the `root.ms365` shape (`graph`, `mail`, …) + `ms365ConfigureGuard()` |
+| 20 | public API + `$output` | `ms365WrapBind` (keeps `.bind()` returning a wrapped fn), `getMs365Api()`, `$output = [getMs365Api()]` |
 
-const lists = await root.ms365.tasks.sync.listTaskLists();
-const open = await root.ms365.tasks.sync.listTasks({ listId: lists.value[0].id, includeCompleted: false });
-await root.ms365.tasks.update.setTaskComplete({ listId: lists.value[0].id, taskId: open.value[0].id });
+The API object is **callable** (it returns the widget HTML, so `[ms365]` renders
+the auth card) and carries every namespace as a property.
 
-const health = await root.ms365.health.testConnection();
-await root.ms365.scopedPermissions.ensureScopes("mailSend"); // on-demand incremental consent
-```
+## src/ files
 
-Every Graph call routes through the error mapper: catch the promise and branch on
-`err.code`/`err.status`, or surface `err.friendly` to the user.
+- `runtime.js` — `ms365Api()`: lazy accessor returning `root.getMs365Api()`
+  (falls back to `window.root` for module scripts). Everything under `src/`
+  goes through it so the suites test the shipped code.
+- `auth/oauth2.js`, `auth/token-store.js`, `auth/tenant-validator.js`,
+  `auth/scoped-permissions.js`, `graph/graph-client.js`, `graph/error-mapper.js`,
+  `odata.js`, `mail/{mailbox-query,email-dispatcher,calendar-sync}.js`,
+  `files/{file-discovery,file-transfer,permission-auditor}.js`,
+  `tasks/{task-sync,task-updater}.js`, `health/connection-check.js` — **thin
+  shims**: each re-exports the matching namespace of `ms365Api()`, keeping the
+  original export names (and `FEATURE_SCOPES`/`SIMPLE_UPLOAD_LIMIT`-style consts
+  as `featureScopes()`/`simpleUploadLimit()` accessors). No logic here.
+- `test-helpers.js` — `assert*`, `MemoryStorage`, `mockRes`, `fakeIdToken`,
+  `makeEnv({scopes,routes,tokenHandler})`, `makeSuite()`.
+- `*/**/*.test.js` — validation suites, each exporting `runAll()`.
+- `consumer-contract.test.js` — **the import contract suite** (see below).
 
 ## How it works
 
-Single entry point: index.html's `<script type="module">` imports the 15 modules
-under `src/` and assembles `window.ms365 = { oauth2, tokenStore, tenantValidator,
-scopedPermissions, graph, errorMapper, mail:{query,send,calendar},
-files:{discover,transfer,auditor}, tasks:{sync,update}, health, version }`.
-
-- **Auth.** `oauth2.launchAuthFlow()` opens a popup at the v2.0 authorize
-  endpoint with a PKCE challenge + state; the popup redirects back to the page
-  URL; `handleCallback()` exchanges the code (via super-fetch, since the token
-  endpoint is not CORS-enabled) and stores `{tokens, profile}` via
-  `token-store`. `getValidToken()` single-flight-refreshes near expiry;
+- **Auth.** `auth.launchAuthFlow()` opens a popup at the Microsoft Identity
+  Platform v2.0 authorize endpoint with a PKCE challenge + state;
+  `handleCallback()` (safe on every load) exchanges the code and commits the
+  session. The token endpoint is not CORS-enabled, so exchange/refresh go
+  through `super-fetch-plugin` (default; override with `fetchImpl`).
+- **Token lifecycle.** Tokens live in storage (default: this origin's
+  `localStorage`). `getValidToken()` single-flight-refreshes near expiry;
   `scheduleAutoRefresh()` keeps a timer; `onSessionChange`/`onSessionExpired`
   notify the UI.
-- **Graph.** `graphRequest()` attaches the bearer token, builds OData query
-  strings with literal `$` keys, retries 429/503/504 (exponential backoff,
-  `Retry-After` honored), refreshes-and-retries once on 401, and pages through
-  `@odata.nextLink` via `getAllPages()`. All errors normalize through
-  `error-mapper` to `{code,status,category,friendly,hint,retryable}`.
-- **Scopes.** `scopedPermissions.ensureScopes(feature)` compares the granted
-  scopes against `FEATURE_SCOPES[feature]`; if anything is missing it re-runs
-  `launchAuthFlow({extraScopes: missing, prompt:"consent"})` (incremental
-  consent — the user stays signed in) and merges the grant into the config.
-- **Features.** mail/files/tasks/health are thin wrappers: friendly options →
-  Graph path + OData query → normalized response shape (see Layout above for
-  exact per-module option/result schemas).
+- **Injectable, async-capable storage.** Pass `storage` to `configure()` with
+  `getItem`/`setItem`/`removeItem` (may return promises — awaited if thenable) to
+  back tokens with kv-plugin/IndexedDB. Keys are namespaced per connection
+  (`ms365.oauth2.session::<clientId>|<tenant>`), so configs don't collide.
+- **Graph.** `graphRequest()` attaches the bearer token, builds OData queries
+  with literal `$` keys, retries 429/503/504 with backoff (`Retry-After`
+  honored), refreshes-and-retries once on 401, pages via `getAllPages()`, and
+  normalizes every error through the error mapper.
+- **Scopes.** `scopedPermissions.ensureScopes(feature)` re-runs auth with
+  `prompt:"consent"` asking only for the missing scopes, then merges the grant.
+- **Relay mode.** Set `relay: true` (or a generator name / https URL) in the
+  config. The Azure redirect URI then points at *this plugin's own page*
+  (`https://perchance.org/ms365-integration`, default). That page loads with
+  `?code=…&state=…&__ms365_relay=1`, `handleCallback()` sees the relay marker and
+  `postMessage`s `{type:"ms365:auth", code, state}` to `window.opener`, then
+  closes. `launchAuthFlow()` accepts that message as well as the same-origin
+  popup message, so every importer/fork can share **one** registered redirect
+  URI instead of registering each `<publicId>.perchance.org/<name>` origin.
+
+## Azure app registration
+
+Public client, **PKCE only, no client secret anywhere** (this code is public).
+
+- Authentication → Platform configurations → **Single-page application**:
+  `https://perchance.org/ms365-integration` (the relay redirect; shared by all
+  importers). Optionally also add a Web-platform redirect for per-generator
+  return URIs.
+- API permissions: `User.Read` plus the features you use — `Mail.ReadWrite`,
+  `Calendars.ReadWrite`, `Files.ReadWrite.All`, `Tasks.ReadWrite`; deep tenant
+  validation needs `Organization.Read.All` (admin consent).
+- Native/mobile-style public clients may need the `http://localhost` redirect.
 
 ## Running the suites
 
-On the generator page, each suite is a `?test=` route wired in index.html
-(`TEST_SUITES`): `oauth2` (35) · `tenant` (16) · `graph` (22) · `error` (12) ·
-`mailbox` (7) · `email` (9) · `calendar` (7) · `files` (10) · `file-transfer`
-(9) · `file-perms` (9) · `tasks` (9) · `tasks-update` (10) · `health` (8) ·
-`scoped` (5) — **168 tests total, all green**.
-Programmatically: `await (await import("src/<path>.test.js")).runAll()`.
+`?test=<name>` on the generator page (`TEST_SUITES` in index.html), or
+programmatically `await (await import("src/<path>.test.js")).runAll()`:
+
+`oauth2` (35) · `tenant` (16) · `graph` (22) · `error` (12) · `mailbox` (7) ·
+`email` (9) · `calendar` (7) · `files` (10) · `file-transfer` (9) ·
+`file-perms` (9) · `tasks` (9) · `tasks-update` (10) · `health` (8) ·
+`scoped` (5) · `consumer` (10) — **178 tests, all green**.
+
+`consumer-contract.test.js` proves the whole API works the way an importer uses
+it: headless, no DOM, injected fetch + injected **async** storage, and no
+`window.__m365`. It asserts construction is side-effect-free (no fetch, no
+popup, no DOM/window writes), `configure()` round-trips/merges, a generic Graph
+call works through injected storage with namespaced keys, a 401 triggers
+refresh-and-retry with persisted rotation, errors carry the friendly fields,
+`reset()` clears, `$output` is the API object (not a string), relay mode points
+`redirect_uri` at the plugin's page, the relay page forwards `{code,state}` to
+its opener, and `launchAuthFlow()` accepts that cross-origin relay message and
+closes the popup.
 
 ## Widget
 
-`main.pjs` `ms365AuthWidget()` renders the auth card; `index.html` hydrates it
-(sign in/out, token expiry countdown, Validate tenant verdict, **Test connection**,
-Graph request playground), restores a stored session, processes the OAuth
-callback, and exposes `window.ms365` (see How it works). Config bridge: a hidden
-div evaluates `window.ms365InitConfig = ms365InitConfig()` at render time so the
-module sees the `ms365Config` list values from main.pjs. Redirect URI is
-`window.location.origin + window.location.pathname` (add it as a Single-page
-application platform redirect in the Azure app registration; no client secret —
-public client, PKCE).
+`ms365Widget()` renders the auth card markup; the playground's module script
+hydrates it (sign in/out, expiry countdown, Validate tenant, Test connection,
+Graph request playground), restores a stored session, and calls
+`handleCallback()`. The redirect URI shown in the widget is
+`window.location.origin + window.location.pathname` unless a `relay`/`redirectUri`
+config says otherwise.
+
+## Theme (project-u)
+
+`index.html` is re-skinned to the shared **project-u** visual theme. It is a
+pure re-skin — no behaviour, ids, scripts or text content changed.
+
+- **Tokens.** Light values live in `:root`; the dark set is duplicated in both
+  `@media (prefers-color-scheme: dark) { :root:not([data-theme]) { … } }` and
+  `:root[data-theme="dark"] { … }`, so the OS preference and the manual toggle
+  both work. Accent `#2f6feb` (light) / `#6ea8ff` (dark). `--ok`/`--bad`/`--warn`
+  are extra semantic status colours the suite runner and widget use
+  (`status.style.color = "var(--ok)"`) — keep them defined.
+- **Chrome.** Sticky 66px `.site-header` (`.brand-mark` + `#brandName`, set at
+  runtime from `window.generatorName`), a `.hero` (`.eyebrow` + `h1` + `.lead`),
+  `.codeblock`/`.codebar` cards around every `<pre>`, and a `.site-footer`.
+- **Theme toggle.** A small classic `<script>` before the playground module
+  script cycles Auto → Light → Dark → Auto, persists the choice in
+  `localStorage["projectUTheme"]`, and **removes** the `data-theme` attribute for
+  `auto` (setting it to `""` would still match `[data-theme]` and break the auto
+  media query).
+- **Widget.** `ms365Widget()` (main.pjs §16) emits class-only markup
+  (`.ms365-*`); all of its styling lives in index.html, so re-theming it never
+  requires touching main.pjs.
+
+## Notes for future agents
+
+- **Perchance `{import:x}` imports main.pjs only.** Never move implementation
+  back into `src/` modules — importers would get a dead API. Keep `src/` shims
+  thin, and keep `$output = [getMs365Api()]` returning the API object.
+- **Template literals in pjs function bodies break the pjs parser** (backticks
+  with `${…}` inside a `name() =>` body produce a parse error). Build strings as
+  `[ 'a', 'b' ].join("\n")` arrays of single-quoted lines — that's how
+  `ms365Widget()` is written.
+- **`{import:…}` literal text in a comment is treated as a real import** by the
+  engine, so don't write that token in prose/comments.
+- `root` is a page global; individual pjs list/function names are not on
+  `window` (they're only bare identifiers inside inline classic `<script>` tags).
+- Async rejections from pjs functions are not reported by the engine's error
+  logger, but **sync throws are** (attributed to a bogus "lists editor" line) —
+  hence the plain-JS `ms365ConfigureGuard()` so deliberate validation errors
+  don't spam the console.
+- The editor **auto-saves**: any edit is immediately the saved copy, so avoid
+  destructive rewrites.
