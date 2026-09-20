@@ -506,13 +506,79 @@ function renderJournal() {
     <div class="two-grid">${CHAR.trackers.map(t => card(t.name, t.text, t.kind)).join("")}</div>
     <div class="sechead">Campaign Notes</div>
     <div class="panel"><textarea id="notesEl" placeholder="Session notes, party plans, arcane discoveries…">${esc(S.notes)}</textarea></div>
-    <div class="sechead">Backstory</div>
+    <div class="sechead">Backstory <button class="linkbtn" data-act="handout" title="View the original two-page handout">📜 View original handout</button></div>
     <div class="panel" style="font-size:13.5px;color:var(--mut);line-height:1.65;white-space:pre-wrap">${esc(BACKSTORY)}</div>`;
   $("#notesEl").addEventListener("input", e => { S.notes = e.target.value; save(); });
 }
 
+/* ---------------- fullscreen tabs ---------------- */
+function fsActive() {
+  return !!document.fullscreenElement || !!document.querySelector(".tabsec.fs");
+}
+const ROLL_OV = $("#rollOverlay");
+const IMG_OV = $("#imgOverlay");
+const FLOATERS = [ROLL_OV, IMG_OV];
+
+function stripFs(sec) {
+  sec.classList.remove("fs");
+  const bar = sec.querySelector(".fsbar");
+  if (bar) bar.remove();
+  document.body.classList.remove("fs-open");
+  document.body.style.removeProperty("overflow");
+  FLOATERS.forEach(el => { if (el.parentElement !== document.body) document.body.appendChild(el); });
+}
+function syncFsDom() {
+  const sec = document.querySelector(".tabsec.fs");
+  if (!sec) return;
+  if (!sec.querySelector(".fsbar")) {
+    const tab = document.querySelector(".tabbtn.on");
+    sec.insertAdjacentHTML("afterbegin",
+      `<div class="fsbar"><span class="fstitle">${esc(tab ? tab.textContent.trim() : "")}</span>` +
+      `<button class="fsbtn" data-act="fs-exit" title="Exit fullscreen (Esc)">⛶ Exit fullscreen</button></div>`);
+  }
+  FLOATERS.forEach(el => { if (el.parentElement !== sec) sec.appendChild(el); });
+}
+
+/* ---------------- handout overlay ---------------- */
+function openHandout() {
+  const url = CHAR.meta.handout;
+  if (!url) { toast("No handout set"); return; }
+  const img = $("#imgEl");
+  if (img.getAttribute("src") !== url) img.src = url;
+  $("#imgOpenLink").href = url;
+  IMG_OV.hidden = false;
+}
+function closeHandout() {
+  if (IMG_OV.hidden) return;
+  IMG_OV.hidden = true;
+}
+function handoutOpen() { return !IMG_OV.hidden; }
+async function enterFullscreen() {
+  const sec = document.querySelector(".tabsec.on");
+  if (!sec || fsActive()) return;
+  sec.classList.add("fs");
+  document.body.classList.add("fs-open");
+  document.body.style.overflow = "hidden";
+  syncFsDom();
+  syncFsBtn();
+  if (document.fullscreenEnabled) {
+    try { await sec.requestFullscreen(); } catch (e) { /* keep the in-page overlay instead */ }
+  }
+}
+async function exitFullscreen() {
+  const sec = document.querySelector(".tabsec.fs");
+  if (document.fullscreenElement) { try { await document.exitFullscreen(); } catch (e) {} }
+  if (sec) stripFs(sec);
+  syncFsBtn();
+}
+function syncFsBtn() {
+  const b = $("#fsBtn");
+  if (b) b.classList.toggle("on", fsActive());
+}
+
 /* ---------------- tab switching ---------------- */
 function switchTab(name) {
+  if (fsActive()) exitFullscreen();
   document.querySelectorAll(".tabbtn").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
   document.querySelectorAll(".tabsec").forEach(s => s.classList.toggle("on", s.id === "tab-" + name));
   if (name === "abilities") renderAbilities();
@@ -524,11 +590,16 @@ function switchTab(name) {
 
 /* ---------------- events ---------------- */
 document.addEventListener("click", e => {
+  if (e.target === IMG_OV) { closeHandout(); return; }
   const el = e.target.closest("[data-act]");
   if (!el) return;
   const act = el.dataset.act;
   switch (act) {
     case "tab": switchTab(el.dataset.tab); break;
+    case "fullscreen": fsActive() ? exitFullscreen() : enterFullscreen(); break;
+    case "fs-exit": exitFullscreen(); break;
+    case "handout": openHandout(); break;
+    case "handout-close": closeHandout(); break;
     case "tile":
       if (el.dataset.tile === "roll") rollD20(9, "Initiative");
       else if (el.dataset.tile === "insp") { S.inspiration = !S.inspiration; save(); renderHeader(); }
@@ -673,6 +744,22 @@ function doLongRest() {
 /* ---------------- init ---------------- */
 function init() {
   document.querySelectorAll(".tabbtn").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement) {
+      const sec = document.querySelector(".tabsec.fs");
+      if (sec) stripFs(sec);
+    }
+    syncFsBtn();
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape") return;
+    if (handoutOpen()) { closeHandout(); return; }
+    if (document.fullscreenElement) return;
+    const sec = document.querySelector(".tabsec.fs");
+    if (sec) { stripFs(sec); syncFsBtn(); }
+  });
+  const fsObs = new MutationObserver(syncFsDom);
+  document.querySelectorAll(".tabsec").forEach(s => fsObs.observe(s, { childList: true }));
   $("#tempInput").addEventListener("change", e => {
     const v = parseInt(e.target.value, 10);
     S.hpTemp = Math.max(0, isNaN(v) ? 0 : v);

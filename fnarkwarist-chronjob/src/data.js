@@ -20,6 +20,7 @@ window.CHAR = {
   "background": "Spelljammer Engineer",
   "xp": 140000,
   "avatar": "https://www.dndbeyond.com/avatars/41881/638/1581111423-124839767.jpeg?width=400&height=400&fit=crop&quality=95&auto=webp",
+  "handout": "https://user.uploads.dev/file/64fe50e242d3427484ccd704b6cd73ba.webp",
   "age": 80,
   "gender": "Male",
   "height": "119 cm",
