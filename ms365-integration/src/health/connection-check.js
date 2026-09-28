@@ -1,8 +1,0 @@
-// src/health/connection-check.js — THIN SHIM.
-// The implementation lives in main.pjs (a Perchance import pulls in only the
-// other generator's main.pjs), so this module just re-exports the matching
-// namespace of root.getMs365Api() — the same object importers receive. See
-// src/runtime.js and src/README.md. Exported names mirror the original module.
-import { ms365Api } from "../runtime.js";
-export const testConnection = (...a) => ms365Api().health.testConnection(...a);
-export const assertConnected = (...a) => ms365Api().health.assertConnected(...a);
